@@ -71,8 +71,8 @@ export class MercadolivreService {
       console.warn('[ML connect] /users/me failed (non-fatal):', err.message)
     })
 
-    // Delete existing row for this org then insert fresh (avoids onConflict constraint dependency)
-    await supabaseAdmin.from('ml_connections').delete().eq('organization_id', orgId)
+    // Delete existing row for this seller then insert fresh (avoids onConflict constraint dependency)
+    await supabaseAdmin.from('ml_connections').delete().eq('seller_id', user_id)
 
     const { error: dbError } = await supabaseAdmin.from('ml_connections').insert({
       organization_id: orgId,
