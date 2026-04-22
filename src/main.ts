@@ -6,7 +6,7 @@ async function bootstrap() {
   const port = process.env.PORT ?? 3001;
   console.log(`[Bootstrap] NODE_ENV=${process.env.NODE_ENV} PORT=${port}`);
   console.log(`[Bootstrap] SUPABASE_URL=${process.env.SUPABASE_URL ? 'SET' : 'MISSING'}`);
-  console.log(`[Bootstrap] SUPABASE_SERVICE_ROLE_KEY=${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SET' : 'MISSING'}`);
+  console.log(`[Bootstrap] SUPABASE_SECRET_KEY=${process.env.SUPABASE_SECRET_KEY ? 'SET' : 'MISSING'}`);
   console.log(`[Bootstrap] ML_CLIENT_ID=${process.env.ML_CLIENT_ID ? 'SET' : 'MISSING'}`);
 
   const app = await NestFactory.create(AppModule);
