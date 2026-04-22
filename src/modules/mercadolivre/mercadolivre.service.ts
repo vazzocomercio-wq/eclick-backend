@@ -29,6 +29,8 @@ export class MercadolivreService {
     console.log('[ML connect] orgId:', orgId)
     console.log('[ML connect] redirectUri:', redirectUri)
     console.log('[ML connect] code length:', code?.length)
+    console.log('[ML connect] ML_CLIENT_ID:', process.env.ML_CLIENT_ID?.substring(0, 8))
+    console.log('[ML connect] ML_CLIENT_SECRET length:', process.env.ML_CLIENT_SECRET?.length)
 
     let access_token: string, refresh_token: string, expires_in: number, user_id: number
 
