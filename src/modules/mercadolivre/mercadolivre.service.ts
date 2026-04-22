@@ -71,19 +71,19 @@ export class MercadolivreService {
       console.warn('[ML connect] /users/me failed (non-fatal):', err.message)
     })
 
-    const { error: dbError } = await supabaseAdmin.from('ml_connections').upsert(
-      {
-        organization_id: orgId,
-        seller_id: user_id,
-        access_token,
-        refresh_token,
-        expires_at: new Date(expires_at).toISOString(),
-        nickname,
-      },
-      { onConflict: 'organization_id' },
-    )
+    // Delete existing row for this org then insert fresh (avoids onConflict constraint dependency)
+    await supabaseAdmin.from('ml_connections').delete().eq('organization_id', orgId)
+
+    const { error: dbError } = await supabaseAdmin.from('ml_connections').insert({
+      organization_id: orgId,
+      seller_id: user_id,
+      access_token,
+      refresh_token,
+      expires_at: new Date(expires_at).toISOString(),
+      nickname,
+    })
     if (dbError) {
-      console.error('[ML connect] db upsert failed:', dbError.message)
+      console.error('[ML connect] db insert failed:', dbError.message)
       throw new HttpException(dbError.message, 500)
     }
 
