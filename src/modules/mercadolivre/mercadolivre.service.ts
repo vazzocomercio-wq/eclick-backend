@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common'
+import { Injectable, UnauthorizedException, HttpException } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 
@@ -26,33 +26,55 @@ export class MercadolivreService {
   }
 
   async connect(orgId: string, code: string, redirectUri: string): Promise<{ seller_id: number; nickname: string }> {
-    const res = await axios.post<{
-      access_token: string
-      refresh_token: string
-      expires_in: number
-      user_id: number
-    }>(
-      `${ML_BASE}/oauth/token`,
-      new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: process.env.ML_CLIENT_ID!,
-        client_secret: process.env.ML_CLIENT_SECRET!,
-        code,
-        redirect_uri: redirectUri,
-      }),
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
-    )
+    console.log('[ML connect] orgId:', orgId)
+    console.log('[ML connect] redirectUri:', redirectUri)
+    console.log('[ML connect] code length:', code?.length)
 
-    const { access_token, refresh_token, expires_in, user_id } = res.data
+    let access_token: string, refresh_token: string, expires_in: number, user_id: number
+
+    try {
+      const res = await axios.post<{
+        access_token: string
+        refresh_token: string
+        expires_in: number
+        user_id: number
+      }>(
+        `${ML_BASE}/oauth/token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          client_id: process.env.ML_CLIENT_ID!,
+          client_secret: process.env.ML_CLIENT_SECRET!,
+          code,
+          redirect_uri: redirectUri,
+        }),
+        { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
+      )
+      ;({ access_token, refresh_token, expires_in, user_id } = res.data)
+      console.log('[ML connect] token exchange ok, user_id:', user_id)
+    } catch (err: any) {
+      const mlError = err.response?.data
+      console.error('[ML connect] token exchange failed:', mlError ?? err.message)
+      throw new HttpException(
+        mlError?.message ?? mlError?.error ?? err.message ?? 'Token exchange failed',
+        err.response?.status ?? 500,
+      )
+    }
+
     const expires_at = Date.now() + expires_in * 1000
 
-    const profileRes = await axios.get<{ nickname?: string; first_name?: string }>(
-      `${ML_BASE}/users/me`,
-      { headers: { Authorization: `Bearer ${access_token}` } },
-    )
-    const nickname = profileRes.data.nickname ?? profileRes.data.first_name ?? `Conta #${user_id}`
+    let nickname = `Conta #${user_id}`
+    try {
+      const profileRes = await axios.get<{ nickname?: string; first_name?: string }>(
+        `${ML_BASE}/users/me`,
+        { headers: { Authorization: `Bearer ${access_token}` } },
+      )
+      nickname = profileRes.data.nickname ?? profileRes.data.first_name ?? nickname
+      console.log('[ML connect] nickname:', nickname)
+    } catch (err: any) {
+      console.warn('[ML connect] /users/me failed (non-fatal):', err.message)
+    }
 
-    await supabaseAdmin.from('ml_connections').upsert(
+    const { error: dbError } = await supabaseAdmin.from('ml_connections').upsert(
       {
         organization_id: orgId,
         seller_id: user_id,
@@ -63,6 +85,10 @@ export class MercadolivreService {
       },
       { onConflict: 'organization_id' },
     )
+    if (dbError) {
+      console.error('[ML connect] db upsert failed:', dbError.message)
+      throw new HttpException(dbError.message, 500)
+    }
 
     return { seller_id: user_id, nickname }
   }
