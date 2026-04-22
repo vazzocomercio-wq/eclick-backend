@@ -32,49 +32,44 @@ export class MercadolivreService {
     console.log('[ML connect] ML_CLIENT_ID:', process.env.ML_CLIENT_ID?.substring(0, 8))
     console.log('[ML connect] ML_CLIENT_SECRET length:', process.env.ML_CLIENT_SECRET?.length)
 
-    let access_token: string, refresh_token: string, expires_in: number, user_id: number
-
-    try {
-      const res = await axios.post<{
-        access_token: string
-        refresh_token: string
-        expires_in: number
-        user_id: number
-      }>(
-        `${ML_BASE}/oauth/token`,
-        new URLSearchParams({
-          grant_type: 'authorization_code',
-          client_id: process.env.ML_CLIENT_ID!,
-          client_secret: process.env.ML_CLIENT_SECRET!,
-          code,
-          redirect_uri: redirectUri,
-        }),
-        { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
-      )
-      ;({ access_token, refresh_token, expires_in, user_id } = res.data)
-      console.log('[ML connect] token exchange ok, user_id:', user_id)
-    } catch (err: any) {
+    const tokenRes = await axios.post<{
+      access_token: string
+      refresh_token: string
+      expires_in: number
+      user_id: number
+    }>(
+      `${ML_BASE}/oauth/token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: process.env.ML_CLIENT_ID!,
+        client_secret: process.env.ML_CLIENT_SECRET!,
+        code,
+        redirect_uri: redirectUri,
+      }),
+      { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
+    ).catch((err: any) => {
       const mlError = err.response?.data
       console.error('[ML connect] token exchange failed:', mlError ?? err.message)
       throw new HttpException(
         mlError?.message ?? mlError?.error ?? err.message ?? 'Token exchange failed',
         err.response?.status ?? 500,
       )
-    }
+    })
 
+    const { access_token, refresh_token, expires_in, user_id } = tokenRes.data
     const expires_at = Date.now() + expires_in * 1000
+    console.log('[ML connect] token exchange ok, user_id:', user_id)
 
     let nickname = `Conta #${user_id}`
-    try {
-      const profileRes = await axios.get<{ nickname?: string; first_name?: string }>(
-        `${ML_BASE}/users/me`,
-        { headers: { Authorization: `Bearer ${access_token}` } },
-      )
-      nickname = profileRes.data.nickname ?? profileRes.data.first_name ?? nickname
+    await axios.get<{ nickname?: string; first_name?: string }>(
+      `${ML_BASE}/users/me`,
+      { headers: { Authorization: `Bearer ${access_token}` } },
+    ).then((r) => {
+      nickname = r.data.nickname ?? r.data.first_name ?? nickname
       console.log('[ML connect] nickname:', nickname)
-    } catch (err: any) {
+    }).catch((err: any) => {
       console.warn('[ML connect] /users/me failed (non-fatal):', err.message)
-    }
+    })
 
     const { error: dbError } = await supabaseAdmin.from('ml_connections').upsert(
       {
