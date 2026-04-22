@@ -25,7 +25,7 @@ export class MercadolivreService {
     return `${ML_AUTH}/authorization?${params.toString()}`
   }
 
-  async connect(orgId: string, code: string, redirectUri: string): Promise<{ seller_id: number }> {
+  async connect(orgId: string, code: string, redirectUri: string): Promise<{ seller_id: number; nickname: string }> {
     const res = await axios.post<{
       access_token: string
       refresh_token: string
@@ -46,6 +46,12 @@ export class MercadolivreService {
     const { access_token, refresh_token, expires_in, user_id } = res.data
     const expires_at = Date.now() + expires_in * 1000
 
+    const profileRes = await axios.get<{ nickname?: string; first_name?: string }>(
+      `${ML_BASE}/users/me`,
+      { headers: { Authorization: `Bearer ${access_token}` } },
+    )
+    const nickname = profileRes.data.nickname ?? profileRes.data.first_name ?? `Conta #${user_id}`
+
     await supabaseAdmin.from('ml_connections').upsert(
       {
         organization_id: orgId,
@@ -53,11 +59,12 @@ export class MercadolivreService {
         access_token,
         refresh_token,
         expires_at: new Date(expires_at).toISOString(),
+        nickname,
       },
       { onConflict: 'organization_id' },
     )
 
-    return { seller_id: user_id }
+    return { seller_id: user_id, nickname }
   }
 
   async disconnect(orgId: string): Promise<void> {
@@ -67,7 +74,7 @@ export class MercadolivreService {
   async getConnection(orgId: string) {
     const { data } = await supabaseAdmin
       .from('ml_connections')
-      .select('seller_id, expires_at, access_token')
+      .select('seller_id, expires_at, access_token, nickname')
       .eq('organization_id', orgId)
       .maybeSingle()
     return data
