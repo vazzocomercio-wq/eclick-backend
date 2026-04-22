@@ -95,12 +95,27 @@ export class MercadolivreService {
   }
 
   async getConnection(orgId: string) {
-    const { data } = await supabaseAdmin
+    console.log('[ML status] looking up orgId:', orgId)
+
+    const { data, error } = await supabaseAdmin
       .from('ml_connections')
-      .select('seller_id, expires_at, access_token, nickname')
+      .select('seller_id, expires_at, access_token, nickname, organization_id')
       .eq('organization_id', orgId)
       .maybeSingle()
-    return data
+
+    console.log('[ML status] result by orgId:', data, 'error:', error?.message)
+
+    if (data) return data
+
+    // Fallback: return first available connection (temporary diagnostic)
+    const { data: fallback } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, expires_at, access_token, nickname, organization_id')
+      .limit(1)
+      .maybeSingle()
+
+    console.log('[ML status] fallback result:', fallback)
+    return fallback
   }
 
   // ── Token management ─────────────────────────────────────────────────────
