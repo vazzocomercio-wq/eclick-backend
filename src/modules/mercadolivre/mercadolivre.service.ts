@@ -428,6 +428,41 @@ export class MercadolivreService {
     return { total_visits: body.total_visits ?? 0, date_from: body.date_from ?? null, date_to: body.date_to ?? null }
   }
 
+  // ── Shared helpers for getRecentOrders ───────────────────────────────────────
+
+  private async _fetchShipments(token: string, orders: any[]): Promise<Record<number, any>> {
+    const ids = [...new Set(orders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
+    const map: Record<number, any> = {}
+    if (!ids.length) return map
+    const results = await Promise.allSettled(
+      ids.map(id => axios.get(`${ML_BASE}/shipments/${id}`, { headers: { Authorization: `Bearer ${token}` } }))
+    )
+    ids.forEach((id, i) => {
+      if (results[i].status === 'fulfilled') map[id] = (results[i] as PromiseFulfilledResult<any>).value.data
+    })
+    return map
+  }
+
+  private _mapOrder(o: any, shipMap: Record<number, any>) {
+    const ship = shipMap[o.shipping?.id] ?? null
+    const stateId: string = ship?.receiver_address?.state?.id ?? ''
+    const uf = stateId.startsWith('BR-') ? stateId.slice(3) : null
+    return {
+      id: o.id,
+      status: o.status,
+      date_created: o.date_created,
+      total_amount: o.total_amount,
+      items: (o.order_items ?? []).map((i: any) => ({
+        item_id: i.item?.id,
+        title: i.item?.title,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+      })),
+      shipping_state: uf,
+      shipping_city: ship?.receiver_address?.city?.name ?? null,
+    }
+  }
+
   async getRecentOrders(orgId: string, offset = 0, limit = 50) {
     let token: string
     let sellerId: number
@@ -449,19 +484,11 @@ export class MercadolivreService {
 
       console.log('[recent-orders] ML status OK, total:', body.paging?.total)
 
+      const rawOrders: any[] = body.results ?? []
+      const shipMapMain = await this._fetchShipments(token, rawOrders)
+
       return {
-        orders: (body.results ?? []).map((o: any) => ({
-          id: o.id,
-          status: o.status,
-          date_created: o.date_created,
-          total_amount: o.total_amount,
-          items: (o.order_items ?? []).map((i: any) => ({
-            item_id: i.item?.id,
-            title: i.item?.title,
-            quantity: i.quantity,
-            unit_price: i.unit_price,
-          })),
-        })),
+        orders: rawOrders.map((o: any) => this._mapOrder(o, shipMapMain)),
         total: body.paging?.total ?? 0,
       }
     } catch (err: any) {
@@ -478,19 +505,10 @@ export class MercadolivreService {
             params: { seller: sellerId, limit: safeLimit },
           })
           console.log('[recent-orders] fallback OK, total:', body2.paging?.total)
+          const rawOrders2: any[] = body2.results ?? []
+          const shipMapFb = await this._fetchShipments(token, rawOrders2)
           return {
-            orders: (body2.results ?? []).map((o: any) => ({
-              id: o.id,
-              status: o.status,
-              date_created: o.date_created,
-              total_amount: o.total_amount,
-              items: (o.order_items ?? []).map((i: any) => ({
-                item_id: i.item?.id,
-                title: i.item?.title,
-                quantity: i.quantity,
-                unit_price: i.unit_price,
-              })),
-            })),
+            orders: rawOrders2.map((o: any) => this._mapOrder(o, shipMapFb)),
             total: body2.paging?.total ?? 0,
           }
         } catch (err2: any) {
