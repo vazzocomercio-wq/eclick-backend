@@ -1032,7 +1032,7 @@ export class MercadolivreService {
     orgId: string,
     dateFrom: string,
     dateTo: string,
-  ): Promise<{ total_revenue: number; total_orders: number; average_ticket: number; date_from: string; date_to: string }> {
+  ): Promise<{ total_revenue: number; total_orders: number; ml_total: number; average_ticket: number; date_from: string; date_to: string }> {
     let token: string
     let sellerId: number
     try {
@@ -1041,45 +1041,49 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado', 401)
     }
 
-    let totalRevenue = 0
-    let totalOrders  = 0
-    let paginationTotal: number | null = null
-    let pageOffset = 0
-    let pageResults: any[] = []
-
     const from = dateFrom.slice(0, 10)
     const to   = dateTo.slice(0, 10)
 
+    console.log('[fin-summary] inicio - dateFrom:', from, 'dateTo:', to)
+
+    let totalRevenue    = 0
+    let totalOrders     = 0
+    let paginationTotal = 0
+    let offset          = 0
+    let pageResults: any[] = []
+
     do {
       const url =
-        `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=50&offset=${pageOffset}` +
+        `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=50&offset=${offset}` +
         `&order.date_created.from=${from}T00:00:00.000-03:00` +
         `&order.date_created.to=${to}T23:59:59.999-03:00`
 
-      console.log(`[order-totals] offset=${pageOffset} total=${paginationTotal ?? '?'}`)
-
       const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
       pageResults = data?.results ?? []
-      if (paginationTotal === null) paginationTotal = data?.paging?.total ?? 0
+
+      if (offset === 0) {
+        paginationTotal = data?.paging?.total ?? 0
+        console.log(`[fin-summary] total ML: ${paginationTotal} pedidos`)
+      }
 
       for (const order of pageResults) {
         totalRevenue += order.total_amount ?? 0
         totalOrders++
       }
-      pageOffset += 50
-    } while (
-      pageResults.length === 50 &&
-      totalOrders < (paginationTotal ?? 0)
-    )
 
-    console.log(`[order-totals] TOTAL: R$${totalRevenue.toFixed(2)} | ${totalOrders} pedidos`)
+      offset += 50
+      console.log(`[fin-summary] offset=${offset} | acumulado=${totalOrders}/${paginationTotal} | página=${pageResults.length}`)
+    } while (pageResults.length === 50 && totalOrders < paginationTotal)
+
+    console.log(`[fin-summary] FINAL: R$${totalRevenue.toFixed(2)} | ${totalOrders} pedidos (ML diz ${paginationTotal})`)
 
     return {
-      total_revenue:   totalRevenue,
-      total_orders:    totalOrders,
-      average_ticket:  totalOrders > 0 ? totalRevenue / totalOrders : 0,
-      date_from:       from,
-      date_to:         to,
+      total_revenue:  totalRevenue,
+      total_orders:   totalOrders,
+      ml_total:       paginationTotal,
+      average_ticket: totalOrders > 0 ? totalRevenue / totalOrders : 0,
+      date_from:      from,
+      date_to:        to,
     }
   }
 
