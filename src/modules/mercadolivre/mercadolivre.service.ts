@@ -478,41 +478,42 @@ export class MercadolivreService {
     }
   }
 
-  // Fetches up to maxOrders via paginated calls (50 per page, ML API limit with date filters).
+  // Fetches up to 500 orders via paginated calls (50/page, ML API limit with date filters).
   // Build URLs manually to avoid axios percent-encoding colons in ISO 8601 datetimes.
   private async _fetchAllOrders(
     token: string,
     sellerId: number,
     dateFrom?: string,
     dateTo?: string,
-    maxOrders = 200,
     withSort = true,
   ): Promise<{ results: any[]; total: number }> {
     const allOrders: any[] = []
     let pageOffset = 0
-    let totalFromApi = 0
-    let hasMore = true
+    let total: number | null = null
+    let pageResults: any[] = []
 
-    while (hasMore) {
+    do {
       let url = `${ML_BASE}/orders/search?seller=${sellerId}&limit=50&offset=${pageOffset}`
       if (withSort) url += '&sort=date_desc'
       if (dateFrom) url += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
       if (dateTo)   url += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
 
-      console.log(`[recent-orders] page url (offset=${pageOffset}):`, url)
+      console.log(`[recent-orders] page offset=${pageOffset} total=${total ?? '?'}`)
 
       const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
-      const pageResults: any[] = data?.results ?? []
-      totalFromApi = data?.paging?.total ?? totalFromApi
+      pageResults = data?.results ?? []
+      if (total === null) total = data?.paging?.total ?? 0
 
       allOrders.push(...pageResults)
       pageOffset += 50
+    } while (
+      pageResults.length === 50 &&
+      allOrders.length < (total ?? 0) &&
+      pageOffset < 500  // hard cap: 10 pages = 500 orders max
+    )
 
-      hasMore = pageResults.length === 50 && allOrders.length < totalFromApi && allOrders.length < maxOrders
-    }
-
-    console.log(`[recent-orders] fetched ${allOrders.length} / ${totalFromApi} total`)
-    return { results: allOrders, total: totalFromApi }
+    console.log(`[recent-orders] total coletado: ${allOrders.length} / ${total ?? 0}`)
+    return { results: allOrders, total: total ?? 0 }
   }
 
   async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string) {
@@ -525,11 +526,10 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
-    const maxOrders = Math.min(limit, 200)
-    console.log('[recent-orders] sellerId:', sellerId, 'maxOrders:', maxOrders, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
+    console.log('[recent-orders] sellerId:', sellerId, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
 
     try {
-      const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, maxOrders, true)
+      const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, true)
       const shipMap = await this._fetchShipments(token, rawOrders)
       return {
         orders: rawOrders.map((o: any) => this._mapOrder(o, shipMap)),
@@ -544,7 +544,7 @@ export class MercadolivreService {
       if (mlStatus === 400) {
         console.warn('[recent-orders] 400 — retrying without sort')
         try {
-          const { results: rawOrders2, total: total2 } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, maxOrders, false)
+          const { results: rawOrders2, total: total2 } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, false)
           const shipMap2 = await this._fetchShipments(token, rawOrders2)
           return {
             orders: rawOrders2.map((o: any) => this._mapOrder(o, shipMap2)),
