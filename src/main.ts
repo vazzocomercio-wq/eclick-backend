@@ -2,6 +2,17 @@ import 'dotenv/config'
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
+// Catch any unhandled rejection / uncaught exception so the log shows the
+// real cause before Railway stops the container.
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err?.message ?? err)
+  console.error(err?.stack)
+})
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[FATAL] Unhandled rejection:', reason?.message ?? reason)
+  if (reason?.stack) console.error(reason.stack)
+})
+
 async function bootstrap() {
   const port = process.env.PORT ?? 3001;
   console.log(`[Bootstrap] NODE_ENV=${process.env.NODE_ENV} PORT=${port}`);
@@ -11,14 +22,15 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule);
   app.enableCors({
-    origin: [
-      'https://eclick.app.br',
-      'https://eclick-frontend.netlify.app',
-      'http://localhost:3000',
-    ],
+    origin: true,   // allow all origins — restrict after confirmed working
     credentials: true,
   });
   await app.listen(port);
   console.log(`[Bootstrap] App listening on port ${port}`);
 }
-bootstrap();
+
+bootstrap().catch((err) => {
+  console.error('[Bootstrap] FATAL — app failed to start:', err?.message ?? err)
+  console.error(err?.stack)
+  process.exit(1)
+});
