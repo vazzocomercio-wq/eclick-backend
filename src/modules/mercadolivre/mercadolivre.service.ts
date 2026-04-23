@@ -767,4 +767,167 @@ export class MercadolivreService {
 
     return { total, byDay }
   }
+
+  // ── Orders enriched ──────────────────────────────────────────────────────
+
+  async getOrdersKpis(orgId: string) {
+    const { token, sellerId } = await this.getValidToken()
+
+    const now     = new Date()
+    const curFrom = new Date(now.getFullYear(), now.getMonth(), 1)
+    const prvFrom = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    const prvTo   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59)
+    const fmt     = (d: Date) => d.toISOString().slice(0, 19) + '.000-03:00'
+
+    const [curRes, prvRes] = await Promise.allSettled([
+      axios.get(`${ML_BASE}/orders/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { seller: sellerId, 'order.status': 'paid', 'order.date_created.from': fmt(curFrom), limit: 200, sort: 'date_asc' },
+      }),
+      axios.get(`${ML_BASE}/orders/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { seller: sellerId, 'order.status': 'paid', 'order.date_created.from': fmt(prvFrom), 'order.date_created.to': fmt(prvTo), limit: 200, sort: 'date_asc' },
+      }),
+    ])
+
+    const aggregate = (orders: any[]) => {
+      const byDay: Record<string, { count: number; revenue: number }> = {}
+      let count = 0; let revenue = 0
+      for (const o of orders) {
+        const d = (o.date_created ?? '').substring(0, 10)
+        if (d) {
+          byDay[d] = byDay[d] ?? { count: 0, revenue: 0 }
+          byDay[d].count++
+          byDay[d].revenue += o.total_amount ?? 0
+        }
+        count++; revenue += o.total_amount ?? 0
+      }
+      return {
+        count,
+        revenue: Math.round(revenue * 100) / 100,
+        by_day: Object.entries(byDay)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([date, { count: c, revenue: r }]) => ({ date, count: c, revenue: Math.round(r * 100) / 100 })),
+      }
+    }
+
+    return {
+      current_month: aggregate(curRes.status === 'fulfilled' ? curRes.value.data.results ?? [] : []),
+      last_month:    aggregate(prvRes.status === 'fulfilled' ? prvRes.value.data.results ?? [] : []),
+    }
+  }
+
+  async getOrdersEnriched(orgId: string, offset = 0, limit = 20, q?: string) {
+    const { token, sellerId } = await this.getValidToken()
+
+    const params: Record<string, unknown> = { seller: sellerId, sort: 'date_desc', limit, offset }
+    if (q?.trim()) params.q = q.trim()
+
+    const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params,
+    }).catch((err: any) => {
+      throw new HttpException(err?.response?.data?.message ?? 'Erro ao buscar pedidos', err?.response?.status ?? 500)
+    })
+
+    const orders: any[] = body.results ?? []
+
+    // ── Shipping details in parallel ──────────────────────────────────────
+    const shipIds = [...new Set(orders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
+    const shipMap: Record<number, any> = {}
+    if (shipIds.length > 0) {
+      const shipRes = await Promise.allSettled(
+        shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }))
+      )
+      shipIds.forEach((id, i) => {
+        if (shipRes[i].status === 'fulfilled') shipMap[id] = (shipRes[i] as any).value.data
+      })
+    }
+
+    // ── Item thumbnails in batch ──────────────────────────────────────────
+    const itemIds = [...new Set(orders.flatMap((o: any) =>
+      (o.order_items ?? []).map((i: any) => i.item?.id).filter(Boolean)
+    ))] as string[]
+    const thumbMap: Record<string, string> = {}
+    if (itemIds.length > 0) {
+      try {
+        const { data: batchItems } = await axios.get(`${ML_BASE}/items`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { ids: itemIds.slice(0, 20).join(','), attributes: 'id,thumbnail,available_quantity' },
+        })
+        ;(Array.isArray(batchItems) ? batchItems : [])
+          .filter((r: any) => r.code === 200)
+          .forEach((r: any) => { if (r.body?.id) thumbMap[r.body.id] = r.body.thumbnail ?? '' })
+      } catch { /* non-fatal */ }
+    }
+
+    const enriched = orders.map((o: any) => {
+      const ship = shipMap[o.shipping?.id] ?? null
+      const totalAmount: number = o.total_amount ?? 0
+      const tarifaML     = Math.round(totalAmount * 0.115 * 100) / 100
+      const freteVendedor: number = ship?.cost_components?.receiver_shipping_cost ?? ship?.base_cost ?? 0
+      const lucroBruto   = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
+
+      return {
+        order_id:      o.id,
+        status:        o.status,
+        status_detail: o.status_detail ?? null,
+        date_created:  o.date_created,
+        date_closed:   o.date_closed ?? null,
+        total_amount:  totalAmount,
+        paid_amount:   o.paid_amount ?? totalAmount,
+        buyer: {
+          id:         o.buyer?.id ?? null,
+          nickname:   o.buyer?.nickname ?? null,
+          first_name: o.buyer?.first_name ?? null,
+          last_name:  o.buyer?.last_name ?? null,
+        },
+        order_items: (o.order_items ?? []).map((i: any) => ({
+          item_id:              i.item?.id ?? null,
+          title:                i.item?.title ?? null,
+          seller_sku:           i.item?.seller_sku ?? null,
+          quantity:             i.quantity,
+          unit_price:           i.unit_price,
+          full_unit_price:      i.full_unit_price ?? i.unit_price,
+          variation_id:         i.variation_id ?? null,
+          variation_attributes: i.variation_attributes ?? [],
+          thumbnail:            thumbMap[i.item?.id ?? ''] ?? null,
+        })),
+        shipping: {
+          id:                     o.shipping?.id ?? null,
+          status:                 ship?.status ?? null,
+          substatus:              ship?.substatus ?? null,
+          logistic_type:          ship?.logistic_type ?? null,
+          date_created:           ship?.date_created ?? null,
+          estimated_delivery_date: ship?.shipping_option?.estimated_delivery_time?.date ?? null,
+          posting_deadline:       ship?.shipping_option?.estimated_delivery_time?.pay_before ?? null,
+          receiver_address: {
+            zip_code:      ship?.receiver_address?.zip_code ?? null,
+            city:          ship?.receiver_address?.city?.name ?? null,
+            state:         ship?.receiver_address?.state?.name ?? null,
+            street_name:   ship?.receiver_address?.street_name ?? null,
+            street_number: ship?.receiver_address?.street_number ?? null,
+          },
+          base_cost:        ship?.base_cost ?? 0,
+          receiver_cost:    ship?.cost_components?.receiver_shipping_cost ?? null,
+        },
+        payments: (o.payments ?? []).map((p: any) => ({
+          id:                p.id,
+          total_paid_amount: p.total_paid_amount,
+          installments:      p.installments ?? 1,
+          payment_type:      p.payment_type,
+          status:            p.status,
+        })),
+        tags:       o.tags ?? [],
+        mediations: o.mediations ?? [],
+        tarifa_ml:       tarifaML,
+        frete_vendedor:  freteVendedor,
+        lucro_bruto:     lucroBruto,
+      }
+    })
+
+    return { orders: enriched, total: body.paging?.total ?? 0 }
+  }
 }

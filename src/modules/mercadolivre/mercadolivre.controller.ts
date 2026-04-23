@@ -178,6 +178,23 @@ export class MercadolivreController {
 
   // ── Catalog / Listings ────────────────────────────────────────────────────
 
+  // GET /ml/orders/kpis
+  @Get('orders/kpis')
+  getOrdersKpis(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getOrdersKpis(user.orgId!)
+  }
+
+  // GET /ml/orders/enriched?offset=0&limit=20&q=...
+  @Get('orders/enriched')
+  getOrdersEnriched(
+    @ReqUser() user: ReqUserPayload,
+    @Query('offset') offset?: string,
+    @Query('limit')  limit?: string,
+    @Query('q')      q?: string,
+  ) {
+    return this.ml.getOrdersEnriched(user.orgId!, Number(offset ?? 0), Number(limit ?? 20), q)
+  }
+
   // GET /ml/listings/visits
   @Get('listings/visits')
   getListingsVisits(@ReqUser() user: ReqUserPayload) {
