@@ -511,62 +511,15 @@ export class MercadolivreService {
 
   // 7. GET /ml/reputation
   async getReputation(orgId: string) {
-    let sellerId: number
-    let token: string
-    try {
-      ;({ sellerId, token } = await this.getValidToken())
-    } catch (authErr: any) {
-      console.error('[reputation] getValidToken failed:', authErr?.message)
-      throw new HttpException('ML não conectado', 401)
-    }
+    const { token } = await this.getValidToken()
 
-    console.log('[reputation] seller_id:', sellerId)
+    const { data } = await axios.get(`${ML_BASE}/users/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
 
-    // Tentativa 1: /users/me/seller_reputation com token
-    try {
-      const url1 = `${ML_BASE}/users/me/seller_reputation`
-      console.log('[reputation] chamando URL:', url1)
-      const { data } = await axios.get(url1, { headers: { Authorization: `Bearer ${token}` } })
-      console.log('[reputation] /me ok:', JSON.stringify(data)?.substring(0, 200))
-      return { seller_id: sellerId, ...data }
-    } catch (err1: any) {
-      console.warn('[reputation] /me falhou:', err1?.response?.status, err1?.response?.data?.message ?? err1?.message)
-    }
-
-    // Tentativa 2: /users/{sellerId} com token — extrai seller_reputation
-    try {
-      const url2 = `${ML_BASE}/users/${sellerId}`
-      console.log('[reputation] chamando URL:', url2)
-      const publicResponse = await axios.get(url2, { headers: { Authorization: `Bearer ${token}` } })
-      console.log('[reputation] full response keys:', Object.keys(publicResponse.data || {}))
-      console.log('[reputation] seller_reputation:', JSON.stringify(publicResponse.data?.seller_reputation))
-      const rep = publicResponse.data?.seller_reputation ?? null
-      return { seller_id: sellerId, ...(rep ?? {}) }
-    } catch (err2: any) {
-      console.error('[reputation] /users/{id} falhou:', err2?.response?.status, err2?.response?.data?.message ?? err2?.message)
-    }
-
-    // Fallback: estrutura vazia para não quebrar a página
-    console.error('[reputation] todas as tentativas falharam — retornando fallback')
-    return {
-      seller_id: sellerId,
-      level_id: null,
-      power_seller_status: null,
-      transactions: {
-        canceled:  { total: 0, paid: 0 },
-        completed: { total: 0, paid: 0 },
-        total: 0,
-        ratings: { negative: 0, neutral: 0, positive: 0 },
-        period: { total: 0, paid: 0 },
-      },
-      metrics: {
-        sales:                { period: 'past 60 days', completed: 0 },
-        claims:               { period: 'past 60 days', rate: 0, value: 0 },
-        mediation:            { period: 'past 60 days', rate: 0, value: 0 },
-        cancellations:        { period: 'past 60 days', rate: 0, value: 0 },
-        delayed_handling_time:{ period: 'past 60 days', rate: 0, value: 0 },
-      },
-    }
+    const rep = data?.seller_reputation ?? {}
+    console.log('[reputation] metrics:', JSON.stringify(rep?.metrics))
+    return rep
   }
 
   // 8. GET /ml/questions — unanswered
