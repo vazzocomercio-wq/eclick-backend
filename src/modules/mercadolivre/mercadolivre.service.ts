@@ -582,10 +582,20 @@ export class MercadolivreService {
 
     if (ids.length === 0) return { items: [], total }
 
-    // ML multi-get: GET /items?ids=MLB1,MLB2,...
+    // ML multi-get with enriched attributes
     const { data: multi } = await axios.get(`${ML_BASE}/items`, {
       headers: { Authorization: `Bearer ${token}` },
-      params: { ids: ids.join(',') },
+      params: {
+        ids: ids.join(','),
+        attributes: [
+          'id', 'title', 'price', 'original_price', 'available_quantity',
+          'sold_quantity', 'thumbnail', 'permalink', 'status', 'listing_type_id',
+          'catalog_product_id', 'catalog_listing', 'shipping', 'attributes',
+          'variations', 'pictures', 'tags', 'last_updated', 'date_created',
+          'category_id', 'deal_ids', 'promotions', 'health',
+          'catalog_listing_type_id',
+        ].join(','),
+      },
     })
 
     const items = (Array.isArray(multi) ? multi : [])
@@ -605,12 +615,16 @@ export class MercadolivreService {
           listing_type_id: i.listing_type_id,
           catalog_product_id: i.catalog_product_id ?? null,
           catalog_listing: i.catalog_listing ?? false,
+          catalog_listing_type_id: i.catalog_listing_type_id ?? null,
           free_shipping: i.shipping?.free_shipping ?? false,
           logistic_type: i.shipping?.logistic_type ?? null,
           sku: i.attributes?.find((a: any) => a.id === 'SELLER_SKU')?.value_name ?? null,
           has_variations: (i.variations?.length ?? 0) > 0,
           pictures_count: i.pictures?.length ?? 0,
           tags: i.tags ?? [],
+          deal_ids: i.deal_ids ?? [],
+          promotions: i.promotions ?? [],
+          health: i.health ?? null,
           last_updated: i.last_updated,
           date_created: i.date_created,
           category_id: i.category_id,
