@@ -1493,13 +1493,22 @@ export class MercadolivreService {
 
     for (let i = 0; i < listingIds.length; i++) {
       const mlId = listingIds[i]
+      console.log('[from-listing] iniciando para:', mlId)
 
       if (itemsRes[i].status === 'rejected') {
-        results.push({ listing_id: mlId, status: 'error', reason: 'Falha ao buscar anúncio no ML' })
+        const reason = (itemsRes[i] as PromiseRejectedResult).reason?.response?.data?.message ?? 'Falha ao buscar anúncio no ML'
+        console.error('[from-listing] ML item fetch failed:', mlId, reason)
+        results.push({ listing_id: mlId, status: 'error', reason })
         continue
       }
 
       const item = (itemsRes[i] as PromiseFulfilledResult<any>).value.data
+      console.log('[from-listing] item ML:', {
+        id: item.id,
+        title: item.title?.substring(0, 40),
+        sku: item.seller_custom_field,
+        price: item.price,
+      })
       const desc =
         descRes[i].status === 'fulfilled'
           ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
@@ -1561,14 +1570,23 @@ export class MercadolivreService {
         created_at:       new Date().toISOString(),
       }
 
+      console.log('[from-listing] tentando INSERT com:', {
+        name: payload.name,
+        sku: payload.sku,
+        price: payload.price,
+        organization_id: payload.organization_id,
+      })
+
       const { data: created, error } = await supabaseAdmin
         .from('products')
         .insert(payload)
-        .select('id')
+        .select()
         .single()
 
+      console.log('[from-listing] INSERT resultado:', { data: created, error })
+
       if (error) {
-        console.error('[createFromListing] Supabase insert error:', error.code, error.message, error.details)
+        console.error('[from-listing] ERRO INSERT:', error.code, error.message, error.details)
         results.push({ listing_id: mlId, status: 'error', reason: error.message })
       } else {
         results.push({ listing_id: mlId, status: 'created', product_id: created.id })

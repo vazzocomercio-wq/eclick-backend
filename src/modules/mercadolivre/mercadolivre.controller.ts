@@ -228,14 +228,17 @@ export class MercadolivreController {
   // POST /ml/products/from-listing  { listing_ids: string[] }
   @Post('products/from-listing')
   @HttpCode(HttpStatus.OK)
-  createFromListing(
+  async createFromListing(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { listing_ids?: string[] },
   ) {
     const ids = body.listing_ids ?? []
+    console.log('[from-listing] listing_ids recebidos:', ids, '| orgId:', user.orgId)
     if (!ids.length) throw new BadRequestException('listing_ids é obrigatório')
     if (ids.length > 20) throw new BadRequestException('Máximo 20 anúncios por vez')
-    return this.ml.createFromListing(user.orgId, ids)
+    const results = await this.ml.createFromListing(user.orgId, ids)
+    console.log('[from-listing] results:', JSON.stringify(results))
+    return results
   }
 
   // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true
