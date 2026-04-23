@@ -1,6 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 
+const PRODUCT_FIELDS = `id,name,sku,brand,price,stock,status,platforms,photo_urls,
+  ml_title,condition,category,created_at,
+  wholesale_enabled,wholesale_levels,ml_listing_type,
+  ml_free_shipping,ml_flex,ml_listing_id,ml_permalink,cost_price,tax_percentage,tax_on_freight`
+
 export interface UpdateProductCostsDto {
   cost_price?:    number | null
   tax_percentage?: number | null
@@ -9,6 +14,17 @@ export interface UpdateProductCostsDto {
 
 @Injectable()
 export class ProductsService {
+  async getAll(orgId: string | null) {
+    const query = supabaseAdmin.from('products').select(PRODUCT_FIELDS)
+    const { data, error } = await (
+      orgId
+        ? query.eq('organization_id', orgId)
+        : query.is('organization_id', null)
+    ).order('created_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    return data ?? []
+  }
+
   async updateCosts(orgId: string, productId: string, dto: UpdateProductCostsDto) {
     const { data, error } = await supabaseAdmin
       .from('products')
