@@ -566,12 +566,15 @@ export class MercadolivreService {
 
   // ── Catalog / Listings ───────────────────────────────────────────────────
 
-  async getListings(orgId: string, status = 'active', offset = 0, limit = 20) {
+  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string) {
     const { token, sellerId } = await this.getValidToken()
+
+    const searchParams: Record<string, unknown> = { status, offset, limit }
+    if (q?.trim()) searchParams.q = q.trim()
 
     const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
-      params: { status, offset, limit },
+      params: searchParams,
     })
 
     const ids: string[] = search.results ?? []

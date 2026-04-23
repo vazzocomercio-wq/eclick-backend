@@ -181,14 +181,15 @@ export class MercadolivreController {
     return this.ml.getListingsCounts(user.orgId!)
   }
 
-  // GET /ml/listings?status=active&limit=20&offset=0
+  // GET /ml/listings?status=active&limit=20&offset=0&q=busca
   @Get('listings')
   getListings(
     @ReqUser() user: ReqUserPayload,
     @Query('status') status?: string,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
+    @Query('q') q?: string,
   ) {
-    return this.ml.getListings(user.orgId!, status ?? 'active', Number(offset ?? 0), Number(limit ?? 20))
+    return this.ml.getListings(user.orgId!, status ?? 'active', Number(offset ?? 0), Number(limit ?? 20), q)
   }
 }
