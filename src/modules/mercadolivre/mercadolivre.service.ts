@@ -546,7 +546,22 @@ export class MercadolivreService {
     }
   }
 
-  // 7. GET /ml/questions — unanswered
+  // 7. GET /ml/reputation
+  async getReputation(orgId: string) {
+    try {
+      const { token, sellerId } = await this.getAuth(orgId)
+      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      return { seller_id: sellerId, ...data }
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      console.error('[reputation] ML error:', status, err?.response?.data?.message ?? err?.message)
+      throw new HttpException(err?.response?.data?.message ?? 'Erro ao buscar reputação', status)
+    }
+  }
+
+  // 8. GET /ml/questions — unanswered
   async getQuestions(orgId: string) {
     try {
       const { token } = await this.getAuth(orgId)

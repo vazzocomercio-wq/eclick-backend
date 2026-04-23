@@ -149,6 +149,12 @@ export class MercadolivreController {
     return this.ml.getSellerInfo(user.orgId!)
   }
 
+  // GET /ml/reputation
+  @Get('reputation')
+  getReputation(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getReputation(user.orgId!)
+  }
+
   // GET /ml/questions
   @Get('questions')
   getQuestions(@ReqUser() user: ReqUserPayload) {
