@@ -5,6 +5,7 @@ import {
   Delete,
   Body,
   Query,
+  Param,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -95,5 +96,68 @@ export class MercadolivreController {
   @Get('metrics')
   getMetrics(@ReqUser() user: ReqUserPayload) {
     return this.ml.getMetrics(user.orgId!)
+  }
+
+  // ── Pipeline endpoints ────────────────────────────────────────────────────
+
+  // GET /ml/my-items
+  @Get('my-items')
+  getMyItems(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getMyItems(user.orgId!)
+  }
+
+  // GET /ml/items/:mlbId
+  @Get('items/:mlbId')
+  getItemDetail(
+    @ReqUser() user: ReqUserPayload,
+    @Param('mlbId') mlbId: string,
+  ) {
+    return this.ml.getItemDetail(user.orgId!, mlbId)
+  }
+
+  // GET /ml/items/:mlbId/visits
+  @Get('items/:mlbId/visits')
+  getItemVisits(
+    @ReqUser() user: ReqUserPayload,
+    @Param('mlbId') mlbId: string,
+  ) {
+    return this.ml.getItemVisits(user.orgId!, mlbId)
+  }
+
+  // GET /ml/recent-orders?offset=0&limit=50
+  @Get('recent-orders')
+  getRecentOrders(
+    @ReqUser() user: ReqUserPayload,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.ml.getRecentOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 50))
+  }
+
+  // GET /ml/catalog-competitors/:catalogId
+  @Get('catalog-competitors/:catalogId')
+  getCatalogCompetitors(
+    @ReqUser() user: ReqUserPayload,
+    @Param('catalogId') catalogId: string,
+  ) {
+    return this.ml.getCatalogCompetitors(user.orgId!, catalogId)
+  }
+
+  // GET /ml/seller-info
+  @Get('seller-info')
+  getSellerInfo(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getSellerInfo(user.orgId!)
+  }
+
+  // GET /ml/questions
+  @Get('questions')
+  getQuestions(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getQuestions(user.orgId!)
+  }
+
+  // GET /ml/claims
+  @Get('claims')
+  getClaims(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getClaims(user.orgId!)
   }
 }

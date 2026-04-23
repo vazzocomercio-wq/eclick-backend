@@ -364,4 +364,173 @@ export class MercadolivreService {
   private today(): string {
     return new Date().toISOString().slice(0, 10) + 'T23:59:59.999-03:00'
   }
+
+  // ── Auth helper: org-first with fallback + auto-refresh ──────────────────
+
+  private async getAuth(orgId: string): Promise<{ token: string; sellerId: number }> {
+    type ConnRow = { access_token: string; refresh_token: string; expires_at: string; seller_id: number }
+
+    let conn: ConnRow | null = null
+
+    const { data: orgConn } = await supabaseAdmin
+      .from('ml_connections')
+      .select('access_token, refresh_token, expires_at, seller_id')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+
+    conn = orgConn
+
+    if (!conn) {
+      const { data: fallback } = await supabaseAdmin
+        .from('ml_connections')
+        .select('access_token, refresh_token, expires_at, seller_id')
+        .limit(1)
+        .single()
+      conn = fallback
+    }
+
+    if (!conn) throw new UnauthorizedException('ML not connected')
+
+    const expiresAt = new Date(conn.expires_at).getTime()
+    if (Date.now() < expiresAt - 60_000) {
+      return { token: conn.access_token, sellerId: conn.seller_id }
+    }
+
+    // Refresh expired token
+    const res = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
+      `${ML_BASE}/oauth/token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: process.env.ML_CLIENT_ID!,
+        client_secret: process.env.ML_CLIENT_SECRET!,
+        refresh_token: conn.refresh_token,
+      }),
+      { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
+    )
+    const { access_token, refresh_token, expires_in } = res.data
+    const new_expires_at = new Date(Date.now() + expires_in * 1000).toISOString()
+    await supabaseAdmin
+      .from('ml_connections')
+      .update({ access_token, refresh_token, expires_at: new_expires_at })
+      .eq('seller_id', conn.seller_id)
+
+    return { token: access_token, sellerId: conn.seller_id }
+  }
+
+  // ── Pipeline endpoints ───────────────────────────────────────────────────
+
+  // 1. GET /ml/my-items — active listing IDs
+  async getMyItems(orgId: string) {
+    const { token, sellerId } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { status: 'active', limit: 50 },
+    })
+    return { items: body.results ?? [], total: body.paging?.total ?? 0 }
+  }
+
+  // 2. GET /ml/items/:mlbId — item detail
+  async getItemDetail(orgId: string, mlbId: string) {
+    const { token } = await this.getAuth(orgId)
+    const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    return {
+      id: item.id, title: item.title, price: item.price,
+      available_quantity: item.available_quantity, sold_quantity: item.sold_quantity,
+      condition: item.condition, thumbnail: item.thumbnail,
+      permalink: item.permalink, category_id: item.category_id,
+      listing_type_id: item.listing_type_id,
+    }
+  }
+
+  // 3. GET /ml/items/:mlbId/visits — 7-day visits
+  async getItemVisits(orgId: string, mlbId: string) {
+    const { token } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/items/${mlbId}/visits/time_window`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { last: 7, unit: 'day' },
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    return { total_visits: body.total_visits ?? 0, date_from: body.date_from ?? null, date_to: body.date_to ?? null }
+  }
+
+  // 4. GET /ml/recent-orders — orders with item detail
+  async getRecentOrders(orgId: string, offset = 0, limit = 50) {
+    const { token, sellerId } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { seller: sellerId, sort: 'date_desc', offset, limit },
+    })
+    return {
+      orders: (body.results ?? []).map((o: any) => ({
+        id: o.id,
+        status: o.status,
+        date_created: o.date_created,
+        total_amount: o.total_amount,
+        items: (o.order_items ?? []).map((i: any) => ({
+          item_id: i.item?.id,
+          title: i.item?.title,
+          quantity: i.quantity,
+          unit_price: i.unit_price,
+        })),
+      })),
+      total: body.paging?.total ?? 0,
+    }
+  }
+
+  // 5. GET /ml/catalog-competitors/:catalogId
+  async getCatalogCompetitors(orgId: string, catalogId: string) {
+    const { token } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/products/${catalogId}/items`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { status: 'active' },
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    return body
+  }
+
+  // 6. GET /ml/seller-info
+  async getSellerInfo(orgId: string) {
+    const { token, sellerId } = await this.getAuth(orgId)
+    const { data: user } = await axios.get(`${ML_BASE}/users/${sellerId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return {
+      seller_id: sellerId,
+      nickname: user.nickname ?? null,
+      registration_date: user.registration_date ?? null,
+      country_id: user.country_id ?? null,
+      seller_reputation: user.seller_reputation ?? null,
+      metrics: user.metrics ?? null,
+    }
+  }
+
+  // 7. GET /ml/questions — unanswered
+  async getQuestions(orgId: string) {
+    const { token } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { status: 'unanswered' },
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    return { questions: body.questions ?? [], total: body.total ?? 0 }
+  }
+
+  // 8. GET /ml/claims — open claims
+  async getClaims(orgId: string) {
+    const { token } = await this.getAuth(orgId)
+    const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { role: 'complainant', status: 'opened' },
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    return body
+  }
 }
