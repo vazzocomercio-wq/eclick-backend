@@ -478,7 +478,7 @@ export class MercadolivreService {
     }
   }
 
-  async getRecentOrders(orgId: string, offset = 0, limit = 50) {
+  async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string) {
     let token: string
     let sellerId: number
     try {
@@ -489,12 +489,16 @@ export class MercadolivreService {
     }
 
     const safeLimit = Math.min(limit, 50)
-    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit)
+    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit, 'dateFrom:', dateFrom, 'dateTo:', dateTo)
+
+    const mlParams: Record<string, any> = { seller: sellerId, sort: 'date_desc', limit: safeLimit }
+    if (dateFrom) mlParams['order.date_created.from'] = `${dateFrom}T00:00:00.000-03:00`
+    if (dateTo)   mlParams['order.date_created.to']   = `${dateTo}T23:59:59.999-03:00`
 
     try {
       const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { seller: sellerId, sort: 'date_desc', limit: safeLimit },
+        params: mlParams,
       })
 
       console.log('[recent-orders] ML status OK, total:', body.paging?.total)
@@ -515,9 +519,12 @@ export class MercadolivreService {
       if (mlStatus === 400) {
         console.warn('[recent-orders] 400 received — trying fallback without sort param')
         try {
+          const fbParams: Record<string, any> = { seller: sellerId, limit: safeLimit }
+          if (dateFrom) fbParams['order.date_created.from'] = `${dateFrom}T00:00:00.000-03:00`
+          if (dateTo)   fbParams['order.date_created.to']   = `${dateTo}T23:59:59.999-03:00`
           const { data: body2 } = await axios.get(`${ML_BASE}/orders/search`, {
             headers: { Authorization: `Bearer ${token}` },
-            params: { seller: sellerId, limit: safeLimit },
+            params: fbParams,
           })
           console.log('[recent-orders] fallback OK, total:', body2.paging?.total)
           const rawOrders2: any[] = body2.results ?? []

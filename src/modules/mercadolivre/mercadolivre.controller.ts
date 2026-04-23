@@ -134,14 +134,16 @@ export class MercadolivreController {
     return this.ml.getItemVisits(user.orgId!, mlbId)
   }
 
-  // GET /ml/recent-orders?offset=0&limit=50
+  // GET /ml/recent-orders?offset=0&limit=50&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
   @Get('recent-orders')
   getRecentOrders(
     @ReqUser() user: ReqUserPayload,
-    @Query('offset') offset?: string,
-    @Query('limit') limit?: string,
+    @Query('offset')    offset?:   string,
+    @Query('limit')     limit?:    string,
+    @Query('date_from') dateFrom?: string,
+    @Query('date_to')   dateTo?:   string,
   ) {
-    return this.ml.getRecentOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 50))
+    return this.ml.getRecentOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 50), dateFrom, dateTo)
   }
 
   // GET /ml/catalog-competitors/:catalogId
