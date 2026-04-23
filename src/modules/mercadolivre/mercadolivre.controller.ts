@@ -207,6 +207,27 @@ export class MercadolivreController {
     return this.ml.getListingsCounts(user.orgId!)
   }
 
+  // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true
+  @Get('financial-summary')
+  getFinancialSummary(
+    @ReqUser() user: ReqUserPayload,
+    @Query('date_from')  dateFrom?: string,
+    @Query('date_to')    dateTo?: string,
+    @Query('status')     status?: string,
+    @Query('kpis_only')  kpisOnly?: string,
+  ) {
+    const now  = new Date()
+    const from = dateFrom ?? new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+    const to   = dateTo   ?? now.toISOString()
+    return this.ml.getFinancialSummary(
+      user.orgId!,
+      from,
+      to,
+      status,
+      kpisOnly === 'true',
+    )
+  }
+
   // GET /ml/listings?status=active&limit=20&offset=0&q=busca
   @Get('listings')
   getListings(

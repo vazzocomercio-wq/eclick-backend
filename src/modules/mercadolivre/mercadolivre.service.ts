@@ -968,4 +968,273 @@ export class MercadolivreService {
 
     return { orders: enriched, total: body.paging?.total ?? 0 }
   }
+
+  // ── Financial Summary ─────────────────────────────────────────────────────
+
+  async getFinancialSummary(
+    orgId: string,
+    dateFrom: string,
+    dateTo: string,
+    statusFilter?: string,
+    kpisOnly = false,
+  ) {
+    const connections = await this.getAllConnections()
+    if (!connections.length) throw new UnauthorizedException('ML não conectado')
+
+    const fmt = (s: string) =>
+      new Date(s).toISOString().slice(0, 19) + '.000-03:00'
+
+    const allOrders: any[] = []
+
+    for (const conn of connections) {
+      const token = await this.refreshIfNeeded(conn)
+      let offset = 0
+      const perPage = 50
+      const maxOrders = 500
+
+      while (offset < maxOrders) {
+        const params: Record<string, unknown> = {
+          seller: conn.seller_id,
+          sort: 'date_desc',
+          limit: perPage,
+          offset,
+          'order.date_created.from': fmt(dateFrom),
+          'order.date_created.to': fmt(dateTo),
+        }
+        if (statusFilter && statusFilter !== 'all') {
+          params['order.status'] = statusFilter
+        }
+
+        const { data: body } = await axios
+          .get(`${ML_BASE}/orders/search`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params,
+          })
+          .catch(() => ({ data: { results: [], paging: { total: 0 } } }))
+
+        const results: any[] = body.results ?? []
+        for (const o of results) {
+          allOrders.push({
+            ...o,
+            _account_nickname: conn.nickname ?? `Conta #${conn.seller_id}`,
+            _seller_id: conn.seller_id,
+          })
+        }
+        offset += results.length
+        if (results.length < perPage || offset >= (body.paging?.total ?? 0)) break
+      }
+    }
+
+    // Shipments (only when full detail is needed)
+    const shipMap: Record<number, any> = {}
+    if (!kpisOnly) {
+      const shipIds = [
+        ...new Set(allOrders.map((o: any) => o.shipping?.id).filter(Boolean)),
+      ] as number[]
+      if (shipIds.length > 0) {
+        const firstToken = await this.refreshIfNeeded(connections[0])
+        const batchSize = 20
+        for (let i = 0; i < shipIds.length; i += batchSize) {
+          const batch = shipIds.slice(i, i + batchSize)
+          const res = await Promise.allSettled(
+            batch.map(id =>
+              axios.get(`${ML_BASE}/shipments/${id}`, {
+                headers: { Authorization: `Bearer ${firstToken}` },
+              }),
+            ),
+          )
+          batch.forEach((id, j) => {
+            if (res[j].status === 'fulfilled')
+              shipMap[id] = (res[j] as any).value.data
+          })
+        }
+      }
+    }
+
+    // Product costs/tax
+    const skus = [
+      ...new Set(
+        allOrders.flatMap((o: any) =>
+          (o.order_items ?? [])
+            .map((i: any) => i.item?.seller_sku)
+            .filter(Boolean),
+        ),
+      ),
+    ] as string[]
+    const productMap: Record<string, any> = {}
+    if (skus.length > 0) {
+      const { data: prods } = await supabaseAdmin
+        .from('products')
+        .select('sku, cost_price, tax_percentage, tax_on_freight')
+        .in('sku', skus)
+      ;(prods ?? []).forEach((p: any) => {
+        if (p.sku) productMap[p.sku] = p
+      })
+    }
+
+    // Thumbnails (only full mode)
+    const thumbMap: Record<string, string> = {}
+    if (!kpisOnly) {
+      const itemIds = [
+        ...new Set(
+          allOrders.flatMap((o: any) =>
+            (o.order_items ?? []).map((i: any) => i.item?.id).filter(Boolean),
+          ),
+        ),
+      ] as string[]
+      if (itemIds.length > 0) {
+        try {
+          const firstToken = await this.refreshIfNeeded(connections[0])
+          const { data: batchItems } = await axios.get(`${ML_BASE}/items`, {
+            headers: { Authorization: `Bearer ${firstToken}` },
+            params: {
+              ids: itemIds.slice(0, 20).join(','),
+              attributes: 'id,thumbnail',
+            },
+          })
+          ;(Array.isArray(batchItems) ? batchItems : [])
+            .filter((r: any) => r.code === 200)
+            .forEach((r: any) => {
+              if (r.body?.id) thumbMap[r.body.id] = r.body.thumbnail ?? ''
+            })
+        } catch { /* non-fatal */ }
+      }
+    }
+
+    // Aggregate accumulators
+    let faturamento_ml = 0, canceladas = 0
+    let tarifa_total = 0, frete_vendedor_total = 0, frete_comprador_total = 0
+    let custo_total = 0, imposto_total = 0
+    let qtd_aprovadas = 0, qtd_canceladas = 0
+
+    const enrichedOrders = allOrders.map((o: any) => {
+      const ship = shipMap[o.shipping?.id] ?? null
+      const totalAmount: number = o.total_amount ?? 0
+      const isCancelled = o.status === 'cancelled'
+      const tarifaML = Math.round(totalAmount * 0.115 * 100) / 100
+      const freteVendedor: number = ship
+        ? (ship.cost_components?.receiver_shipping_cost ?? ship.base_cost ?? 0)
+        : 0
+      const freteComprador: number =
+        ship?.cost_components?.buyer_shipping_cost ?? 0
+      const lucroBruto =
+        Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
+
+      const firstItem = o.order_items?.[0]
+      const firstSku = firstItem?.item?.seller_sku ?? null
+      const prodData = firstSku ? (productMap[firstSku] ?? null) : null
+      const costPrice: number | null = prodData?.cost_price ?? null
+      const taxPct: number | null = prodData?.tax_percentage ?? null
+      const taxOnFreight: boolean = prodData?.tax_on_freight ?? false
+
+      let taxAmount: number | null = null
+      let contribMargin: number | null = null
+      let contribMarginPct: number | null = null
+
+      if (taxPct != null) {
+        const taxBase = taxOnFreight
+          ? totalAmount + freteVendedor
+          : totalAmount
+        taxAmount = Math.round(taxBase * (taxPct / 100) * 100) / 100
+      }
+      if (costPrice != null || taxAmount != null) {
+        const cm = lucroBruto - (costPrice ?? 0) - (taxAmount ?? 0)
+        contribMargin = Math.round(cm * 100) / 100
+        contribMarginPct =
+          totalAmount > 0
+            ? Math.round((cm / totalAmount) * 10000) / 100
+            : 0
+      }
+
+      if (!isCancelled) {
+        faturamento_ml += totalAmount
+        tarifa_total += tarifaML
+        frete_vendedor_total += freteVendedor
+        frete_comprador_total += freteComprador
+        custo_total += costPrice ?? 0
+        imposto_total += taxAmount ?? 0
+        qtd_aprovadas++
+      } else {
+        canceladas += totalAmount
+        qtd_canceladas++
+      }
+
+      return {
+        order_id: o.id,
+        status: o.status,
+        date_created: o.date_created,
+        account_nickname: o._account_nickname,
+        seller_id: o._seller_id,
+        item_id: firstItem?.item?.id ?? null,
+        title: firstItem?.item?.title ?? null,
+        sku: firstSku,
+        thumbnail: thumbMap[firstItem?.item?.id ?? ''] ?? null,
+        quantity: firstItem?.quantity ?? 1,
+        unit_price: firstItem?.unit_price ?? totalAmount,
+        total_amount: totalAmount,
+        shipping_type: ship?.logistic_type ?? o.shipping?.mode ?? null,
+        frete_comprador: freteComprador,
+        frete_vendedor: freteVendedor,
+        tarifa_ml: tarifaML,
+        cost_price: costPrice,
+        tax_amount: taxAmount,
+        lucro_bruto: lucroBruto,
+        contribution_margin: contribMargin,
+        contribution_margin_pct: contribMarginPct,
+        is_paid: !isCancelled,
+        is_cancelled: isCancelled,
+      }
+    })
+
+    const vendas_aprovadas =
+      faturamento_ml - tarifa_total - frete_vendedor_total
+    const margem_contribuicao =
+      vendas_aprovadas - custo_total - imposto_total
+    const margem_pct =
+      faturamento_ml > 0
+        ? Math.round((margem_contribuicao / faturamento_ml) * 10000) / 100
+        : 0
+    const ticket_medio =
+      qtd_aprovadas > 0
+        ? Math.round((faturamento_ml / qtd_aprovadas) * 100) / 100
+        : 0
+    const ticket_medio_mc =
+      qtd_aprovadas > 0
+        ? Math.round((margem_contribuicao / qtd_aprovadas) * 100) / 100
+        : 0
+
+    const r = (v: number) => Math.round(v * 100) / 100
+    const kpis = {
+      vendas_aprovadas:   r(vendas_aprovadas),
+      faturamento_ml:     r(faturamento_ml),
+      canceladas:         r(canceladas),
+      custo_total:        r(custo_total),
+      imposto_total:      r(imposto_total),
+      tarifa_total:       r(tarifa_total),
+      frete_comprador:    r(frete_comprador_total),
+      frete_vendedor:     r(frete_vendedor_total),
+      frete_total:        r(frete_vendedor_total + frete_comprador_total),
+      margem_contribuicao: r(margem_contribuicao),
+      margem_pct,
+      qtd_aprovadas,
+      qtd_canceladas,
+      ticket_medio,
+      ticket_medio_mc,
+    }
+
+    const donutBase = faturamento_ml || 1
+    const donutData = [
+      { name: 'Custo',          value: r(custo_total),          pct: r((custo_total / donutBase) * 100),          color: '#f97316' },
+      { name: 'Tarifa',         value: r(tarifa_total),         pct: r((tarifa_total / donutBase) * 100),         color: '#f59e0b' },
+      { name: 'Frete',          value: r(frete_vendedor_total), pct: r((frete_vendedor_total / donutBase) * 100), color: '#3b82f6' },
+      { name: 'Imposto',        value: r(imposto_total),        pct: r((imposto_total / donutBase) * 100),        color: '#ef4444' },
+      { name: 'M. Contribuição',value: r(margem_contribuicao),  pct: margem_pct,                                  color: '#22c55e' },
+    ]
+
+    return {
+      kpis,
+      donut_data: donutData,
+      orders: kpisOnly ? [] : enrichedOrders,
+    }
+  }
 }
