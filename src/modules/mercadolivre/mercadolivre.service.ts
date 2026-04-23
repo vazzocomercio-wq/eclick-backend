@@ -511,15 +511,21 @@ export class MercadolivreService {
 
   // 7. GET /ml/reputation
   async getReputation(orgId: string) {
-    const { token } = await this.getValidToken()
+    try {
+      const { token: accessToken } = await this.getValidToken()
 
-    const { data } = await axios.get(`${ML_BASE}/users/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+      const response = await axios.get(`${ML_BASE}/users/me`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
 
-    const rep = data?.seller_reputation ?? {}
-    console.log('[reputation] metrics:', JSON.stringify(rep?.metrics))
-    return rep
+      const rep = response.data?.seller_reputation
+      console.log('[reputation] metrics raw:', JSON.stringify(rep?.metrics))
+      console.log('[reputation] transactions raw:', JSON.stringify(rep?.transactions))
+      return rep || {}
+    } catch (error: any) {
+      console.error('[reputation] erro:', error?.response?.status, error?.message)
+      return {}
+    }
   }
 
   // 8. GET /ml/questions — unanswered
