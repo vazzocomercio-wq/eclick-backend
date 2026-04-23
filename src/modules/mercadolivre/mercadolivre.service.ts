@@ -533,13 +533,13 @@ export class MercadolivreService {
       console.warn('[reputation] /me falhou:', err1?.response?.status, err1?.response?.data?.message ?? err1?.message)
     }
 
-    // Tentativa 2: /users/{sellerId} público — extrai seller_reputation
+    // Tentativa 2: /users/{sellerId} com token — extrai seller_reputation
     try {
       const url2 = `${ML_BASE}/users/${sellerId}`
       console.log('[reputation] chamando URL:', url2)
-      const publicResponse = await axios.get(url2)
-      console.log('[reputation] public response keys:', Object.keys(publicResponse.data || {}).join(', '))
-      console.log('[reputation] seller_reputation field:', JSON.stringify(publicResponse.data?.seller_reputation)?.substring(0, 300))
+      const publicResponse = await axios.get(url2, { headers: { Authorization: `Bearer ${token}` } })
+      console.log('[reputation] full response keys:', Object.keys(publicResponse.data || {}))
+      console.log('[reputation] seller_reputation:', JSON.stringify(publicResponse.data?.seller_reputation))
       const rep = publicResponse.data?.seller_reputation ?? null
       return { seller_id: sellerId, ...(rep ?? {}) }
     } catch (err2: any) {
