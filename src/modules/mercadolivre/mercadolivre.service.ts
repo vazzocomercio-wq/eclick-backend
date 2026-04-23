@@ -488,12 +488,15 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
-    const safeLimit = Math.min(limit, 50)
-    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit, 'dateFrom:', dateFrom, 'dateTo:', dateTo)
+    // Allow up to 200 when a date range is specified; cap at 50 for unbounded calls
+    const safeLimit = Math.min(limit, dateFrom ? 200 : 50)
+    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
 
     const mlParams: Record<string, any> = { seller: sellerId, sort: 'date_desc', limit: safeLimit }
     if (dateFrom) mlParams['order.date_created.from'] = `${dateFrom}T00:00:00.000-03:00`
     if (dateTo)   mlParams['order.date_created.to']   = `${dateTo}T23:59:59.999-03:00`
+
+    console.log('[recent-orders] ML params:', JSON.stringify(mlParams))
 
     try {
       const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
@@ -501,7 +504,7 @@ export class MercadolivreService {
         params: mlParams,
       })
 
-      console.log('[recent-orders] ML status OK, total:', body.paging?.total)
+      console.log('[recent-orders] ML status OK, total:', body.paging?.total, 'results:', body.results?.length)
 
       const rawOrders: any[] = body.results ?? []
       const shipMapMain = await this._fetchShipments(token, rawOrders)
