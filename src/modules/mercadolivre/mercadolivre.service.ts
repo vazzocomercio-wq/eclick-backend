@@ -372,29 +372,43 @@ export class MercadolivreService {
     if (!conn) throw new UnauthorizedException('ML not connected')
 
     const expiresAt = new Date(conn.expires_at).getTime()
-    if (Date.now() < expiresAt - 60_000) {
+    const now = Date.now()
+    console.log('[getAuth] seller_id:', conn.seller_id, '| expires_at:', conn.expires_at, '| expired:', now >= expiresAt - 60_000)
+
+    if (now < expiresAt - 60_000) {
+      console.log('[getAuth] token válido, usando access_token existente')
       return { token: conn.access_token, sellerId: conn.seller_id }
     }
 
-    // Refresh expired token
-    const res = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
-      `${ML_BASE}/oauth/token`,
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: process.env.ML_CLIENT_ID!,
-        client_secret: process.env.ML_CLIENT_SECRET!,
-        refresh_token: conn.refresh_token,
-      }),
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
-    )
-    const { access_token, refresh_token, expires_in } = res.data
-    const new_expires_at = new Date(Date.now() + expires_in * 1000).toISOString()
-    await supabaseAdmin
-      .from('ml_connections')
-      .update({ access_token, refresh_token, expires_at: new_expires_at })
-      .eq('seller_id', conn.seller_id)
+    // Token expirado — tentar refresh
+    console.log('[getAuth] token expirado, iniciando refresh para seller:', conn.seller_id)
+    try {
+      const res = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
+        `${ML_BASE}/oauth/token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: process.env.ML_CLIENT_ID!,
+          client_secret: process.env.ML_CLIENT_SECRET!,
+          refresh_token: conn.refresh_token,
+        }),
+        { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
+      )
+      const { access_token, refresh_token, expires_in } = res.data
+      const new_expires_at = new Date(now + expires_in * 1000).toISOString()
+      console.log('[getAuth] refresh ok — novo expires_at:', new_expires_at)
 
-    return { token: access_token, sellerId: conn.seller_id }
+      await supabaseAdmin
+        .from('ml_connections')
+        .update({ access_token, refresh_token, expires_at: new_expires_at })
+        .eq('seller_id', conn.seller_id)
+
+      return { token: access_token, sellerId: conn.seller_id }
+    } catch (refreshErr: any) {
+      const status = refreshErr?.response?.status ?? 'sem status'
+      const body   = JSON.stringify(refreshErr?.response?.data ?? refreshErr?.message)
+      console.error('[getAuth] refresh FALHOU — status:', status, '| body:', body)
+      throw new HttpException(`Token ML expirado e refresh falhou (${status})`, 401)
+    }
   }
 
   // ── Pipeline endpoints ───────────────────────────────────────────────────
