@@ -548,16 +548,44 @@ export class MercadolivreService {
 
   // 7. GET /ml/reputation
   async getReputation(orgId: string) {
+    let sellerId: number
     try {
-      const { token, sellerId } = await this.getAuth(orgId)
-      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      ;({ sellerId } = await this.getAuth(orgId))
+    } catch (authErr: any) {
+      console.error('[reputation] getAuth failed:', authErr?.message)
+      throw new HttpException('ML não conectado', 401)
+    }
+
+    try {
+      // seller_reputation é endpoint público — sem Authorization
+      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`)
+      console.log('[reputation] success for seller:', sellerId)
       return { seller_id: sellerId, ...data }
     } catch (err: any) {
       const status = err?.response?.status ?? 500
-      console.error('[reputation] ML error:', status, err?.response?.data?.message ?? err?.message)
-      throw new HttpException(err?.response?.data?.message ?? 'Erro ao buscar reputação', status)
+      console.error('[reputation] ML error status:', status)
+      console.error('[reputation] ML error data:', JSON.stringify(err?.response?.data))
+      console.error('[reputation] ML error message:', err?.message)
+      // fallback: retornar estrutura vazia em vez de quebrar a página
+      return {
+        seller_id: sellerId,
+        level_id: null,
+        power_seller_status: null,
+        transactions: {
+          canceled:  { total: 0, paid: 0 },
+          completed: { total: 0, paid: 0 },
+          total: 0,
+          ratings: { negative: 0, neutral: 0, positive: 0 },
+          period: { total: 0, paid: 0 },
+        },
+        metrics: {
+          sales:                { period: 'past 60 days', completed: 0 },
+          claims:               { period: 'past 60 days', rate: 0, value: 0 },
+          mediation:            { period: 'past 60 days', rate: 0, value: 0 },
+          cancellations:        { period: 'past 60 days', rate: 0, value: 0 },
+          delayed_handling_time:{ period: 'past 60 days', rate: 0, value: 0 },
+        },
+      }
     }
   }
 
