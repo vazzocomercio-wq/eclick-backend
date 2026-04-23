@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common'
 import { MercadolivreService } from './mercadolivre.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
@@ -205,6 +206,19 @@ export class MercadolivreController {
   @Get('listings/counts')
   getListingsCounts(@ReqUser() user: ReqUserPayload) {
     return this.ml.getListingsCounts(user.orgId!)
+  }
+
+  // POST /ml/products/from-listing  { listing_ids: string[] }
+  @Post('products/from-listing')
+  @HttpCode(HttpStatus.OK)
+  createFromListing(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { listing_ids?: string[] },
+  ) {
+    const ids = body.listing_ids ?? []
+    if (!ids.length) throw new BadRequestException('listing_ids é obrigatório')
+    if (ids.length > 20) throw new BadRequestException('Máximo 20 anúncios por vez')
+    return this.ml.createFromListing(user.orgId!, ids)
   }
 
   // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true

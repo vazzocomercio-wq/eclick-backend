@@ -1237,4 +1237,128 @@ export class MercadolivreService {
       orders: kpisOnly ? [] : enrichedOrders,
     }
   }
+
+  // ── Create products from listings ─────────────────────────────────────────
+
+  async createFromListing(orgId: string, listingIds: string[]) {
+    const { token } = await this.getValidToken()
+
+    // Fetch item details + descriptions in parallel
+    const [itemsRes, descRes] = await Promise.all([
+      Promise.allSettled(
+        listingIds.map(id =>
+          axios.get(`${ML_BASE}/items/${id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: {
+              attributes: [
+                'id','title','price','available_quantity','sold_quantity',
+                'thumbnail','pictures','seller_custom_field','category_id',
+                'listing_type_id','shipping','attributes','catalog_product_id',
+                'permalink','condition',
+              ].join(','),
+            },
+          }),
+        ),
+      ),
+      Promise.allSettled(
+        listingIds.map(id =>
+          axios.get(`${ML_BASE}/items/${id}/description`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ),
+      ),
+    ])
+
+    const results: Array<{
+      listing_id: string
+      status: 'created' | 'skipped' | 'error'
+      product_id?: string
+      reason?: string
+    }> = []
+
+    for (let i = 0; i < listingIds.length; i++) {
+      const mlId = listingIds[i]
+
+      if (itemsRes[i].status === 'rejected') {
+        results.push({ listing_id: mlId, status: 'error', reason: 'Falha ao buscar anúncio no ML' })
+        continue
+      }
+
+      const item = (itemsRes[i] as PromiseFulfilledResult<any>).value.data
+      const desc =
+        descRes[i].status === 'fulfilled'
+          ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
+          : null
+
+      const sku: string = item.seller_custom_field || item.id
+
+      // Check for duplicate SKU
+      const { data: existing } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('sku', sku)
+        .maybeSingle()
+
+      if (existing) {
+        results.push({ listing_id: mlId, status: 'skipped', reason: 'SKU já existe' })
+        continue
+      }
+
+      // Extract weight from ML attributes
+      const attrs: Array<{ id: string; values?: Array<{ struct?: { number: number; unit: string } }> }> =
+        item.attributes ?? []
+      const weightAttr = attrs.find(a => a.id === 'WEIGHT')
+      const wStruct    = weightAttr?.values?.[0]?.struct
+      const weightKg   = wStruct
+        ? wStruct.unit === 'kg' ? wStruct.number : wStruct.number / 1000
+        : null
+
+      const photoUrls: string[] = (item.pictures ?? [])
+        .map((p: any) => p.url ?? p.secure_url)
+        .filter(Boolean)
+
+      const mlListingType = (() => {
+        const t = item.listing_type_id ?? ''
+        if (t.includes('premium') || t.includes('gold_pro')) return 'premium'
+        return 'classic'
+      })()
+
+      const payload = {
+        organization_id:  orgId,
+        name:             item.title,
+        sku,
+        ml_title:         item.title,
+        price:            item.price ?? 0,
+        stock:            item.available_quantity ?? 0,
+        status:           'active',
+        condition:        item.condition === 'new' ? 'new' : 'used',
+        category:         item.category_id ?? null,
+        description:      desc,
+        photo_urls:       photoUrls.length > 0 ? photoUrls : null,
+        ml_listing_id:    item.id,
+        ml_listing_type:  mlListingType,
+        ml_permalink:     item.permalink ?? null,
+        ml_catalog_id:    item.catalog_product_id ?? null,
+        ml_free_shipping: item.shipping?.free_shipping ?? false,
+        platforms:        ['mercadolivre'],
+        weight_kg:        weightKg,
+        created_at:       new Date().toISOString(),
+      }
+
+      const { data: created, error } = await supabaseAdmin
+        .from('products')
+        .insert(payload)
+        .select('id')
+        .single()
+
+      if (error) {
+        results.push({ listing_id: mlId, status: 'error', reason: error.message })
+      } else {
+        results.push({ listing_id: mlId, status: 'created', product_id: created.id })
+      }
+    }
+
+    return { results }
+  }
 }
