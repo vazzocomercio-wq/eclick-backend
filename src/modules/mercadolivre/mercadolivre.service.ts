@@ -1026,6 +1026,63 @@ export class MercadolivreService {
     return { orders: enriched, total: body.paging?.total ?? 0 }
   }
 
+  // ── Order Totals (lean aggregation — no orders kept in memory) ───────────────
+
+  async getOrderTotals(
+    orgId: string,
+    dateFrom: string,
+    dateTo: string,
+  ): Promise<{ total_revenue: number; total_orders: number; average_ticket: number; date_from: string; date_to: string }> {
+    let token: string
+    let sellerId: number
+    try {
+      ;({ token, sellerId } = await this.getValidToken())
+    } catch {
+      throw new HttpException('ML não conectado', 401)
+    }
+
+    let totalRevenue = 0
+    let totalOrders  = 0
+    let paginationTotal: number | null = null
+    let pageOffset = 0
+    let pageResults: any[] = []
+
+    const from = dateFrom.slice(0, 10)
+    const to   = dateTo.slice(0, 10)
+
+    do {
+      const url =
+        `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=50&offset=${pageOffset}` +
+        `&order.date_created.from=${from}T00:00:00.000-03:00` +
+        `&order.date_created.to=${to}T23:59:59.999-03:00`
+
+      console.log(`[order-totals] offset=${pageOffset} total=${paginationTotal ?? '?'}`)
+
+      const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
+      pageResults = data?.results ?? []
+      if (paginationTotal === null) paginationTotal = data?.paging?.total ?? 0
+
+      for (const order of pageResults) {
+        totalRevenue += order.total_amount ?? 0
+        totalOrders++
+      }
+      pageOffset += 50
+    } while (
+      pageResults.length === 50 &&
+      totalOrders < (paginationTotal ?? 0)
+    )
+
+    console.log(`[order-totals] TOTAL: R$${totalRevenue.toFixed(2)} | ${totalOrders} pedidos`)
+
+    return {
+      total_revenue:   totalRevenue,
+      total_orders:    totalOrders,
+      average_ticket:  totalOrders > 0 ? totalRevenue / totalOrders : 0,
+      date_from:       from,
+      date_to:         to,
+    }
+  }
+
   // ── Financial Summary ─────────────────────────────────────────────────────
 
   async getFinancialSummary(
