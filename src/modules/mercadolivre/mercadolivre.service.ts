@@ -162,10 +162,12 @@ export class MercadolivreService {
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
   async getItemInfo(_orgId: string, url: string) {
-    const mlbMatch = url.match(/MLB-?(\d+)/i)
+    // Only purely numeric MLB IDs work with /items/ endpoint.
+    // MLBU... (catalog IDs) and friendly URLs must go through search.
+    const numericMatch = url.match(/MLB-?(\d{7,})\b/i)
 
-    if (mlbMatch) {
-      const mlbId = `MLB${mlbMatch[1]}`
+    if (numericMatch) {
+      const mlbId = `MLB${numericMatch[1]}`
 
       const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`)
         .catch((err: any) => {
@@ -190,19 +192,22 @@ export class MercadolivreService {
       }
     }
 
-    // ── Friendly URL: extract slug and search ────────────────────────────────
-    let seg: string | undefined
+    // ── Catalog ID (MLBU…) or friendly URL → search by slug ─────────────────
+    // Extract the product-name path segment (contains hyphens, not an ID)
+    let query: string
     try {
       const { pathname } = new URL(url)
-      seg = pathname.split('/').find((s: string) => s.length > 3 && !s.startsWith('_') && s !== 'p')
+      const segments = pathname.split('/').filter((s: string) => s.length > 3 && !s.startsWith('_') && s !== 'p')
+      // Prefer segment with hyphens (product name) over bare IDs
+      const slug = segments.find((s: string) => s.includes('-') && !/^MLB/i.test(s)) ?? segments[0]
+      if (!slug) throw new Error()
+      query = slug.replace(/-/g, ' ').trim()
     } catch {
-      throw new BadRequestException('URL inválida.')
+      throw new BadRequestException('Não foi possível extrair o produto desta URL.')
     }
-    if (!seg) throw new BadRequestException('Não foi possível extrair o produto desta URL.')
 
-    const query = seg.replace(/-/g, ' ')
     const { data: search } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
-      params: { q: query, limit: 1 },
+      params: { q: query, limit: 3 },
     }).catch((err: any) => {
       throw new HttpException(
         err.response?.data?.message ?? `ML Search retornou ${err.response?.status ?? 500}`,
