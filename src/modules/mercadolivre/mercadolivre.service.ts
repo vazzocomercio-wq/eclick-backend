@@ -231,17 +231,10 @@ export class MercadolivreService {
   // ── Items ────────────────────────────────────────────────────────────────
 
   async getItems(orgId: string, offset = 0, limit = 50) {
-    const token = await this.getValidToken(orgId)
-    const { data: conn } = await supabaseAdmin
-      .from('ml_connections')
-      .select('seller_id')
-      .eq('organization_id', orgId)
-      .maybeSingle()
-
-    if (!conn) throw new UnauthorizedException('ML not connected')
+    const { token, sellerId } = await this.getAuth(orgId)
 
     const { data: search } = await axios.get(
-      `${ML_BASE}/users/${conn.seller_id}/items/search`,
+      `${ML_BASE}/users/${sellerId}/items/search`,
       {
         headers: { Authorization: `Bearer ${token}` },
         params: { offset, limit },
@@ -266,7 +259,7 @@ export class MercadolivreService {
   }
 
   async importItem(orgId: string, mlItemId: string): Promise<{ id: string }> {
-    const token = await this.getValidToken(orgId)
+    const { token } = await this.getAuth(orgId)
 
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlItemId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -284,6 +277,7 @@ export class MercadolivreService {
       condition: item.data.condition ?? 'new',
       ml_listing_type: item.data.listing_type_id ?? null,
       ml_free_shipping: item.data.shipping?.free_shipping ?? false,
+      ml_item_id: mlItemId,
       attributes: {},
       fiscal: {},
     }
@@ -301,20 +295,13 @@ export class MercadolivreService {
   // ── Orders ───────────────────────────────────────────────────────────────
 
   async getOrders(orgId: string, offset = 0, limit = 50) {
-    const token = await this.getValidToken(orgId)
-    const { data: conn } = await supabaseAdmin
-      .from('ml_connections')
-      .select('seller_id')
-      .eq('organization_id', orgId)
-      .maybeSingle()
-
-    if (!conn) throw new UnauthorizedException('ML not connected')
+    const { token, sellerId } = await this.getAuth(orgId)
 
     const { data } = await axios.get(
       `${ML_BASE}/orders/search`,
       {
         headers: { Authorization: `Bearer ${token}` },
-        params: { seller: conn.seller_id, offset, limit, sort: 'date_desc' },
+        params: { seller: sellerId, offset, limit, sort: 'date_desc' },
       },
     )
 
@@ -324,24 +311,17 @@ export class MercadolivreService {
   // ── Metrics ──────────────────────────────────────────────────────────────
 
   async getMetrics(orgId: string) {
-    const token = await this.getValidToken(orgId)
-    const { data: conn } = await supabaseAdmin
-      .from('ml_connections')
-      .select('seller_id')
-      .eq('organization_id', orgId)
-      .maybeSingle()
-
-    if (!conn) throw new UnauthorizedException('ML not connected')
+    const { token, sellerId } = await this.getAuth(orgId)
 
     const [visits, sales] = await Promise.all([
-      axios.get(`${ML_BASE}/users/${conn.seller_id}/items_visits`, {
+      axios.get(`${ML_BASE}/users/${sellerId}/items_visits`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { date_from: this.daysAgo(30), date_to: this.today() },
       }),
       axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
         params: {
-          seller: conn.seller_id,
+          seller: sellerId,
           'order.status': 'paid',
           'order.date_created.from': this.daysAgo(30),
           limit: 1,
