@@ -167,10 +167,13 @@ export class MercadolivreController {
     return this.ml.getReputation(user.orgId!)
   }
 
-  // GET /ml/questions
+  // GET /ml/questions?status=UNANSWERED
   @Get('questions')
-  getQuestions(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getQuestions(user.orgId!)
+  getQuestions(
+    @ReqUser() user: ReqUserPayload,
+    @Query('status') status?: string,
+  ) {
+    return this.ml.getQuestions(user.orgId!, status?.toUpperCase() ?? 'UNANSWERED')
   }
 
   // POST /ml/questions/:id/answer  { text: string }

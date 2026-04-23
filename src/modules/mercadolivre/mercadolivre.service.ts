@@ -605,14 +605,32 @@ export class MercadolivreService {
     }
   }
 
-  async getQuestions(orgId: string) {
+  private async fetchQuestionsRaw(token: string, sellerId: number, status = 'UNANSWERED'): Promise<{ questions: any[]; total: number }> {
+    // Primary: /questions/search?seller_id=...
+    const primaryUrl = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=${status}&limit=50`
+    console.log('[questions] primary URL:', primaryUrl)
     try {
-      const { token } = await this.getValidToken()
-      const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { status: 'unanswered', limit: 50 },
-      })
-      const questions: any[] = body.questions ?? []
+      const { data } = await axios.get(primaryUrl, { headers: { Authorization: `Bearer ${token}` } })
+      console.log('[questions] response total:', data?.total, '| count:', data?.questions?.length)
+      return { questions: data?.questions ?? [], total: data?.total ?? 0 }
+    } catch (err: any) {
+      const httpStatus = err?.response?.status ?? 500
+      console.warn('[questions] primary failed with', httpStatus, '— trying fallback /my/received_questions')
+      if (httpStatus !== 403 && httpStatus !== 404) throw err
+    }
+
+    // Fallback: /my/received_questions
+    const fallbackUrl = `${ML_BASE}/my/received_questions?status=${status}&limit=50`
+    console.log('[questions] fallback URL:', fallbackUrl)
+    const { data: fb } = await axios.get(fallbackUrl, { headers: { Authorization: `Bearer ${token}` } })
+    console.log('[questions] fallback total:', fb?.total, '| count:', fb?.questions?.length)
+    return { questions: fb?.questions ?? [], total: fb?.total ?? 0 }
+  }
+
+  async getQuestions(orgId: string, status = 'UNANSWERED') {
+    try {
+      const { token, sellerId } = await this.getValidToken()
+      const { questions, total } = await this.fetchQuestionsRaw(token, sellerId, status)
 
       // Enrich with item data (batch up to 20 IDs per request)
       const itemIds = [...new Set(questions.map((q: any) => q.item_id).filter(Boolean))] as string[]
@@ -646,12 +664,12 @@ export class MercadolivreService {
         item: itemMap[q.item_id] ?? null,
       }))
 
-      return { questions: enriched, total: body.total ?? questions.length }
+      return { questions: enriched, total, sellerId }
     } catch (err: any) {
-      const status = err?.response?.status ?? 500
-      console.error('[questions] ML error:', status, err?.response?.data?.message ?? err?.message)
-      if (status === 403 || status === 404 || status === 401) return { questions: [], total: 0 }
-      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', status)
+      const httpStatus = err?.response?.status ?? 500
+      console.error('[questions] ML error:', httpStatus, err?.response?.data?.message ?? err?.message)
+      if (httpStatus === 403 || httpStatus === 404 || httpStatus === 401) return { questions: [], total: 0, sellerId: null }
+      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', httpStatus)
     }
   }
 
