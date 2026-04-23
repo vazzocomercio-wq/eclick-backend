@@ -753,13 +753,13 @@ export class MercadolivreService {
           'sold_quantity', 'thumbnail', 'permalink', 'status', 'listing_type_id',
           'catalog_product_id', 'catalog_listing', 'shipping', 'attributes',
           'variations', 'pictures', 'tags', 'last_updated', 'date_created',
-          'category_id', 'deal_ids', 'promotions', 'health',
+          'category_id', 'deal_ids', 'promotions', 'seller_custom_field',
           'catalog_listing_type_id',
         ].join(','),
       },
     })
 
-    const baseItems = (Array.isArray(multi) ? multi : [])
+    const items = (Array.isArray(multi) ? multi : [])
       .filter((r: any) => r.code === 200)
       .map((r: any) => {
         const i = r.body
@@ -779,7 +779,9 @@ export class MercadolivreService {
           catalog_listing_type_id: i.catalog_listing_type_id ?? null,
           free_shipping: i.shipping?.free_shipping ?? false,
           logistic_type: i.shipping?.logistic_type ?? null,
-          sku: i.attributes?.find((a: any) => a.id === 'SELLER_SKU')?.value_name ?? null,
+          sku: i.seller_custom_field
+            ?? i.attributes?.find((a: any) => a.id === 'SELLER_SKU')?.value_name
+            ?? null,
           has_variations: (i.variations?.length ?? 0) > 0,
           pictures_count: i.pictures?.length ?? 0,
           tags: i.tags ?? [],
@@ -793,26 +795,6 @@ export class MercadolivreService {
           health_reasons: [] as string[],
         }
       })
-
-    const healthResults = await Promise.allSettled(
-      baseItems.map(item => axios.get(`${ML_BASE}/items/${item.id}/health`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }))
-    )
-
-    const items = baseItems.map((item, idx) => {
-      const h = healthResults[idx]
-      if (h.status === 'fulfilled') {
-        const d = h.value.data
-        return {
-          ...item,
-          health_score:   d?.overall_score  ?? null,
-          health_status:  d?.status         ?? null,
-          health_reasons: d?.reasons?.map((r: any) => r.message ?? r.id ?? String(r)) ?? [],
-        }
-      }
-      return item
-    })
 
     return { items, total }
   }
