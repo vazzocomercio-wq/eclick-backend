@@ -478,6 +478,43 @@ export class MercadolivreService {
     }
   }
 
+  // Fetches up to maxOrders via paginated calls (50 per page, ML API limit with date filters).
+  // Build URLs manually to avoid axios percent-encoding colons in ISO 8601 datetimes.
+  private async _fetchAllOrders(
+    token: string,
+    sellerId: number,
+    dateFrom?: string,
+    dateTo?: string,
+    maxOrders = 200,
+    withSort = true,
+  ): Promise<{ results: any[]; total: number }> {
+    const allOrders: any[] = []
+    let pageOffset = 0
+    let totalFromApi = 0
+    let hasMore = true
+
+    while (hasMore) {
+      let url = `${ML_BASE}/orders/search?seller=${sellerId}&limit=50&offset=${pageOffset}`
+      if (withSort) url += '&sort=date_desc'
+      if (dateFrom) url += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
+      if (dateTo)   url += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
+
+      console.log(`[recent-orders] page url (offset=${pageOffset}):`, url)
+
+      const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
+      const pageResults: any[] = data?.results ?? []
+      totalFromApi = data?.paging?.total ?? totalFromApi
+
+      allOrders.push(...pageResults)
+      pageOffset += 50
+
+      hasMore = pageResults.length === 50 && allOrders.length < totalFromApi && allOrders.length < maxOrders
+    }
+
+    console.log(`[recent-orders] fetched ${allOrders.length} / ${totalFromApi} total`)
+    return { results: allOrders, total: totalFromApi }
+  }
+
   async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string) {
     let token: string
     let sellerId: number
@@ -488,31 +525,15 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
-    // Allow up to 200 when a date range is specified; cap at 50 for unbounded calls
-    const safeLimit = Math.min(limit, dateFrom ? 200 : 50)
-    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
-
-    // Build URL manually — axios percent-encodes `:` in datetime strings which
-    // breaks the ML API date filter (it requires literal colons in ISO 8601)
-    let mlUrl = `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=${safeLimit}`
-    if (dateFrom) mlUrl += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
-    if (dateTo)   mlUrl += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
-
-    console.log('[recent-orders] ML URL:', mlUrl)
+    const maxOrders = Math.min(limit, 200)
+    console.log('[recent-orders] sellerId:', sellerId, 'maxOrders:', maxOrders, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
 
     try {
-      const { data: body } = await axios.get(mlUrl, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      console.log('[recent-orders] ML status OK, total:', body.paging?.total, 'results:', body.results?.length)
-
-      const rawOrders: any[] = body.results ?? []
-      const shipMapMain = await this._fetchShipments(token, rawOrders)
-
+      const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, maxOrders, true)
+      const shipMap = await this._fetchShipments(token, rawOrders)
       return {
-        orders: rawOrders.map((o: any) => this._mapOrder(o, shipMapMain)),
-        total: body.paging?.total ?? 0,
+        orders: rawOrders.map((o: any) => this._mapOrder(o, shipMap)),
+        total,
       }
     } catch (err: any) {
       const mlStatus = err?.response?.status ?? 500
@@ -523,19 +544,11 @@ export class MercadolivreService {
       if (mlStatus === 400) {
         console.warn('[recent-orders] 400 — retrying without sort')
         try {
-          let fbUrl = `${ML_BASE}/orders/search?seller=${sellerId}&limit=${safeLimit}`
-          if (dateFrom) fbUrl += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
-          if (dateTo)   fbUrl += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
-          console.log('[recent-orders] fallback URL:', fbUrl)
-          const { data: body2 } = await axios.get(fbUrl, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-          console.log('[recent-orders] fallback OK, total:', body2.paging?.total)
-          const rawOrders2: any[] = body2.results ?? []
-          const shipMapFb = await this._fetchShipments(token, rawOrders2)
+          const { results: rawOrders2, total: total2 } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, maxOrders, false)
+          const shipMap2 = await this._fetchShipments(token, rawOrders2)
           return {
-            orders: rawOrders2.map((o: any) => this._mapOrder(o, shipMapFb)),
-            total: body2.paging?.total ?? 0,
+            orders: rawOrders2.map((o: any) => this._mapOrder(o, shipMap2)),
+            total: total2,
           }
         } catch (err2: any) {
           console.error('[recent-orders] fallback also failed:', err2?.response?.status, JSON.stringify(err2?.response?.data))
