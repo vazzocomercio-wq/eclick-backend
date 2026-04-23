@@ -512,23 +512,21 @@ export class MercadolivreService {
   // 7. GET /ml/reputation
   async getReputation(orgId: string) {
     let sellerId: number
-    let token: string
     try {
-      ;({ sellerId, token } = await this.getValidToken())
+      ;({ sellerId } = await this.getValidToken())
     } catch (authErr: any) {
       console.error('[reputation] getValidToken failed:', authErr?.message)
       throw new HttpException('ML não conectado', 401)
     }
 
     console.log('[reputation] usando seller_id:', sellerId)
-    console.log('[reputation] token presente:', !!token)
 
     try {
-      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      console.log('[reputation] success for seller:', sellerId)
-      return { seller_id: sellerId, ...data }
+      // GET /users/{id} é público e contém seller_reputation sem scope especial
+      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}`)
+      const rep = data?.seller_reputation ?? null
+      console.log('[reputation] data:', JSON.stringify(rep)?.substring(0, 200))
+      return { seller_id: sellerId, ...(rep ?? {}) }
     } catch (err: any) {
       const status = err?.response?.status ?? 500
       console.error('[reputation] ML error status:', status)
