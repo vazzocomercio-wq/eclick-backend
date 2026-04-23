@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException, HttpException, BadRequestException, 
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 
+// redeploy - organization_id now nullable
 const ML_BASE = 'https://api.mercadolibre.com'
 const ML_AUTH = 'https://auth.mercadolivre.com.br'
 
