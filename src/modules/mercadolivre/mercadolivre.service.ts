@@ -449,12 +449,15 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
-    console.log('[recent-orders] sellerId:', sellerId, 'offset:', offset, 'limit:', limit)
+    // Cap limit at 50 (ML API rejects higher values on some accounts)
+    const safeLimit = Math.min(limit, 50)
+    console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit)
 
     try {
       const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { seller: sellerId, sort: 'date_desc', offset, limit },
+        // offset omitted — some seller profiles return 400 when offset=0 is explicit
+        params: { seller: sellerId, sort: 'date_desc', limit: safeLimit },
       })
 
       console.log('[recent-orders] ML status OK, total:', body.paging?.total)
@@ -475,10 +478,43 @@ export class MercadolivreService {
         total: body.paging?.total ?? 0,
       }
     } catch (err: any) {
-      const mlMsg = err?.response?.data?.message ?? err?.response?.data?.error ?? null
       const mlStatus = err?.response?.status ?? 500
-      console.error('[recent-orders] ML API error:', mlStatus, mlMsg ?? err?.message ?? err)
-      throw new HttpException(mlMsg ?? err?.message ?? 'Erro ao buscar pedidos', mlStatus)
+      const mlData   = err?.response?.data
+      console.error('[recent-orders] ML error status:', mlStatus)
+      console.error('[recent-orders] ML error body:', JSON.stringify(mlData))
+
+      // 400 from ML usually means param issue — return empty rather than crashing the dashboard
+      if (mlStatus === 400) {
+        console.warn('[recent-orders] 400 received — trying fallback without sort param')
+        try {
+          const { data: body2 } = await axios.get(`${ML_BASE}/orders/search`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { seller: sellerId, limit: safeLimit },
+          })
+          console.log('[recent-orders] fallback OK, total:', body2.paging?.total)
+          return {
+            orders: (body2.results ?? []).map((o: any) => ({
+              id: o.id,
+              status: o.status,
+              date_created: o.date_created,
+              total_amount: o.total_amount,
+              items: (o.order_items ?? []).map((i: any) => ({
+                item_id: i.item?.id,
+                title: i.item?.title,
+                quantity: i.quantity,
+                unit_price: i.unit_price,
+              })),
+            })),
+            total: body2.paging?.total ?? 0,
+          }
+        } catch (err2: any) {
+          console.error('[recent-orders] fallback also failed:', err2?.response?.status, JSON.stringify(err2?.response?.data))
+          return { orders: [], total: 0 }
+        }
+      }
+
+      const mlMsg = mlData?.message ?? mlData?.error ?? err?.message ?? 'Erro ao buscar pedidos'
+      throw new HttpException(mlMsg, mlStatus)
     }
   }
 
