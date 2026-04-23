@@ -431,9 +431,9 @@ export class MercadolivreService {
   // ── Shared helpers for getRecentOrders ───────────────────────────────────────
 
   private async _fetchShipments(token: string, orders: any[]): Promise<Record<number, any>> {
-    // Limit to first 20 to avoid ML API rate limiting
+    // Fetch up to 40 shipments (parallel); ML rate-limit is lenient for reads
     const ids = [...new Set(
-      orders.slice(0, 20).map((o: any) => o.shipping?.id).filter(Boolean)
+      orders.slice(0, 40).map((o: any) => o.shipping?.id).filter(Boolean)
     )] as number[]
     const map: Record<number, any> = {}
     if (!ids.length) {
@@ -492,16 +492,17 @@ export class MercadolivreService {
     const safeLimit = Math.min(limit, dateFrom ? 200 : 50)
     console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit, 'dateFrom:', dateFrom ?? 'none', 'dateTo:', dateTo ?? 'none')
 
-    const mlParams: Record<string, any> = { seller: sellerId, sort: 'date_desc', limit: safeLimit }
-    if (dateFrom) mlParams['order.date_created.from'] = `${dateFrom}T00:00:00.000-03:00`
-    if (dateTo)   mlParams['order.date_created.to']   = `${dateTo}T23:59:59.999-03:00`
+    // Build URL manually — axios percent-encodes `:` in datetime strings which
+    // breaks the ML API date filter (it requires literal colons in ISO 8601)
+    let mlUrl = `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=${safeLimit}`
+    if (dateFrom) mlUrl += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
+    if (dateTo)   mlUrl += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
 
-    console.log('[recent-orders] ML params:', JSON.stringify(mlParams))
+    console.log('[recent-orders] ML URL:', mlUrl)
 
     try {
-      const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
+      const { data: body } = await axios.get(mlUrl, {
         headers: { Authorization: `Bearer ${token}` },
-        params: mlParams,
       })
 
       console.log('[recent-orders] ML status OK, total:', body.paging?.total, 'results:', body.results?.length)
@@ -520,14 +521,14 @@ export class MercadolivreService {
       console.error('[recent-orders] ML error body:', JSON.stringify(mlData))
 
       if (mlStatus === 400) {
-        console.warn('[recent-orders] 400 received — trying fallback without sort param')
+        console.warn('[recent-orders] 400 — retrying without sort')
         try {
-          const fbParams: Record<string, any> = { seller: sellerId, limit: safeLimit }
-          if (dateFrom) fbParams['order.date_created.from'] = `${dateFrom}T00:00:00.000-03:00`
-          if (dateTo)   fbParams['order.date_created.to']   = `${dateTo}T23:59:59.999-03:00`
-          const { data: body2 } = await axios.get(`${ML_BASE}/orders/search`, {
+          let fbUrl = `${ML_BASE}/orders/search?seller=${sellerId}&limit=${safeLimit}`
+          if (dateFrom) fbUrl += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
+          if (dateTo)   fbUrl += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
+          console.log('[recent-orders] fallback URL:', fbUrl)
+          const { data: body2 } = await axios.get(fbUrl, {
             headers: { Authorization: `Bearer ${token}` },
-            params: fbParams,
           })
           console.log('[recent-orders] fallback OK, total:', body2.paging?.total)
           const rawOrders2: any[] = body2.results ?? []
