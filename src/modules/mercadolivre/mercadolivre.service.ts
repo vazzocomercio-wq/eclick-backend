@@ -610,14 +610,64 @@ export class MercadolivreService {
       const { token } = await this.getValidToken()
       const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { status: 'unanswered' },
+        params: { status: 'unanswered', limit: 50 },
       })
-      return { questions: body.questions ?? [], total: body.total ?? 0 }
+      const questions: any[] = body.questions ?? []
+
+      // Enrich with item data (batch up to 20 IDs per request)
+      const itemIds = [...new Set(questions.map((q: any) => q.item_id).filter(Boolean))] as string[]
+      const itemMap: Record<string, any> = {}
+      for (let i = 0; i < itemIds.length; i += 20) {
+        const chunk = itemIds.slice(i, i + 20)
+        try {
+          const { data: items } = await axios.get(`${ML_BASE}/items`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { ids: chunk.join(',') },
+          })
+          for (const result of items) {
+            if (result.code === 200 && result.body) {
+              const b = result.body
+              itemMap[b.id] = {
+                id: b.id,
+                title: b.title,
+                thumbnail: b.thumbnail,
+                price: b.price,
+                available_quantity: b.available_quantity,
+                seller_sku: b.seller_custom_field ?? null,
+                permalink: b.permalink ?? null,
+              }
+            }
+          }
+        } catch { /* skip enrichment on error */ }
+      }
+
+      const enriched = questions.map((q: any) => ({
+        ...q,
+        item: itemMap[q.item_id] ?? null,
+      }))
+
+      return { questions: enriched, total: body.total ?? questions.length }
     } catch (err: any) {
       const status = err?.response?.status ?? 500
       console.error('[questions] ML error:', status, err?.response?.data?.message ?? err?.message)
       if (status === 403 || status === 404 || status === 401) return { questions: [], total: 0 }
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', status)
+    }
+  }
+
+  async answerQuestion(orgId: string, questionId: number, text: string) {
+    const { token } = await this.getValidToken()
+    try {
+      const { data } = await axios.post(
+        `${ML_BASE}/answers`,
+        { question_id: questionId, text },
+        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+      )
+      return data
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      console.error('[answer-question] ML error:', status, err?.response?.data?.message ?? err?.message)
+      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao responder pergunta', status)
     }
   }
 

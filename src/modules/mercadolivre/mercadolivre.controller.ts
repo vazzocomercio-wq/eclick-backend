@@ -173,6 +173,18 @@ export class MercadolivreController {
     return this.ml.getQuestions(user.orgId!)
   }
 
+  // POST /ml/questions/:id/answer  { text: string }
+  @Post('questions/:id/answer')
+  @HttpCode(HttpStatus.OK)
+  answerQuestion(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { text: string },
+  ) {
+    if (!body.text?.trim()) throw new BadRequestException('text é obrigatório')
+    return this.ml.answerQuestion(user.orgId!, Number(id), body.text)
+  }
+
   // GET /ml/claims
   @Get('claims')
   getClaims(@ReqUser() user: ReqUserPayload) {
