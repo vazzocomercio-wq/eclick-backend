@@ -162,7 +162,18 @@ export class MercadolivreService {
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
   async getItemInfo(orgId: string, url: string) {
-    const token = await this.getValidToken(orgId)
+    // Use org connection first, fall back to first available connection
+    let token: string | null = null
+    try { token = await this.getValidToken(orgId) } catch { /* fallback below */ }
+    if (!token) {
+      const { data: conn } = await supabaseAdmin
+        .from('ml_connections')
+        .select('access_token')
+        .limit(1)
+        .single()
+      if (!conn) throw new UnauthorizedException('ML not connected')
+      token = conn.access_token
+    }
     const headers = { Authorization: `Bearer ${token}` }
 
     const mlbMatch = url.match(/MLB-?(\d+)/i)
