@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, HttpException } from '@nestjs/common'
+import { Injectable, UnauthorizedException, HttpException, BadRequestException, NotFoundException } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 
@@ -157,6 +157,74 @@ export class MercadolivreService {
       .eq('organization_id', orgId)
 
     return access_token
+  }
+
+  // ── Item info (for competitor lookup) ────────────────────────────────────
+
+  async getItemInfo(orgId: string, url: string) {
+    const token = await this.getValidToken(orgId)
+    const headers = { Authorization: `Bearer ${token}` }
+
+    const mlbMatch = url.match(/MLB-?(\d+)/i)
+
+    if (mlbMatch) {
+      const mlbId = `MLB${mlbMatch[1]}`
+
+      const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, { headers })
+        .catch((err: any) => {
+          throw new HttpException(
+            err.response?.data?.message ?? `ML retornou ${err.response?.status ?? 500}`,
+            err.response?.status ?? 500,
+          )
+        })
+
+      let seller = `Vendedor #${item.data.seller_id}`
+      await axios.get(`${ML_BASE}/users/${item.data.seller_id}`, { headers })
+        .then((r: any) => { if (r.data.nickname) seller = r.data.nickname })
+        .catch(() => { /* non-fatal */ })
+
+      return {
+        title: item.data.title ?? null,
+        price: item.data.price ?? null,
+        seller,
+        thumbnail: item.data.thumbnail ?? null,
+        mlbId,
+        permalink: item.data.permalink ?? null,
+      }
+    }
+
+    // ── Friendly URL: extract slug and search ────────────────────────────────
+    let seg: string | undefined
+    try {
+      const { pathname } = new URL(url)
+      seg = pathname.split('/').find((s: string) => s.length > 3 && !s.startsWith('_') && s !== 'p')
+    } catch {
+      throw new BadRequestException('URL inválida.')
+    }
+    if (!seg) throw new BadRequestException('Não foi possível extrair o produto desta URL.')
+
+    const query = seg.replace(/-/g, ' ')
+    const { data: search } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
+      headers,
+      params: { q: query, limit: 1 },
+    }).catch((err: any) => {
+      throw new HttpException(
+        err.response?.data?.message ?? `ML Search retornou ${err.response?.status ?? 500}`,
+        err.response?.status ?? 500,
+      )
+    })
+
+    const result = search.data.results?.[0]
+    if (!result) throw new NotFoundException('Nenhum produto encontrado para esta URL.')
+
+    return {
+      title: result.title ?? null,
+      price: result.price ?? null,
+      seller: result.seller?.nickname ?? null,
+      thumbnail: result.thumbnail ?? null,
+      mlbId: result.id ?? null,
+      permalink: result.permalink ?? null,
+    }
   }
 
   // ── Items ────────────────────────────────────────────────────────────────

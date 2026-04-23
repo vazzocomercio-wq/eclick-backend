@@ -52,6 +52,15 @@ export class MercadolivreController {
     return this.ml.getConnection(user.orgId!)
   }
 
+  // GET /ml/item-info?url=...
+  @Get('item-info')
+  getItemInfo(
+    @ReqUser() user: ReqUserPayload,
+    @Query('url') url: string,
+  ) {
+    return this.ml.getItemInfo(user.orgId!, url)
+  }
+
   // GET /ml/items?offset=0&limit=50
   @Get('items')
   getItems(
