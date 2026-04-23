@@ -1441,8 +1441,22 @@ export class MercadolivreService {
 
   // ── Create products from listings ─────────────────────────────────────────
 
-  async createFromListing(orgId: string, listingIds: string[]) {
-    const { token } = await this.getValidToken()
+  async createFromListing(orgId: string | null, listingIds: string[]) {
+    const { token, sellerId: tokenSellerId } = await this.getValidToken()
+
+    let resolvedOrgId = orgId
+    if (!resolvedOrgId) {
+      const { data: conn } = await supabaseAdmin
+        .from('ml_connections')
+        .select('organization_id')
+        .eq('seller_id', tokenSellerId)
+        .maybeSingle()
+      resolvedOrgId = conn?.organization_id ?? null
+      console.log('[createFromListing] orgId resolved from ml_connections:', resolvedOrgId)
+    }
+    if (!resolvedOrgId) {
+      throw new HttpException('Organização não encontrada para esta conta ML', 400)
+    }
 
     // Fetch item details + descriptions in parallel
     const [itemsRes, descRes] = await Promise.all([
@@ -1497,7 +1511,7 @@ export class MercadolivreService {
       const { data: existing } = await supabaseAdmin
         .from('products')
         .select('id')
-        .eq('organization_id', orgId)
+        .eq('organization_id', resolvedOrgId)
         .eq('sku', sku)
         .maybeSingle()
 
@@ -1526,7 +1540,7 @@ export class MercadolivreService {
       })()
 
       const payload = {
-        organization_id:  orgId,
+        organization_id:  resolvedOrgId,
         name:             item.title,
         sku,
         ml_title:         item.title,

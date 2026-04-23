@@ -235,7 +235,7 @@ export class MercadolivreController {
     const ids = body.listing_ids ?? []
     if (!ids.length) throw new BadRequestException('listing_ids é obrigatório')
     if (ids.length > 20) throw new BadRequestException('Máximo 20 anúncios por vez')
-    return this.ml.createFromListing(user.orgId!, ids)
+    return this.ml.createFromListing(user.orgId, ids)
   }
 
   // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true
