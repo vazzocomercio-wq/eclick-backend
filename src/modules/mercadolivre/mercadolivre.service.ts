@@ -563,4 +563,115 @@ export class MercadolivreService {
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar reclamações', status)
     }
   }
+
+  // ── Catalog / Listings ───────────────────────────────────────────────────
+
+  async getListings(orgId: string, status = 'active', offset = 0, limit = 20) {
+    const { token, sellerId } = await this.getValidToken()
+
+    const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { status, offset, limit },
+    })
+
+    const ids: string[] = search.results ?? []
+    const total: number = search.paging?.total ?? 0
+
+    if (ids.length === 0) return { items: [], total }
+
+    // ML multi-get: GET /items?ids=MLB1,MLB2,...
+    const { data: multi } = await axios.get(`${ML_BASE}/items`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { ids: ids.join(',') },
+    })
+
+    const items = (Array.isArray(multi) ? multi : [])
+      .filter((r: any) => r.code === 200)
+      .map((r: any) => {
+        const i = r.body
+        return {
+          id: i.id,
+          title: i.title,
+          price: i.price,
+          original_price: i.original_price ?? null,
+          available_quantity: i.available_quantity,
+          sold_quantity: i.sold_quantity,
+          thumbnail: i.thumbnail,
+          permalink: i.permalink,
+          status: i.status,
+          listing_type_id: i.listing_type_id,
+          catalog_product_id: i.catalog_product_id ?? null,
+          catalog_listing: i.catalog_listing ?? false,
+          free_shipping: i.shipping?.free_shipping ?? false,
+          logistic_type: i.shipping?.logistic_type ?? null,
+          sku: i.attributes?.find((a: any) => a.id === 'SELLER_SKU')?.value_name ?? null,
+          has_variations: (i.variations?.length ?? 0) > 0,
+          pictures_count: i.pictures?.length ?? 0,
+          tags: i.tags ?? [],
+          last_updated: i.last_updated,
+          date_created: i.date_created,
+          category_id: i.category_id,
+        }
+      })
+
+    return { items, total }
+  }
+
+  async getListingsCounts(orgId: string) {
+    const { token, sellerId } = await this.getValidToken()
+    const statuses = ['active', 'paused', 'closed', 'under_review']
+
+    const results = await Promise.allSettled(
+      statuses.map(s => axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { status: s, limit: 1 },
+      }))
+    )
+
+    const counts: Record<string, number> = {}
+    statuses.forEach((s, i) => {
+      const r = results[i]
+      counts[s] = r.status === 'fulfilled' ? (r.value.data?.paging?.total ?? 0) : 0
+    })
+    return counts
+  }
+
+  async getListingsVisits(orgId: string) {
+    const { token, sellerId } = await this.getValidToken()
+
+    const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { status: 'active', limit: 20 },
+    })
+
+    const ids: string[] = (search.results ?? []).slice(0, 20)
+    if (ids.length === 0) return { total: 0, byDay: [] }
+
+    const results = await Promise.allSettled(
+      ids.map((id: string) => axios.get(`${ML_BASE}/items/${id}/visits/time_window`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { last: 150, unit: 'day' },
+      }))
+    )
+
+    const byDateMap: Record<string, number> = {}
+    let total = 0
+
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        const body = r.value.data
+        total += body.total_visits ?? 0
+        for (const result of body.results ?? []) {
+          const date: string = result.date?.substring(0, 10) ?? ''
+          if (date) byDateMap[date] = (byDateMap[date] ?? 0) + (result.total ?? 0)
+        }
+      }
+    }
+
+    const byDay = Object.entries(byDateMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, visits]) => ({ date, visits }))
+
+    return { total, byDay }
+  }
 }

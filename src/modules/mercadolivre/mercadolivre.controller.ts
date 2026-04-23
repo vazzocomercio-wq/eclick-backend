@@ -166,4 +166,29 @@ export class MercadolivreController {
   getClaims(@ReqUser() user: ReqUserPayload) {
     return this.ml.getClaims(user.orgId!)
   }
+
+  // ── Catalog / Listings ────────────────────────────────────────────────────
+
+  // GET /ml/listings/visits
+  @Get('listings/visits')
+  getListingsVisits(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getListingsVisits(user.orgId!)
+  }
+
+  // GET /ml/listings/counts
+  @Get('listings/counts')
+  getListingsCounts(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getListingsCounts(user.orgId!)
+  }
+
+  // GET /ml/listings?status=active&limit=20&offset=0
+  @Get('listings')
+  getListings(
+    @ReqUser() user: ReqUserPayload,
+    @Query('status') status?: string,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.ml.getListings(user.orgId!, status ?? 'active', Number(offset ?? 0), Number(limit ?? 20))
+  }
 }
