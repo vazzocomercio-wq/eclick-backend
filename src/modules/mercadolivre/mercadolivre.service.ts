@@ -863,12 +863,46 @@ export class MercadolivreService {
       } catch { /* non-fatal */ }
     }
 
+    // ── Product cost/tax lookup by SKU ───────────────────────────────────
+    const skus = [...new Set(orders.flatMap((o: any) =>
+      (o.order_items ?? []).map((i: any) => i.item?.seller_sku).filter(Boolean)
+    ))] as string[]
+    const productMap: Record<string, { cost_price: number | null; tax_percentage: number | null; tax_on_freight: boolean }> = {}
+    if (skus.length > 0) {
+      const { data: prods } = await supabaseAdmin
+        .from('products')
+        .select('sku, cost_price, tax_percentage, tax_on_freight')
+        .in('sku', skus)
+      ;(prods ?? []).forEach((p: any) => {
+        if (p.sku) productMap[p.sku] = { cost_price: p.cost_price ?? null, tax_percentage: p.tax_percentage ?? null, tax_on_freight: p.tax_on_freight ?? false }
+      })
+    }
+
     const enriched = orders.map((o: any) => {
       const ship = shipMap[o.shipping?.id] ?? null
       const totalAmount: number = o.total_amount ?? 0
       const tarifaML     = Math.round(totalAmount * 0.115 * 100) / 100
       const freteVendedor: number = ship?.cost_components?.receiver_shipping_cost ?? ship?.base_cost ?? 0
       const lucroBruto   = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
+
+      // product cost/tax for first item's SKU
+      const firstSku = o.order_items?.[0]?.item?.seller_sku ?? null
+      const prodData = firstSku ? (productMap[firstSku] ?? null) : null
+      const costPrice: number | null   = prodData?.cost_price ?? null
+      const taxPct: number | null      = prodData?.tax_percentage ?? null
+      const taxOnFreight: boolean      = prodData?.tax_on_freight ?? false
+      let taxAmount: number | null = null
+      let contribMargin: number | null = null
+      let contribMarginPct: number | null = null
+      if (taxPct != null) {
+        const taxBase = taxOnFreight ? totalAmount + freteVendedor : totalAmount
+        taxAmount = Math.round(taxBase * (taxPct / 100) * 100) / 100
+      }
+      if (costPrice != null) {
+        const cm = lucroBruto - (costPrice ?? 0) - (taxAmount ?? 0)
+        contribMargin    = Math.round(cm * 100) / 100
+        contribMarginPct = totalAmount > 0 ? Math.round((cm / totalAmount) * 10000) / 100 : 0
+      }
 
       return {
         order_id:      o.id,
@@ -922,9 +956,13 @@ export class MercadolivreService {
         })),
         tags:       o.tags ?? [],
         mediations: o.mediations ?? [],
-        tarifa_ml:       tarifaML,
-        frete_vendedor:  freteVendedor,
-        lucro_bruto:     lucroBruto,
+        tarifa_ml:           tarifaML,
+        frete_vendedor:      freteVendedor,
+        lucro_bruto:         lucroBruto,
+        cost_price:          costPrice,
+        tax_amount:          taxAmount,
+        contribution_margin: contribMargin,
+        contribution_margin_pct: contribMarginPct,
       }
     })
 
