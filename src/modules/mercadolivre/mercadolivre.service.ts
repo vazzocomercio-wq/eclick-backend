@@ -548,25 +548,37 @@ export class MercadolivreService {
 
   // 7. GET /ml/questions — unanswered
   async getQuestions(orgId: string) {
-    const { token } = await this.getAuth(orgId)
-    const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { status: 'unanswered' },
-    }).catch((err: any) => {
-      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
-    })
-    return { questions: body.questions ?? [], total: body.total ?? 0 }
+    try {
+      const { token } = await this.getAuth(orgId)
+      const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { status: 'unanswered' },
+      })
+      return { questions: body.questions ?? [], total: body.total ?? 0 }
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      console.error('[questions] ML error:', status, err?.response?.data?.message ?? err?.message)
+      // 403/404 → scope not granted or endpoint unavailable — return empty
+      if (status === 403 || status === 404 || status === 401) return { questions: [], total: 0 }
+      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', status)
+    }
   }
 
-  // 8. GET /ml/claims — open claims
+  // 8. GET /ml/claims — open claims (role=seller: we are the respondent)
   async getClaims(orgId: string) {
-    const { token } = await this.getAuth(orgId)
-    const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { role: 'complainant', status: 'opened' },
-    }).catch((err: any) => {
-      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
-    })
-    return body
+    try {
+      const { token } = await this.getAuth(orgId)
+      const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { role: 'seller', status: 'opened' },
+      })
+      return body
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      console.error('[claims] ML error:', status, err?.response?.data?.message ?? err?.message)
+      // 403/404 → scope not granted or endpoint unavailable — return empty
+      if (status === 403 || status === 404 || status === 401) return { data: [], total: 0 }
+      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar reclamações', status)
+    }
   }
 }
