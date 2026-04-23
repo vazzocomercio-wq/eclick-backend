@@ -1554,6 +1554,7 @@ export class MercadolivreService {
         .single()
 
       if (error) {
+        console.error('[createFromListing] Supabase insert error:', error.code, error.message, error.details)
         results.push({ listing_id: mlId, status: 'error', reason: error.message })
       } else {
         results.push({ listing_id: mlId, status: 'created', product_id: created.id })
