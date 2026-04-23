@@ -598,7 +598,7 @@ export class MercadolivreService {
       },
     })
 
-    const items = (Array.isArray(multi) ? multi : [])
+    const baseItems = (Array.isArray(multi) ? multi : [])
       .filter((r: any) => r.code === 200)
       .map((r: any) => {
         const i = r.body
@@ -624,12 +624,35 @@ export class MercadolivreService {
           tags: i.tags ?? [],
           deal_ids: i.deal_ids ?? [],
           promotions: i.promotions ?? [],
-          health: i.health ?? null,
           last_updated: i.last_updated,
           date_created: i.date_created,
           category_id: i.category_id,
+          health_score: null as number | null,
+          health_status: null as string | null,
+          health_reasons: [] as string[],
         }
       })
+
+    // Fetch health score for each item in parallel (silent failures)
+    const healthResults = await Promise.allSettled(
+      baseItems.map(item => axios.get(`${ML_BASE}/items/${item.id}/health`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }))
+    )
+
+    const items = baseItems.map((item, idx) => {
+      const h = healthResults[idx]
+      if (h.status === 'fulfilled') {
+        const d = h.value.data
+        return {
+          ...item,
+          health_score:   d?.overall_score  ?? null,
+          health_status:  d?.status         ?? null,
+          health_reasons: d?.reasons?.map((r: any) => r.message ?? r.id ?? String(r)) ?? [],
+        }
+      }
+      return item
+    })
 
     return { items, total }
   }
