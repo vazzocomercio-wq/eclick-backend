@@ -3,13 +3,24 @@ import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 
 const ML_BASE = 'https://api.mercadolibre.com'
-const ML_AUTH = 'https://auth.mercadolibre.com.br'
+const ML_AUTH = 'https://auth.mercadolivre.com.br'
 
 export interface MlTokens {
   access_token: string
   refresh_token: string
   expires_at: number // unix ms
   seller_id: number
+}
+
+interface MlConnection {
+  id?: string
+  organization_id: string
+  seller_id: number
+  access_token: string
+  refresh_token: string
+  expires_at: string
+  nickname: string | null
+  created_at?: string
 }
 
 @Injectable()
@@ -71,7 +82,7 @@ export class MercadolivreService {
       console.warn('[ML connect] /users/me failed (non-fatal):', err.message)
     })
 
-    // Delete existing row for this seller then insert fresh (avoids onConflict constraint dependency)
+    // Delete existing row for this seller then insert fresh
     await supabaseAdmin.from('ml_connections').delete().eq('seller_id', user_id)
 
     const { error: dbError } = await supabaseAdmin.from('ml_connections').insert({
@@ -90,10 +101,22 @@ export class MercadolivreService {
     return { seller_id: user_id, nickname }
   }
 
-  async disconnect(orgId: string): Promise<void> {
-    await supabaseAdmin.from('ml_connections').delete().eq('organization_id', orgId)
+  async disconnect(orgId: string, sellerId?: number): Promise<void> {
+    if (sellerId) {
+      await supabaseAdmin
+        .from('ml_connections')
+        .delete()
+        .eq('organization_id', orgId)
+        .eq('seller_id', sellerId)
+    } else {
+      await supabaseAdmin
+        .from('ml_connections')
+        .delete()
+        .eq('organization_id', orgId)
+    }
   }
 
+  // Returns first connection (for backward compat with /ml/status)
   async getConnection(orgId: string) {
     console.log('[ML status] looking up orgId:', orgId)
 
@@ -107,7 +130,6 @@ export class MercadolivreService {
 
     if (data) return data
 
-    // Fallback: return first available connection (temporary diagnostic)
     const { data: fallback } = await supabaseAdmin
       .from('ml_connections')
       .select('seller_id, expires_at, access_token, nickname, organization_id')
@@ -118,11 +140,78 @@ export class MercadolivreService {
     return fallback
   }
 
+  // Returns all connections (safe — no tokens)
+  async getConnections(_orgId: string) {
+    const { data } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, expires_at, nickname, created_at, organization_id')
+      .order('created_at', { ascending: true })
+    return data || []
+  }
+
+  // ── Multi-account helpers ─────────────────────────────────────────────────
+
+  async getAllConnections(): Promise<MlConnection[]> {
+    const { data } = await supabaseAdmin
+      .from('ml_connections')
+      .select('*')
+      .order('created_at', { ascending: true })
+    return (data || []) as MlConnection[]
+  }
+
+  private async refreshIfNeeded(
+    conn: Pick<MlConnection, 'seller_id' | 'access_token' | 'refresh_token' | 'expires_at'>,
+  ): Promise<string> {
+    const isExpired = new Date(conn.expires_at).getTime() - Date.now() < 5 * 60 * 1000
+
+    if (!isExpired) return conn.access_token
+
+    console.log('[refreshIfNeeded] iniciando refresh para seller:', conn.seller_id)
+    try {
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: conn.refresh_token,
+        client_id: process.env.ML_CLIENT_ID!,
+        client_secret: process.env.ML_CLIENT_SECRET!,
+      })
+      const response = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
+        `${ML_BASE}/oauth/token`,
+        params.toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+      )
+      const { access_token, refresh_token, expires_in } = response.data
+      const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
+      console.log('[refreshIfNeeded] refresh ok — seller:', conn.seller_id, 'novo expires_at:', newExpiresAt)
+
+      await supabaseAdmin
+        .from('ml_connections')
+        .update({ access_token, refresh_token, expires_at: newExpiresAt })
+        .eq('seller_id', conn.seller_id)
+
+      return access_token
+    } catch (err: any) {
+      const status = err?.response?.status ?? 'sem status'
+      const body   = JSON.stringify(err?.response?.data ?? err?.message)
+      console.error('[refreshIfNeeded] refresh FALHOU — seller:', conn.seller_id, '| status:', status, '| body:', body)
+      throw new HttpException(`Token ML expirado e refresh falhou (${status})`, 401)
+    }
+  }
+
+  private async getValidToken(): Promise<{ token: string; sellerId: number }> {
+    const connections = await this.getAllConnections()
+    if (!connections.length) {
+      console.error('[getValidToken] sem conexão ML no banco')
+      throw new UnauthorizedException('ML não conectado')
+    }
+    const conn = connections[0]
+    console.log('[getValidToken] seller_id:', conn.seller_id, '| expires_at:', conn.expires_at)
+    const token = await this.refreshIfNeeded(conn)
+    return { token, sellerId: conn.seller_id }
+  }
+
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
   async getItemInfo(_orgId: string, url: string) {
-    // Only purely numeric MLB IDs work with /items/ endpoint.
-    // MLBU... (catalog IDs) and friendly URLs must go through search.
     const numericMatch = url.match(/MLB-?(\d{7,})\b/i)
 
     if (numericMatch) {
@@ -151,13 +240,10 @@ export class MercadolivreService {
       }
     }
 
-    // ── Catalog ID (MLBU…) or friendly URL → search by slug ─────────────────
-    // Extract the product-name path segment (contains hyphens, not an ID)
     let query: string
     try {
       const { pathname } = new URL(url)
       const segments = pathname.split('/').filter((s: string) => s.length > 3 && !s.startsWith('_') && s !== 'p')
-      // Prefer segment with hyphens (product name) over bare IDs
       const slug = segments.find((s: string) => s.includes('-') && !/^MLB/i.test(s)) ?? segments[0]
       if (!slug) throw new Error()
       query = slug.replace(/-/g, ' ').trim()
@@ -304,65 +390,8 @@ export class MercadolivreService {
     return new Date().toISOString().slice(0, 10) + 'T23:59:59.999-03:00'
   }
 
-  // ── Auth helper: busca conexão ML, faz refresh se expirado ─────────────────
-
-  private async getValidToken(): Promise<{ token: string; sellerId: number }> {
-    const { data: conn, error } = await supabaseAdmin
-      .from('ml_connections')
-      .select('access_token, refresh_token, expires_at, seller_id')
-      .limit(1)
-      .single()
-
-    if (error || !conn) {
-      console.error('[getValidToken] sem conexão ML no banco:', error?.message)
-      throw new UnauthorizedException('ML não conectado')
-    }
-
-    const expiresAt = new Date(conn.expires_at)
-    const now = new Date()
-    const isExpired = expiresAt.getTime() - now.getTime() < 5 * 60 * 1000
-
-    console.log('[getValidToken] seller_id:', conn.seller_id, '| expires_at:', conn.expires_at, '| expirado:', isExpired)
-
-    if (!isExpired) {
-      return { token: conn.access_token, sellerId: conn.seller_id }
-    }
-
-    // Token expirado — fazer refresh
-    console.log('[getValidToken] iniciando refresh para seller:', conn.seller_id)
-    try {
-      const params = new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: conn.refresh_token,
-        client_id: process.env.ML_CLIENT_ID!,
-        client_secret: process.env.ML_CLIENT_SECRET!,
-      })
-      const response = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
-        `${ML_BASE}/oauth/token`,
-        params.toString(),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
-      )
-      const { access_token, refresh_token, expires_in } = response.data
-      const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
-      console.log('[getValidToken] refresh ok — novo expires_at:', newExpiresAt)
-
-      await supabaseAdmin
-        .from('ml_connections')
-        .update({ access_token, refresh_token, expires_at: newExpiresAt })
-        .eq('seller_id', conn.seller_id)
-
-      return { token: access_token, sellerId: conn.seller_id }
-    } catch (refreshErr: any) {
-      const status = refreshErr?.response?.status ?? 'sem status'
-      const body   = JSON.stringify(refreshErr?.response?.data ?? refreshErr?.message)
-      console.error('[getValidToken] refresh FALHOU — status:', status, '| body:', body)
-      throw new HttpException(`Token ML expirado e refresh falhou (${status})`, 401)
-    }
-  }
-
   // ── Pipeline endpoints ───────────────────────────────────────────────────
 
-  // 1. GET /ml/my-items — active listing IDs
   async getMyItems(orgId: string) {
     const { token, sellerId } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
@@ -372,7 +401,6 @@ export class MercadolivreService {
     return { items: body.results ?? [], total: body.paging?.total ?? 0 }
   }
 
-  // 2. GET /ml/items/:mlbId — item detail
   async getItemDetail(orgId: string, mlbId: string) {
     const { token } = await this.getValidToken()
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
@@ -389,7 +417,6 @@ export class MercadolivreService {
     }
   }
 
-  // 3. GET /ml/items/:mlbId/visits — 7-day visits
   async getItemVisits(orgId: string, mlbId: string) {
     const { token } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/items/${mlbId}/visits/time_window`, {
@@ -401,7 +428,6 @@ export class MercadolivreService {
     return { total_visits: body.total_visits ?? 0, date_from: body.date_from ?? null, date_to: body.date_to ?? null }
   }
 
-  // 4. GET /ml/recent-orders — orders with item detail
   async getRecentOrders(orgId: string, offset = 0, limit = 50) {
     let token: string
     let sellerId: number
@@ -412,14 +438,12 @@ export class MercadolivreService {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
-    // Cap limit at 50 (ML API rejects higher values on some accounts)
     const safeLimit = Math.min(limit, 50)
     console.log('[recent-orders] sellerId:', sellerId, 'limit:', safeLimit)
 
     try {
       const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        // offset omitted — some seller profiles return 400 when offset=0 is explicit
         params: { seller: sellerId, sort: 'date_desc', limit: safeLimit },
       })
 
@@ -446,7 +470,6 @@ export class MercadolivreService {
       console.error('[recent-orders] ML error status:', mlStatus)
       console.error('[recent-orders] ML error body:', JSON.stringify(mlData))
 
-      // 400 from ML usually means param issue — return empty rather than crashing the dashboard
       if (mlStatus === 400) {
         console.warn('[recent-orders] 400 received — trying fallback without sort param')
         try {
@@ -481,7 +504,6 @@ export class MercadolivreService {
     }
   }
 
-  // 5. GET /ml/catalog-competitors/:catalogId
   async getCatalogCompetitors(orgId: string, catalogId: string) {
     const { token } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/products/${catalogId}/items`, {
@@ -493,7 +515,6 @@ export class MercadolivreService {
     return body
   }
 
-  // 6. GET /ml/seller-info
   async getSellerInfo(orgId: string) {
     const { token, sellerId } = await this.getValidToken()
     const { data: user } = await axios.get(`${ML_BASE}/users/${sellerId}`, {
@@ -509,7 +530,6 @@ export class MercadolivreService {
     }
   }
 
-  // 7. GET /ml/reputation
   async getReputation(orgId: string) {
     try {
       const { token: accessToken } = await this.getValidToken()
@@ -528,7 +548,6 @@ export class MercadolivreService {
     }
   }
 
-  // 8. GET /ml/questions — unanswered
   async getQuestions(orgId: string) {
     try {
       const { token } = await this.getValidToken()
@@ -540,13 +559,11 @@ export class MercadolivreService {
     } catch (err: any) {
       const status = err?.response?.status ?? 500
       console.error('[questions] ML error:', status, err?.response?.data?.message ?? err?.message)
-      // 403/404 → scope not granted or endpoint unavailable — return empty
       if (status === 403 || status === 404 || status === 401) return { questions: [], total: 0 }
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', status)
     }
   }
 
-  // 8. GET /ml/claims — open claims (role=seller: we are the respondent)
   async getClaims(orgId: string) {
     try {
       const { token } = await this.getValidToken()
@@ -558,7 +575,6 @@ export class MercadolivreService {
     } catch (err: any) {
       const status = err?.response?.status ?? 500
       console.error('[claims] ML error:', status, err?.response?.data?.message ?? err?.message)
-      // 403/404 → scope not granted or endpoint unavailable — return empty
       if (status === 403 || status === 404 || status === 401) return { data: [], total: 0 }
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar reclamações', status)
     }
@@ -566,9 +582,14 @@ export class MercadolivreService {
 
   // ── Catalog / Listings ───────────────────────────────────────────────────
 
-  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string) {
-    const { token, sellerId } = await this.getValidToken()
-
+  private async fetchListingsForAccount(
+    sellerId: number,
+    token: string,
+    status: string,
+    offset: number,
+    limit: number,
+    q?: string,
+  ): Promise<{ items: any[]; total: number }> {
     const searchParams: Record<string, unknown> = { status, offset, limit }
     if (q?.trim()) searchParams.q = q.trim()
 
@@ -582,7 +603,6 @@ export class MercadolivreService {
 
     if (ids.length === 0) return { items: [], total }
 
-    // ML multi-get with enriched attributes
     const { data: multi } = await axios.get(`${ML_BASE}/items`, {
       headers: { Authorization: `Bearer ${token}` },
       params: {
@@ -633,7 +653,6 @@ export class MercadolivreService {
         }
       })
 
-    // Fetch health score for each item in parallel (silent failures)
     const healthResults = await Promise.allSettled(
       baseItems.map(item => axios.get(`${ML_BASE}/items/${item.id}/health`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -657,22 +676,56 @@ export class MercadolivreService {
     return { items, total }
   }
 
+  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string) {
+    const connections = await this.getAllConnections()
+    if (!connections.length) throw new UnauthorizedException('ML não conectado')
+
+    let allItems: any[] = []
+    let totalSum = 0
+
+    for (const conn of connections) {
+      try {
+        const token = await this.refreshIfNeeded(conn)
+        const { items, total } = await this.fetchListingsForAccount(
+          conn.seller_id, token, status, offset, limit, q,
+        )
+        allItems = allItems.concat(items.map(i => ({
+          ...i,
+          account_nickname: conn.nickname ?? `Conta #${conn.seller_id}`,
+          account_seller_id: conn.seller_id,
+        })))
+        totalSum += total
+      } catch (err: any) {
+        console.error('[getListings] erro para seller', conn.seller_id, err?.message)
+      }
+    }
+
+    return { items: allItems, total: totalSum }
+  }
+
   async getListingsCounts(orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+    const connections = await this.getAllConnections()
     const statuses = ['active', 'paused', 'closed', 'under_review']
+    const counts: Record<string, number> = { active: 0, paused: 0, closed: 0, under_review: 0 }
 
-    const results = await Promise.allSettled(
-      statuses.map(s => axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { status: s, limit: 1 },
-      }))
-    )
+    for (const conn of connections) {
+      try {
+        const token = await this.refreshIfNeeded(conn)
+        const results = await Promise.allSettled(
+          statuses.map(s => axios.get(`${ML_BASE}/users/${conn.seller_id}/items/search`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { status: s, limit: 1 },
+          }))
+        )
+        statuses.forEach((s, i) => {
+          const r = results[i]
+          if (r.status === 'fulfilled') counts[s] += r.value.data?.paging?.total ?? 0
+        })
+      } catch (err: any) {
+        console.error('[getListingsCounts] erro para seller', conn.seller_id, err?.message)
+      }
+    }
 
-    const counts: Record<string, number> = {}
-    statuses.forEach((s, i) => {
-      const r = results[i]
-      counts[s] = r.status === 'fulfilled' ? (r.value.data?.paging?.total ?? 0) : 0
-    })
     return counts
   }
 

@@ -40,17 +40,26 @@ export class MercadolivreController {
     return this.ml.connect(user.orgId!, body.code, body.redirect_uri)
   }
 
-  // DELETE /ml/disconnect
+  // DELETE /ml/disconnect?seller_id=123456  (omit to remove all)
   @Delete('disconnect')
   @HttpCode(HttpStatus.NO_CONTENT)
-  disconnect(@ReqUser() user: ReqUserPayload) {
-    return this.ml.disconnect(user.orgId!)
+  disconnect(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.disconnect(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
-  // GET /ml/status
+  // GET /ml/status  (backward compat — first connection)
   @Get('status')
   status(@ReqUser() user: ReqUserPayload) {
     return this.ml.getConnection(user.orgId!)
+  }
+
+  // GET /ml/connections  (all connected accounts, no tokens)
+  @Get('connections')
+  getConnections(@ReqUser() user: ReqUserPayload) {
+    return this.ml.getConnections(user.orgId!)
   }
 
   // GET /ml/item-info?url=...
