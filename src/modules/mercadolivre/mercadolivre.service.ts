@@ -675,17 +675,32 @@ export class MercadolivreService {
 
   async answerQuestion(orgId: string, questionId: number, text: string) {
     const { token } = await this.getValidToken()
+    console.log('[answer] questionId:', questionId, '| text length:', text?.length)
     try {
       const { data } = await axios.post(
         `${ML_BASE}/answers`,
         { question_id: questionId, text },
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
       )
+      console.log('[answer] ML response:', JSON.stringify(data))
       return data
     } catch (err: any) {
       const status = err?.response?.status ?? 500
-      console.error('[answer-question] ML error:', status, err?.response?.data?.message ?? err?.message)
-      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao responder pergunta', status)
+      const mlMsg: string = err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? ''
+      console.error('[answer] ML error:', status, mlMsg)
+
+      // Translate common ML errors to clear Portuguese messages
+      if (status === 400) {
+        const lower = mlMsg.toLowerCase()
+        if (lower.includes('already answered') || lower.includes('already have an answer')) {
+          throw new HttpException('Esta pergunta já foi respondida', 400)
+        }
+        if (lower.includes('too short') || lower.includes('too long')) {
+          throw new HttpException('Resposta com tamanho inválido para o ML', 400)
+        }
+        throw new HttpException(mlMsg || 'Dados inválidos', 400)
+      }
+      throw new HttpException(mlMsg || 'Erro ao responder pergunta', status)
     }
   }
 
