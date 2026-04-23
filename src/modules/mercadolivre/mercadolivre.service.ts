@@ -118,47 +118,6 @@ export class MercadolivreService {
     return fallback
   }
 
-  // ── Token management ─────────────────────────────────────────────────────
-
-  async getValidToken(orgId: string): Promise<string> {
-    const { data: conn, error } = await supabaseAdmin
-      .from('ml_connections')
-      .select('access_token, refresh_token, expires_at')
-      .eq('organization_id', orgId)
-      .maybeSingle()
-
-    if (error || !conn) throw new UnauthorizedException('ML not connected')
-
-    const expiresAt = new Date(conn.expires_at).getTime()
-    if (Date.now() < expiresAt - 60_000) return conn.access_token
-
-    // Refresh
-    const res = await axios.post<{
-      access_token: string
-      refresh_token: string
-      expires_in: number
-    }>(
-      `${ML_BASE}/oauth/token`,
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: process.env.ML_CLIENT_ID!,
-        client_secret: process.env.ML_CLIENT_SECRET!,
-        refresh_token: conn.refresh_token,
-      }),
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
-    )
-
-    const { access_token, refresh_token, expires_in } = res.data
-    const new_expires_at = new Date(Date.now() + expires_in * 1000).toISOString()
-
-    await supabaseAdmin
-      .from('ml_connections')
-      .update({ access_token, refresh_token, expires_at: new_expires_at })
-      .eq('organization_id', orgId)
-
-    return access_token
-  }
-
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
   async getItemInfo(_orgId: string, url: string) {
@@ -231,7 +190,7 @@ export class MercadolivreService {
   // ── Items ────────────────────────────────────────────────────────────────
 
   async getItems(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getAuth(orgId)
+    const { token, sellerId } = await this.getValidToken()
 
     const { data: search } = await axios.get(
       `${ML_BASE}/users/${sellerId}/items/search`,
@@ -259,7 +218,7 @@ export class MercadolivreService {
   }
 
   async importItem(orgId: string, mlItemId: string): Promise<{ id: string }> {
-    const { token } = await this.getAuth(orgId)
+    const { token } = await this.getValidToken()
 
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlItemId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -295,7 +254,7 @@ export class MercadolivreService {
   // ── Orders ───────────────────────────────────────────────────────────────
 
   async getOrders(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getAuth(orgId)
+    const { token, sellerId } = await this.getValidToken()
 
     const { data } = await axios.get(
       `${ML_BASE}/orders/search`,
@@ -311,7 +270,7 @@ export class MercadolivreService {
   // ── Metrics ──────────────────────────────────────────────────────────────
 
   async getMetrics(orgId: string) {
-    const { token, sellerId } = await this.getAuth(orgId)
+    const { token, sellerId } = await this.getValidToken()
 
     const [visits, sales] = await Promise.all([
       axios.get(`${ML_BASE}/users/${sellerId}/items_visits`, {
@@ -345,68 +304,58 @@ export class MercadolivreService {
     return new Date().toISOString().slice(0, 10) + 'T23:59:59.999-03:00'
   }
 
-  // ── Auth helper: org-first with fallback + auto-refresh ──────────────────
+  // ── Auth helper: busca conexão ML, faz refresh se expirado ─────────────────
 
-  private async getAuth(orgId: string): Promise<{ token: string; sellerId: number }> {
-    type ConnRow = { access_token: string; refresh_token: string; expires_at: string; seller_id: number }
-
-    let conn: ConnRow | null = null
-
-    const { data: orgConn } = await supabaseAdmin
+  private async getValidToken(): Promise<{ token: string; sellerId: number }> {
+    const { data: conn, error } = await supabaseAdmin
       .from('ml_connections')
       .select('access_token, refresh_token, expires_at, seller_id')
-      .eq('organization_id', orgId)
-      .maybeSingle()
+      .limit(1)
+      .single()
 
-    conn = orgConn
-
-    if (!conn) {
-      const { data: fallback } = await supabaseAdmin
-        .from('ml_connections')
-        .select('access_token, refresh_token, expires_at, seller_id')
-        .limit(1)
-        .single()
-      conn = fallback
+    if (error || !conn) {
+      console.error('[getValidToken] sem conexão ML no banco:', error?.message)
+      throw new UnauthorizedException('ML não conectado')
     }
 
-    if (!conn) throw new UnauthorizedException('ML not connected')
+    const expiresAt = new Date(conn.expires_at)
+    const now = new Date()
+    const isExpired = expiresAt.getTime() - now.getTime() < 5 * 60 * 1000
 
-    const expiresAt = new Date(conn.expires_at).getTime()
-    const now = Date.now()
-    console.log('[getAuth] seller_id:', conn.seller_id, '| expires_at:', conn.expires_at, '| expired:', now >= expiresAt - 60_000)
+    console.log('[getValidToken] seller_id:', conn.seller_id, '| expires_at:', conn.expires_at, '| expirado:', isExpired)
 
-    if (now < expiresAt - 60_000) {
-      console.log('[getAuth] token válido, usando access_token existente')
+    if (!isExpired) {
       return { token: conn.access_token, sellerId: conn.seller_id }
     }
 
-    // Token expirado — tentar refresh
-    console.log('[getAuth] token expirado, iniciando refresh para seller:', conn.seller_id)
+    // Token expirado — fazer refresh
+    console.log('[getValidToken] iniciando refresh para seller:', conn.seller_id)
     try {
-      const res = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: conn.refresh_token,
+        client_id: process.env.ML_CLIENT_ID!,
+        client_secret: process.env.ML_CLIENT_SECRET!,
+      })
+      const response = await axios.post<{ access_token: string; refresh_token: string; expires_in: number }>(
         `${ML_BASE}/oauth/token`,
-        new URLSearchParams({
-          grant_type: 'refresh_token',
-          client_id: process.env.ML_CLIENT_ID!,
-          client_secret: process.env.ML_CLIENT_SECRET!,
-          refresh_token: conn.refresh_token,
-        }),
-        { headers: { 'content-type': 'application/x-www-form-urlencoded' } },
+        params.toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
       )
-      const { access_token, refresh_token, expires_in } = res.data
-      const new_expires_at = new Date(now + expires_in * 1000).toISOString()
-      console.log('[getAuth] refresh ok — novo expires_at:', new_expires_at)
+      const { access_token, refresh_token, expires_in } = response.data
+      const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
+      console.log('[getValidToken] refresh ok — novo expires_at:', newExpiresAt)
 
       await supabaseAdmin
         .from('ml_connections')
-        .update({ access_token, refresh_token, expires_at: new_expires_at })
+        .update({ access_token, refresh_token, expires_at: newExpiresAt })
         .eq('seller_id', conn.seller_id)
 
       return { token: access_token, sellerId: conn.seller_id }
     } catch (refreshErr: any) {
       const status = refreshErr?.response?.status ?? 'sem status'
       const body   = JSON.stringify(refreshErr?.response?.data ?? refreshErr?.message)
-      console.error('[getAuth] refresh FALHOU — status:', status, '| body:', body)
+      console.error('[getValidToken] refresh FALHOU — status:', status, '| body:', body)
       throw new HttpException(`Token ML expirado e refresh falhou (${status})`, 401)
     }
   }
@@ -415,7 +364,7 @@ export class MercadolivreService {
 
   // 1. GET /ml/my-items — active listing IDs
   async getMyItems(orgId: string) {
-    const { token, sellerId } = await this.getAuth(orgId)
+    const { token, sellerId } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { status: 'active', limit: 50 },
@@ -425,7 +374,7 @@ export class MercadolivreService {
 
   // 2. GET /ml/items/:mlbId — item detail
   async getItemDetail(orgId: string, mlbId: string) {
-    const { token } = await this.getAuth(orgId)
+    const { token } = await this.getValidToken()
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
       headers: { Authorization: `Bearer ${token}` },
     }).catch((err: any) => {
@@ -442,7 +391,7 @@ export class MercadolivreService {
 
   // 3. GET /ml/items/:mlbId/visits — 7-day visits
   async getItemVisits(orgId: string, mlbId: string) {
-    const { token } = await this.getAuth(orgId)
+    const { token } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/items/${mlbId}/visits/time_window`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { last: 7, unit: 'day' },
@@ -457,9 +406,9 @@ export class MercadolivreService {
     let token: string
     let sellerId: number
     try {
-      ;({ token, sellerId } = await this.getAuth(orgId))
+      ;({ token, sellerId } = await this.getValidToken())
     } catch (authErr: any) {
-      console.error('[recent-orders] getAuth failed:', authErr?.message ?? authErr)
+      console.error('[recent-orders] getValidToken failed:', authErr?.message ?? authErr)
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
 
@@ -534,7 +483,7 @@ export class MercadolivreService {
 
   // 5. GET /ml/catalog-competitors/:catalogId
   async getCatalogCompetitors(orgId: string, catalogId: string) {
-    const { token } = await this.getAuth(orgId)
+    const { token } = await this.getValidToken()
     const { data: body } = await axios.get(`${ML_BASE}/products/${catalogId}/items`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { status: 'active' },
@@ -546,7 +495,7 @@ export class MercadolivreService {
 
   // 6. GET /ml/seller-info
   async getSellerInfo(orgId: string) {
-    const { token, sellerId } = await this.getAuth(orgId)
+    const { token, sellerId } = await this.getValidToken()
     const { data: user } = await axios.get(`${ML_BASE}/users/${sellerId}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -565,9 +514,9 @@ export class MercadolivreService {
     let sellerId: number
     let token: string
     try {
-      ;({ sellerId, token } = await this.getAuth(orgId))
+      ;({ sellerId, token } = await this.getValidToken())
     } catch (authErr: any) {
-      console.error('[reputation] getAuth failed:', authErr?.message)
+      console.error('[reputation] getValidToken failed:', authErr?.message)
       throw new HttpException('ML não conectado', 401)
     }
 
@@ -611,7 +560,7 @@ export class MercadolivreService {
   // 8. GET /ml/questions — unanswered
   async getQuestions(orgId: string) {
     try {
-      const { token } = await this.getAuth(orgId)
+      const { token } = await this.getValidToken()
       const { data: body } = await axios.get(`${ML_BASE}/my/received_questions`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { status: 'unanswered' },
@@ -629,7 +578,7 @@ export class MercadolivreService {
   // 8. GET /ml/claims — open claims (role=seller: we are the respondent)
   async getClaims(orgId: string) {
     try {
-      const { token } = await this.getAuth(orgId)
+      const { token } = await this.getValidToken()
       const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { role: 'seller', status: 'opened' },
