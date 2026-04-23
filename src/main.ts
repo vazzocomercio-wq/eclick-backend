@@ -25,8 +25,9 @@ async function bootstrap() {
     origin: true,   // allow all origins — restrict after confirmed working
     credentials: true,
   });
-  await app.listen(port);
-  console.log(`[Bootstrap] App listening on port ${port}`);
+  const numPort = parseInt(String(port), 10) || 3001;
+  await app.listen(numPort, '0.0.0.0');
+  console.log(`[Bootstrap] Listening on 0.0.0.0:${numPort}`);
 }
 
 bootstrap().catch((err) => {
