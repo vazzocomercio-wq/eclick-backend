@@ -16,13 +16,35 @@ export interface UpdateProductCostsDto {
 export class ProductsService {
   async getAll(orgId: string | null) {
     const query = supabaseAdmin.from('products').select(PRODUCT_FIELDS)
+    // When no org membership, return all products (user is likely sole owner)
     const { data, error } = await (
       orgId
         ? query.eq('organization_id', orgId)
-        : query.is('organization_id', null)
+        : query
     ).order('created_at', { ascending: false })
     if (error) throw new Error(error.message)
     return data ?? []
+  }
+
+  async getById(id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('*')
+      .eq('id', id)
+      .single()
+    if (error || !data) throw new NotFoundException('Produto não encontrado')
+    return data
+  }
+
+  async updateFull(id: string, payload: Record<string, unknown>) {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('id')
+      .single()
+    if (error || !data) throw new NotFoundException('Produto não encontrado')
+    return data
   }
 
   async updateCosts(orgId: string, productId: string, dto: UpdateProductCostsDto) {

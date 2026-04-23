@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Param, Body, UseGuards } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Param, Body, UseGuards } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto } from './products.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -16,7 +16,22 @@ export class ProductsController {
     return this.products.getAll(user.orgId)
   }
 
-  // PATCH /products/:id
+  // GET /products/:id
+  @Get(':id')
+  getById(@Param('id') id: string) {
+    return this.products.getById(id)
+  }
+
+  // PUT /products/:id  (full update)
+  @Put(':id')
+  updateFull(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.products.updateFull(id, body)
+  }
+
+  // PATCH /products/:id  (costs only)
   @Patch(':id')
   updateCosts(
     @ReqUser() user: ReqUserPayload,
