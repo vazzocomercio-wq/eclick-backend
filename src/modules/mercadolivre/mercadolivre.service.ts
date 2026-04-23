@@ -549,16 +549,21 @@ export class MercadolivreService {
   // 7. GET /ml/reputation
   async getReputation(orgId: string) {
     let sellerId: number
+    let token: string
     try {
-      ;({ sellerId } = await this.getAuth(orgId))
+      ;({ sellerId, token } = await this.getAuth(orgId))
     } catch (authErr: any) {
       console.error('[reputation] getAuth failed:', authErr?.message)
       throw new HttpException('ML não conectado', 401)
     }
 
+    console.log('[reputation] usando seller_id:', sellerId)
+    console.log('[reputation] token presente:', !!token)
+
     try {
-      // seller_reputation é endpoint público — sem Authorization
-      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`)
+      const { data } = await axios.get(`${ML_BASE}/users/${sellerId}/seller_reputation`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
       console.log('[reputation] success for seller:', sellerId)
       return { seller_id: sellerId, ...data }
     } catch (err: any) {
