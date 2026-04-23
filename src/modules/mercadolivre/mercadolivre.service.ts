@@ -537,9 +537,10 @@ export class MercadolivreService {
     try {
       const url2 = `${ML_BASE}/users/${sellerId}`
       console.log('[reputation] chamando URL:', url2)
-      const { data } = await axios.get(url2)
-      const rep = data?.seller_reputation ?? null
-      console.log('[reputation] /users/{id} ok:', JSON.stringify(rep)?.substring(0, 200))
+      const publicResponse = await axios.get(url2)
+      console.log('[reputation] public response keys:', Object.keys(publicResponse.data || {}).join(', '))
+      console.log('[reputation] seller_reputation field:', JSON.stringify(publicResponse.data?.seller_reputation)?.substring(0, 300))
+      const rep = publicResponse.data?.seller_reputation ?? null
       return { seller_id: sellerId, ...(rep ?? {}) }
     } catch (err2: any) {
       console.error('[reputation] /users/{id} falhou:', err2?.response?.status, err2?.response?.data?.message ?? err2?.message)
