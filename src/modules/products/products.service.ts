@@ -26,6 +26,14 @@ export class ProductsService {
     return data ?? []
   }
 
+  async getLinkedListingIds(): Promise<string[]> {
+    const { data } = await supabaseAdmin
+      .from('products')
+      .select('ml_listing_id')
+      .not('ml_listing_id', 'is', null)
+    return (data ?? []).map((r: any) => r.ml_listing_id as string)
+  }
+
   async getById(id: string) {
     const { data, error } = await supabaseAdmin
       .from('products')

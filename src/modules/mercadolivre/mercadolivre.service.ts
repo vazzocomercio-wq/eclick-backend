@@ -1543,14 +1543,33 @@ export class MercadolivreService {
         }
       }
 
-      // Extract weight from ML attributes
-      const attrs: Array<{ id: string; values?: Array<{ struct?: { number: number; unit: string } }> }> =
-        item.attributes ?? []
-      const weightAttr = attrs.find(a => a.id === 'WEIGHT')
-      const wStruct    = weightAttr?.values?.[0]?.struct
-      const weightKg   = wStruct
-        ? wStruct.unit === 'kg' ? wStruct.number : wStruct.number / 1000
-        : null
+      // ── Extract ML attributes ──────────────────────────────────────
+      const attrs: any[] = item.attributes ?? []
+
+      const attrStr = (id: string): string | null =>
+        attrs.find((a: any) => a.id === id)?.values?.[0]?.value_name ?? null
+
+      const attrNum = (id: string, toUnit: string): number | null => {
+        const s = attrs.find((a: any) => a.id === id)?.values?.[0]?.struct
+        if (!s) return null
+        if (s.unit === toUnit) return s.number
+        if (toUnit === 'kg' && s.unit === 'g')  return s.number / 1000
+        if (toUnit === 'g'  && s.unit === 'kg') return s.number * 1000
+        if (toUnit === 'cm' && s.unit === 'mm') return s.number / 10
+        if (toUnit === 'mm' && s.unit === 'cm') return s.number * 10
+        return s.number
+      }
+
+      const weightKg = attrNum('WEIGHT', 'kg')
+      const widthCm  = attrNum('WIDTH',  'cm')
+      const heightCm = attrNum('HEIGHT', 'cm')
+      const lengthCm = attrNum('LENGTH', 'cm') ?? attrNum('DEPTH', 'cm')
+      const brand    = attrStr('BRAND')
+      const model    = attrStr('MODEL')
+      const gtin     = attrStr('GTIN') ?? item.ean ?? null
+      const color    = attrStr('COLOR')
+      const voltage  = attrStr('VOLTAGE')
+      const mlFlex   = item.shipping?.logistic_type === 'fulfillment'
 
       const photoUrls: string[] = (item.pictures ?? [])
         .map((p: any) => p.url ?? p.secure_url)
@@ -1566,6 +1585,9 @@ export class MercadolivreService {
         organization_id:  resolvedOrgId,
         name:             item.title,
         sku,
+        brand,
+        model,
+        gtin,
         ml_title:         item.title,
         price:            item.price ?? 0,
         stock:            item.available_quantity ?? 0,
@@ -1579,8 +1601,16 @@ export class MercadolivreService {
         ml_permalink:     item.permalink ?? null,
         ml_catalog_id:    item.catalog_product_id ?? null,
         ml_free_shipping: item.shipping?.free_shipping ?? false,
+        ml_flex:          mlFlex,
         platforms:        ['mercadolivre'],
         weight_kg:        weightKg,
+        width_cm:         widthCm,
+        height_cm:        heightCm,
+        length_cm:        lengthCm,
+        attributes: {
+          ...(color   ? { color }   : {}),
+          ...(voltage ? { voltage } : {}),
+        },
         created_at:       new Date().toISOString(),
       }
 

@@ -16,6 +16,12 @@ export class ProductsController {
     return this.products.getAll(user.orgId)
   }
 
+  // GET /products/linked-listings  — must be before :id to avoid param capture
+  @Get('linked-listings')
+  getLinkedListingIds() {
+    return this.products.getLinkedListingIds()
+  }
+
   // GET /products/:id
   @Get(':id')
   getById(@Param('id') id: string) {
