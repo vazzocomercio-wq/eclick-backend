@@ -1455,9 +1455,8 @@ export class MercadolivreService {
       resolvedOrgId = conn?.organization_id ?? null
       console.log('[createFromListing] orgId resolved from ml_connections:', resolvedOrgId)
     }
-    if (!resolvedOrgId) {
-      throw new HttpException('Organização não encontrada para esta conta ML', 400)
-    }
+    // resolvedOrgId may still be null — products table accepts null organization_id
+    console.log('[createFromListing] resolvedOrgId final:', resolvedOrgId)
 
     // Fetch item details + descriptions in parallel
     const [itemsRes, descRes] = await Promise.all([
@@ -1517,13 +1516,13 @@ export class MercadolivreService {
 
       const sku: string = item.seller_custom_field || item.id
 
-      // Check for duplicate SKU
-      const { data: existing } = await supabaseAdmin
-        .from('products')
-        .select('id')
-        .eq('organization_id', resolvedOrgId)
-        .eq('sku', sku)
-        .maybeSingle()
+      // Check for duplicate SKU (null-safe: use .is() when orgId is null)
+      const dupQuery = supabaseAdmin.from('products').select('id').eq('sku', sku)
+      const { data: existing } = await (
+        resolvedOrgId
+          ? dupQuery.eq('organization_id', resolvedOrgId)
+          : dupQuery.is('organization_id', null)
+      ).maybeSingle()
 
       if (existing) {
         results.push({ listing_id: mlId, status: 'skipped', reason: 'SKU já existe' })
