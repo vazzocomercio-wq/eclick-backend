@@ -1514,19 +1514,33 @@ export class MercadolivreService {
           ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
           : null
 
-      const sku: string = item.seller_custom_field || item.id
+      // Use the seller's own SKU; if not set, leave null (don't use MLB ID as fallback)
+      const sku: string | null = item.seller_custom_field || null
 
-      // Check for duplicate SKU (null-safe: use .is() when orgId is null)
-      const dupQuery = supabaseAdmin.from('products').select('id').eq('sku', sku)
-      const { data: existing } = await (
-        resolvedOrgId
-          ? dupQuery.eq('organization_id', resolvedOrgId)
-          : dupQuery.is('organization_id', null)
-      ).maybeSingle()
+      // Check for duplicate by ml_listing_id (works regardless of SKU presence)
+      const { data: existingByListing } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('ml_listing_id', item.id)
+        .maybeSingle()
 
-      if (existing) {
-        results.push({ listing_id: mlId, status: 'skipped', reason: 'SKU já existe' })
+      if (existingByListing) {
+        results.push({ listing_id: mlId, status: 'skipped', reason: 'Anúncio já importado' })
         continue
+      }
+
+      // Also check duplicate by SKU when present
+      if (sku) {
+        const dupQuery = supabaseAdmin.from('products').select('id').eq('sku', sku)
+        const { data: existingBySku } = await (
+          resolvedOrgId
+            ? dupQuery.eq('organization_id', resolvedOrgId)
+            : dupQuery.is('organization_id', null)
+        ).maybeSingle()
+        if (existingBySku) {
+          results.push({ listing_id: mlId, status: 'skipped', reason: 'SKU já existe' })
+          continue
+        }
       }
 
       // Extract weight from ML attributes
