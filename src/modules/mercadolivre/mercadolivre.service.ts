@@ -305,7 +305,7 @@ export class MercadolivreService {
       },
     )
 
-    return { orders: data.data.results ?? [], total: data.data.paging?.total ?? 0 }
+    return { orders: data.results ?? [], total: data.paging?.total ?? 0 }
   }
 
   // ── Metrics ──────────────────────────────────────────────────────────────
@@ -440,25 +440,45 @@ export class MercadolivreService {
 
   // 4. GET /ml/recent-orders — orders with item detail
   async getRecentOrders(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getAuth(orgId)
-    const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { seller: sellerId, sort: 'date_desc', offset, limit },
-    })
-    return {
-      orders: (body.results ?? []).map((o: any) => ({
-        id: o.id,
-        status: o.status,
-        date_created: o.date_created,
-        total_amount: o.total_amount,
-        items: (o.order_items ?? []).map((i: any) => ({
-          item_id: i.item?.id,
-          title: i.item?.title,
-          quantity: i.quantity,
-          unit_price: i.unit_price,
+    let token: string
+    let sellerId: number
+    try {
+      ;({ token, sellerId } = await this.getAuth(orgId))
+    } catch (authErr: any) {
+      console.error('[recent-orders] getAuth failed:', authErr?.message ?? authErr)
+      throw new HttpException('ML não conectado — verifique a integração', 401)
+    }
+
+    console.log('[recent-orders] sellerId:', sellerId, 'offset:', offset, 'limit:', limit)
+
+    try {
+      const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { seller: sellerId, sort: 'date_desc', offset, limit },
+      })
+
+      console.log('[recent-orders] ML status OK, total:', body.paging?.total)
+
+      return {
+        orders: (body.results ?? []).map((o: any) => ({
+          id: o.id,
+          status: o.status,
+          date_created: o.date_created,
+          total_amount: o.total_amount,
+          items: (o.order_items ?? []).map((i: any) => ({
+            item_id: i.item?.id,
+            title: i.item?.title,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+          })),
         })),
-      })),
-      total: body.paging?.total ?? 0,
+        total: body.paging?.total ?? 0,
+      }
+    } catch (err: any) {
+      const mlMsg = err?.response?.data?.message ?? err?.response?.data?.error ?? null
+      const mlStatus = err?.response?.status ?? 500
+      console.error('[recent-orders] ML API error:', mlStatus, mlMsg ?? err?.message ?? err)
+      throw new HttpException(mlMsg ?? err?.message ?? 'Erro ao buscar pedidos', mlStatus)
     }
   }
 
