@@ -161,27 +161,13 @@ export class MercadolivreService {
 
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
-  async getItemInfo(orgId: string, url: string) {
-    // Use org connection first, fall back to first available connection
-    let token: string | null = null
-    try { token = await this.getValidToken(orgId) } catch { /* fallback below */ }
-    if (!token) {
-      const { data: conn } = await supabaseAdmin
-        .from('ml_connections')
-        .select('access_token')
-        .limit(1)
-        .single()
-      if (!conn) throw new UnauthorizedException('ML not connected')
-      token = conn.access_token
-    }
-    const headers = { Authorization: `Bearer ${token}` }
-
+  async getItemInfo(_orgId: string, url: string) {
     const mlbMatch = url.match(/MLB-?(\d+)/i)
 
     if (mlbMatch) {
       const mlbId = `MLB${mlbMatch[1]}`
 
-      const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, { headers })
+      const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`)
         .catch((err: any) => {
           throw new HttpException(
             err.response?.data?.message ?? `ML retornou ${err.response?.status ?? 500}`,
@@ -190,7 +176,7 @@ export class MercadolivreService {
         })
 
       let seller = `Vendedor #${item.data.seller_id}`
-      await axios.get(`${ML_BASE}/users/${item.data.seller_id}`, { headers })
+      await axios.get(`${ML_BASE}/users/${item.data.seller_id}`)
         .then((r: any) => { if (r.data.nickname) seller = r.data.nickname })
         .catch(() => { /* non-fatal */ })
 
@@ -216,7 +202,6 @@ export class MercadolivreService {
 
     const query = seg.replace(/-/g, ' ')
     const { data: search } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
-      headers,
       params: { q: query, limit: 1 },
     }).catch((err: any) => {
       throw new HttpException(
