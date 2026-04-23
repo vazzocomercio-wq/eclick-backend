@@ -431,22 +431,37 @@ export class MercadolivreService {
   // ── Shared helpers for getRecentOrders ───────────────────────────────────────
 
   private async _fetchShipments(token: string, orders: any[]): Promise<Record<number, any>> {
-    const ids = [...new Set(orders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
+    // Limit to first 20 to avoid ML API rate limiting
+    const ids = [...new Set(
+      orders.slice(0, 20).map((o: any) => o.shipping?.id).filter(Boolean)
+    )] as number[]
     const map: Record<number, any> = {}
-    if (!ids.length) return map
+    if (!ids.length) {
+      console.log('[shipments] no shipping ids found in orders')
+      return map
+    }
+    console.log('[shipments] fetching', ids.length, 'shipments:', ids.slice(0, 5).join(','), '...')
     const results = await Promise.allSettled(
       ids.map(id => axios.get(`${ML_BASE}/shipments/${id}`, { headers: { Authorization: `Bearer ${token}` } }))
     )
     ids.forEach((id, i) => {
-      if (results[i].status === 'fulfilled') map[id] = (results[i] as PromiseFulfilledResult<any>).value.data
+      if (results[i].status === 'fulfilled') {
+        map[id] = (results[i] as PromiseFulfilledResult<any>).value.data
+      } else {
+        console.warn('[shipments] failed for id', id, ':', (results[i] as PromiseRejectedResult).reason?.response?.status)
+      }
     })
+    const withAddress = Object.values(map).filter(s => s?.receiver_address?.state?.id).length
+    console.log('[shipments] fetched', Object.keys(map).length, '| with receiver_address+state:', withAddress)
     return map
   }
 
   private _mapOrder(o: any, shipMap: Record<number, any>) {
     const ship = shipMap[o.shipping?.id] ?? null
     const stateId: string = ship?.receiver_address?.state?.id ?? ''
-    const uf = stateId.startsWith('BR-') ? stateId.slice(3) : null
+    // ML returns "BR-SP" — extract "SP"
+    const uf = stateId.startsWith('BR-') ? stateId.slice(3) : (stateId.length === 2 ? stateId : null)
+    console.log(`[mapOrder] order ${o.id} | shipping_id=${o.shipping?.id} | stateId="${stateId}" | uf=${uf} | city=${ship?.receiver_address?.city?.name}`)
     return {
       id: o.id,
       status: o.status,
