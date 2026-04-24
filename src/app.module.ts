@@ -6,6 +6,7 @@ import { MercadolivreModule } from './modules/mercadolivre/mercadolivre.module'
 import { OrdersModule } from './modules/orders/orders.module'
 import { ProductsModule } from './modules/products/products.module'
 import { SalesAggregatorModule } from './modules/sales-aggregator/sales-aggregator.module'
+import { SuppliersModule } from './modules/suppliers/suppliers.module'
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { SalesAggregatorModule } from './modules/sales-aggregator/sales-aggregat
     OrdersModule,
     ProductsModule,
     SalesAggregatorModule,
+    SuppliersModule,
   ],
   controllers: [AppController],
   providers: [AppService],
