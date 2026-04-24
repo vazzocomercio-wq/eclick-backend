@@ -274,6 +274,25 @@ export class MercadolivreService {
     }
   }
 
+  // ── Vínculo preview ──────────────────────────────────────────────────────
+
+  async getListingPreview(listingId: string) {
+    const { token } = await this.getValidToken()
+    const { data } = await axios.get(`${ML_BASE}/items/${listingId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params:  { attributes: 'id,title,price,available_quantity,pictures,permalink,status' },
+    })
+    return {
+      id:                 data.id              as string,
+      title:              data.title           as string,
+      price:              data.price           as number,
+      available_quantity: data.available_quantity as number,
+      thumbnail: (data.pictures?.[0]?.url ?? data.pictures?.[0]?.secure_url ?? null) as string | null,
+      permalink:          data.permalink       as string,
+      status:             data.status          as string,
+    }
+  }
+
   // ── Items ────────────────────────────────────────────────────────────────
 
   async getItems(orgId: string, offset = 0, limit = 50) {

@@ -72,6 +72,13 @@ export class MercadolivreController {
     return this.ml.getItemInfo(user.orgId!, url)
   }
 
+  // GET /ml/vinculos/preview?listing_id=MLB...
+  @Get('vinculos/preview')
+  getVinculoPreview(@Query('listing_id') listingId: string) {
+    if (!listingId) throw new BadRequestException('listing_id é obrigatório')
+    return this.ml.getListingPreview(listingId)
+  }
+
   // GET /ml/items?offset=0&limit=50
   @Get('items')
   getItems(

@@ -1,5 +1,5 @@
 import { Controller, Get, Put, Patch, Delete, Post, Param, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
-import { ProductsService, UpdateProductCostsDto } from './products.service'
+import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto } from './products.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -20,6 +20,25 @@ export class ProductsController {
   @Get('linked-listings')
   getLinkedListingIds() {
     return this.products.getLinkedListingIds()
+  }
+
+  // POST /products/vinculos
+  @Post('vinculos')
+  createVinculo(@Body() dto: CreateVinculoDto) {
+    return this.products.createVinculo(dto)
+  }
+
+  // DELETE /products/vinculos/:id
+  @Delete('vinculos/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteVinculo(@Param('id') id: string) {
+    return this.products.deleteVinculo(id)
+  }
+
+  // POST /products/stock/movement
+  @Post('stock/movement')
+  createStockMovement(@Body() dto: CreateStockMovementDto) {
+    return this.products.createStockMovement(dto)
   }
 
   // GET /products/:id

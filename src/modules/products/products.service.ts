@@ -12,6 +12,27 @@ export interface UpdateProductCostsDto {
   tax_on_freight?: boolean
 }
 
+export interface CreateVinculoDto {
+  product_id:        string
+  platform:          string
+  listing_id:        string
+  quantity_per_unit?: number
+  variation_id?:     string | null
+  account_id?:       string | null
+  listing_title?:    string | null
+  listing_price?:    number | null
+  listing_thumbnail?: string | null
+  listing_permalink?: string | null
+}
+
+export interface CreateStockMovementDto {
+  product_id:       string
+  product_stock_id?: string
+  type:             'in' | 'out' | 'adjustment' | 'sale' | 'return' | 'transfer'
+  quantity:         number
+  reason?:          string | null
+}
+
 @Injectable()
 export class ProductsService {
   async getAll(orgId: string | null) {
@@ -94,6 +115,87 @@ export class ProductsService {
       .delete()
       .in('id', ids)
     if (error) throw new Error(error.message)
+  }
+
+  async createVinculo(dto: CreateVinculoDto) {
+    const { data, error } = await supabaseAdmin
+      .from('product_listings')
+      .insert({
+        product_id:        dto.product_id,
+        platform:          dto.platform,
+        listing_id:        dto.listing_id,
+        quantity_per_unit: dto.quantity_per_unit ?? 1,
+        variation_id:      dto.variation_id      ?? null,
+        account_id:        dto.account_id        ?? null,
+        listing_title:     dto.listing_title     ?? null,
+        listing_price:     dto.listing_price     ?? null,
+        listing_thumbnail: dto.listing_thumbnail ?? null,
+        listing_permalink: dto.listing_permalink ?? null,
+        is_active:         true,
+      })
+      .select()
+      .single()
+    if (error) throw new Error(error.message)
+    return data
+  }
+
+  async deleteVinculo(id: string) {
+    const { error } = await supabaseAdmin
+      .from('product_listings')
+      .delete()
+      .eq('id', id)
+    if (error) throw new Error(error.message)
+  }
+
+  async createStockMovement(dto: CreateStockMovementDto) {
+    // Resolve stock record (use shared stock if no explicit stockId)
+    let stockId = dto.product_stock_id ?? null
+    let currentQty = 0
+    if (!stockId) {
+      const { data: stock } = await supabaseAdmin
+        .from('product_stock')
+        .select('id, quantity')
+        .eq('product_id', dto.product_id)
+        .is('platform', null)
+        .maybeSingle()
+      stockId    = stock?.id       ?? null
+      currentQty = stock?.quantity ?? 0
+    } else {
+      const { data: stock } = await supabaseAdmin
+        .from('product_stock')
+        .select('quantity')
+        .eq('id', stockId)
+        .maybeSingle()
+      currentQty = stock?.quantity ?? 0
+    }
+
+    // Insert movement record
+    const { error: mvError } = await supabaseAdmin
+      .from('stock_movements')
+      .insert({
+        product_id:       dto.product_id,
+        product_stock_id: stockId,
+        type:             dto.type,
+        quantity:         dto.quantity,
+        reason:           dto.reason ?? null,
+      })
+    if (mvError) throw new Error(mvError.message)
+
+    // Update stock quantity
+    if (stockId) {
+      const newQty = dto.type === 'adjustment'
+        ? dto.quantity
+        : dto.type === 'in' || dto.type === 'return'
+          ? currentQty + dto.quantity
+          : Math.max(0, currentQty - dto.quantity)
+
+      await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: newQty, updated_at: new Date().toISOString() })
+        .eq('id', stockId)
+    }
+
+    return { ok: true, type: dto.type, quantity: dto.quantity }
   }
 
   async getBySku(orgId: string, sku: string) {
