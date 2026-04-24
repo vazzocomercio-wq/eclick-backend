@@ -1125,6 +1125,9 @@ export class MercadolivreService {
             state:         ship?.receiver_address?.state?.name ?? null,
             street_name:   ship?.receiver_address?.street_name ?? null,
             street_number: ship?.receiver_address?.street_number ?? null,
+            neighborhood:  ship?.receiver_address?.neighborhood?.name ?? null,
+            complement:    ship?.receiver_address?.complement ?? ship?.receiver_address?.apartment ?? null,
+            address_line:  ship?.receiver_address?.address_line ?? null,
           },
           base_cost:        ship?.base_cost ?? 0,
           receiver_cost:    ship?.cost_components?.receiver_shipping_cost ?? null,
@@ -1703,6 +1706,21 @@ export class MercadolivreService {
         console.error('[from-listing] ERRO INSERT:', error.code, error.message, error.details)
         results.push({ listing_id: mlId, status: 'error', reason: error.message })
       } else {
+        // Manter vínculo na nova tabela product_listings (fase 1 de refatoração)
+        const { error: plError } = await supabaseAdmin
+          .from('product_listings')
+          .insert({
+            product_id:        created.id,
+            platform:          'mercadolivre',
+            listing_id:        item.id,
+            listing_title:     item.title ?? null,
+            listing_price:     item.price ?? null,
+            listing_thumbnail: item.pictures?.[0]?.url ?? item.pictures?.[0]?.secure_url ?? null,
+            listing_permalink: item.permalink ?? null,
+            quantity_per_unit: 1,
+            is_active:         true,
+          })
+        if (plError) console.warn('[from-listing] product_listings insert falhou (não crítico):', plError.message)
         results.push({ listing_id: mlId, status: 'created', product_id: created.id })
       }
     }
