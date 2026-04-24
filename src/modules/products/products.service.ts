@@ -13,16 +13,17 @@ export interface UpdateProductCostsDto {
 }
 
 export interface CreateVinculoDto {
-  product_id:        string
-  platform:          string
-  listing_id:        string
-  quantity_per_unit?: number
-  variation_id?:     string | null
-  account_id?:       string | null
-  listing_title?:    string | null
-  listing_price?:    number | null
-  listing_thumbnail?: string | null
-  listing_permalink?: string | null
+  product_id:           string
+  platform?:            string
+  listing_id:           string
+  quantity_per_unit?:   number
+  variation_id?:        string | null
+  variation_attributes?: Record<string, unknown> | null
+  account_id?:          string | null
+  listing_title?:       string | null
+  listing_price?:       number | null
+  listing_thumbnail?:   string | null
+  listing_permalink?:   string | null
 }
 
 export interface CreateStockMovementDto {
@@ -117,25 +118,31 @@ export class ProductsService {
     if (error) throw new Error(error.message)
   }
 
-  async createVinculo(dto: CreateVinculoDto) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async createVinculo(dto: any) {
+    console.log('[vinculos.service] inserindo:', JSON.stringify(dto))
     const { data, error } = await supabaseAdmin
       .from('product_listings')
       .insert({
-        product_id:        dto.product_id,
-        platform:          dto.platform,
-        listing_id:        dto.listing_id,
-        quantity_per_unit: dto.quantity_per_unit ?? 1,
-        variation_id:      dto.variation_id      ?? null,
-        account_id:        dto.account_id        ?? null,
-        listing_title:     dto.listing_title     ?? null,
-        listing_price:     dto.listing_price     ?? null,
-        listing_thumbnail: dto.listing_thumbnail ?? null,
-        listing_permalink: dto.listing_permalink ?? null,
-        is_active:         true,
+        product_id:           dto.product_id,
+        platform:             dto.platform          ?? 'mercadolivre',
+        listing_id:           dto.listing_id,
+        quantity_per_unit:    dto.quantity_per_unit ?? 1,
+        variation_id:         dto.variation_id      ?? null,
+        variation_attributes: dto.variation_attributes ?? null,
+        account_id:           dto.account_id        ?? null,
+        listing_title:        dto.listing_title     ?? null,
+        listing_price:        dto.listing_price     ?? null,
+        listing_thumbnail:    dto.listing_thumbnail ?? null,
+        listing_permalink:    dto.listing_permalink ?? null,
+        is_active:            true,
       })
       .select()
       .single()
-    if (error) throw new Error(error.message)
+    if (error) {
+      console.error('[vinculos.service] erro Supabase:', JSON.stringify(error))
+      throw new Error(error.message)
+    }
     return data
   }
 
