@@ -1496,8 +1496,11 @@ export class MercadolivreService {
           ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
           : null
 
-      // Use the seller's own SKU; if not set, leave null (don't use MLB ID as fallback)
-      const sku: string | null = item.seller_custom_field || null
+      // seller_custom_field is the canonical SKU; fall back to SELLER_SKU attribute
+      const sku: string | null =
+        item.seller_custom_field ||
+        attrs.find((a: any) => a.id === 'SELLER_SKU')?.value_name ||
+        null
 
       // Check for duplicate by ml_listing_id (works regardless of SKU presence)
       const { data: existingByListing } = await supabaseAdmin
@@ -1528,8 +1531,11 @@ export class MercadolivreService {
       // ── Extract ML attributes ──────────────────────────────────────
       const attrs: any[] = item.attributes ?? []
 
-      const attrStr = (id: string): string | null =>
-        attrs.find((a: any) => a.id === id)?.values?.[0]?.value_name ?? null
+      // ML attribute value is at attribute.value_name (top-level) or values[0].name
+      const attrStr = (id: string): string | null => {
+        const a = attrs.find((a: any) => a.id === id)
+        return a?.value_name ?? a?.values?.[0]?.name ?? null
+      }
 
       const attrNum = (id: string, toUnit: string): number | null => {
         const s = attrs.find((a: any) => a.id === id)?.values?.[0]?.struct
@@ -1548,7 +1554,7 @@ export class MercadolivreService {
       const lengthCm = attrNum('LENGTH', 'cm') ?? attrNum('DEPTH', 'cm')
       const brand    = attrStr('BRAND')
       const model    = attrStr('MODEL')
-      const gtin     = attrStr('GTIN') ?? item.ean ?? null
+      const gtin     = attrStr('GTIN') ?? attrStr('EAN') ?? item.ean ?? null
       const color    = attrStr('COLOR')
       const voltage  = attrStr('VOLTAGE')
       const mlFlex   = item.shipping?.logistic_type === 'fulfillment'
