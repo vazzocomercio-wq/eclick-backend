@@ -402,6 +402,17 @@ export class MercadolivreService {
     return { items: body.results ?? [], total: body.paging?.total ?? 0 }
   }
 
+  async getCategory(id: string) {
+    try {
+      const { data } = await axios.get<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> }>(
+        `${ML_BASE}/categories/${id}`,
+      )
+      return data
+    } catch {
+      return { id, name: id, path_from_root: [] }
+    }
+  }
+
   async getItemDetail(orgId: string, mlbId: string) {
     const { token } = await this.getValidToken()
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {

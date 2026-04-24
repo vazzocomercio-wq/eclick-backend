@@ -116,6 +116,12 @@ export class MercadolivreController {
     return this.ml.getMyItems(user.orgId!)
   }
 
+  // GET /ml/categories/:id  — proxies ML API, no seller token needed
+  @Get('categories/:id')
+  getCategory(@Param('id') id: string) {
+    return this.ml.getCategory(id)
+  }
+
   // GET /ml/items/:mlbId
   @Get('items/:mlbId')
   getItemDetail(
