@@ -1499,7 +1499,7 @@ export class MercadolivreService {
       // seller_custom_field is the canonical SKU; fall back to SELLER_SKU attribute
       const sku: string | null =
         item.seller_custom_field ||
-        attrs.find((a: any) => a.id === 'SELLER_SKU')?.value_name ||
+        (item.attributes ?? []).find((a: any) => a.id === 'SELLER_SKU')?.value_name ||
         null
 
       // Check for duplicate by ml_listing_id (works regardless of SKU presence)
@@ -1557,7 +1557,20 @@ export class MercadolivreService {
       const gtin     = attrStr('GTIN') ?? attrStr('EAN') ?? item.ean ?? null
       const color    = attrStr('COLOR')
       const voltage  = attrStr('VOLTAGE')
-      const mlFlex   = item.shipping?.logistic_type === 'fulfillment'
+
+      // Power: try value_name first ("40W"), then construct from struct
+      const powerStr = attrStr('POWER')
+      const powerStruct = attrs.find((a: any) => a.id === 'POWER')?.values?.[0]?.struct
+      const power = powerStr ?? (powerStruct ? `${powerStruct.number}${powerStruct.unit ?? 'W'}` : null)
+
+      const material        = attrStr('MAIN_MATERIAL')
+      const originCountry   = attrStr('ORIGIN') ?? attrStr('ITEM_ORIGIN')
+      const lightingType    = attrStr('LIGHTING_TYPE')
+      const lampType        = attrStr('BULB_TYPE') ?? attrStr('LAMP_TYPE')
+      const connectionType  = attrStr('CONNECTION_TYPE')
+      const installLocation = attrStr('INSTALLATION_PLACE') ?? attrStr('INSTALL_LOCATION')
+
+      const mlFlex = item.shipping?.logistic_type === 'fulfillment'
 
       const photoUrls: string[] = (item.pictures ?? [])
         .map((p: any) => p.url ?? p.secure_url)
@@ -1596,8 +1609,17 @@ export class MercadolivreService {
         height_cm:        heightCm,
         length_cm:        lengthCm,
         attributes: {
-          ...(color   ? { color }   : {}),
-          ...(voltage ? { voltage } : {}),
+          ...(color          ? { color }                           : {}),
+          ...(voltage        ? { voltage }                         : {}),
+          ...(power          ? { power }                           : {}),
+          ...(material       ? { material }                        : {}),
+          ...(originCountry  ? { origin_country: originCountry }   : {}),
+          ...(lightingType   ? { lighting_type: lightingType }     : {}),
+          ...(lampType       ? { lamp_type: lampType }             : {}),
+          ...(connectionType ? { connection_type: connectionType } : {}),
+          ...(installLocation? { install_location: installLocation }: {}),
+          warranty_type: 'seller',
+          warranty_days: 90,
         },
         created_at:       new Date().toISOString(),
       }
