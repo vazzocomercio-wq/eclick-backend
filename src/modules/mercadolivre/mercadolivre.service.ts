@@ -1649,6 +1649,7 @@ export class MercadolivreService {
       console.log('[from-listing] tentando INSERT com:', {
         name: payload.name,
         sku: payload.sku,
+        ml_listing_id: (payload as any).ml_listing_id,
         price: payload.price,
         organization_id: payload.organization_id,
       })
