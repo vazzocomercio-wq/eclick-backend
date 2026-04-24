@@ -211,11 +211,23 @@ export class MercadolivreService {
   }
 
   async getTokenForOrg(orgId: string): Promise<{ token: string; sellerId: number }> {
-    const { data: conn } = await supabaseAdmin
+    let { data: conn } = await supabaseAdmin
       .from('ml_connections')
       .select('seller_id, access_token, refresh_token, expires_at')
       .eq('organization_id', orgId)
       .maybeSingle()
+
+    // Fallback: first available connection (solo-owner setup where org_id wasn't set on connect)
+    if (!conn) {
+      const { data: fallback } = await supabaseAdmin
+        .from('ml_connections')
+        .select('seller_id, access_token, refresh_token, expires_at')
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      conn = fallback
+    }
+
     if (!conn) throw new UnauthorizedException('ML não conectado para esta organização')
     const token = await this.refreshIfNeeded(conn as MlConnection)
     return { token, sellerId: conn.seller_id as number }

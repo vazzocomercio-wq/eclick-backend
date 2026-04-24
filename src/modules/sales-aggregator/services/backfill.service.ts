@@ -74,16 +74,34 @@ export class BackfillService {
 
   private async resolveOrgId(orgId: string | null): Promise<string> {
     if (orgId) return orgId
+
+    // ml_connections with non-null organization_id
     const { data: conn } = await supabaseAdmin
       .from('ml_connections')
       .select('organization_id')
+      .not('organization_id', 'is', null)
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle()
-    if (!conn?.organization_id) {
-      throw new HttpException('Nenhuma organização com ML conectado encontrada', 400)
+    if (conn?.organization_id) return conn.organization_id as string
+
+    // Last resort: first org in the system (solo-owner setup where org_id wasn't set on connect)
+    const { data: org } = await supabaseAdmin
+      .from('organizations')
+      .select('id')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (org?.id) {
+      // Patch null organization_id rows so future calls resolve correctly
+      await supabaseAdmin
+        .from('ml_connections')
+        .update({ organization_id: org.id })
+        .is('organization_id', null)
+      return org.id as string
     }
-    return conn.organization_id as string
+
+    throw new HttpException('Nenhuma organização encontrada. Configure uma organização primeiro.', 400)
   }
 
   @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC
