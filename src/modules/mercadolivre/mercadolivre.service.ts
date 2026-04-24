@@ -823,6 +823,17 @@ export class MercadolivreService {
       }
     }
 
+    // Batch-check which items already have a linked product in the catalog
+    if (allItems.length > 0) {
+      const mlIds = allItems.map((i: any) => i.id)
+      const { data: linked } = await supabaseAdmin
+        .from('products')
+        .select('ml_listing_id')
+        .in('ml_listing_id', mlIds)
+      const linkedSet = new Set((linked ?? []).map((r: any) => r.ml_listing_id as string))
+      allItems = allItems.map((i: any) => ({ ...i, has_product: linkedSet.has(i.id) }))
+    }
+
     return { items: allItems, total: totalSum }
   }
 
