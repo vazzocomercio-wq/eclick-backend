@@ -210,6 +210,17 @@ export class MercadolivreService {
     return { token, sellerId: conn.seller_id }
   }
 
+  async getTokenForOrg(orgId: string): Promise<{ token: string; sellerId: number }> {
+    const { data: conn } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, access_token, refresh_token, expires_at')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!conn) throw new UnauthorizedException('ML não conectado para esta organização')
+    const token = await this.refreshIfNeeded(conn as MlConnection)
+    return { token, sellerId: conn.seller_id as number }
+  }
+
   // ── Item info (for competitor lookup) ────────────────────────────────────
 
   async getItemInfo(_orgId: string, url: string) {

@@ -1,0 +1,184 @@
+import { Injectable, HttpException } from '@nestjs/common'
+import { Cron } from '@nestjs/schedule'
+import { supabaseAdmin } from '../../../common/supabase'
+import { OrdersIngestionService } from './orders-ingestion.service'
+import { SnapshotsAggregationService } from './snapshots-aggregation.service'
+
+export interface AggregatorRun {
+  id: string
+  organization_id: string
+  run_type: string
+  status: string
+  start_date: string
+  end_date: string
+  total_dates: number
+  processed_dates: number
+  current_date_processing: string | null
+  orders_fetched: number
+  orders_inserted: number
+  orders_updated: number
+  snapshots_inserted: number
+  api_calls_made: number
+  started_at: string
+  completed_at: string | null
+  duration_seconds: number | null
+  error_message: string | null
+  error_details: unknown | null
+  triggered_by: string | null
+  created_at: string
+}
+
+@Injectable()
+export class BackfillService {
+  constructor(
+    private readonly ordersIngestion: OrdersIngestionService,
+    private readonly snapshotsAggregation: SnapshotsAggregationService,
+  ) {}
+
+  async startBackfill(orgId: string, days: number, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(orgId, 'backfill', days, userId)
+  }
+
+  async runManual(orgId: string, days: number, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(orgId, 'manual', days, userId)
+  }
+
+  async runDaily(orgId: string, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(orgId, 'daily', 3, userId)
+  }
+
+  async getStatus(orgId: string): Promise<{ activeRun: AggregatorRun | null; recentRuns: AggregatorRun[] }> {
+    const { data: all } = await supabaseAdmin
+      .from('aggregator_runs')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('started_at', { ascending: false })
+      .limit(21)
+
+    const rows = (all ?? []) as AggregatorRun[]
+    const activeRun = rows.find(r => r.status === 'running') ?? null
+    const recentRuns = rows.filter(r => r.status !== 'running').slice(0, 20)
+    return { activeRun, recentRuns }
+  }
+
+  async cancelRun(orgId: string, runId: string): Promise<void> {
+    const { error } = await supabaseAdmin
+      .from('aggregator_runs')
+      .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+      .eq('id', runId)
+      .eq('organization_id', orgId)
+    if (error) throw new HttpException(error.message, 500)
+  }
+
+  @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC
+  async dailyAggregation(): Promise<void> {
+    console.log('[aggregator] cron dailyAggregation iniciando')
+    const { data: connections } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id')
+    const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
+    console.log(`[aggregator] cron encontrou ${orgIds.length} orgs`)
+
+    for (const orgId of orgIds) {
+      try {
+        await this.runDaily(orgId, null)
+        console.log(`[aggregator] cron daily iniciado para org ${orgId}`)
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[aggregator] cron daily falhou para org ${orgId}:`, msg)
+      }
+    }
+  }
+
+  private async startRun(
+    orgId: string,
+    runType: 'backfill' | 'daily' | 'manual',
+    days: number,
+    userId: string | null,
+  ): Promise<{ runId: string }> {
+    // Check for active run
+    const { data: active } = await supabaseAdmin
+      .from('aggregator_runs')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('status', 'running')
+      .limit(1)
+      .maybeSingle()
+
+    if (active) {
+      throw new HttpException('Já existe uma execução em andamento para esta organização', 409)
+    }
+
+    const endDate = new Date()
+    endDate.setUTCHours(12, 0, 0, 0)
+    const startDate = new Date(endDate)
+    startDate.setUTCDate(startDate.getUTCDate() - (days - 1))
+
+    const dateFrom = startDate.toISOString().slice(0, 10)
+    const dateTo   = endDate.toISOString().slice(0, 10)
+    const totalDates = days
+
+    const { data: run, error: createErr } = await supabaseAdmin
+      .from('aggregator_runs')
+      .insert({
+        organization_id:  orgId,
+        run_type:         runType,
+        status:           'running',
+        start_date:       dateFrom,
+        end_date:         dateTo,
+        total_dates:      totalDates,
+        processed_dates:  0,
+        triggered_by:     userId,
+        started_at:       new Date().toISOString(),
+      })
+      .select('id')
+      .single()
+
+    if (createErr || !run) {
+      throw new HttpException(createErr?.message ?? 'Erro ao criar run', 500)
+    }
+
+    const runId = run.id as string
+    console.log(`[aggregator] run ${runId} criado (${runType}, ${days} dias, ${dateFrom}→${dateTo})`)
+
+    // Fire and forget background processing
+    const startedAt = Date.now()
+    ;(async () => {
+      const errorDetails: Array<{ date: string; error: string }> = []
+      try {
+        const ingestionStats = await this.ordersIngestion.ingestDateRange(orgId, dateFrom, dateTo, runId)
+        if (ingestionStats.errors.length) errorDetails.push(...ingestionStats.errors)
+
+        await this.snapshotsAggregation.aggregateDateRange(orgId, dateFrom, dateTo, runId)
+
+        const duration = Math.round((Date.now() - startedAt) / 1000)
+        await supabaseAdmin
+          .from('aggregator_runs')
+          .update({
+            status:          'completed',
+            completed_at:    new Date().toISOString(),
+            duration_seconds: duration,
+            error_details:   errorDetails.length ? errorDetails : null,
+          })
+          .eq('id', runId)
+
+        console.log(`[aggregator] run ${runId} completed in ${duration}s`)
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[aggregator] run ${runId} failed:`, msg)
+        await supabaseAdmin
+          .from('aggregator_runs')
+          .update({
+            status:          'failed',
+            completed_at:    new Date().toISOString(),
+            duration_seconds: Math.round((Date.now() - startedAt) / 1000),
+            error_message:   msg,
+            error_details:   errorDetails,
+          })
+          .eq('id', runId)
+      }
+    })()
+
+    return { runId }
+  }
+}
