@@ -44,7 +44,7 @@ export class ProductsController {
     @Param('id') id: string,
     @Body() dto: UpdateProductCostsDto,
   ) {
-    return this.products.updateCosts(user.orgId!, id, dto)
+    return this.products.updateCosts(user.orgId ?? null, id, dto)
   }
 
   // DELETE /products/:id

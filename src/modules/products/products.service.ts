@@ -55,20 +55,27 @@ export class ProductsService {
     return data
   }
 
-  async updateCosts(orgId: string, productId: string, dto: UpdateProductCostsDto) {
-    const { data, error } = await supabaseAdmin
+  async updateCosts(orgId: string | null, productId: string, dto: UpdateProductCostsDto) {
+    console.log('[products.updateCosts] id:', productId, '| orgId:', orgId, '| dto:', dto)
+
+    let query = supabaseAdmin
       .from('products')
       .update({
-        cost_price:    dto.cost_price    ?? null,
+        cost_price:     dto.cost_price     ?? null,
         tax_percentage: dto.tax_percentage ?? null,
         tax_on_freight: dto.tax_on_freight ?? false,
-        updated_at:    new Date().toISOString(),
+        updated_at:     new Date().toISOString(),
       })
       .eq('id', productId)
-      .eq('organization_id', orgId)
+
+    // Só filtra por org quando orgId está presente — produtos criados sem org têm organization_id null
+    if (orgId) query = (query as any).eq('organization_id', orgId)
+
+    const { data, error } = await (query as any)
       .select('id, cost_price, tax_percentage, tax_on_freight')
       .single()
 
+    console.log('[products.updateCosts] resultado:', { data, error: error?.message })
     if (error || !data) throw new NotFoundException('Produto não encontrado')
     return data
   }
