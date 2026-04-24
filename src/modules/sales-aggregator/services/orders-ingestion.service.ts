@@ -71,18 +71,31 @@ export class OrdersIngestionService {
         const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId)
 
         if (rows.length > 0) {
+          // Log first row's keys so we can confirm columns match the table schema
+          console.log(`[aggregator] ${date}: ${rows.length} rows to upsert, cols:`, Object.keys(rows[0]).join(', '))
+          console.log(`[aggregator] ${date}: first row sample:`, JSON.stringify({
+            external_order_id: rows[0].external_order_id,
+            sku:               rows[0].sku,
+            source:            rows[0].source,
+            sale_price:        rows[0].sale_price,
+            organization_id:   rows[0].organization_id,
+          }))
+
           const BATCH = 100
           for (let b = 0; b < rows.length; b += BATCH) {
+            const batch = rows.slice(b, b + BATCH)
             const { error } = await supabaseAdmin
               .from('orders')
-              .upsert(rows.slice(b, b + BATCH), {
+              .upsert(batch, {
                 onConflict: 'source,external_order_id,sku',
                 ignoreDuplicates: false,
               })
             if (error) {
-              console.error(`[aggregator] upsert error on ${date}:`, error.message)
+              console.error(`[aggregator] UPSERT FAILED on ${date} batch ${b}–${b + batch.length}:`, error.message)
+              console.error(`[aggregator] first row of failed batch:`, JSON.stringify(batch[0]))
+              stats.errors.push({ date, error: `upsert batch ${b}: ${error.message}` })
             } else {
-              stats.rowsUpserted += Math.min(BATCH, rows.length - b)
+              stats.rowsUpserted += batch.length
             }
           }
         }
