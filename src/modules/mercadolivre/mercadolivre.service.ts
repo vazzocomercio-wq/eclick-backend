@@ -1721,6 +1721,19 @@ export class MercadolivreService {
             is_active:         true,
           })
         if (plError) console.warn('[from-listing] product_listings insert falhou (não crítico):', plError.message)
+
+        // Estoque compartilhado inicial (platform/account nulos = estoque global)
+        const { error: psError } = await supabaseAdmin
+          .from('product_stock')
+          .insert({
+            product_id:       created.id,
+            platform:         null,
+            account_id:       null,
+            quantity:         item.available_quantity ?? 0,
+            reserved_quantity: 0,
+          })
+        if (psError) console.warn('[from-listing] product_stock insert falhou (não crítico):', psError.message)
+
         results.push({ listing_id: mlId, status: 'created', product_id: created.id })
       }
     }
