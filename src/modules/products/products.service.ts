@@ -73,6 +73,22 @@ export class ProductsService {
     return data
   }
 
+  async deleteProduct(id: string) {
+    const { error } = await supabaseAdmin
+      .from('products')
+      .delete()
+      .eq('id', id)
+    if (error) throw new Error(error.message)
+  }
+
+  async deleteMany(ids: string[]) {
+    const { error } = await supabaseAdmin
+      .from('products')
+      .delete()
+      .in('id', ids)
+    if (error) throw new Error(error.message)
+  }
+
   async getBySku(orgId: string, sku: string) {
     const { data } = await supabaseAdmin
       .from('products')

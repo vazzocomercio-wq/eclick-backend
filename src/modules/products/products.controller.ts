@@ -1,4 +1,4 @@
-import { Controller, Get, Put, Patch, Param, Body, UseGuards } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Delete, Post, Param, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto } from './products.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -45,5 +45,19 @@ export class ProductsController {
     @Body() dto: UpdateProductCostsDto,
   ) {
     return this.products.updateCosts(user.orgId!, id, dto)
+  }
+
+  // DELETE /products/:id
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteProduct(@Param('id') id: string) {
+    return this.products.deleteProduct(id)
+  }
+
+  // POST /products/bulk-delete  { ids: string[] }
+  @Post('bulk-delete')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  bulkDelete(@Body() body: { ids: string[] }) {
+    return this.products.deleteMany(body.ids)
   }
 }
