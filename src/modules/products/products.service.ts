@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
 const PRODUCT_FIELDS = `id,name,sku,brand,price,stock,status,platforms,photo_urls,
   ml_title,condition,category,created_at,
@@ -43,6 +44,8 @@ export interface UpdateStockDto {
 
 @Injectable()
 export class ProductsService {
+  constructor(private readonly ml: MercadolivreService) {}
+
   async getAll(orgId: string | null) {
     const query = supabaseAdmin.from('products').select(PRODUCT_FIELDS)
     // When no org membership, return all products (user is likely sole owner)
@@ -163,24 +166,27 @@ export class ProductsService {
 
   async createStockMovement(dto: CreateStockMovementDto) {
     // Resolve stock record (use shared stock if no explicit stockId)
-    let stockId = dto.product_stock_id ?? null
+    let stockId    = dto.product_stock_id ?? null
     let currentQty = 0
+    let virtualQty = 0
     if (!stockId) {
       const { data: stock } = await supabaseAdmin
         .from('product_stock')
-        .select('id, quantity')
+        .select('id, quantity, virtual_quantity')
         .eq('product_id', dto.product_id)
         .is('platform', null)
         .maybeSingle()
-      stockId    = stock?.id       ?? null
-      currentQty = stock?.quantity ?? 0
+      stockId    = stock?.id              ?? null
+      currentQty = stock?.quantity        ?? 0
+      virtualQty = stock?.virtual_quantity ?? 0
     } else {
       const { data: stock } = await supabaseAdmin
         .from('product_stock')
-        .select('quantity')
+        .select('quantity, virtual_quantity')
         .eq('id', stockId)
         .maybeSingle()
-      currentQty = stock?.quantity ?? 0
+      currentQty = stock?.quantity        ?? 0
+      virtualQty = stock?.virtual_quantity ?? 0
     }
 
     // Insert movement record
@@ -195,7 +201,7 @@ export class ProductsService {
       })
     if (mvError) throw new Error(mvError.message)
 
-    // Update stock quantity
+    // Update stock quantity + sync to ML
     if (stockId) {
       const newQty = dto.type === 'adjustment'
         ? dto.quantity
@@ -207,12 +213,23 @@ export class ProductsService {
         .from('product_stock')
         .update({ quantity: newQty, updated_at: new Date().toISOString() })
         .eq('id', stockId)
+
+      const platformQty = newQty + virtualQty
+      this.ml.syncStockToListings(dto.product_id, platformQty)
+        .catch((e: Error) => console.error('[stock-sync] movement sync falhou:', e.message))
     }
 
     return { ok: true, type: dto.type, quantity: dto.quantity }
   }
 
   async updateStock(stockId: string, dto: UpdateStockDto) {
+    // Fetch current values to calculate platform_qty
+    const { data: current } = await supabaseAdmin
+      .from('product_stock')
+      .select('product_id, quantity, virtual_quantity')
+      .eq('id', stockId)
+      .maybeSingle()
+
     const { data, error } = await supabaseAdmin
       .from('product_stock')
       .update({ ...dto, updated_at: new Date().toISOString() })
@@ -220,6 +237,15 @@ export class ProductsService {
       .select()
       .single()
     if (error) throw new Error(error.message)
+
+    if (current && (dto.quantity !== undefined || dto.virtual_quantity !== undefined)) {
+      const physicalQty = dto.quantity          ?? current.quantity          ?? 0
+      const virtualQty  = dto.virtual_quantity  ?? current.virtual_quantity  ?? 0
+      const platformQty = physicalQty + virtualQty
+      this.ml.syncStockToListings(current.product_id, platformQty)
+        .catch((e: Error) => console.error('[stock-sync] updateStock sync falhou:', e.message))
+    }
+
     return data
   }
 

@@ -596,6 +596,50 @@ export class MercadolivreService {
     }
   }
 
+  // ── ML stock sync ────────────────────────────────────────────────────────
+
+  async updateListingStock(listingId: string, newQuantity: number): Promise<void> {
+    const { token } = await this.getValidToken()
+    console.log(`[stock-sync] atualizando ${listingId} → ${newQuantity} unid.`)
+    try {
+      const res = await axios.put(
+        `${ML_BASE}/items/${listingId}`,
+        { available_quantity: newQuantity },
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      console.log(`[stock-sync] ${listingId} atualizado:`, res.data?.available_quantity)
+    } catch (e: any) {
+      console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data ?? e.message)
+      throw e
+    }
+  }
+
+  async syncStockToListings(productId: string, platformQty: number): Promise<void> {
+    const { data: vinculos } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id')
+      .eq('product_id', productId)
+      .eq('is_active', true)
+      .eq('platform', 'mercadolivre')
+
+    if (!vinculos?.length) {
+      console.log(`[stock-sync] nenhum anúncio ML para produto ${productId}`)
+      return
+    }
+
+    console.log(`[stock-sync] sincronizando ${vinculos.length} anúncio(s) → ${platformQty} unid.`)
+
+    const results = await Promise.allSettled(
+      (vinculos as { listing_id: string }[]).map(v => this.updateListingStock(v.listing_id, platformQty)),
+    )
+
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.error(`[stock-sync] falha em ${(vinculos as any)[i].listing_id}:`, (r.reason as Error)?.message ?? r.reason)
+      }
+    })
+  }
+
   // ── Auto stock decrement ─────────────────────────────────────────────────
 
   private async decrementStock(orderId: number, listingId: string, qtdVendida: number) {
@@ -644,18 +688,20 @@ export class MercadolivreService {
         balance_after:    novaQtd,
       })
 
-      console.log(`[stock] produto=${vinculo.product_id} -${qtdDecrementar} → físico=${novaQtd}`)
+      const platformQty = novaQtd + (stock.virtual_quantity ?? 0)
+      console.log(`[stock] produto=${vinculo.product_id} -${qtdDecrementar} → físico=${novaQtd} plataforma=${platformQty}`)
+
+      // Sincronizar com ML (fire-and-forget)
+      this.syncStockToListings(vinculo.product_id, platformQty)
+        .catch((e: Error) => console.error('[stock-sync] decrementStock sync falhou:', e.message))
 
       // Pausa automática: (físico + virtual) ≤ mínimo
-      if (stock.auto_pause_enabled) {
-        const platformQty = novaQtd + (stock.virtual_quantity ?? 0)
-        if (platformQty <= (stock.min_stock_to_pause ?? 0)) {
-          console.log(`[stock] PAUSA AUTO produto=${vinculo.product_id} platform_qty=${platformQty} ≤ min=${stock.min_stock_to_pause}`)
-          await supabaseAdmin
-            .from('products')
-            .update({ status: 'paused' })
-            .eq('id', vinculo.product_id)
-        }
+      if (stock.auto_pause_enabled && platformQty <= (stock.min_stock_to_pause ?? 0)) {
+        console.log(`[stock] PAUSA AUTO produto=${vinculo.product_id} platform_qty=${platformQty} ≤ min=${stock.min_stock_to_pause}`)
+        await supabaseAdmin
+          .from('products')
+          .update({ status: 'paused' })
+          .eq('id', vinculo.product_id)
       }
     }
   }
