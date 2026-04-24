@@ -977,18 +977,31 @@ export class MercadolivreService {
 
     const orders: any[] = body.results ?? []
 
-    // ── Shipping details in parallel ──────────────────────────────────────
+    // ── Shipping details + real seller costs in parallel ─────────────────
     const shipIds = [...new Set(orders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
     const shipMap: Record<number, any> = {}
+    const costsMap: Record<number, number> = {}
+
     if (shipIds.length > 0) {
-      const shipRes = await Promise.allSettled(
-        shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }))
-      )
+      const [shipRes, costsRes] = await Promise.all([
+        Promise.allSettled(
+          shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }))
+        ),
+        Promise.allSettled(
+          shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}/costs`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }))
+        ),
+      ])
+
       shipIds.forEach((id, i) => {
-        if (shipRes[i].status === 'fulfilled') shipMap[id] = (shipRes[i] as any).value.data
+        if (shipRes[i].status === 'fulfilled')   shipMap[id]  = (shipRes[i]  as any).value.data
+        if (costsRes[i].status === 'fulfilled') costsMap[id] = (costsRes[i] as any).value.data?.senders?.[0]?.cost ?? 0
       })
+
+      console.log('[orders] shipping costs obtidos:', Object.keys(costsMap).length, costsMap)
     }
 
     // ── Item thumbnails in batch ──────────────────────────────────────────
@@ -1023,12 +1036,36 @@ export class MercadolivreService {
       })
     }
 
-    const enriched = orders.map((o: any) => {
-      const ship = shipMap[o.shipping?.id] ?? null
+    const enriched = orders.map((o: any, idx: number) => {
+      const ship        = shipMap[o.shipping?.id] ?? null
       const totalAmount: number = o.total_amount ?? 0
-      const tarifaML     = Math.round(totalAmount * 0.115 * 100) / 100
-      const freteVendedor: number = ship?.cost_components?.receiver_shipping_cost ?? ship?.base_cost ?? 0
-      const lucroBruto   = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
+
+      // Tarifa: soma real dos sale_fee dos itens (fallback: 11,5%)
+      const tarifaSaleFee = (o.order_items ?? []).reduce((s: number, i: any) => s + (i.sale_fee ?? 0), 0)
+      const tarifaML      = tarifaSaleFee > 0
+        ? Math.round(tarifaSaleFee * 100) / 100
+        : Math.round(totalAmount * 0.115 * 100) / 100
+
+      // Frete: custo real do vendedor via /shipments/{id}/costs → senders[0].cost
+      const freteVendedor: number = o.shipping?.id != null
+        ? (costsMap[o.shipping.id] ?? ship?.base_cost ?? 0)
+        : 0
+
+      if (idx === 0) {
+        console.log('[orders] diagnóstico frete/tarifa #0:', {
+          order_id:             o.id,
+          total_amount:         totalAmount,
+          sale_fee_items:       (o.order_items ?? []).map((i: any) => ({ id: i.item?.id, sale_fee: i.sale_fee })),
+          tarifaSaleFee,
+          tarifaML,
+          costsMap_entry:       costsMap[o.shipping?.id],
+          ship_base_cost:       ship?.base_cost,
+          ship_receiver_cost:   ship?.cost_components?.receiver_shipping_cost,
+          freteVendedor,
+        })
+      }
+
+      const lucroBruto = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
 
       // product cost/tax for first item's SKU
       const firstSku = o.order_items?.[0]?.item?.seller_sku ?? null
