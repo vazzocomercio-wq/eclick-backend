@@ -34,6 +34,13 @@ export interface CreateStockMovementDto {
   reason?:          string | null
 }
 
+export interface UpdateStockDto {
+  quantity?:            number
+  virtual_quantity?:    number
+  min_stock_to_pause?:  number
+  auto_pause_enabled?:  boolean
+}
+
 @Injectable()
 export class ProductsService {
   async getAll(orgId: string | null) {
@@ -203,6 +210,17 @@ export class ProductsService {
     }
 
     return { ok: true, type: dto.type, quantity: dto.quantity }
+  }
+
+  async updateStock(stockId: string, dto: UpdateStockDto) {
+    const { data, error } = await supabaseAdmin
+      .from('product_stock')
+      .update({ ...dto, updated_at: new Date().toISOString() })
+      .eq('id', stockId)
+      .select()
+      .single()
+    if (error) throw new Error(error.message)
+    return data
   }
 
   async getBySku(orgId: string, sku: string) {

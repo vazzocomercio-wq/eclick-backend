@@ -1,5 +1,5 @@
 import { Controller, Get, Put, Patch, Delete, Post, Param, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
-import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto } from './products.service'
+import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -50,6 +50,12 @@ export class ProductsController {
   @Post('stock/movement')
   createStockMovement(@Body() dto: CreateStockMovementDto) {
     return this.products.createStockMovement(dto)
+  }
+
+  // PATCH /products/stock/:id
+  @Patch('stock/:id')
+  updateStock(@Param('id') id: string, @Body() dto: UpdateStockDto) {
+    return this.products.updateStock(id, dto)
   }
 
   // GET /products/:id

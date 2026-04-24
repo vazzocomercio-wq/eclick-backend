@@ -562,6 +562,10 @@ export class MercadolivreService {
     try {
       const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, true)
       const shipMap = await this._fetchShipments(token, rawOrders)
+      // Fire-and-forget: decrement stock for new paid/shipped orders
+      this.processOrdersStock(rawOrders).catch((e: Error) =>
+        console.error('[stock-sync] processOrdersStock falhou:', e.message),
+      )
       return {
         orders: rawOrders.map((o: any) => this._mapOrder(o, shipMap)),
         total,
@@ -589,6 +593,86 @@ export class MercadolivreService {
 
       const mlMsg = mlData?.message ?? mlData?.error ?? err?.message ?? 'Erro ao buscar pedidos'
       throw new HttpException(mlMsg, mlStatus)
+    }
+  }
+
+  // ── Auto stock decrement ─────────────────────────────────────────────────
+
+  private async decrementStock(orderId: number, listingId: string, qtdVendida: number) {
+    // Idempotency check
+    const { data: existing } = await supabaseAdmin
+      .from('stock_movements')
+      .select('id')
+      .eq('reference_type', 'ml_order')
+      .eq('reference_id', String(orderId))
+      .limit(1)
+    if (existing?.length) return
+
+    const { data: vinculos } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id, quantity_per_unit')
+      .eq('listing_id', listingId)
+      .eq('is_active', true)
+
+    for (const vinculo of (vinculos ?? [])) {
+      const qtdDecrementar = (vinculo.quantity_per_unit ?? 1) * qtdVendida
+
+      const { data: stock } = await supabaseAdmin
+        .from('product_stock')
+        .select('id, quantity, virtual_quantity, auto_pause_enabled, min_stock_to_pause')
+        .eq('product_id', vinculo.product_id)
+        .is('platform', null)
+        .maybeSingle()
+
+      if (!stock) continue
+
+      const novaQtd = Math.max(0, (stock.quantity ?? 0) - qtdDecrementar)
+
+      await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: novaQtd, updated_at: new Date().toISOString() })
+        .eq('id', stock.id)
+
+      await supabaseAdmin.from('stock_movements').insert({
+        product_id:       vinculo.product_id,
+        product_stock_id: stock.id,
+        type:             'sale',
+        quantity:         qtdDecrementar,
+        reason:           `Venda automática: ${qtdVendida} un. anúncio ${listingId}`,
+        reference_type:   'ml_order',
+        reference_id:     String(orderId),
+        balance_after:    novaQtd,
+      })
+
+      console.log(`[stock] produto=${vinculo.product_id} -${qtdDecrementar} → físico=${novaQtd}`)
+
+      // Pausa automática: (físico + virtual) ≤ mínimo
+      if (stock.auto_pause_enabled) {
+        const platformQty = novaQtd + (stock.virtual_quantity ?? 0)
+        if (platformQty <= (stock.min_stock_to_pause ?? 0)) {
+          console.log(`[stock] PAUSA AUTO produto=${vinculo.product_id} platform_qty=${platformQty} ≤ min=${stock.min_stock_to_pause}`)
+          await supabaseAdmin
+            .from('products')
+            .update({ status: 'paused' })
+            .eq('id', vinculo.product_id)
+        }
+      }
+    }
+  }
+
+  private async processOrdersStock(orders: any[]) {
+    const toProcess = orders
+      .filter((o: any) => o.status === 'paid' || o.status === 'shipped')
+      .slice(0, 50)
+    for (const order of toProcess) {
+      for (const item of (order.order_items ?? [])) {
+        const listingId = item.item?.id
+        const qty       = item.quantity ?? 1
+        if (listingId) {
+          await this.decrementStock(order.id, listingId, qty)
+            .catch((e: Error) => console.error(`[stock] order ${order.id}:`, e.message))
+        }
+      }
     }
   }
 
