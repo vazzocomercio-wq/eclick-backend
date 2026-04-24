@@ -24,7 +24,6 @@ interface OrderRow {
   sold_at: string | null
   quantity: number | null
   sale_price: number | null
-  total_amount: number | null
   cost_price: number | null
   gross_profit: number | null
   contribution_margin: number | null
@@ -44,7 +43,7 @@ export class SnapshotsAggregationService {
     // Fetch all qualifying orders in the range at once
     const { data: orders, error } = await supabaseAdmin
       .from('orders')
-      .select('product_id, source, sold_at, quantity, sale_price, total_amount, cost_price, gross_profit, contribution_margin, status')
+      .select('product_id, source, sold_at, quantity, sale_price, cost_price, gross_profit, contribution_margin, status')
       .eq('organization_id', orgId)
       .gte('sold_at', dateFrom + 'T00:00:00.000Z')
       .lte('sold_at', dateTo + 'T23:59:59.999Z')
@@ -143,7 +142,7 @@ export class SnapshotsAggregationService {
 
   private accumulateOrder(snap: SnapshotRow, o: OrderRow): void {
     const qty    = o.quantity ?? 0
-    const total  = o.total_amount ?? ((o.sale_price ?? 0) * qty)
+    const total  = (o.sale_price ?? 0) * qty
     const gp     = o.contribution_margin ?? o.gross_profit ?? 0
     const cost   = o.cost_price ?? 0
     const status = o.status ?? ''
