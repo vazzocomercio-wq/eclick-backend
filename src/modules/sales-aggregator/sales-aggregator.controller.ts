@@ -14,11 +14,6 @@ interface BackfillBody {
   days?: number
 }
 
-function requireOrg(orgId: string | null): string {
-  if (!orgId) throw new Error('Organização não encontrada para este usuário')
-  return orgId
-}
-
 @Controller('sales-aggregator')
 @UseGuards(SupabaseAuthGuard)
 export class SalesAggregatorController {
@@ -30,16 +25,14 @@ export class SalesAggregatorController {
     @ReqUser() user: AuthUser,
     @Body() body: BackfillBody,
   ) {
-    const orgId = requireOrg(user.orgId)
     const days = Math.min(Math.max(body.days ?? 180, 1), 365)
-    const { runId } = await this.backfill.startBackfill(orgId, days, user.id)
+    const { runId } = await this.backfill.startBackfill(user.orgId, days, user.id)
     return { runId, message: `Backfill de ${days} dias iniciado` }
   }
 
   @Get('status')
   async getStatus(@ReqUser() user: AuthUser) {
-    const orgId = requireOrg(user.orgId)
-    return this.backfill.getStatus(orgId)
+    return this.backfill.getStatus(user.orgId)
   }
 
   @Post('run-now')
@@ -48,9 +41,8 @@ export class SalesAggregatorController {
     @ReqUser() user: AuthUser,
     @Body() body: BackfillBody,
   ) {
-    const orgId = requireOrg(user.orgId)
     const days = Math.min(Math.max(body.days ?? 3, 1), 30)
-    const { runId } = await this.backfill.runManual(orgId, days, user.id)
+    const { runId } = await this.backfill.runManual(user.orgId, days, user.id)
     return { runId, message: `Sincronização de ${days} dias iniciada` }
   }
 
@@ -60,8 +52,7 @@ export class SalesAggregatorController {
     @ReqUser() user: AuthUser,
     @Param('runId') runId: string,
   ) {
-    const orgId = requireOrg(user.orgId)
-    await this.backfill.cancelRun(orgId, runId)
+    await this.backfill.cancelRun(user.orgId, runId)
     return { ok: true }
   }
 }

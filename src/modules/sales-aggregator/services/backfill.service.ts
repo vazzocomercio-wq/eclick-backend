@@ -35,19 +35,20 @@ export class BackfillService {
     private readonly snapshotsAggregation: SnapshotsAggregationService,
   ) {}
 
-  async startBackfill(orgId: string, days: number, userId: string | null): Promise<{ runId: string }> {
-    return this.startRun(orgId, 'backfill', days, userId)
+  async startBackfill(orgId: string | null, days: number, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(await this.resolveOrgId(orgId), 'backfill', days, userId)
   }
 
-  async runManual(orgId: string, days: number, userId: string | null): Promise<{ runId: string }> {
-    return this.startRun(orgId, 'manual', days, userId)
+  async runManual(orgId: string | null, days: number, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(await this.resolveOrgId(orgId), 'manual', days, userId)
   }
 
-  async runDaily(orgId: string, userId: string | null): Promise<{ runId: string }> {
-    return this.startRun(orgId, 'daily', 3, userId)
+  async runDaily(orgId: string | null, userId: string | null): Promise<{ runId: string }> {
+    return this.startRun(await this.resolveOrgId(orgId), 'daily', 3, userId)
   }
 
-  async getStatus(orgId: string): Promise<{ activeRun: AggregatorRun | null; recentRuns: AggregatorRun[] }> {
+  async getStatus(orgId: string | null): Promise<{ activeRun: AggregatorRun | null; recentRuns: AggregatorRun[] }> {
+    orgId = await this.resolveOrgId(orgId)
     const { data: all } = await supabaseAdmin
       .from('aggregator_runs')
       .select('*')
@@ -61,13 +62,28 @@ export class BackfillService {
     return { activeRun, recentRuns }
   }
 
-  async cancelRun(orgId: string, runId: string): Promise<void> {
+  async cancelRun(orgId: string | null, runId: string): Promise<void> {
+    orgId = await this.resolveOrgId(orgId)
     const { error } = await supabaseAdmin
       .from('aggregator_runs')
       .update({ status: 'cancelled', completed_at: new Date().toISOString() })
       .eq('id', runId)
       .eq('organization_id', orgId)
     if (error) throw new HttpException(error.message, 500)
+  }
+
+  private async resolveOrgId(orgId: string | null): Promise<string> {
+    if (orgId) return orgId
+    const { data: conn } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (!conn?.organization_id) {
+      throw new HttpException('Nenhuma organização com ML conectado encontrada', 400)
+    }
+    return conn.organization_id as string
   }
 
   @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC
