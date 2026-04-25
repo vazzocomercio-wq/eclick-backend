@@ -57,7 +57,7 @@ export class CredentialsService {
         key_preview: preview,
         is_active:   true,
         updated_at:  new Date().toISOString(),
-      }, { onConflict: 'organization_id,provider,key_name' })
+      }, { onConflict: 'provider,key_name' })
       .select('id, provider, key_name, key_preview, is_active, last_tested_at, last_test_status, last_test_message')
       .single()
 
