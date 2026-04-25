@@ -43,9 +43,18 @@ export class CompetitorsController {
   @Post('enrich-all')
   async enrichAll(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
-    // Fire and forget — return immediately
     this.svc.enrichAllCompetitors(orgId).catch(() => {})
     return { ok: true, message: 'Enriquecimento iniciado' }
+  }
+
+  @Post('enrich-now')
+  @UseGuards()
+  async enrichNow() {
+    const HARDCODED_ORG = '4ef1aabd-c209-40b0-b034-ef69dcb66833'
+    this.svc.enrichAllCompetitors(HARDCODED_ORG).catch(e =>
+      console.error('[enrich-now] erro:', e?.message)
+    )
+    return { ok: true, message: `Enriquecimento disparado para org ${HARDCODED_ORG}` }
   }
 
   // Must be before :id to avoid route shadowing
