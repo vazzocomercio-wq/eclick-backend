@@ -51,24 +51,9 @@ export interface AddDocumentDto {
 
 @Injectable()
 export class SuppliersService {
-  // ── Org resolution (mirrors BackfillService.resolveOrgId) ────────────────────
-
-  private async resolveOrgId(orgId: string | null): Promise<string> {
-    if (orgId) return orgId
-    const { data: org } = await supabaseAdmin
-      .from('organizations')
-      .select('id')
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-    if (org?.id) return org.id as string
-    throw new HttpException('Organização não encontrada. Configure uma organização primeiro.', 400)
-  }
-
   // ── Suppliers ────────────────────────────────────────────────────────────────
 
-  async getAll(orgId: string | null, filters: { type?: string; country?: string; active?: string; q?: string }) {
-    const oid = await this.resolveOrgId(orgId)
+  async getAll(orgId: string, filters: { type?: string; country?: string; active?: string; q?: string }) {
     let query = supabaseAdmin
       .from('suppliers')
       .select(`
@@ -79,7 +64,7 @@ export class SuppliersService {
         created_at,
         supplier_products(count)
       `)
-      .eq('organization_id', oid)
+      .eq('organization_id', orgId)
       .order('name', { ascending: true })
 
     if (filters.type && filters.type !== 'all') {
@@ -102,8 +87,7 @@ export class SuppliersService {
     return data ?? []
   }
 
-  async getById(orgId: string | null, id: string) {
-    const oid = await this.resolveOrgId(orgId)
+  async getById(orgId: string, id: string) {
     const { data, error } = await supabaseAdmin
       .from('suppliers')
       .select(`
@@ -115,7 +99,7 @@ export class SuppliersService {
         ),
         supplier_documents(id, document_type, file_name, file_url, notes, created_at)
       `)
-      .eq('organization_id', oid)
+      .eq('organization_id', orgId)
       .eq('id', id)
       .maybeSingle()
 
@@ -124,24 +108,22 @@ export class SuppliersService {
     return data
   }
 
-  async create(orgId: string | null, dto: CreateSupplierDto) {
-    const oid = await this.resolveOrgId(orgId)
+  async create(orgId: string, dto: CreateSupplierDto) {
     const { data, error } = await supabaseAdmin
       .from('suppliers')
-      .insert({ ...dto, organization_id: oid, is_active: true })
+      .insert({ ...dto, organization_id: orgId, is_active: true })
       .select()
       .single()
     if (error) throw new HttpException(error.message, 500)
     return data
   }
 
-  async update(orgId: string | null, id: string, dto: UpdateSupplierDto) {
-    const oid = await this.resolveOrgId(orgId)
+  async update(orgId: string, id: string, dto: UpdateSupplierDto) {
     const { data, error } = await supabaseAdmin
       .from('suppliers')
       .update({ ...dto, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .eq('organization_id', oid)
+      .eq('organization_id', orgId)
       .select()
       .single()
     if (error) throw new HttpException(error.message, 500)
@@ -149,19 +131,18 @@ export class SuppliersService {
     return data
   }
 
-  async deactivate(orgId: string | null, id: string) {
-    const oid = await this.resolveOrgId(orgId)
+  async deactivate(orgId: string, id: string) {
     const { error } = await supabaseAdmin
       .from('suppliers')
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .eq('organization_id', oid)
+      .eq('organization_id', orgId)
     if (error) throw new HttpException(error.message, 500)
   }
 
   // ── Supplier Products ────────────────────────────────────────────────────────
 
-  async getProducts(orgId: string | null, supplierId: string) {
+  async getProducts(orgId: string, supplierId: string) {
     await this.assertOwnership(orgId, supplierId)
     const { data, error } = await supabaseAdmin
       .from('supplier_products')
@@ -177,7 +158,7 @@ export class SuppliersService {
     return data ?? []
   }
 
-  async linkProduct(orgId: string | null, supplierId: string, dto: LinkProductDto) {
+  async linkProduct(orgId: string, supplierId: string, dto: LinkProductDto) {
     await this.assertOwnership(orgId, supplierId)
     const { data, error } = await supabaseAdmin
       .from('supplier_products')
@@ -191,7 +172,7 @@ export class SuppliersService {
     return data
   }
 
-  async updateProductLink(orgId: string | null, supplierId: string, productId: string, dto: UpdateProductLinkDto) {
+  async updateProductLink(orgId: string, supplierId: string, productId: string, dto: UpdateProductLinkDto) {
     await this.assertOwnership(orgId, supplierId)
     const { data, error } = await supabaseAdmin
       .from('supplier_products')
@@ -205,7 +186,7 @@ export class SuppliersService {
     return data
   }
 
-  async unlinkProduct(orgId: string | null, supplierId: string, productId: string) {
+  async unlinkProduct(orgId: string, supplierId: string, productId: string) {
     await this.assertOwnership(orgId, supplierId)
     const { error } = await supabaseAdmin
       .from('supplier_products')
@@ -217,7 +198,7 @@ export class SuppliersService {
 
   // ── Documents ────────────────────────────────────────────────────────────────
 
-  async addDocument(orgId: string | null, supplierId: string, dto: AddDocumentDto) {
+  async addDocument(orgId: string, supplierId: string, dto: AddDocumentDto) {
     await this.assertOwnership(orgId, supplierId)
     const { data, error } = await supabaseAdmin
       .from('supplier_documents')
@@ -228,7 +209,7 @@ export class SuppliersService {
     return data
   }
 
-  async removeDocument(orgId: string | null, supplierId: string, docId: string) {
+  async removeDocument(orgId: string, supplierId: string, docId: string) {
     await this.assertOwnership(orgId, supplierId)
     const { error } = await supabaseAdmin
       .from('supplier_documents')
@@ -240,13 +221,12 @@ export class SuppliersService {
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  private async assertOwnership(orgId: string | null, supplierId: string) {
-    const oid = await this.resolveOrgId(orgId)
+  private async assertOwnership(orgId: string, supplierId: string) {
     const { data } = await supabaseAdmin
       .from('suppliers')
       .select('id')
       .eq('id', supplierId)
-      .eq('organization_id', oid)
+      .eq('organization_id', orgId)
       .maybeSingle()
     if (!data) throw new NotFoundException('Fornecedor não encontrado')
   }

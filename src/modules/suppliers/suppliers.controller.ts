@@ -1,113 +1,155 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query,
-  UseGuards, HttpCode, HttpStatus,
+  UseGuards, HttpCode, HttpStatus, Headers, HttpException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
-import { ReqUser } from '../../common/decorators/user.decorator'
+import { supabaseAdmin } from '../../common/supabase'
 import {
   SuppliersService, CreateSupplierDto, UpdateSupplierDto,
   LinkProductDto, UpdateProductLinkDto, AddDocumentDto,
 } from './suppliers.service'
-
-interface AuthUser { id: string; orgId: string | null }
 
 @Controller('suppliers')
 @UseGuards(SupabaseAuthGuard)
 export class SuppliersController {
   constructor(private readonly svc: SuppliersService) {}
 
+  // Extracts organization_id directly from the JWT — same approach used in
+  // supabase-auth.guard.ts but with explicit logging so failures are visible.
+  private async resolveOrgId(auth: string | undefined): Promise<string> {
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    console.log('[suppliers] token recebido:', !!token)
+
+    const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token ?? '')
+    console.log('[suppliers] user do supabase:', user?.id, userError?.message)
+
+    const { data, error } = await supabaseAdmin
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', user?.id ?? '')
+      .single()
+    console.log('[suppliers] query organization_members result:', data, error?.message)
+    console.log('[suppliers] org encontrada:', data?.organization_id)
+
+    if (error || !data) throw new HttpException('Organização não encontrada', 400)
+    return data.organization_id as string
+  }
+
   // ── Suppliers ────────────────────────────────────────────────────────────────
 
   @Get()
-  getAll(
-    @ReqUser() user: AuthUser,
+  async getAll(
+    @Headers('authorization') auth: string,
     @Query('type')    type?:    string,
     @Query('country') country?: string,
     @Query('active')  active?:  string,
     @Query('q')       q?:       string,
   ) {
-    return this.svc.getAll(user.orgId, { type, country, active, q })
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getAll(orgId, { type, country, active, q })
   }
 
   @Get(':id')
-  getById(@ReqUser() user: AuthUser, @Param('id') id: string) {
-    return this.svc.getById(user.orgId, id)
+  async getById(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getById(orgId, id)
   }
 
   @Post()
-  create(@ReqUser() user: AuthUser, @Body() dto: CreateSupplierDto) {
-    return this.svc.create(user.orgId, dto)
+  async create(
+    @Headers('authorization') auth: string,
+    @Body() dto: CreateSupplierDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.create(orgId, dto)
   }
 
   @Patch(':id')
-  update(
-    @ReqUser() user: AuthUser,
+  async update(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Body() dto: UpdateSupplierDto,
   ) {
-    return this.svc.update(user.orgId, id, dto)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.update(orgId, id, dto)
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deactivate(@ReqUser() user: AuthUser, @Param('id') id: string) {
-    return this.svc.deactivate(user.orgId, id)
+  async deactivate(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.deactivate(orgId, id)
   }
 
   // ── Products ─────────────────────────────────────────────────────────────────
 
   @Get(':id/products')
-  getProducts(@ReqUser() user: AuthUser, @Param('id') id: string) {
-    return this.svc.getProducts(user.orgId, id)
+  async getProducts(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getProducts(orgId, id)
   }
 
   @Post(':id/products')
-  linkProduct(
-    @ReqUser() user: AuthUser,
+  async linkProduct(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Body() dto: LinkProductDto,
   ) {
-    return this.svc.linkProduct(user.orgId, id, dto)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.linkProduct(orgId, id, dto)
   }
 
   @Patch(':id/products/:productId')
-  updateProductLink(
-    @ReqUser() user: AuthUser,
+  async updateProductLink(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Param('productId') productId: string,
     @Body() dto: UpdateProductLinkDto,
   ) {
-    return this.svc.updateProductLink(user.orgId, id, productId, dto)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.updateProductLink(orgId, id, productId, dto)
   }
 
   @Delete(':id/products/:productId')
   @HttpCode(HttpStatus.NO_CONTENT)
-  unlinkProduct(
-    @ReqUser() user: AuthUser,
+  async unlinkProduct(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Param('productId') productId: string,
   ) {
-    return this.svc.unlinkProduct(user.orgId, id, productId)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.unlinkProduct(orgId, id, productId)
   }
 
   // ── Documents ────────────────────────────────────────────────────────────────
 
   @Post(':id/documents')
-  addDocument(
-    @ReqUser() user: AuthUser,
+  async addDocument(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Body() dto: AddDocumentDto,
   ) {
-    return this.svc.addDocument(user.orgId, id, dto)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.addDocument(orgId, id, dto)
   }
 
   @Delete(':id/documents/:docId')
   @HttpCode(HttpStatus.NO_CONTENT)
-  removeDocument(
-    @ReqUser() user: AuthUser,
+  async removeDocument(
+    @Headers('authorization') auth: string,
     @Param('id') id: string,
     @Param('docId') docId: string,
   ) {
-    return this.svc.removeDocument(user.orgId, id, docId)
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.removeDocument(orgId, id, docId)
   }
 }
