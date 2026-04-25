@@ -9,6 +9,7 @@ export interface CreateCompetitorDto {
   product_id: string
   platform: string
   url: string
+  listing_id?: string | null
   title?: string | null
   seller?: string | null
   current_price: number
@@ -29,6 +30,7 @@ export class CompetitorsService {
         product_id:      dto.product_id,
         platform:        dto.platform,
         url:             dto.url,
+        listing_id:      dto.listing_id ?? null,
         title:           dto.title    ?? null,
         seller:          dto.seller   ?? null,
         current_price:   dto.current_price,
@@ -168,12 +170,23 @@ export class CompetitorsService {
     const sold  = (enriched.sold_quantity as number) ?? 0
 
     if (price > 0) {
+      const sellerNickname = (enriched as any)?.seller?.nickname ?? undefined
       await supabaseAdmin.from('competitors').update({
-        current_price: price,
-        title:         (enriched.title as string) ?? undefined,
-        photo_url:     (enriched.thumbnail as string) ?? undefined,
-        seller:        (enriched as any)?.seller?.nickname ?? undefined,
-        last_checked:  new Date().toISOString(),
+        current_price:     price,
+        available_quantity: qty,
+        sold_quantity:     sold,
+        title:             (enriched.title as string) ?? undefined,
+        photo_url:         (enriched.thumbnail as string) ?? undefined,
+        seller:            sellerNickname,
+        seller_nickname:   sellerNickname,
+        seller_reputation: (enriched as any)?.seller?.seller_reputation?.level_id ?? undefined,
+        rating:            (enriched.rating as number) ?? undefined,
+        reviews_total:     (enriched.reviews_total as number) ?? undefined,
+        visits_30d:        (enriched.visits_30d as number) ?? undefined,
+        listing_type:      (enriched.listing_type_id as string) ?? undefined,
+        free_shipping:     (enriched as any)?.shipping?.free_shipping ?? undefined,
+        enriched_at:       new Date().toISOString(),
+        last_checked:      new Date().toISOString(),
       }).eq('id', id)
 
       await this.saveSnapshot(id, price, qty, sold)
@@ -206,8 +219,21 @@ export class CompetitorsService {
         const qty   = (enriched.available_quantity as number) ?? 0
         const sold  = (enriched.sold_quantity as number) ?? 0
         if (price > 0) {
+          const sellerNickname = (enriched as any)?.seller?.nickname ?? undefined
           await supabaseAdmin.from('competitors').update({
-            current_price: price, last_checked: new Date().toISOString(),
+            current_price:     price,
+            available_quantity: qty,
+            sold_quantity:     sold,
+            seller:            sellerNickname,
+            seller_nickname:   sellerNickname,
+            seller_reputation: (enriched as any)?.seller?.seller_reputation?.level_id ?? undefined,
+            rating:            (enriched.rating as number) ?? undefined,
+            reviews_total:     (enriched.reviews_total as number) ?? undefined,
+            visits_30d:        (enriched.visits_30d as number) ?? undefined,
+            listing_type:      (enriched.listing_type_id as string) ?? undefined,
+            free_shipping:     (enriched as any)?.shipping?.free_shipping ?? undefined,
+            enriched_at:       new Date().toISOString(),
+            last_checked:      new Date().toISOString(),
           }).eq('id', c.id)
           await this.saveSnapshot(c.id, price, qty, sold)
         }
