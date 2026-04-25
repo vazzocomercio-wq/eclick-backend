@@ -7,6 +7,7 @@ import { OrdersModule } from './modules/orders/orders.module'
 import { ProductsModule } from './modules/products/products.module'
 import { SalesAggregatorModule } from './modules/sales-aggregator/sales-aggregator.module'
 import { SuppliersModule } from './modules/suppliers/suppliers.module'
+import { ComprasModule } from './modules/compras/compras.module'
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { SuppliersModule } from './modules/suppliers/suppliers.module'
     ProductsModule,
     SalesAggregatorModule,
     SuppliersModule,
+    ComprasModule,
   ],
   controllers: [AppController],
   providers: [AppService],
