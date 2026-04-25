@@ -13,6 +13,7 @@ import { CompetitorsModule } from './modules/competitors/competitors.module'
 import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 import { CredentialsModule } from './modules/credentials/credentials.module'
 import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
+import { StockModule } from './modules/stock/stock.module'
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
     AtendenteIaModule,
     CredentialsModule,
     AiUsageModule,
+    StockModule,
   ],
   controllers: [AppController],
   providers: [AppService],
