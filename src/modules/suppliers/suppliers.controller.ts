@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query,
-  UseGuards, HttpCode, HttpStatus,
+  UseGuards, HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -12,7 +12,7 @@ import {
 interface AuthUser { id: string; orgId: string | null }
 
 function orgId(user: AuthUser): string {
-  if (!user.orgId) throw new Error('Organização não encontrada')
+  if (!user.orgId) throw new BadRequestException('Organização não encontrada para este usuário')
   return user.orgId
 }
 
