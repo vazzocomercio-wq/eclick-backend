@@ -34,14 +34,34 @@ export class StockController {
   }
 
   @Post('distribution')
-  createDistribution(@Body() body: Record<string, unknown>) {
+  createDistribution(@Body() body: {
+    product_id: string
+    channel: string
+    account_id?: string
+    distribution_mode?: string
+    percentage?: number
+    fixed_quantity?: number
+    min_quantity?: number
+    max_quantity?: number
+    priority?: number
+  }) {
     return this.svc.saveDistribution(body)
   }
 
   @Patch('distribution/:id')
   updateDistribution(
     @Param('id') id: string,
-    @Body() body: Record<string, unknown>,
+    @Body() body: Partial<{
+      channel: string
+      account_id: string
+      distribution_mode: string
+      percentage: number
+      fixed_quantity: number
+      min_quantity: number
+      max_quantity: number
+      priority: number
+      is_active: boolean
+    }>,
   ) {
     return this.svc.updateDistribution(id, body)
   }
