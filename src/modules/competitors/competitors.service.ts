@@ -1,4 +1,4 @@
-import { Injectable, HttpException } from '@nestjs/common'
+import { Injectable, HttpException, OnModuleInit, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
@@ -18,9 +18,22 @@ export interface CreateCompetitorDto {
 }
 
 @Injectable()
-export class CompetitorsService {
+export class CompetitorsService implements OnModuleInit {
+  private readonly logger = new Logger(CompetitorsService.name)
 
-  // ── Core CRUD ────────────────────────────────────────────────────────────────
+  // ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+  onModuleInit() {
+    setTimeout(async () => {
+      this.logger.log('iniciando enriquecimento inicial...')
+      const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
+      for (const org of orgs ?? []) {
+        await this.enrichAllCompetitors(org.id)
+      }
+    }, 5000)
+  }
+
+  // ── Core CRUD ─────────────────────────────────────────────────────────────────
 
   async create(orgId: string, dto: CreateCompetitorDto) {
     const { data: competitor, error } = await supabaseAdmin
@@ -43,16 +56,19 @@ export class CompetitorsService {
       .single()
 
     if (error || !competitor) {
-      console.error('[competitors.create] erro:', error)
       throw new HttpException(error?.message ?? 'Erro ao criar concorrente', 400)
     }
 
     try {
       await supabaseAdmin
         .from('price_history')
-        .insert({ competitor_id: competitor.id, price: dto.current_price })
-    } catch (e: any) {
-      console.warn('[competitors.create] price_history insert failed:', e.message)
+        .insert({
+          competitor_id: competitor.id,
+          price: dto.current_price,
+          recorded_at: new Date().toISOString(),
+        })
+    } catch (e: unknown) {
+      this.logger.warn('price_history insert failed: ' + (e instanceof Error ? e.message : e))
     }
 
     return competitor
@@ -61,7 +77,7 @@ export class CompetitorsService {
   async list(orgId: string, productId?: string) {
     let q = supabaseAdmin
       .from('competitors')
-      .select('id, product_id, platform, url, title, seller, current_price, my_price, photo_url, status, last_checked, created_at')
+      .select('id, product_id, platform, url, listing_id, title, seller, current_price, my_price, photo_url, status, last_checked, enriched_at, created_at')
       .eq('organization_id', orgId)
       .order('created_at', { ascending: false })
 
@@ -82,10 +98,9 @@ export class CompetitorsService {
     return { ok: true }
   }
 
-  // ── Detail & History ─────────────────────────────────────────────────────────
+  // ── Detail & History ──────────────────────────────────────────────────────────
 
   async getOne(orgId: string, id: string) {
-    console.log('[competitors.getOne] id:', id, 'orgId:', orgId)
     const { data, error } = await supabaseAdmin
       .from('competitors')
       .select('*')
@@ -93,20 +108,31 @@ export class CompetitorsService {
       .eq('organization_id', orgId)
       .single()
 
-    console.log('[competitors.getOne] found:', !!data, 'error:', error?.message ?? null)
     if (error || !data) throw new HttpException('Concorrente não encontrado', 404)
 
     const { data: history } = await supabaseAdmin
-      .from('competitor_price_history')
-      .select('price, available_quantity, sold_quantity, checked_at')
+      .from('price_history')
+      .select('price, my_price, available_quantity, sold_quantity, recorded_at, checked_at')
       .eq('competitor_id', id)
-      .order('checked_at', { ascending: false })
+      .order('recorded_at', { ascending: false })
       .limit(180)
 
     return { ...data, price_history: history ?? [] }
   }
 
-  // ── ML Enrichment ────────────────────────────────────────────────────────────
+  async getHistory(id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('price_history')
+      .select('id, price, my_price, available_quantity, sold_quantity, recorded_at, checked_at')
+      .eq('competitor_id', id)
+      .order('recorded_at', { ascending: false })
+      .limit(360)
+
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  // ── ML Enrichment (public API) ────────────────────────────────────────────────
 
   async enrichFromML(listingId: string): Promise<Record<string, unknown>> {
     const attrs = 'id,title,price,available_quantity,sold_quantity,thumbnail,pictures,seller,shipping,listing_type_id,permalink,category_id,date_created,last_updated,health,attributes'
@@ -119,14 +145,14 @@ export class CompetitorsService {
     ])
 
     if (itemRes.status === 'rejected') {
-      const status = (itemRes.reason as any)?.response?.status ?? 500
+      const status = (itemRes.reason as { response?: { status?: number } })?.response?.status ?? 500
       throw new HttpException(`Item ${listingId} não encontrado na ML`, status)
     }
 
-    const item     = itemRes.value.data
-    const visits   = visitsRes.status === 'fulfilled'  ? visitsRes.value.data   : {}
-    const desc     = descRes.status === 'fulfilled'    ? descRes.value.data     : {}
-    const reviews  = reviewsRes.status === 'fulfilled' ? reviewsRes.value.data  : {}
+    const item    = itemRes.value.data
+    const visits  = visitsRes.status  === 'fulfilled' ? visitsRes.value.data  : {}
+    const desc    = descRes.status    === 'fulfilled' ? descRes.value.data    : {}
+    const reviews = reviewsRes.status === 'fulfilled' ? reviewsRes.value.data : {}
 
     return {
       ...item,
@@ -138,16 +164,149 @@ export class CompetitorsService {
     }
   }
 
-  // ── Snapshot ─────────────────────────────────────────────────────────────────
+  // ── Enrich single competitor ──────────────────────────────────────────────────
+
+  async enrichCompetitor(competitorId: string) {
+    const { data: competitor } = await supabaseAdmin
+      .from('competitors')
+      .select('*')
+      .eq('id', competitorId)
+      .single()
+
+    if (!competitor) return null
+
+    // Extract listing_id from URL if missing
+    let listingId = competitor.listing_id as string | null
+    if (!listingId && competitor.url) {
+      const m = (competitor.url as string).match(/MLB[0-9]+/i)
+      if (m) {
+        listingId = m[0].toUpperCase()
+        await supabaseAdmin
+          .from('competitors')
+          .update({ listing_id: listingId })
+          .eq('id', competitorId)
+      }
+    }
+
+    if (!listingId) return null
+
+    let item: Record<string, unknown>
+    try {
+      item = await this.enrichFromML(listingId)
+    } catch (e: unknown) {
+      this.logger.warn(`enrichCompetitor ${listingId} failed: ${(e as Error).message}`)
+      return null
+    }
+
+    const price    = (item.price as number) ?? 0
+    const qty      = (item.available_quantity as number) ?? 0
+    const sold     = (item.sold_quantity as number) ?? 0
+    const seller   = (item as { seller?: { nickname?: string } }).seller
+    const shipping = (item as { shipping?: { free_shipping?: boolean } }).shipping
+
+    // Update competitor record
+    await supabaseAdmin
+      .from('competitors')
+      .update({
+        current_price:      price,
+        available_quantity: qty,
+        sold_quantity:      sold,
+        title:              (item.title as string) ?? undefined,
+        photo_url:          (item.thumbnail as string) ?? undefined,
+        seller:             seller?.nickname ?? undefined,
+        seller_nickname:    seller?.nickname ?? undefined,
+        seller_reputation:  (item as { seller?: { seller_reputation?: { level_id?: string } } }).seller?.seller_reputation?.level_id ?? undefined,
+        rating:             (item.rating as number) ?? undefined,
+        reviews_total:      (item.reviews_total as number) ?? undefined,
+        visits_30d:         (item.visits_30d as number) ?? undefined,
+        listing_type:       (item.listing_type_id as string) ?? undefined,
+        free_shipping:      shipping?.free_shipping ?? undefined,
+        enriched_at:        new Date().toISOString(),
+        last_checked:       new Date().toISOString(),
+      })
+      .eq('id', competitorId)
+
+    // Save to price_history with new columns
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from('price_history')
+      .insert({
+        competitor_id:      competitorId,
+        organization_id:    competitor.organization_id,
+        product_id:         competitor.product_id,
+        price,
+        my_price:           competitor.my_price,
+        available_quantity: qty,
+        sold_quantity:      sold,
+        recorded_at:        now,
+        checked_at:         now,
+      })
+      .then(({ error }) => {
+        if (error) this.logger.warn(`price_history insert failed: ${error.message}`)
+      })
+
+    // Alert if price diff > 10%
+    const myPrice = Number(competitor.my_price)
+    if (myPrice > 0 && price > 0) {
+      const diff_pct = ((myPrice - price) / myPrice) * 100
+      if (Math.abs(diff_pct) > 10) {
+        await supabaseAdmin
+          .from('competitor_alerts')
+          .upsert({
+            competitor_id:    competitorId,
+            organization_id:  competitor.organization_id,
+            product_id:       competitor.product_id,
+            alert_type:       diff_pct > 0 ? 'price_above' : 'price_below',
+            my_price:         myPrice,
+            competitor_price: price,
+            difference_pct:   diff_pct,
+            created_at:       now,
+          })
+          .then(({ error }) => {
+            if (error) this.logger.warn(`competitor_alerts upsert failed: ${error.message}`)
+          })
+      }
+    }
+
+    this.logger.log(`enriched ${listingId}: R$ ${price}`)
+    return item
+  }
+
+  // ── Enrich all for an org ─────────────────────────────────────────────────────
+
+  async enrichAllCompetitors(orgId: string) {
+    const { data: competitors } = await supabaseAdmin
+      .from('competitors')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .not('url', 'is', null)
+
+    this.logger.log(`enriching ${competitors?.length ?? 0} competitors for org ${orgId}`)
+
+    for (const c of competitors ?? []) {
+      await this.enrichCompetitor(c.id)
+      await new Promise(r => setTimeout(r, 500))
+    }
+  }
+
+  // ── Snapshot (legacy) ─────────────────────────────────────────────────────────
 
   async saveSnapshot(competitorId: string, price: number, availableQty: number, soldQty: number) {
     const { error } = await supabaseAdmin
-      .from('competitor_price_history')
-      .insert({ competitor_id: competitorId, price, available_quantity: availableQty, sold_quantity: soldQty })
-    if (error) console.warn('[competitors] snapshot insert failed:', error.message)
+      .from('price_history')
+      .insert({
+        competitor_id:      competitorId,
+        price,
+        available_quantity: availableQty,
+        sold_quantity:      soldQty,
+        recorded_at:        new Date().toISOString(),
+        checked_at:         new Date().toISOString(),
+      })
+    if (error) this.logger.warn('snapshot insert failed: ' + error.message)
   }
 
-  // ── Refresh ───────────────────────────────────────────────────────────────────
+  // ── Refresh single (legacy endpoint, preserves existing behavior) ─────────────
 
   async refresh(orgId: string, id: string) {
     const { data: row, error } = await supabaseAdmin
@@ -159,36 +318,34 @@ export class CompetitorsService {
 
     if (error || !row) throw new HttpException('Concorrente não encontrado', 404)
 
-    const mlbMatch = row.url?.match(/MLB[UBub]?(\d+)/i)
-    const listingId = mlbMatch ? `MLB${mlbMatch[1]}` : null
+    const mlbMatch = (row.url as string | null)?.match(/MLB[0-9]+/i)
+    const listingId = mlbMatch ? mlbMatch[0].toUpperCase() : null
 
     let enriched: Record<string, unknown> = {}
-    if (listingId) {
-      enriched = await this.enrichFromML(listingId)
-    }
+    if (listingId) enriched = await this.enrichFromML(listingId)
 
-    const price = (enriched.price as number) ?? 0
-    const qty   = (enriched.available_quantity as number) ?? 0
-    const sold  = (enriched.sold_quantity as number) ?? 0
+    const price  = (enriched.price as number) ?? 0
+    const qty    = (enriched.available_quantity as number) ?? 0
+    const sold   = (enriched.sold_quantity as number) ?? 0
+    const seller = (enriched as { seller?: { nickname?: string } }).seller
 
     if (price > 0) {
-      const sellerNickname = (enriched as any)?.seller?.nickname ?? undefined
       await supabaseAdmin.from('competitors').update({
-        current_price:     price,
+        current_price:      price,
         available_quantity: qty,
-        sold_quantity:     sold,
-        title:             (enriched.title as string) ?? undefined,
-        photo_url:         (enriched.thumbnail as string) ?? undefined,
-        seller:            sellerNickname,
-        seller_nickname:   sellerNickname,
-        seller_reputation: (enriched as any)?.seller?.seller_reputation?.level_id ?? undefined,
-        rating:            (enriched.rating as number) ?? undefined,
-        reviews_total:     (enriched.reviews_total as number) ?? undefined,
-        visits_30d:        (enriched.visits_30d as number) ?? undefined,
-        listing_type:      (enriched.listing_type_id as string) ?? undefined,
-        free_shipping:     (enriched as any)?.shipping?.free_shipping ?? undefined,
-        enriched_at:       new Date().toISOString(),
-        last_checked:      new Date().toISOString(),
+        sold_quantity:      sold,
+        title:              (enriched.title as string) ?? undefined,
+        photo_url:          (enriched.thumbnail as string) ?? undefined,
+        seller:             seller?.nickname ?? undefined,
+        seller_nickname:    seller?.nickname ?? undefined,
+        seller_reputation:  (enriched as { seller?: { seller_reputation?: { level_id?: string } } }).seller?.seller_reputation?.level_id ?? undefined,
+        rating:             (enriched.rating as number) ?? undefined,
+        reviews_total:      (enriched.reviews_total as number) ?? undefined,
+        visits_30d:         (enriched.visits_30d as number) ?? undefined,
+        listing_type:       (enriched.listing_type_id as string) ?? undefined,
+        free_shipping:      (enriched as { shipping?: { free_shipping?: boolean } }).shipping?.free_shipping ?? undefined,
+        enriched_at:        new Date().toISOString(),
+        last_checked:       new Date().toISOString(),
       }).eq('id', id)
 
       await this.saveSnapshot(id, price, qty, sold)
@@ -198,53 +355,14 @@ export class CompetitorsService {
     return { ...base, ml_data: enriched }
   }
 
-  // ── Scheduled poll ────────────────────────────────────────────────────────────
+  // ── Scheduled enrichment every 2h ────────────────────────────────────────────
 
-  @Cron('0 */6 * * *')
-  async pollAllCompetitors() {
-    console.log('[competitors] polling all active competitors…')
-    const { data: all } = await supabaseAdmin
-      .from('competitors')
-      .select('id, url')
-      .eq('status', 'active')
-
-    if (!all?.length) return
-
-    let ok = 0, fail = 0
-    for (const c of all) {
-      try {
-        const mlbMatch = c.url?.match(/MLB[UBub]?(\d+)/i)
-        if (!mlbMatch) { fail++; continue }
-        const listingId = `MLB${mlbMatch[1]}`
-        const enriched  = await this.enrichFromML(listingId)
-        const price = (enriched.price as number) ?? 0
-        const qty   = (enriched.available_quantity as number) ?? 0
-        const sold  = (enriched.sold_quantity as number) ?? 0
-        if (price > 0) {
-          const sellerNickname = (enriched as any)?.seller?.nickname ?? undefined
-          await supabaseAdmin.from('competitors').update({
-            current_price:     price,
-            available_quantity: qty,
-            sold_quantity:     sold,
-            seller:            sellerNickname,
-            seller_nickname:   sellerNickname,
-            seller_reputation: (enriched as any)?.seller?.seller_reputation?.level_id ?? undefined,
-            rating:            (enriched.rating as number) ?? undefined,
-            reviews_total:     (enriched.reviews_total as number) ?? undefined,
-            visits_30d:        (enriched.visits_30d as number) ?? undefined,
-            listing_type:      (enriched.listing_type_id as string) ?? undefined,
-            free_shipping:     (enriched as any)?.shipping?.free_shipping ?? undefined,
-            enriched_at:       new Date().toISOString(),
-            last_checked:      new Date().toISOString(),
-          }).eq('id', c.id)
-          await this.saveSnapshot(c.id, price, qty, sold)
-        }
-        ok++
-      } catch (e: any) {
-        console.warn(`[competitors] poll failed for ${c.id}:`, e.message)
-        fail++
-      }
+  @Cron('0 */2 * * *')
+  async scheduledEnrichment() {
+    this.logger.log('scheduled enrichment starting…')
+    const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
+    for (const org of orgs ?? []) {
+      await this.enrichAllCompetitors(org.id)
     }
-    console.log(`[competitors] poll done — ok:${ok} fail:${fail}`)
   }
 }

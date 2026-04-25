@@ -40,7 +40,20 @@ export class CompetitorsController {
     return this.scraper.scrapeProduct(url)
   }
 
+  @Post('enrich-all')
+  async enrichAll(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    // Fire and forget — return immediately
+    this.svc.enrichAllCompetitors(orgId).catch(() => {})
+    return { ok: true, message: 'Enriquecimento iniciado' }
+  }
+
   // Must be before :id to avoid route shadowing
+  @Get(':id/history')
+  getHistory(@Param('id') id: string) {
+    return this.svc.getHistory(id)
+  }
+
   @Get(':id/refresh')
   async refresh(
     @Headers('authorization') auth: string,
