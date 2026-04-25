@@ -234,36 +234,45 @@ export class MercadolivreService {
   }
 
   // ── Item info (for competitor lookup) ────────────────────────────────────
+  // Uses ML public endpoint — no seller token required
 
   async getItemInfo(_orgId: string, url: string) {
-    const numericMatch = url.match(/MLB-?(\d{7,})\b/i)
+    // Handle MLBU / MLBB / MLB patterns (e.g. MLBU3911384208 → MLB3911384208)
+    const idMatch = url.match(/MLB[UBub]?(\d{7,})/i)
 
-    if (numericMatch) {
-      const mlbId = `MLB${numericMatch[1]}`
+    if (idMatch) {
+      const mlbId = `MLB${idMatch[1]}`
 
-      const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`)
-        .catch((err: any) => {
-          throw new HttpException(
-            err.response?.data?.message ?? `ML retornou ${err.response?.status ?? 500}`,
-            err.response?.status ?? 500,
-          )
+      let item: Record<string, unknown>
+      try {
+        // Public endpoint — no Authorization header
+        const { data } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
+          params: { attributes: 'id,title,price,available_quantity,seller_id,thumbnail,permalink,shipping' },
         })
+        item = data as Record<string, unknown>
+      } catch (err: any) {
+        throw new HttpException(
+          err.response?.data?.message ?? `ML retornou ${err.response?.status ?? 500}`,
+          err.response?.status ?? 500,
+        )
+      }
 
-      let seller = `Vendedor #${item.data.seller_id}`
-      await axios.get(`${ML_BASE}/users/${item.data.seller_id}`)
-        .then((r: any) => { if (r.data.nickname) seller = r.data.nickname })
+      let seller = `Vendedor #${item.seller_id}`
+      await axios.get(`${ML_BASE}/users/${item.seller_id}`)
+        .then((r: any) => { if (r.data?.nickname) seller = r.data.nickname })
         .catch(() => { /* non-fatal */ })
 
       return {
-        title: item.data.title ?? null,
-        price: item.data.price ?? null,
+        title:     item.title     ?? null,
+        price:     item.price     ?? null,
         seller,
-        thumbnail: item.data.thumbnail ?? null,
+        thumbnail: item.thumbnail ?? null,
         mlbId,
-        permalink: item.data.permalink ?? null,
+        permalink: item.permalink ?? null,
       }
     }
 
+    // Fallback: extract slug from URL and run a public search
     let query: string
     try {
       const { pathname } = new URL(url)
@@ -275,25 +284,30 @@ export class MercadolivreService {
       throw new BadRequestException('Não foi possível extrair o produto desta URL.')
     }
 
-    const { data: search } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
-      params: { q: query, limit: 3 },
-    }).catch((err: any) => {
+    let searchData: Record<string, unknown>
+    try {
+      const { data } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
+        params: { q: query, limit: 3 },
+      })
+      searchData = data as Record<string, unknown>
+    } catch (err: any) {
       throw new HttpException(
         err.response?.data?.message ?? `ML Search retornou ${err.response?.status ?? 500}`,
         err.response?.status ?? 500,
       )
-    })
+    }
 
-    const result = search.data.results?.[0]
+    const results = searchData.results as Array<Record<string, unknown>> | undefined
+    const result = results?.[0]
     if (!result) throw new NotFoundException('Nenhum produto encontrado para esta URL.')
 
     return {
-      title: result.title ?? null,
-      price: result.price ?? null,
-      seller: result.seller?.nickname ?? null,
-      thumbnail: result.thumbnail ?? null,
-      mlbId: result.id ?? null,
-      permalink: result.permalink ?? null,
+      title:     result.title                                       ?? null,
+      price:     result.price                                       ?? null,
+      seller:    (result.seller as Record<string, unknown>)?.nickname ?? null,
+      thumbnail: result.thumbnail                                   ?? null,
+      mlbId:     result.id                                          ?? null,
+      permalink: result.permalink                                   ?? null,
     }
   }
 
