@@ -40,6 +40,25 @@ export class CompetitorsController {
     return this.scraper.scrapeProduct(url)
   }
 
+  // Must be before :id to avoid route shadowing
+  @Get(':id/refresh')
+  async refresh(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.refresh(orgId, id)
+  }
+
+  @Get(':id')
+  async getOne(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getOne(orgId, id)
+  }
+
   @Get()
   async list(
     @Headers('authorization') auth: string,
