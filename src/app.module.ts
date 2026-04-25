@@ -12,6 +12,7 @@ import { PurchaseOrdersModule } from './modules/purchase-orders/purchase-orders.
 import { CompetitorsModule } from './modules/competitors/competitors.module'
 import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 import { CredentialsModule } from './modules/credentials/credentials.module'
+import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { CredentialsModule } from './modules/credentials/credentials.module'
     CompetitorsModule,
     AtendenteIaModule,
     CredentialsModule,
+    AiUsageModule,
   ],
   controllers: [AppController],
   providers: [AppService],
