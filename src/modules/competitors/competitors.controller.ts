@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Delete, Body, Param, Query, Headers, HttpException, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { Public } from '../../common/decorators/public.decorator'
 import { supabaseAdmin } from '../../common/supabase'
 import { CompetitorsService, CreateCompetitorDto } from './competitors.service'
 import { ScraperService } from '../scraper/scraper.service'
@@ -48,7 +49,7 @@ export class CompetitorsController {
   }
 
   @Post('enrich-now')
-  @UseGuards()
+  @Public()
   async enrichNow() {
     const HARDCODED_ORG = '4ef1aabd-c209-40b0-b034-ef69dcb66833'
     this.svc.enrichAllCompetitors(HARDCODED_ORG).catch(e =>
