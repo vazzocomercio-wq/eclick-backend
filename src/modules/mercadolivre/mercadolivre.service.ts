@@ -236,12 +236,30 @@ export class MercadolivreService {
   // ── Item info (for competitor lookup) ────────────────────────────────────
   // Uses ML public endpoint — no seller token required
 
-  async getItemInfo(_orgId: string, url: string) {
-    // Handle MLBU / MLBB / MLB patterns (e.g. MLBU3911384208 → MLB3911384208)
-    const idMatch = url.match(/MLB[UBub]?(\d{7,})/i)
+  private extractMlbId(input: string): string | null {
+    const cleaned = input.trim()
+    if (/^MLB\d+$/i.test(cleaned)) return cleaned.toUpperCase()
+    const patterns = [
+      /MLB[UBub]?(\d+)/i,         // MLBU3911384208 or MLB3911384208
+      /\/p\/MLB(\d+)/i,            // /p/MLB1234567
+      /[-_]MLB(\d+)/i,             // -MLB1234567
+      /item_id=MLB(\d+)/i,         // item_id=MLB1234567
+      /[^\d](\d{8,12})(?:-_JM|#)/,// 12345678-_JM (numeric suffix only)
+    ]
+    for (const pattern of patterns) {
+      const match = cleaned.match(pattern)
+      if (match) {
+        const id = match[1] ?? match[0]
+        return id.toUpperCase().startsWith('MLB') ? id.toUpperCase() : `MLB${id}`
+      }
+    }
+    return null
+  }
 
-    if (idMatch) {
-      const mlbId = `MLB${idMatch[1]}`
+  async getItemInfo(_orgId: string, url: string) {
+    const mlbId = this.extractMlbId(url)
+
+    if (mlbId) {
 
       let item: Record<string, unknown>
       try {
@@ -272,43 +290,10 @@ export class MercadolivreService {
       }
     }
 
-    // Fallback: extract slug from URL and run a public search
-    let query: string
-    try {
-      const { pathname } = new URL(url)
-      const segments = pathname.split('/').filter((s: string) => s.length > 3 && !s.startsWith('_') && s !== 'p')
-      const slug = segments.find((s: string) => s.includes('-') && !/^MLB/i.test(s)) ?? segments[0]
-      if (!slug) throw new Error()
-      query = slug.replace(/-/g, ' ').trim()
-    } catch {
-      throw new BadRequestException('Não foi possível extrair o produto desta URL.')
-    }
-
-    let searchData: Record<string, unknown>
-    try {
-      const { data } = await axios.get(`${ML_BASE}/sites/MLB/search`, {
-        params: { q: query, limit: 3 },
-      })
-      searchData = data as Record<string, unknown>
-    } catch (err: any) {
-      throw new HttpException(
-        err.response?.data?.message ?? `ML Search retornou ${err.response?.status ?? 500}`,
-        err.response?.status ?? 500,
-      )
-    }
-
-    const results = searchData.results as Array<Record<string, unknown>> | undefined
-    const result = results?.[0]
-    if (!result) throw new NotFoundException('Nenhum produto encontrado para esta URL.')
-
-    return {
-      title:     result.title                                       ?? null,
-      price:     result.price                                       ?? null,
-      seller:    (result.seller as Record<string, unknown>)?.nickname ?? null,
-      thumbnail: result.thumbnail                                   ?? null,
-      mlbId:     result.id                                          ?? null,
-      permalink: result.permalink                                   ?? null,
-    }
+    throw new BadRequestException(
+      'Não foi possível extrair o ID do anúncio. ' +
+      'Cole apenas o código MLB (ex: MLB6630158494) ou a URL completa do Mercado Livre.',
+    )
   }
 
   // ── Vínculo preview ──────────────────────────────────────────────────────
