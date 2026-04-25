@@ -863,7 +863,7 @@ export class MercadolivreService {
     }
   }
 
-  async answerQuestion(orgId: string, questionId: number, text: string) {
+  async answerQuestion(orgId: string | null, questionId: number, text: string) {
     const { token } = await this.getValidToken()
     console.log('[answer] questionId:', questionId, '| text length:', text?.length)
     try {

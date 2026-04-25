@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
 @Injectable()
 export class ConversationsService {
+  constructor(private readonly mlService: MercadolivreService) {}
 
   async list(filters: {
     orgId: string
@@ -65,7 +67,7 @@ export class ConversationsService {
       .from('ai_messages')
       .insert({
         conversation_id: conversationId,
-        role: 'human',
+        role:            'human',
         content,
         was_approved_by: userId,
       })
@@ -74,15 +76,6 @@ export class ConversationsService {
 
     if (error) throw error
 
-    await supabaseAdmin
-      .from('ai_conversations')
-      .update({
-        updated_at: new Date().toISOString(),
-        total_messages: supabaseAdmin.rpc as unknown as number,
-      })
-      .eq('id', conversationId)
-
-    // Simpler counter update
     const { data: conv } = await supabaseAdmin
       .from('ai_conversations')
       .select('total_messages')
@@ -92,9 +85,9 @@ export class ConversationsService {
     await supabaseAdmin
       .from('ai_conversations')
       .update({
-        updated_at: new Date().toISOString(),
+        updated_at:     new Date().toISOString(),
         total_messages: (conv?.total_messages ?? 0) + 1,
-        status: 'waiting_customer',
+        status:         'waiting_customer',
       })
       .eq('id', conversationId)
 
@@ -102,12 +95,22 @@ export class ConversationsService {
   }
 
   async approveSuggestion(conversationId: string, messageId: string, userId: string, editedContent?: string) {
+    // 1. Fetch original message content for sending
+    const { data: message } = await supabaseAdmin
+      .from('ai_messages')
+      .select('content')
+      .eq('id', messageId)
+      .maybeSingle()
+
+    const contentToSend = editedContent || message?.content || ''
+
+    // 2. Update the AI message
     const update: Record<string, unknown> = {
-      was_auto_sent: true,
+      was_auto_sent:   true,
       was_approved_by: userId,
     }
     if (editedContent) {
-      update.content = editedContent
+      update.content              = editedContent
       update.was_edited_before_send = true
     }
 
@@ -119,16 +122,63 @@ export class ConversationsService {
       .single()
 
     if (error) throw error
+
+    // 3. Fetch conversation for channel + external id
+    const { data: conv } = await supabaseAdmin
+      .from('ai_conversations')
+      .select('channel, external_conversation_id')
+      .eq('id', conversationId)
+      .maybeSingle()
+
+    // 4. Send to ML if applicable
+    if (conv?.channel === 'mercadolivre' && conv.external_conversation_id) {
+      try {
+        await this.mlService.answerQuestion(
+          null,
+          Number(conv.external_conversation_id),
+          contentToSend,
+        )
+      } catch (e: any) {
+        console.error('[approve] erro ao enviar ML:', e.message)
+        // Don't throw — message is approved even if ML delivery fails
+      }
+    }
+
+    // 5. Resolve conversation
+    await supabaseAdmin
+      .from('ai_conversations')
+      .update({
+        status:      'resolved',
+        resolved_at: new Date().toISOString(),
+        updated_at:  new Date().toISOString(),
+      })
+      .eq('id', conversationId)
+
     return data
+  }
+
+  async discardSuggestion(conversationId: string, messageId: string) {
+    await supabaseAdmin
+      .from('ai_messages')
+      .delete()
+      .eq('id', messageId)
+      .eq('conversation_id', conversationId)
+
+    await supabaseAdmin
+      .from('ai_conversations')
+      .update({ status: 'open', updated_at: new Date().toISOString() })
+      .eq('id', conversationId)
+
+    return { ok: true }
   }
 
   async resolve(conversationId: string) {
     const { data, error } = await supabaseAdmin
       .from('ai_conversations')
       .update({
-        status: 'resolved',
+        status:      'resolved',
         resolved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        updated_at:  new Date().toISOString(),
       })
       .eq('id', conversationId)
       .select()
@@ -142,10 +192,10 @@ export class ConversationsService {
     const { data, error } = await supabaseAdmin
       .from('ai_conversations')
       .update({
-        status: 'escalated',
-        priority: 'high',
+        status:     'escalated',
+        priority:   'high',
         assigned_to: assignTo ?? null,
-        updated_at: new Date().toISOString(),
+        updated_at:  new Date().toISOString(),
       })
       .eq('id', conversationId)
       .select()
@@ -169,7 +219,7 @@ export class ConversationsService {
       .from('ai_conversations')
       .upsert(
         { ...conv, updated_at: new Date().toISOString() },
-        { onConflict: 'channel,external_conversation_id', ignoreDuplicates: false }
+        { onConflict: 'channel,external_conversation_id', ignoreDuplicates: false },
       )
       .select()
       .single()
@@ -206,7 +256,7 @@ export class ConversationsService {
     await supabaseAdmin
       .from('ai_conversations')
       .update({
-        updated_at: new Date().toISOString(),
+        updated_at:     new Date().toISOString(),
         total_messages: (conv?.total_messages ?? 0) + 1,
         ...(msg.was_auto_sent ? { auto_replied_count: (conv?.auto_replied_count ?? 0) + 1 } : {}),
         status: msg.was_auto_sent ? 'waiting_customer' : 'waiting_human',

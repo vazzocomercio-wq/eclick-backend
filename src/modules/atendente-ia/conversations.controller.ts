@@ -63,6 +63,15 @@ export class ConversationsController {
     return this.svc.approveSuggestion(convId, body.message_id, u.id, body.content)
   }
 
+  @Post(':id/discard-suggestion')
+  @HttpCode(HttpStatus.OK)
+  discard(
+    @Param('id') convId: string,
+    @Body() body: { message_id: string },
+  ) {
+    return this.svc.discardSuggestion(convId, body.message_id)
+  }
+
   @Post(':id/resolve')
   @HttpCode(HttpStatus.OK)
   resolve(@Param('id') id: string) {
