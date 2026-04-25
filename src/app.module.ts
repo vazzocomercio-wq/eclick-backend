@@ -10,6 +10,7 @@ import { SuppliersModule } from './modules/suppliers/suppliers.module'
 import { ComprasModule } from './modules/compras/compras.module'
 import { PurchaseOrdersModule } from './modules/purchase-orders/purchase-orders.module'
 import { CompetitorsModule } from './modules/competitors/competitors.module'
+import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { CompetitorsModule } from './modules/competitors/competitors.module'
     ComprasModule,
     PurchaseOrdersModule,
     CompetitorsModule,
+    AtendenteIaModule,
   ],
   controllers: [AppController],
   providers: [AppService],
