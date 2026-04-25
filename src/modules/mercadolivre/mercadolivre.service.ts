@@ -256,44 +256,51 @@ export class MercadolivreService {
     return null
   }
 
+  // Public fetch — no seller token. Safe to call for any MLB item.
+  async getCompetitorItem(itemId: string): Promise<Record<string, unknown>> {
+    console.log('[competitor] buscando item público:', itemId)
+    try {
+      const { data } = await axios.get(`${ML_BASE}/items/${itemId}`, {
+        params: {
+          attributes: 'id,title,price,available_quantity,sold_quantity,thumbnail,pictures,seller_id,shipping,listing_type_id,permalink,category_id',
+        },
+      })
+      console.log('[competitor] item encontrado:', (data as any)?.title)
+      return data as Record<string, unknown>
+    } catch (e: any) {
+      console.error('[competitor] erro:', { status: e.response?.status, data: e.response?.data, itemId })
+      throw new HttpException(
+        e.response?.data?.message ?? `Não foi possível buscar o item ${itemId}`,
+        e.response?.status ?? 500,
+      )
+    }
+  }
+
   async getItemInfo(_orgId: string, url: string) {
     const mlbId = this.extractMlbId(url)
 
-    if (mlbId) {
-
-      let item: Record<string, unknown>
-      try {
-        // Public endpoint — no Authorization header
-        const { data } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
-          params: { attributes: 'id,title,price,available_quantity,seller_id,thumbnail,permalink,shipping' },
-        })
-        item = data as Record<string, unknown>
-      } catch (err: any) {
-        throw new HttpException(
-          err.response?.data?.message ?? `ML retornou ${err.response?.status ?? 500}`,
-          err.response?.status ?? 500,
-        )
-      }
-
-      let seller = `Vendedor #${item.seller_id}`
-      await axios.get(`${ML_BASE}/users/${item.seller_id}`)
-        .then((r: any) => { if (r.data?.nickname) seller = r.data.nickname })
-        .catch(() => { /* non-fatal */ })
-
-      return {
-        title:     item.title     ?? null,
-        price:     item.price     ?? null,
-        seller,
-        thumbnail: item.thumbnail ?? null,
-        mlbId,
-        permalink: item.permalink ?? null,
-      }
+    if (!mlbId) {
+      throw new BadRequestException(
+        'Não foi possível extrair o ID do anúncio. ' +
+        'Cole apenas o código MLB (ex: MLB6630158494) ou a URL completa do Mercado Livre.',
+      )
     }
 
-    throw new BadRequestException(
-      'Não foi possível extrair o ID do anúncio. ' +
-      'Cole apenas o código MLB (ex: MLB6630158494) ou a URL completa do Mercado Livre.',
-    )
+    const item = await this.getCompetitorItem(mlbId)
+
+    let seller = `Vendedor #${item.seller_id}`
+    await axios.get(`${ML_BASE}/users/${item.seller_id}`)
+      .then((r: any) => { if (r.data?.nickname) seller = r.data.nickname })
+      .catch(() => { /* non-fatal */ })
+
+    return {
+      title:     item.title     ?? null,
+      price:     item.price     ?? null,
+      seller,
+      thumbnail: item.thumbnail ?? null,
+      mlbId,
+      permalink: item.permalink ?? null,
+    }
   }
 
   // ── Vínculo preview ──────────────────────────────────────────────────────
