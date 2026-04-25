@@ -1,12 +1,16 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, Headers, HttpException, UseGuards } from '@nestjs/common'
+import { Controller, Get, Post, Delete, Body, Param, Query, Headers, HttpException, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { CompetitorsService, CreateCompetitorDto } from './competitors.service'
+import { ScraperService } from '../scraper/scraper.service'
 
 @Controller('competitors')
 @UseGuards(SupabaseAuthGuard)
 export class CompetitorsController {
-  constructor(private readonly svc: CompetitorsService) {}
+  constructor(
+    private readonly svc: CompetitorsService,
+    private readonly scraper: ScraperService,
+  ) {}
 
   private async resolveOrgId(auth: string | undefined): Promise<string> {
     const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
@@ -28,6 +32,12 @@ export class CompetitorsController {
     console.log('[competitors.create] body:', body)
     const orgId = await this.resolveOrgId(auth)
     return this.svc.create(orgId, body)
+  }
+
+  @Get('preview')
+  async preview(@Query('url') url: string) {
+    if (!url) throw new BadRequestException('url é obrigatório')
+    return this.scraper.scrapeProduct(url)
   }
 
   @Get()

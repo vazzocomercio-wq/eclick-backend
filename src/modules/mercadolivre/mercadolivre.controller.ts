@@ -12,6 +12,7 @@ import {
   BadRequestException,
 } from '@nestjs/common'
 import { MercadolivreService } from './mercadolivre.service'
+import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -23,7 +24,17 @@ interface ReqUserPayload {
 @Controller('ml')
 @UseGuards(SupabaseAuthGuard)
 export class MercadolivreController {
-  constructor(private readonly ml: MercadolivreService) {}
+  constructor(
+    private readonly ml: MercadolivreService,
+    private readonly scraper: ScraperService,
+  ) {}
+
+  // GET /ml/competitors/preview?url=...
+  @Get('competitors/preview')
+  async previewCompetitor(@Query('url') url: string) {
+    if (!url) throw new BadRequestException('url é obrigatório')
+    return this.scraper.scrapeProduct(url)
+  }
 
   // GET /ml/auth-url?redirect_uri=...
   @Get('auth-url')
