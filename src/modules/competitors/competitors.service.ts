@@ -85,6 +85,7 @@ export class CompetitorsService {
   // ── Detail & History ─────────────────────────────────────────────────────────
 
   async getOne(orgId: string, id: string) {
+    console.log('[competitors.getOne] id:', id, 'orgId:', orgId)
     const { data, error } = await supabaseAdmin
       .from('competitors')
       .select('*')
@@ -92,6 +93,7 @@ export class CompetitorsService {
       .eq('organization_id', orgId)
       .single()
 
+    console.log('[competitors.getOne] found:', !!data, 'error:', error?.message ?? null)
     if (error || !data) throw new HttpException('Concorrente não encontrado', 404)
 
     const { data: history } = await supabaseAdmin
