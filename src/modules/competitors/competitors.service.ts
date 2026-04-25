@@ -167,13 +167,16 @@ export class CompetitorsService implements OnModuleInit {
   // ── Enrich single competitor ──────────────────────────────────────────────────
 
   async enrichCompetitor(competitorId: string) {
-    const { data: competitor } = await supabaseAdmin
+    const { data: competitor, error: fetchErr } = await supabaseAdmin
       .from('competitors')
       .select('*')
       .eq('id', competitorId)
       .single()
 
-    if (!competitor) return null
+    if (fetchErr || !competitor) {
+      this.logger.error(`[enrichCompetitor] fetch failed id=${competitorId}: ${fetchErr?.message}`)
+      return null
+    }
 
     // Extract listing_id from URL if missing
     let listingId = competitor.listing_id as string | null
@@ -181,20 +184,27 @@ export class CompetitorsService implements OnModuleInit {
       const m = (competitor.url as string).match(/MLB[0-9]+/i)
       if (m) {
         listingId = m[0].toUpperCase()
-        await supabaseAdmin
+        const { error: lidErr } = await supabaseAdmin
           .from('competitors')
           .update({ listing_id: listingId })
           .eq('id', competitorId)
+        this.logger.log(`[enrichCompetitor] extracted listing_id=${listingId} from URL | update: ${lidErr?.message ?? 'ok'}`)
       }
     }
 
-    if (!listingId) return null
+    if (!listingId) {
+      this.logger.warn(`[enrichCompetitor] id=${competitorId} sem listing_id e URL não contém MLB — skip`)
+      return null
+    }
+
+    this.logger.log(`[enrichCompetitor] iniciando enrich para listing_id=${listingId}`)
 
     let item: Record<string, unknown>
     try {
       item = await this.enrichFromML(listingId)
+      this.logger.log(`[enrichCompetitor] ML retornou id=${item.id} price=${item.price}`)
     } catch (e: unknown) {
-      this.logger.warn(`enrichCompetitor ${listingId} failed: ${(e as Error).message}`)
+      this.logger.error(`[enrichCompetitor] ML fetch falhou listing_id=${listingId}: ${(e as Error).message}`)
       return null
     }
 
@@ -205,7 +215,7 @@ export class CompetitorsService implements OnModuleInit {
     const shipping = (item as { shipping?: { free_shipping?: boolean } }).shipping
 
     // Update competitor record
-    await supabaseAdmin
+    const { error: updateErr } = await supabaseAdmin
       .from('competitors')
       .update({
         current_price:      price,
@@ -226,9 +236,11 @@ export class CompetitorsService implements OnModuleInit {
       })
       .eq('id', competitorId)
 
+    this.logger.log(`[enrichCompetitor] UPDATE competitors id=${competitorId}: ${updateErr?.message ?? 'ok'} | price=${price}`)
+
     // Save to price_history with new columns
     const now = new Date().toISOString()
-    await supabaseAdmin
+    const { error: phErr } = await supabaseAdmin
       .from('price_history')
       .insert({
         competitor_id:      competitorId,
@@ -241,9 +253,8 @@ export class CompetitorsService implements OnModuleInit {
         recorded_at:        now,
         checked_at:         now,
       })
-      .then(({ error }) => {
-        if (error) this.logger.warn(`price_history insert failed: ${error.message}`)
-      })
+
+    this.logger.log(`[enrichCompetitor] INSERT price_history: ${phErr?.message ?? 'ok'}`)
 
     // Alert if price diff > 10%
     const myPrice = Number(competitor.my_price)
