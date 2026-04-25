@@ -20,6 +20,9 @@ export class SuppliersController {
     const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
     console.log('[suppliers] token recebido:', !!token)
 
+    const keyInUse = (process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? '')
+    console.log('[suppliers] supabase key prefix:', keyInUse.substring(0, 24), '| is service_role:', keyInUse.startsWith('sb_secret_') || keyInUse.startsWith('eyJhbGci'))
+
     const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token ?? '')
     console.log('[suppliers] user do supabase:', user?.id, userError?.message)
 
