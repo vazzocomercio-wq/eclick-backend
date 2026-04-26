@@ -38,6 +38,9 @@ export class CompetitorsController {
   @Get('preview')
   async preview(@Query('url') url: string) {
     if (!url) throw new BadRequestException('url é obrigatório')
+    if (this.scraper.detectPlatform(url) === 'mercadolivre') {
+      return this.svc.previewMlUrl(url)
+    }
     return this.scraper.scrapeProduct(url)
   }
 

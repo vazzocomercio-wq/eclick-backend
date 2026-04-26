@@ -1,10 +1,50 @@
-import { Injectable, HttpException, OnModuleInit, Logger } from '@nestjs/common'
+import { Injectable, HttpException, OnModuleInit, Logger, BadRequestException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import axios, { AxiosError } from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
+
+export function normalizeMercadoLivreUrl(inputUrl: string | null | undefined): {
+  itemId: string
+  cleanUrl: string
+  catalogId: string | null
+} | null {
+  if (!inputUrl) return null
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(inputUrl.trim())
+  } catch {
+    decoded = inputUrl.trim()
+  }
+
+  let itemId: string | null = null
+  let catalogId: string | null = null
+
+  // 1. item_id via query (catálogo/PDP)
+  const queryMatch = decoded.match(/item_id[=:]?(MLB\d+)/i)
+  if (queryMatch) itemId = queryMatch[1].toUpperCase()
+
+  // 2. MLB direto na URL (com ou sem hífen) — não captura MLBU/MLBA/etc
+  if (!itemId) {
+    const directMatch = decoded.match(/MLB-?(\d+)/)
+    if (directMatch) itemId = `MLB${directMatch[1]}`
+  }
+
+  // 3. catalog_id (URLs /up/MLBU…)
+  const catalogMatch = decoded.match(/\/up\/(MLBU\d+)/i)
+  if (catalogMatch) catalogId = catalogMatch[1].toUpperCase()
+
+  if (!itemId) return null
+
+  const numericId = itemId.replace(/^MLB/i, '')
+  return {
+    itemId,
+    cleanUrl: `https://produto.mercadolivre.com.br/MLB-${numericId}`,
+    catalogId,
+  }
+}
 
 export interface CreateCompetitorDto {
   product_id: string
@@ -28,6 +68,9 @@ export class CompetitorsService implements OnModuleInit {
 
   onModuleInit() {
     setTimeout(async () => {
+      this.logger.log('corrigindo listing_ids existentes...')
+      await this.updateExistingListingIds()
+
       this.logger.log('iniciando enriquecimento inicial...')
       const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
       for (const org of orgs ?? []) {
@@ -36,17 +79,58 @@ export class CompetitorsService implements OnModuleInit {
     }, 5000)
   }
 
+  // ── Listing ID backfill ──────────────────────────────────────────────────────
+
+  async updateExistingListingIds() {
+    const { data, error } = await supabaseAdmin
+      .from('competitors')
+      .select('id, url, listing_id')
+      .not('url', 'is', null)
+
+    if (error) {
+      this.logger.warn(`updateExistingListingIds query failed: ${error.message}`)
+      return
+    }
+
+    let updated = 0
+    for (const row of data ?? []) {
+      const norm = normalizeMercadoLivreUrl(row.url as string)
+      if (!norm) continue
+      if (norm.itemId === row.listing_id) continue
+
+      const { error: updErr } = await supabaseAdmin
+        .from('competitors')
+        .update({ listing_id: norm.itemId, url: norm.cleanUrl })
+        .eq('id', row.id)
+
+      if (updErr) {
+        this.logger.warn(`failed to update listing_id id=${row.id}: ${updErr.message}`)
+      } else {
+        this.logger.log(`corrigido ${row.id}: ${row.listing_id ?? '(null)'} → ${norm.itemId}`)
+        updated++
+      }
+    }
+
+    this.logger.log(`updateExistingListingIds: ${updated} de ${data?.length ?? 0} corrigidos`)
+  }
+
   // ── Core CRUD ─────────────────────────────────────────────────────────────────
 
   async create(orgId: string, dto: CreateCompetitorDto) {
+    const norm =
+      normalizeMercadoLivreUrl(dto.url) ??
+      normalizeMercadoLivreUrl(dto.listing_id ?? '')
+    const listingId = norm?.itemId ?? dto.listing_id ?? null
+    const url = norm?.cleanUrl ?? dto.url
+
     const { data: competitor, error } = await supabaseAdmin
       .from('competitors')
       .insert({
         organization_id: orgId,
         product_id:      dto.product_id,
         platform:        dto.platform,
-        url:             dto.url,
-        listing_id:      dto.listing_id ?? null,
+        url,
+        listing_id:      listingId,
         title:           dto.title    ?? null,
         seller:          dto.seller   ?? null,
         current_price:   dto.current_price,
@@ -182,35 +266,34 @@ export class CompetitorsService implements OnModuleInit {
       return null
     }
 
-    // Extract listing_id from URL if missing
-    let listingId = competitor.listing_id as string | null
-    if (!listingId && competitor.url) {
-      const m = (competitor.url as string).match(/MLB[0-9]+/i)
-      if (m) {
-        listingId = m[0].toUpperCase()
-        const { error: lidErr } = await supabaseAdmin
-          .from('competitors')
-          .update({ listing_id: listingId })
-          .eq('id', competitorId)
-        this.logger.log(`[enrichCompetitor] extracted listing_id=${listingId} from URL | update: ${lidErr?.message ?? 'ok'}`)
-      }
+    // Normalize URL → resolve canonical listing_id
+    const norm = normalizeMercadoLivreUrl(competitor.url as string | null)
+    const listingId = norm?.itemId ?? (competitor.listing_id as string | null)
+
+    if (norm && (norm.itemId !== competitor.listing_id || norm.cleanUrl !== competitor.url)) {
+      const { error: lidErr } = await supabaseAdmin
+        .from('competitors')
+        .update({ listing_id: norm.itemId, url: norm.cleanUrl })
+        .eq('id', competitorId)
+      this.logger.log(`[enrichCompetitor] normalizado ${competitor.listing_id ?? '(null)'} → ${norm.itemId} | update: ${lidErr?.message ?? 'ok'}`)
     }
 
     if (!listingId) {
-      this.logger.warn(`[enrichCompetitor] id=${competitorId} sem listing_id e URL não contém MLB — skip`)
+      this.logger.warn(`[enrichCompetitor] id=${competitorId} sem listing_id válido — skip`)
       return null
     }
 
     this.logger.log(`[enrichCompetitor] iniciando enrich para listing_id=${listingId}`)
 
-    // Get valid token (auto-refreshes if expired)
-    let token: string | undefined
+    // Token OAuth do banco (refresha se expirado)
+    let token: string
     try {
-      const conn = await this.mlService.getTokenForOrg(competitor.organization_id)
-      token = conn.token
-      this.logger.log(`[enrichCompetitor] token obtido para org=${competitor.organization_id} seller=${conn.sellerId}`)
+      const { token: t, sellerId } = await this.mlService.getValidToken()
+      token = t
+      this.logger.log(`[enrichCompetitor] token válido obtido | seller=${sellerId}`)
     } catch (e: unknown) {
-      this.logger.warn(`[enrichCompetitor] falhou ao obter token: ${(e as Error).message} — tentando sem auth`)
+      this.logger.error(`[enrichCompetitor] sem token ML válido: ${(e as Error).message} — skip`)
+      return null
     }
 
     let item: Record<string, unknown>
@@ -219,32 +302,13 @@ export class CompetitorsService implements OnModuleInit {
       this.logger.log(`[enrichCompetitor] ML retornou id=${item.id} price=${item.price}`)
     } catch (e: unknown) {
       const status = (e as HttpException).getStatus?.() ?? 0
-      if (status === 403 || status === 401) {
-        // Retry without token (some items accessible publicly)
-        if (token) {
-          this.logger.warn(`[enrichCompetitor] ${status} com token — retentando sem auth`)
-          try {
-            item = await this.enrichFromML(listingId, undefined)
-            this.logger.log(`[enrichCompetitor] ML (sem auth) retornou id=${item.id} price=${item.price}`)
-          } catch (e2: unknown) {
-            const s2 = (e2 as HttpException).getStatus?.() ?? 0
-            if (s2 === 403) {
-              this.logger.warn(`[enrichCompetitor] 403 sem auth também — marcando inaccessible listing_id=${listingId}`)
-              await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
-            } else {
-              this.logger.error(`[enrichCompetitor] sem auth falhou ${s2} listing_id=${listingId}: ${(e2 as Error).message}`)
-            }
-            return null
-          }
-        } else {
-          this.logger.warn(`[enrichCompetitor] 403 sem token — marcando inaccessible listing_id=${listingId}`)
-          await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
-          return null
-        }
+      if (status === 403 || status === 404) {
+        this.logger.warn(`[enrichCompetitor] ${status} com token — item pausado/removido, marcando inaccessible listing_id=${listingId}`)
+        await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
       } else {
-        this.logger.error(`[enrichCompetitor] ML fetch falhou listing_id=${listingId}: ${(e as Error).message}`)
-        return null
+        this.logger.error(`[enrichCompetitor] ML fetch falhou ${status} listing_id=${listingId}: ${(e as Error).message}`)
       }
+      return null
     }
 
     const price    = (item.price as number) ?? 0
@@ -368,12 +432,11 @@ export class CompetitorsService implements OnModuleInit {
 
     if (error || !row) throw new HttpException('Concorrente não encontrado', 404)
 
-    const mlbMatch = (row.url as string | null)?.match(/MLB[0-9]+/i)
-    const listingId = mlbMatch ? mlbMatch[0].toUpperCase() : null
+    const listingId = normalizeMercadoLivreUrl(row.url as string | null)?.itemId ?? null
 
     let token: string | undefined
     try {
-      const conn = await this.mlService.getTokenForOrg(row.organization_id as string)
+      const conn = await this.mlService.getValidToken()
       token = conn.token
     } catch { /* fallback to public */ }
 
@@ -409,6 +472,38 @@ export class CompetitorsService implements OnModuleInit {
 
     const base = await this.getOne(orgId, id)
     return { ...base, ml_data: enriched }
+  }
+
+  // ── Preview ML URL (used by /competitors/preview) ────────────────────────────
+
+  async previewMlUrl(url: string) {
+    const normalized = normalizeMercadoLivreUrl(url)
+    if (!normalized) throw new BadRequestException('URL do Mercado Livre inválida')
+
+    const { token } = await this.mlService.getValidToken()
+
+    const { data } = await axios.get(
+      `${ML_BASE}/items/${normalized.itemId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+
+    return {
+      itemId:             normalized.itemId,
+      cleanUrl:           normalized.cleanUrl,
+      catalogId:          normalized.catalogId,
+      title:              data?.title ?? null,
+      price:              data?.price ?? null,
+      thumbnail:          data?.thumbnail ?? null,
+      available_quantity: data?.available_quantity ?? null,
+      seller_nickname:    data?.seller?.nickname ?? null,
+      status:             data?.status ?? null,
+      platform:           'mercadolivre',
+    }
   }
 
   // ── Scheduled enrichment every 2h ────────────────────────────────────────────

@@ -198,7 +198,7 @@ export class MercadolivreService {
     }
   }
 
-  private async getValidToken(): Promise<{ token: string; sellerId: number }> {
+  async getValidToken(): Promise<{ token: string; sellerId: number }> {
     const connections = await this.getAllConnections()
     if (!connections.length) {
       console.error('[getValidToken] sem conexão ML no banco')
