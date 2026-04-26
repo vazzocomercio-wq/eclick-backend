@@ -95,6 +95,7 @@ export class AiResponderService {
       )
 
       const questions: MlQuestion[] = res.data?.questions ?? []
+      let processed = 0
 
       for (const q of questions) {
         // Skip if already processed
@@ -130,6 +131,12 @@ export class AiResponderService {
             product:    (vinculo as any)?.product ?? null,
           },
         })
+        processed++
+      }
+
+      // Summary log: only when there's something to report (avoids 1 line/min idle spam)
+      if (processed > 0) {
+        this.logger.log(`[questions.poll] seller=${sellerId} ${questions.length} fetched, ${processed} new processed`)
       }
     } catch (err) {
       this.logger.warn('[processOrgMlQuestions]', (err as Error).message)
@@ -155,8 +162,6 @@ export class AiResponderService {
   }) {
     const { agentChannel, channel, externalConvId, customerMessage, externalCustomerId, customerName, productInfo } = opts
     const { agent } = agentChannel
-
-    this.logger.log(`[ai-responder] canal:${channel} agente:${agent.name} conv:${externalConvId}`)
 
     // 1. Upsert conversation
     const conv = await this.conversations.upsertConversation({
@@ -223,10 +228,9 @@ export class AiResponderService {
             return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
           })
           .filter((x): x is NonNullable<typeof x> => !!x)
-        this.logger.log(`[ai-responder] [KNOWLEDGE] ${knowledge.length} via semantic search`)
       }
     } catch (e: any) {
-      this.logger.warn(`[ai-responder] [KNOWLEDGE] semantic search failed (${e?.message}) — fallback to SELECT`)
+      this.logger.warn(`[ai-responder] semantic search failed (${e?.message}) — fallback to SELECT`)
     }
 
     if (!knowledge.length) {
@@ -240,7 +244,6 @@ export class AiResponderService {
         knowledgeCitedIds.push(r.id)
         return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
       })
-      this.logger.log(`[ai-responder] [KNOWLEDGE] ${knowledge.length} via fallback SELECT`)
     }
 
     // Recent messages
@@ -275,7 +278,6 @@ export class AiResponderService {
     }
 
     const { content, confidence: llmConf, reasoning, tokensIn, tokensOut } = aiResult
-    this.logger.log(`[ai-responder] [LLM] ${tokensIn}in/${tokensOut}out in ${durationMs}ms llmConf:${llmConf}`)
 
     // 8b. Compute final confidence with context boosts/penalties
     const confidence = this.computeConfidence(llmConf, {
@@ -294,7 +296,6 @@ export class AiResponderService {
       queueThreshold:    settings.queue_threshold ?? 50,
       channelMode:       agentChannel.mode,
     })
-    this.logger.log(`[ai-responder] [DECISION] confidence:${confidence} → ${decision}`)
 
     const autoSend = decision === 'auto_send'
 
@@ -336,20 +337,17 @@ export class AiResponderService {
       }
       try {
         await this.mlService.answerQuestion(null, Number(externalConvId), content)
-        this.logger.log(`[ai-responder] [SEND] enviado ao ML conf:${confidence}%`)
       } catch (e: any) {
-        this.logger.warn('[ai-responder] [SEND] erro ML:', e.message)
+        this.logger.warn('[ai-responder] erro ML:', e.message)
       }
     } else if (decision === 'escalate') {
       await this.conversations.escalate(conv.id)
-      this.logger.log(`[ai-responder] [SEND] escalado pra humano conf:${confidence}%`)
     } else {
       // queue_for_human → status já é 'waiting_human' via addMessage
       await supabaseAdmin
         .from('ai_conversations')
         .update({ status: 'waiting_human', updated_at: new Date().toISOString() })
         .eq('id', conv.id)
-      this.logger.log(`[ai-responder] [SEND] queue pra humano conf:${confidence}%`)
     }
 
     // 11. Analytics
@@ -392,7 +390,6 @@ export class AiResponderService {
     metadata?:          Record<string, unknown>
   }): Promise<{ decision: AutoPilotDecision; response: string; confidence: number; ai_message_id?: string }> {
     const { text, channel, conversation_id } = opts
-    this.logger.log(`[ai.processMessage] [START] channel=${channel} conv=${conversation_id} customer=${opts.customer_name ?? '?'}`)
 
     // 1. Save customer message (idempotent guard would require a unique key
     //    on external_message_id; webhook should de-dupe upstream)
@@ -514,7 +511,6 @@ export class AiResponderService {
       queueThreshold:    settings.queue_threshold ?? 50,
       channelMode:       agentChannel.mode,
     })
-    this.logger.log(`[ai.processMessage] [DECISION] conf=${confidence} → ${decision}`)
 
     // 9. Save AI message + tracking columns
     const savedMsg = await this.conversations.addMessage({
@@ -560,7 +556,8 @@ export class AiResponderService {
       }).catch(() => { /* fire-and-forget */ })
     }
 
-    this.logger.log(`[ai.processMessage] [END] decision=${decision} conf=${confidence} duration=${durationMs}ms`)
+    // Single summary line per processed message — suppressed at idle.
+    this.logger.log(`[ai.processMessage] ${channel} → ${decision} (conf=${confidence}, ${durationMs}ms)`)
     return { decision, response: content, confidence, ai_message_id: savedMsg?.id }
   }
 
