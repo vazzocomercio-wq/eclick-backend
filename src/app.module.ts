@@ -19,6 +19,7 @@ import { CustomersModule } from './modules/customers/customers.module'
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module'
 import { WebhooksModule } from './modules/webhooks/webhooks.module'
 import { WidgetsModule } from './modules/widgets/widgets.module'
+import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { WidgetsModule } from './modules/widgets/widgets.module'
     WhatsAppModule,
     WidgetsModule,
     WebhooksModule,
+    MlAdsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
