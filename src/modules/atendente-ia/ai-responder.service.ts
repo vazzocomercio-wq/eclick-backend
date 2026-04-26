@@ -369,6 +369,175 @@ export class AiResponderService {
     }
   }
 
+  /**
+   * Channel-agnostic message processor used by webhook controllers (WhatsApp,
+   * widget, future channels). Returns the AI's response + decision so the
+   * caller can decide whether to actually send it on its channel. The legacy
+   * processIncomingMessage stays untouched (handles ML question polling
+   * end-to-end).
+   *
+   * Saves the AI message to ai_messages with the same tracking columns
+   * (confidence, decision, knowledge_cited, duration_ms, tokens_used).
+   * Does NOT send the response — that's the caller's job.
+   */
+  async processMessage(opts: {
+    text:               string
+    channel:            string                  // 'whatsapp' | 'widget' | ...
+    conversation_id:    string                  // existing or newly upserted
+    customer_name?:     string
+    customer_phone?:    string
+    customer_email?:    string
+    customer_whatsapp_id?: string
+    unified_customer_id?: string
+    metadata?:          Record<string, unknown>
+  }): Promise<{ decision: AutoPilotDecision; response: string; confidence: number; ai_message_id?: string }> {
+    const { text, channel, conversation_id } = opts
+    this.logger.log(`[ai.processMessage] [START] channel=${channel} conv=${conversation_id} customer=${opts.customer_name ?? '?'}`)
+
+    // 1. Save customer message (idempotent guard would require a unique key
+    //    on external_message_id; webhook should de-dupe upstream)
+    await this.conversations.addMessage({
+      conversation_id,
+      role: 'customer',
+      content: text,
+    })
+
+    // 2. Pick agent for this channel
+    const { data: agentChannel } = await supabaseAdmin
+      .from('ai_agent_channels')
+      .select('*, agent:ai_agents(*)')
+      .eq('channel', channel)
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (!agentChannel?.agent) {
+      this.logger.warn(`[ai.processMessage] sem agente ativo no canal ${channel} — escalando`)
+      await this.conversations.escalate(conversation_id)
+      return { decision: 'escalate', response: '', confidence: 0 }
+    }
+    const agent = agentChannel.agent
+
+    // 3. Knowledge via semantic search (with fallback)
+    const knowledgeCitedIds: string[] = []
+    let knowledge: Array<{ type?: string; title: string; content: string }> = []
+    try {
+      const matches = await this.aiKnowledge.searchSimilar(text, agent.id, 5)
+      if (matches.length) {
+        const ids = matches.map(m => m.knowledge_id)
+        const { data: rows } = await supabaseAdmin
+          .from('ai_knowledge_base').select('id, type, title, content').in('id', ids)
+        const byId = new Map((rows ?? []).map(r => [r.id, r]))
+        for (const m of matches) {
+          const r = byId.get(m.knowledge_id)
+          if (r) { knowledgeCitedIds.push(r.id); knowledge.push({ type: r.type, title: r.title, content: r.content }) }
+        }
+      }
+    } catch (e: any) {
+      this.logger.warn(`[ai.processMessage] knowledge search failed: ${e?.message}`)
+    }
+    if (!knowledge.length) {
+      const { data: kbRows } = await supabaseAdmin
+        .from('ai_knowledge_base').select('id, type, title, content')
+        .eq('agent_id', agent.id).eq('is_active', true).limit(20)
+      knowledge = (kbRows ?? []).map(r => { knowledgeCitedIds.push(r.id); return { type: r.type, title: r.title, content: r.content } })
+    }
+
+    // 4. Recent messages
+    const { data: messagesData } = await supabaseAdmin
+      .from('ai_messages')
+      .select('role, content')
+      .eq('conversation_id', conversation_id)
+      .order('sent_at', { ascending: false })
+      .limit(10)
+    const recentMessages = (messagesData ?? []).reverse()
+
+    // 5. Build prompts (no productInfo — channels don't always have one)
+    const systemPrompt = this.buildSystemPrompt(agent, { listing_id: undefined, title: undefined, price: undefined, product: null }, knowledge)
+    const userPrompt   = this.buildUserPrompt(text, recentMessages)
+
+    // 6. API key
+    const keyName = agent.model_provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'
+    const apiKey  = await this.credentials.getDecryptedKey(null, agent.model_provider, keyName)
+    if (!apiKey) {
+      this.logger.error(`[ai.processMessage] sem API key pra ${agent.model_provider} — escalando`)
+      await this.conversations.escalate(conversation_id)
+      return { decision: 'escalate', response: '', confidence: 0 }
+    }
+
+    // 7. Call AI
+    const t0 = Date.now()
+    const aiResult = await this.callAI(agent.model_provider, agent.model_id, systemPrompt, userPrompt, apiKey)
+    const durationMs = Date.now() - t0
+    if (!aiResult) {
+      this.logger.error(`[ai.processMessage] LLM null after ${durationMs}ms`)
+      await this.conversations.escalate(conversation_id)
+      return { decision: 'escalate', response: '', confidence: 0 }
+    }
+    const { content, confidence: llmConf, reasoning, tokensIn, tokensOut } = aiResult
+
+    // 8. Confidence + decision
+    const confidence = this.computeConfidence(llmConf, { knowledgeCount: knowledge.length, hasListing: false, content })
+    const settings = await this.aiSettings.getSettings()
+    const decision = this.decideAutoPilot({
+      confidence,
+      alwaysEscalate: !!(agent as { always_escalate?: boolean }).always_escalate,
+      categorizedAsComplaint: false,
+      autoSendThreshold: settings.auto_send_threshold ?? 80,
+      queueThreshold:    settings.queue_threshold ?? 50,
+      channelMode:       agentChannel.mode,
+    })
+    this.logger.log(`[ai.processMessage] [DECISION] conf=${confidence} → ${decision}`)
+
+    // 9. Save AI message + tracking columns
+    const savedMsg = await this.conversations.addMessage({
+      conversation_id,
+      role:            'agent',
+      content,
+      ai_provider:     agent.model_provider,
+      ai_model:        agent.model_id,
+      ai_confidence:   confidence,
+      ai_reasoning:    reasoning,
+      was_auto_sent:   decision === 'auto_send',
+    })
+    if (savedMsg?.id) {
+      await supabaseAdmin
+        .from('ai_messages')
+        .update({
+          confidence,
+          decision,
+          knowledge_cited:  knowledgeCitedIds,
+          duration_ms:      durationMs,
+          tokens_used:      { input: tokensIn, output: tokensOut, total: tokensIn + tokensOut },
+          sent_to_customer: decision === 'auto_send',
+        })
+        .eq('id', savedMsg.id)
+    }
+    if (knowledgeCitedIds.length) this.aiKnowledge.recordUsage(knowledgeCitedIds).catch(() => {})
+
+    // 10. Update conversation status (auto_send → caller will send → status set elsewhere)
+    if (decision === 'escalate') {
+      await this.conversations.escalate(conversation_id)
+    }
+
+    // 11. Token usage
+    if (tokensIn || tokensOut) {
+      this.aiUsage.logUsage({
+        provider:      agent.model_provider,
+        model:         agent.model_id,
+        feature:       `atendente_${channel}`,
+        tokens_input:  tokensIn,
+        tokens_output: tokensOut,
+        tokens_total:  tokensIn + tokensOut,
+        cost_usd:      calcCost(agent.model_provider, agent.model_id, tokensIn, tokensOut),
+      }).catch(() => { /* fire-and-forget */ })
+    }
+
+    this.logger.log(`[ai.processMessage] [END] decision=${decision} conf=${confidence} duration=${durationMs}ms`)
+    return { decision, response: content, confidence, ai_message_id: savedMsg?.id }
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   /**

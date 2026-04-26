@@ -15,6 +15,9 @@ import { CredentialsModule } from './modules/credentials/credentials.module'
 import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
 import { StockModule } from './modules/stock/stock.module'
 import { ChannelsModule } from './modules/channels/channels.module'
+import { CustomersModule } from './modules/customers/customers.module'
+import { WhatsAppModule } from './modules/whatsapp/whatsapp.module'
+import { WebhooksModule } from './modules/webhooks/webhooks.module'
 
 @Module({
   imports: [
@@ -32,6 +35,9 @@ import { ChannelsModule } from './modules/channels/channels.module'
     AiUsageModule,
     StockModule,
     ChannelsModule,
+    CustomersModule,
+    WhatsAppModule,
+    WebhooksModule,
   ],
   controllers: [AppController],
   providers: [AppService],
