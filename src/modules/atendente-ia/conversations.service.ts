@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, HttpException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
@@ -37,18 +37,29 @@ export class ConversationsService {
   }
 
   async getConversation(id: string) {
-    const { data, error } = await supabaseAdmin
-      .from('ai_conversations')
-      .select(`
-        *,
-        agent:ai_agents(id, name, avatar_url, model_provider, model_id, tone),
-        channel_config:ai_agent_channels(*)
-      `)
-      .eq('id', id)
-      .single()
+    try {
+      // Note: ai_agent_channels has FK to ai_agents (not to ai_conversations),
+      // so the channel_config join must be nested inside the agent expansion.
+      // Previous version selected it at top level which caused PGRST200
+      // ("could not find a relationship between ai_conversations and ai_agent_channels").
+      const { data, error } = await supabaseAdmin
+        .from('ai_conversations')
+        .select(`
+          *,
+          agent:ai_agents(
+            id, name, avatar_url, model_provider, model_id, tone,
+            channels:ai_agent_channels(*)
+          )
+        `)
+        .eq('id', id)
+        .single()
 
-    if (error) throw error
-    return data
+      if (error) throw error
+      return data
+    } catch (e: any) {
+      console.error('[conversations.getConversation] ERRO:', e?.message, e?.code, e?.details, e?.hint)
+      throw new HttpException(e?.message ?? 'Erro ao buscar conversa', 400)
+    }
   }
 
   async getMessages(conversationId: string) {
