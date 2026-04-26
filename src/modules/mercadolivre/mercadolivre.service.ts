@@ -643,7 +643,10 @@ export class MercadolivreService {
     }
   }
 
-  async syncStockToListings(productId: string, platformQty: number): Promise<void> {
+  /** @deprecated prefer StockService.syncStockToAllChannels (logs to stock_sync_logs).
+   * Retained because decrementStock (sale webhook) cannot inject StockService
+   * without a circular dep. This path now writes to stock_sync_logs too. */
+  async syncStockToListings(productId: string, platformQty: number, triggeredBy = 'ml_order_decrement'): Promise<void> {
     const { data: vinculos } = await supabaseAdmin
       .from('product_listings')
       .select('listing_id')
@@ -653,20 +656,48 @@ export class MercadolivreService {
 
     if (!vinculos?.length) {
       console.log(`[stock-sync] nenhum anúncio ML para produto ${productId}`)
+      await supabaseAdmin.from('stock_sync_logs').insert({
+        product_id:    productId,
+        channel:       'mercadolivre',
+        sent_quantity: platformQty,
+        status:        'ignored',
+        error_message: 'Produto sem anúncios vinculados',
+        triggered_by:  triggeredBy,
+      })
       return
     }
 
     console.log(`[stock-sync] sincronizando ${vinculos.length} anúncio(s) → ${platformQty} unid.`)
 
-    const results = await Promise.allSettled(
-      (vinculos as { listing_id: string }[]).map(v => this.updateListingStock(v.listing_id, platformQty)),
-    )
-
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        console.error(`[stock-sync] falha em ${(vinculos as any)[i].listing_id}:`, (r.reason as Error)?.message ?? r.reason)
+    for (const v of vinculos as { listing_id: string }[]) {
+      const startTime = Date.now()
+      let status = 'pending', errorMsg: string | null = null, httpStatus = 0
+      let confirmedQty: number | null = null
+      try {
+        await this.updateListingStock(v.listing_id, platformQty)
+        confirmedQty = platformQty
+        status = 'success'
+        httpStatus = 200
+      } catch (e: any) {
+        status     = 'error'
+        errorMsg   = e?.message ?? 'erro'
+        httpStatus = e?.response?.status ?? 500
+        console.error(`[stock-sync] falha em ${v.listing_id}: ${errorMsg}`)
       }
-    })
+
+      await supabaseAdmin.from('stock_sync_logs').insert({
+        product_id:         productId,
+        channel:            'mercadolivre',
+        listing_id:         v.listing_id,
+        sent_quantity:      platformQty,
+        confirmed_quantity: confirmedQty,
+        status,
+        error_message:      errorMsg,
+        http_status:        httpStatus,
+        triggered_by:       triggeredBy,
+        duration_ms:        Date.now() - startTime,
+      })
+    }
   }
 
   // ── Auto stock decrement ─────────────────────────────────────────────────

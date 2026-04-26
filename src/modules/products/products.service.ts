@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
-import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { StockService } from '../stock/stock.service'
 
 const PRODUCT_FIELDS = `id,name,sku,brand,price,stock,status,platforms,photo_urls,
   ml_title,condition,category,created_at,
@@ -44,7 +44,7 @@ export interface UpdateStockDto {
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly ml: MercadolivreService) {}
+  constructor(private readonly stock: StockService) {}
 
   async getAll(orgId: string | null) {
     const query = supabaseAdmin.from('products').select(PRODUCT_FIELDS)
@@ -214,8 +214,8 @@ export class ProductsService {
         .update({ quantity: newQty, updated_at: new Date().toISOString() })
         .eq('id', stockId)
 
-      const platformQty = newQty + virtualQty
-      this.ml.syncStockToListings(dto.product_id, platformQty)
+      // Use new path so stock_sync_logs gets populated
+      this.stock.syncStockToAllChannels(dto.product_id, 'movement')
         .catch((e: Error) => console.error('[stock-sync] movement sync falhou:', e.message))
     }
 
@@ -239,10 +239,7 @@ export class ProductsService {
     if (error) throw new Error(error.message)
 
     if (current && (dto.quantity !== undefined || dto.virtual_quantity !== undefined)) {
-      const physicalQty = dto.quantity          ?? current.quantity          ?? 0
-      const virtualQty  = dto.virtual_quantity  ?? current.virtual_quantity  ?? 0
-      const platformQty = physicalQty + virtualQty
-      this.ml.syncStockToListings(current.product_id, platformQty)
+      this.stock.syncStockToAllChannels(current.product_id, 'manual_update')
         .catch((e: Error) => console.error('[stock-sync] updateStock sync falhou:', e.message))
     }
 
