@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Logger, Post, Query, Res } from '@nestjs/common'
+import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Logger, Param, Post, Query, Res } from '@nestjs/common'
 import type { Response } from 'express'
 import { supabaseAdmin } from '../../common/supabase'
 import { WhatsAppConfigService } from '../whatsapp/whatsapp-config.service'
@@ -7,6 +7,7 @@ import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 import { ConversationsService } from '../atendente-ia/conversations.service'
 import { AiResponderService } from '../atendente-ia/ai-responder.service'
 import { CustomerIdentityService } from '../customers/customer-identity.service'
+import { ChatWidgetService } from '../widgets/chat-widget.service'
 
 @Controller('webhooks')
 export class WebhooksController {
@@ -19,6 +20,7 @@ export class WebhooksController {
     private readonly conversations: ConversationsService,
     private readonly responder:    AiResponderService,
     private readonly customers:    CustomerIdentityService,
+    private readonly widgets:      ChatWidgetService,
   ) {}
 
   // ── Meta webhook verification (one-time handshake) ───────────────────────
@@ -144,5 +146,103 @@ export class WebhooksController {
         } catch { /* don't double-fail */ }
       }
     })
+  }
+
+  // ── Widget (public — no auth, CORS open) ──────────────────────────────────
+
+  @Post('widget/:token')
+  @HttpCode(HttpStatus.OK)
+  async receiveWidget(
+    @Param('token') token: string,
+    @Body() body: { message?: string; session_token?: string; name?: string; email?: string; phone?: string; origin_url?: string; user_agent?: string },
+    @Res() res: Response,
+  ) {
+    // CORS: anyone can post (it's a public widget endpoint)
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+    if (!body?.message?.trim()) {
+      return res.status(400).json({ error: 'message é obrigatório' })
+    }
+
+    try {
+      const widget = await this.widgets.findByToken(token)
+      if (!widget) return res.status(404).json({ error: 'Widget não encontrado' })
+
+      // Find or create session
+      let session = await this.widgets.getSession(body.session_token ?? '')
+      if (!session) {
+        session = await this.widgets.createSession(widget.id, {
+          visitor_name:  body.name,
+          visitor_email: body.email,
+          visitor_phone: body.phone,
+          origin_url:    body.origin_url,
+          user_agent:    body.user_agent,
+        })
+      } else {
+        await this.widgets.touchSession(session.id)
+      }
+
+      // Resolve customer if we have phone
+      if (body.phone && !session.unified_customer_id) {
+        const customer = await this.customers.resolveByPhone(body.phone, body.name, 'widget')
+        if (customer) {
+          await this.widgets.linkCustomerToSession(session.id, customer.id)
+          session.unified_customer_id = customer.id
+        }
+      }
+
+      // Find or create conversation
+      let conversationId = session.conversation_id
+      if (!conversationId) {
+        const conv = await this.conversations.upsertConversation({
+          channel:                  'widget',
+          external_conversation_id: `widget:${session.session_token}`,
+          external_customer_id:     session.unified_customer_id ?? session.session_token,
+          customer_name:            session.visitor_name ?? body.name ?? 'Visitante',
+        })
+        conversationId = conv.id
+        await this.widgets.linkConversationToSession(session.id, conv.id)
+
+        if (session.unified_customer_id) {
+          await supabaseAdmin
+            .from('ai_conversations')
+            .update({ unified_customer_id: session.unified_customer_id, customer_phone: body.phone, customer_email: body.email })
+            .eq('id', conv.id)
+        }
+      }
+
+      const result = await this.responder.processMessage({
+        text:                body.message!,
+        channel:             'widget',
+        conversation_id:     conversationId,
+        customer_name:       session.visitor_name ?? body.name,
+        customer_phone:      body.phone,
+        customer_email:      body.email,
+        unified_customer_id: session.unified_customer_id ?? undefined,
+        metadata:            { widget_id: widget.id, session_id: session.id },
+      })
+
+      this.logger.log(`[widget.webhook] ${widget.name}: decision=${result.decision} conf=${result.confidence}%`)
+
+      // Send response to widget caller
+      if (result.decision === 'auto_send' && result.response) {
+        return res.status(200).json({
+          message:         result.response,
+          confidence:      result.confidence,
+          session_token:   session.session_token,
+          conversation_id: conversationId,
+        })
+      }
+      return res.status(200).json({
+        queued:          true,
+        session_token:   session.session_token,
+        conversation_id: conversationId,
+      })
+    } catch (err: any) {
+      this.logger.error(`[widget.webhook] ERRO: ${err?.message}`, err?.stack)
+      return res.status(500).json({ error: err?.message ?? 'erro' })
+    }
   }
 }

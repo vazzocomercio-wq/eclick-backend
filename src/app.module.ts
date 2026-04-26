@@ -18,6 +18,7 @@ import { ChannelsModule } from './modules/channels/channels.module'
 import { CustomersModule } from './modules/customers/customers.module'
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module'
 import { WebhooksModule } from './modules/webhooks/webhooks.module'
+import { WidgetsModule } from './modules/widgets/widgets.module'
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module'
     ChannelsModule,
     CustomersModule,
     WhatsAppModule,
+    WidgetsModule,
     WebhooksModule,
   ],
   controllers: [AppController],

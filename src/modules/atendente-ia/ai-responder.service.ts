@@ -453,8 +453,34 @@ export class AiResponderService {
       .limit(10)
     const recentMessages = (messagesData ?? []).reverse()
 
-    // 5. Build prompts (no productInfo — channels don't always have one)
-    const systemPrompt = this.buildSystemPrompt(agent, { listing_id: undefined, title: undefined, price: undefined, product: null }, knowledge)
+    // 5. Cross-channel customer history (only when we know who they are)
+    let crossChannelContext = ''
+    if (opts.unified_customer_id) {
+      try {
+        const { data: history } = await supabaseAdmin
+          .from('ai_conversations')
+          .select('channel, status, total_messages, listing_title, updated_at')
+          .eq('unified_customer_id', opts.unified_customer_id)
+          .neq('id', conversation_id)
+          .order('updated_at', { ascending: false })
+          .limit(5)
+        if (history?.length) {
+          crossChannelContext = '\n\n=== HISTÓRICO DO CLIENTE (CROSS-CANAL) ===\n'
+          crossChannelContext += `Cliente teve ${history.length} conversa(s) anterior(es):\n`
+          for (const h of history) {
+            const when = relativeWhen(h.updated_at as string)
+            const subject = h.listing_title ? ` (sobre ${(h.listing_title as string).slice(0, 40)})` : ''
+            crossChannelContext += `- ${when} via ${h.channel} · ${h.total_messages ?? 0} msgs · ${h.status}${subject}\n`
+          }
+        }
+      } catch (e: any) {
+        this.logger.warn(`[ai.processMessage] cross-channel history failed: ${e?.message}`)
+      }
+    }
+
+    // 6. Build prompts (no productInfo — channels don't always have one)
+    const baseSystemPrompt = this.buildSystemPrompt(agent, { listing_id: undefined, title: undefined, price: undefined, product: null }, knowledge)
+    const systemPrompt = baseSystemPrompt + crossChannelContext
     const userPrompt   = this.buildUserPrompt(text, recentMessages)
 
     // 6. API key
@@ -727,4 +753,15 @@ Confiança: 90-100 = informação exata | 70-89 = informação relacionada | 50-
         })
     }
   }
+}
+
+function relativeWhen(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 60)   return 'há minutos'
+  const h = Math.floor(m / 60)
+  if (h < 24)   return `há ${h}h`
+  const d = Math.floor(h / 24)
+  if (d < 30)   return `há ${d}d`
+  return 'há mais de 1 mês'
 }
