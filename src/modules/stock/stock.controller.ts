@@ -101,6 +101,33 @@ export class StockController {
     }
   }
 
+  // ── Auto distribution ──────────────────────────────────────────────────────
+
+  @Get(':product_id/auto-check')
+  autoCheck(@Param('product_id') productId: string) {
+    return this.svc.canUseAutoMode(productId)
+  }
+
+  @Post(':product_id/recalc-auto')
+  @HttpCode(HttpStatus.OK)
+  async recalcAuto(@Param('product_id') productId: string) {
+    this.logger.log(`[recalc-auto] product_id=${productId}`)
+    try {
+      const result = await this.svc.applyAutoDistribution(productId, 'user_manual')
+      return result
+    } catch (e: any) {
+      this.logger.error(`[recalc-auto] ERRO: ${e?.message}`)
+      throw new HttpException(e?.message ?? 'Erro ao recalcular', 400)
+    }
+  }
+
+  @Get(':product_id/recalc-history')
+  recalcHistory(@Param('product_id') productId: string) {
+    return this.svc.getRecalcHistory(productId)
+  }
+
+  // ── Sync ──────────────────────────────────────────────────────────────────
+
   @Post('sync-all')
   @HttpCode(HttpStatus.OK)
   async syncAll() {

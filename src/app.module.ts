@@ -14,6 +14,7 @@ import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 import { CredentialsModule } from './modules/credentials/credentials.module'
 import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
 import { StockModule } from './modules/stock/stock.module'
+import { ChannelsModule } from './modules/channels/channels.module'
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { StockModule } from './modules/stock/stock.module'
     CredentialsModule,
     AiUsageModule,
     StockModule,
+    ChannelsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

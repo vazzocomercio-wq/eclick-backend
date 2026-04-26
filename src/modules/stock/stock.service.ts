@@ -831,6 +831,21 @@ export class StockService {
     return result
   }
 
+  async getRecalcHistory(productId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('distribution_recalc_log')
+      .select('id, triggered_by, channels_considered, channels_skipped, result, applied, created_at')
+      .eq('product_id', productId)
+      .order('created_at', { ascending: false })
+      .limit(20)
+
+    if (error) {
+      this.logger.warn(`[stock.auto] history failed: ${error.message}`)
+      return []
+    }
+    return data ?? []
+  }
+
   // ── Sync logs ─────────────────────────────────────────────────────────────
 
   async getSyncLogs(filters: {
