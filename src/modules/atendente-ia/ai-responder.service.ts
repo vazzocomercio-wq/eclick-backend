@@ -6,6 +6,10 @@ import { ConversationsService } from './conversations.service'
 import { CredentialsService } from '../credentials/credentials.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { AiUsageService } from '../ai-usage/ai-usage.service'
+import { AiSettingsService } from './ai-settings.service'
+import { AiKnowledgeService } from './ai-knowledge.service'
+
+type AutoPilotDecision = 'auto_send' | 'queue_for_human' | 'escalate'
 
 interface MlQuestion {
   id: number
@@ -43,6 +47,8 @@ export class AiResponderService {
     private readonly credentials: CredentialsService,
     private readonly mlService: MercadolivreService,
     private readonly aiUsage: AiUsageService,
+    private readonly aiSettings: AiSettingsService,
+    private readonly aiKnowledge: AiKnowledgeService,
   ) {}
 
   // ── ML Question polling ────────────────────────────────────────────────────
@@ -195,24 +201,56 @@ export class AiResponderService {
       return
     }
 
-    // 5. Fetch knowledge + recent messages for context
-    const [knowledgeRes, messagesRes] = await Promise.all([
-      supabaseAdmin
+    // 5. Build context: top-N relevant knowledge (semantic) + recent messages.
+    // Prefer searchSimilar (pgvector) — falls back to plain SELECT if embedding
+    // generation fails (e.g., no OpenAI key) so the agent still answers.
+    let knowledge: Array<{ type?: string; title: string; content: string; knowledge_id?: string }> = []
+    const knowledgeCitedIds: string[] = []
+    try {
+      const matches = await this.aiKnowledge.searchSimilar(customerMessage, agent.id, 5)
+      if (matches.length) {
+        const ids = matches.map(m => m.knowledge_id)
+        const { data: rows } = await supabaseAdmin
+          .from('ai_knowledge_base')
+          .select('id, type, title, content')
+          .in('id', ids)
+        const byId = new Map((rows ?? []).map(r => [r.id, r]))
+        knowledge = matches
+          .map(m => {
+            const r = byId.get(m.knowledge_id)
+            if (!r) return null
+            knowledgeCitedIds.push(r.id)
+            return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
+          })
+          .filter((x): x is NonNullable<typeof x> => !!x)
+        this.logger.log(`[ai-responder] [KNOWLEDGE] ${knowledge.length} via semantic search`)
+      }
+    } catch (e: any) {
+      this.logger.warn(`[ai-responder] [KNOWLEDGE] semantic search failed (${e?.message}) — fallback to SELECT`)
+    }
+
+    if (!knowledge.length) {
+      const { data: kbRows } = await supabaseAdmin
         .from('ai_knowledge_base')
-        .select('type, title, content')
+        .select('id, type, title, content')
         .eq('agent_id', agent.id)
         .eq('is_active', true)
-        .limit(20),
-      supabaseAdmin
-        .from('ai_messages')
-        .select('role, content')
-        .eq('conversation_id', conv.id)
-        .order('sent_at', { ascending: false })
-        .limit(10),
-    ])
+        .limit(20)
+      knowledge = (kbRows ?? []).map(r => {
+        knowledgeCitedIds.push(r.id)
+        return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
+      })
+      this.logger.log(`[ai-responder] [KNOWLEDGE] ${knowledge.length} via fallback SELECT`)
+    }
 
-    const knowledge      = knowledgeRes.data ?? []
-    const recentMessages = (messagesRes.data ?? []).reverse()
+    // Recent messages
+    const { data: messagesData } = await supabaseAdmin
+      .from('ai_messages')
+      .select('role, content')
+      .eq('conversation_id', conv.id)
+      .order('sent_at', { ascending: false })
+      .limit(10)
+    const recentMessages = (messagesData ?? []).reverse()
 
     // 6. Build prompts
     const systemPrompt = this.buildSystemPrompt(agent, productInfo, knowledge)
@@ -227,17 +265,42 @@ export class AiResponderService {
       return
     }
 
-    // 8. Call AI
+    // 8. Call AI (track duration)
+    const t0 = Date.now()
     const aiResult = await this.callAI(agent.model_provider, agent.model_id, systemPrompt, userPrompt, apiKey)
-    if (!aiResult) return
+    const durationMs = Date.now() - t0
+    if (!aiResult) {
+      this.logger.error(`[ai-responder] [LLM] returned null after ${durationMs}ms`)
+      return
+    }
 
-    const { content, confidence, reasoning, tokensIn, tokensOut } = aiResult
+    const { content, confidence: llmConf, reasoning, tokensIn, tokensOut } = aiResult
+    this.logger.log(`[ai-responder] [LLM] ${tokensIn}in/${tokensOut}out in ${durationMs}ms llmConf:${llmConf}`)
 
-    const autoSend = agentChannel.mode === 'auto' ||
-      (agentChannel.mode === 'hybrid' && confidence >= (agentChannel.confidence_threshold ?? 80))
+    // 8b. Compute final confidence with context boosts/penalties
+    const confidence = this.computeConfidence(llmConf, {
+      knowledgeCount: knowledge.length,
+      hasListing:     !!productInfo.listing_id,
+      content,
+    })
 
-    // 9. Save AI message
-    await this.conversations.addMessage({
+    // 8c. Decide auto-pilot action (uses settings thresholds + agent flags)
+    const settings = await this.aiSettings.getSettings()
+    const decision = this.decideAutoPilot({
+      confidence,
+      alwaysEscalate: !!(agent as { always_escalate?: boolean }).always_escalate,
+      categorizedAsComplaint: shouldEscalate, // already detected via keywords above
+      autoSendThreshold: settings.auto_send_threshold ?? 80,
+      queueThreshold:    settings.queue_threshold ?? 50,
+      channelMode:       agentChannel.mode,
+    })
+    this.logger.log(`[ai-responder] [DECISION] confidence:${confidence} → ${decision}`)
+
+    const autoSend = decision === 'auto_send'
+
+    // 9. Save AI message — first via legacy addMessage (keeps stats counters),
+    // then update with the new tracking columns.
+    const savedMsg = await this.conversations.addMessage({
       conversation_id: conv.id,
       role:            'agent',
       content,
@@ -247,24 +310,46 @@ export class AiResponderService {
       ai_reasoning:    reasoning,
       was_auto_sent:   autoSend,
     })
+    if (savedMsg?.id) {
+      await supabaseAdmin
+        .from('ai_messages')
+        .update({
+          confidence,
+          decision,
+          knowledge_cited:  knowledgeCitedIds,
+          duration_ms:      durationMs,
+          tokens_used:      { input: tokensIn, output: tokensOut, total: tokensIn + tokensOut },
+          sent_to_customer: autoSend,
+        })
+        .eq('id', savedMsg.id)
+    }
 
-    // 10. Auto-send to ML if applicable
-    if (autoSend && channel === 'mercadolivre') {
+    // 9b. Bump knowledge usage stats (best-effort)
+    if (knowledgeCitedIds.length) {
+      this.aiKnowledge.recordUsage(knowledgeCitedIds).catch(() => { /* logged inside */ })
+    }
+
+    // 10. Act on decision
+    if (decision === 'auto_send' && channel === 'mercadolivre') {
       if ((agentChannel.auto_reply_delay_seconds ?? 0) > 0) {
         await new Promise(r => setTimeout(r, agentChannel.auto_reply_delay_seconds * 1000))
       }
       try {
         await this.mlService.answerQuestion(null, Number(externalConvId), content)
-        this.logger.log(`[ai-responder] resposta enviada ao ML conf:${confidence}%`)
+        this.logger.log(`[ai-responder] [SEND] enviado ao ML conf:${confidence}%`)
       } catch (e: any) {
-        this.logger.warn('[ai-responder] erro ao enviar ML:', e.message)
+        this.logger.warn('[ai-responder] [SEND] erro ML:', e.message)
       }
-    } else if (!autoSend) {
+    } else if (decision === 'escalate') {
+      await this.conversations.escalate(conv.id)
+      this.logger.log(`[ai-responder] [SEND] escalado pra humano conf:${confidence}%`)
+    } else {
+      // queue_for_human → status já é 'waiting_human' via addMessage
       await supabaseAdmin
         .from('ai_conversations')
         .update({ status: 'waiting_human', updated_at: new Date().toISOString() })
         .eq('id', conv.id)
-      this.logger.log(`[ai-responder] aguardando aprovação humana conf:${confidence}%`)
+      this.logger.log(`[ai-responder] [SEND] queue pra humano conf:${confidence}%`)
     }
 
     // 11. Analytics
@@ -285,6 +370,52 @@ export class AiResponderService {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Refines the LLM's self-reported confidence with concrete signal from
+   * context and response shape. Heuristic:
+   *   base 60 (or LLM's value if reasonable)
+   *   +15 if 2+ knowledge entries cited
+   *   +15 if conversation has a listing context
+   *   +10 if response length is in a "decent" range (30–500 chars)
+   *   -25 if response contains hedging phrases ("não sei", "verifique", "não tenho certeza")
+   *   capped to [0, 100]
+   */
+  private computeConfidence(llmConf: number, ctx: { knowledgeCount: number; hasListing: boolean; content: string }): number {
+    let conf = typeof llmConf === 'number' && llmConf >= 0 && llmConf <= 100 ? llmConf : 60
+    if (ctx.knowledgeCount >= 2) conf += 15
+    if (ctx.hasListing)          conf += 15
+
+    const len = (ctx.content ?? '').length
+    if (len >= 30 && len <= 500) conf += 10
+
+    const hedge = /\b(não sei|nao sei|verifique|não tenho certeza|nao tenho certeza)\b/i
+    if (hedge.test(ctx.content ?? '')) conf -= 25
+
+    return Math.max(0, Math.min(100, Math.round(conf)))
+  }
+
+  /**
+   * Decides what to do with the AI response based on confidence + agent flags
+   * + module-wide settings thresholds.
+   */
+  private decideAutoPilot(input: {
+    confidence: number
+    alwaysEscalate: boolean
+    categorizedAsComplaint: boolean
+    autoSendThreshold: number
+    queueThreshold: number
+    channelMode?: string
+  }): AutoPilotDecision {
+    if (input.alwaysEscalate)         return 'escalate'
+    if (input.categorizedAsComplaint) return 'escalate'
+    // Channel-level override: if channel is 'human', never auto-send
+    if (input.channelMode === 'human') return 'queue_for_human'
+
+    if (input.confidence >= input.autoSendThreshold) return 'auto_send'
+    if (input.confidence >= input.queueThreshold)    return 'queue_for_human'
+    return 'escalate'
+  }
 
   private buildSystemPrompt(
     agent: { name: string; tone: string; language: string; system_prompt?: string },
