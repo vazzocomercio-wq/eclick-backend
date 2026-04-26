@@ -50,7 +50,8 @@ export class MlAdsService {
     }
   }
 
-  /** Returns the first product_ads advertiser for the connected ML account. */
+  /** Returns the first product_ads advertiser for the connected ML account.
+   * Never throws — caller treats null as "no advertiser configured". */
   async getAdvertiser(): Promise<{ advertiser_id: string; account_name: string | null } | null> {
     try {
       const headers = await this.authHeaders()
@@ -66,9 +67,8 @@ export class MlAdsService {
         account_name:  first.account_name ?? null,
       }
     } catch (e: any) {
-      const status = e?.response?.status ?? 500
-      if (status === 401 || status === 403 || status === 404) return null
-      throw new HttpException(e?.response?.data?.message ?? 'Erro ao buscar advertiser', status)
+      this.logger.warn(`[ml-ads.advertiser] ${e?.response?.status ?? ''} ${e?.message ?? ''}`)
+      return null
     }
   }
 

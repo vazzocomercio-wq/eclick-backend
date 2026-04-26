@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Query, UseGuards, HttpCode, HttpStatus, Logger } from '@nestjs/common'
+import { Controller, Get, Post, Param, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
 import { MlAdsService } from './ml-ads.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 
@@ -14,66 +14,83 @@ const EMPTY_SUMMARY = {
 @Controller('ml-ads')
 @UseGuards(SupabaseAuthGuard)
 export class MlAdsController {
-  private readonly logger = new Logger(MlAdsController.name)
-
   constructor(private readonly svc: MlAdsService) {}
 
-  // Helper — every endpoint runs the call, logs any error, and returns
-  // the supplied empty fallback so the frontend never sees a 500.
-  private async safe<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+  @Get('advertiser')
+  async advertiser() {
     try {
-      return await fn()
+      return await this.svc.getAdvertiser()
     } catch (e: unknown) {
-      const err = e as { message?: string; stack?: string }
-      this.logger.error(`[${label}] ${err?.message}`)
-      if (err?.stack) this.logger.error(err.stack)
-      return fallback
+      const err = e as Error
+      console.error('[ml-ads] advertiser erro:', err?.message)
+      if (err?.stack) console.error(err.stack)
+      return null
     }
   }
 
-  @Get('advertiser')
-  advertiser() {
-    return this.safe('advertiser', () => this.svc.getAdvertiser(), null)
-  }
-
   @Get('campaigns')
-  campaigns(
+  async getCampaigns(
     @Query('from') dateFrom?: string,
     @Query('to')   dateTo?:   string,
   ) {
-    return this.safe<unknown[]>(
-      'campaigns',
-      async () => dateFrom && dateTo
-        ? await this.svc.getCampaignAggregation(dateFrom, dateTo)
-        : await this.svc.listCampaigns(),
-      [],
-    )
+    try {
+      if (dateFrom && dateTo) return await this.svc.getCampaignAggregation(dateFrom, dateTo)
+      return await this.svc.listCampaigns()
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] campaigns erro:', err?.message)
+      if (err?.stack) console.error(err.stack)
+      return []
+    }
   }
 
   @Get('reports/summary')
-  summary(
+  async getSummary(
     @Query('from') dateFrom: string,
     @Query('to')   dateTo:   string,
   ) {
-    return this.safe('reports.summary', () => this.svc.getSummaryReport(dateFrom, dateTo), EMPTY_SUMMARY)
+    try {
+      return await this.svc.getSummaryReport(dateFrom, dateTo)
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] summary erro:', err?.message)
+      if (err?.stack) console.error(err.stack)
+      return EMPTY_SUMMARY
+    }
   }
 
   @Get('reports/campaign/:id')
-  campaignSeries(
+  async getCampaignSeries(
     @Param('id') id: string,
     @Query('from') dateFrom: string,
     @Query('to')   dateTo:   string,
   ) {
-    return this.safe('reports.campaign', () => this.svc.getCampaignDailySeries(id, dateFrom, dateTo), [])
+    try {
+      return await this.svc.getCampaignDailySeries(id, dateFrom, dateTo)
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] campaign series erro:', err?.message)
+      if (err?.stack) console.error(err.stack)
+      return []
+    }
   }
 
   @Post('sync')
   @HttpCode(HttpStatus.OK)
-  sync() {
-    return this.safe(
-      'sync',
-      () => this.svc.syncAll(),
-      { ok: false, advertiser_id: null, campaigns: 0, reports: 0, message: 'Erro durante sync — ver logs do servidor' },
-    )
+  async sync() {
+    try {
+      return await this.svc.syncAll()
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] sync erro:', err?.message)
+      if (err?.stack) console.error(err.stack)
+      return {
+        ok: false,
+        advertiser_id: null,
+        campaigns: 0,
+        reports: 0,
+        message: err?.message ?? 'Erro durante sync',
+      }
+    }
   }
 }
