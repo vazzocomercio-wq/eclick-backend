@@ -88,8 +88,6 @@ export class ProductsService {
   }
 
   async updateCosts(orgId: string | null, productId: string, dto: UpdateProductCostsDto) {
-    console.log('[products.updateCosts] id:', productId, '| orgId:', orgId, '| dto:', dto)
-
     let query = supabaseAdmin
       .from('products')
       .update({
@@ -107,7 +105,6 @@ export class ProductsService {
       .select('id, cost_price, tax_percentage, tax_on_freight')
       .single()
 
-    console.log('[products.updateCosts] resultado:', { data, error: error?.message })
     if (error || !data) throw new NotFoundException('Produto não encontrado')
     return data
   }
@@ -130,7 +127,6 @@ export class ProductsService {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async createVinculo(dto: any) {
-    console.log('[vinculos.service] inserindo:', JSON.stringify(dto))
     const { data, error } = await supabaseAdmin
       .from('product_listings')
       .insert({

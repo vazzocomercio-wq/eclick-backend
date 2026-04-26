@@ -25,18 +25,8 @@ export class ProductsController {
   // POST /products/vinculos
   @Post('vinculos')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async createVinculo(@Body() body: any) {
-    console.log('[vinculos.create] body recebido:', JSON.stringify(body))
-    try {
-      const result = await this.products.createVinculo(body)
-      console.log('[vinculos.create] sucesso:', result)
-      return result
-    } catch (e: unknown) {
-      const err = e as Error
-      console.error('[vinculos.create] ERRO:', err.message)
-      console.error('[vinculos.create] STACK:', err.stack)
-      throw e
-    }
+  createVinculo(@Body() body: any) {
+    return this.products.createVinculo(body)
   }
 
   // DELETE /products/vinculos/:id

@@ -476,30 +476,17 @@ export class StockService {
   }
 
   async syncStockToAllChannels(productId: string, triggeredBy = 'system_distribution') {
-    console.log(`[STOCK-SYNC] >>> INICIO sync para produto ${productId} (trigger=${triggeredBy})`)
     try {
       const channelQtys = await this.calculateChannelQuantities(productId)
-      console.log(`[STOCK-SYNC] canais retornados: ${JSON.stringify(channelQtys)}`)
-
-      if (!channelQtys || channelQtys.length === 0) {
-        console.log(`[STOCK-SYNC] nenhum canal retornado, abortando`)
-        return
-      }
+      if (!channelQtys?.length) return
 
       for (const cq of channelQtys) {
-        console.log(`[STOCK-SYNC] iterando canal: ${cq.channel} qty:${cq.qty}`)
         if (cq.channel === 'mercadolivre') {
-          console.log(`[STOCK-SYNC] >>> CHAMANDO syncToMl para ${productId}`)
           await this.syncToMl(productId, cq.qty, cq.should_pause, cq.distribution_id, triggeredBy)
-          console.log(`[STOCK-SYNC] <<< syncToMl RETORNOU para ${productId}`)
-        } else {
-          console.log(`[STOCK-SYNC] canal ${cq.channel} ignorado (não suportado)`)
         }
       }
-
-      console.log(`[STOCK-SYNC] <<< FIM sync para produto ${productId}`)
     } catch (e: any) {
-      console.error(`[STOCK-SYNC] ERRO GERAL produto=${productId}:`, e?.message, e?.stack)
+      console.error(`[stock.sync] product=${productId}:`, e?.message)
       throw e
     }
   }
@@ -511,15 +498,12 @@ export class StockService {
     distributionId: string | null = null,
     triggeredBy = 'system_distribution',
   ) {
-    console.log(`[STOCK-ML] === INICIO === productId:${productId} qty:${qty} pause:${shouldPause} trigger:${triggeredBy}`)
-
     // Skip products without a product_stock row — without it qty was being
     // silently treated as 0, which would erase the listing's actual quantity
     // on ML. Better to log "ignored" and require an explicit stock record.
     const calc = await this.calculateAvailable(productId)
     if (calc.no_stock_record) {
-      console.log(`[STOCK-ML] productId=${productId} sem registro em product_stock — abortando sync`)
-      const { error: insErr } = await supabaseAdmin.from('stock_sync_logs').insert({
+      await supabaseAdmin.from('stock_sync_logs').insert({
         product_id:    productId,
         channel:       'mercadolivre',
         sent_quantity: 0,
@@ -527,23 +511,19 @@ export class StockService {
         error_message: 'Produto sem registro de estoque cadastrado',
         triggered_by:  triggeredBy,
       })
-      if (insErr) console.error(`[STOCK-ML] erro ao inserir log no_stock_record: ${insErr.message}`)
       return
     }
 
     try {
-      const { data: vinculos, error: vincErr } = await supabaseAdmin
+      const { data: vinculos } = await supabaseAdmin
         .from('product_listings')
         .select('listing_id')
         .eq('product_id', productId)
         .eq('platform', 'mercadolivre')
         .eq('is_active', true)
 
-      console.log(`[STOCK-ML] vínculos encontrados: ${vinculos?.length ?? 0}${vincErr ? ' err:' + vincErr.message : ''}`)
-
       if (!vinculos?.length) {
-        console.log(`[STOCK-ML] sem vínculos, salvando log "ignored"`)
-        const { error: insErr } = await supabaseAdmin.from('stock_sync_logs').insert({
+        await supabaseAdmin.from('stock_sync_logs').insert({
           product_id:    productId,
           channel:       'mercadolivre',
           sent_quantity: qty,
@@ -551,12 +531,10 @@ export class StockService {
           error_message: 'Produto sem anúncios vinculados',
           triggered_by:  triggeredBy,
         })
-        console.log(`[STOCK-ML] insert "ignored": ${insErr ? 'ERRO ' + insErr.message : 'ok'}`)
         return
       }
 
       for (const v of vinculos) {
-        console.log(`[STOCK-ML] processando vínculo: ${v.listing_id}`)
         const startTime = Date.now()
         let status: string = 'pending'
         let errorMsg: string | null = null
@@ -564,21 +542,18 @@ export class StockService {
         let confirmedQty: number | null = null
 
         try {
-          console.log(`[STOCK-ML] chamando ML PUT (${shouldPause ? 'pause→0' : qty})...`)
           await this.mlService.updateListingStock(v.listing_id, shouldPause ? 0 : qty)
           confirmedQty = shouldPause ? 0 : qty
           status       = 'success'
           httpStatus   = 200
-          console.log(`[STOCK-ML] ML respondeu: ${confirmedQty}`)
         } catch (e: any) {
           status     = 'error'
           errorMsg   = e?.message ?? 'erro desconhecido'
           httpStatus = e?.response?.status ?? 500
-          console.error(`[STOCK-ML] ML ERRO ${v.listing_id}: ${errorMsg}`)
+          console.error(`[stock.ml] ${v.listing_id}: ${errorMsg}`)
         }
 
-        console.log(`[STOCK-ML] inserindo log final: status=${status}`)
-        const { error: logErr } = await supabaseAdmin.from('stock_sync_logs').insert({
+        await supabaseAdmin.from('stock_sync_logs').insert({
           product_id:         productId,
           channel:            'mercadolivre',
           listing_id:         v.listing_id,
@@ -591,9 +566,6 @@ export class StockService {
           duration_ms:        Date.now() - startTime,
         })
 
-        if (logErr) console.error(`[STOCK-ML] ERRO ao inserir log: ${logErr.message}`)
-        else        console.log(`[STOCK-ML] log inserido OK`)
-
         if (status === 'success' && distributionId) {
           await supabaseAdmin
             .from('channel_stock_distribution')
@@ -601,10 +573,8 @@ export class StockService {
             .eq('id', distributionId)
         }
       }
-
-      console.log(`[STOCK-ML] === FIM === productId:${productId}`)
     } catch (e: any) {
-      console.error(`[STOCK-ML] ERRO GERAL productId=${productId}:`, e?.message, e?.stack)
+      console.error(`[stock.ml] product=${productId}:`, e?.message)
     }
   }
 
@@ -622,19 +592,15 @@ export class StockService {
     missing_integration: string[]
     missing_sales_data: string[]
   }> {
-    console.log(`[auto-check] productId=${productId}`)
-
     // Note: account_id removed from SELECT — column doesn't exist on
     // channel_stock_distribution; previous version errored silently and
     // returned data=null, falling into the "Nenhum canal cadastrado" branch
     // even when there were perfectly good rows in the table.
-    const { data: distributions, error } = await supabaseAdmin
+    const { data: distributions } = await supabaseAdmin
       .from('channel_stock_distribution')
       .select('channel, is_active, distribution_mode')
       .eq('product_id', productId)
       .eq('is_active', true)
-
-    console.log(`[auto-check] rows=${distributions?.length ?? 0} err=${error?.message ?? 'none'} data=${JSON.stringify(distributions)}`)
 
     if (!distributions?.length) {
       return {
@@ -783,11 +749,9 @@ export class StockService {
 
   /** Apply the calculated auto distribution + log + re-sync ML. */
   async applyAutoDistribution(productId: string, triggeredBy = 'user_manual') {
-    console.log(`[stock.auto] iniciando recálculo product_id=${productId} trigger=${triggeredBy}`)
     const result = await this.calculateAutoDistribution(productId)
 
     if (!result.ok || !result.distribution) {
-      console.log(`[stock.auto] não aplicado: ${result.message}`)
       // Audit even when skipped, so the user sees why
       await supabaseAdmin.from('distribution_recalc_log').insert({
         product_id:           productId,
@@ -839,7 +803,6 @@ export class StockService {
     this.syncStockToAllChannels(productId, `auto_recalc_${triggeredBy}`)
       .catch(e => console.error('[stock.auto] sync erro:', e?.message))
 
-    console.log(`[stock.auto] aplicado para ${productId}:`, result.distribution)
     return result
   }
 
