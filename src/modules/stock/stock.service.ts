@@ -507,22 +507,6 @@ export class StockService {
   ) {
     console.log(`[STOCK-ML] === INICIO === productId:${productId} qty:${qty} pause:${shouldPause} trigger:${triggeredBy}`)
 
-    // CANARY: prove the function is entered, even before vinculos lookup runs.
-    // If after a sync attempt no row appears with status='pending' and
-    // triggered_by='canary_<trigger>', then syncToMl is not being called at all.
-    const { data: canary, error: canaryErr } = await supabaseAdmin
-      .from('stock_sync_logs')
-      .insert({
-        product_id:    productId,
-        channel:       'mercadolivre',
-        sent_quantity: qty,
-        status:        'pending',
-        triggered_by:  `canary_${triggeredBy}`,
-      })
-      .select('id')
-      .single()
-    console.log(`[STOCK-ML] canary inserido?: id=${canary?.id ?? 'null'} erro=${canaryErr?.message ?? 'none'}`)
-
     try {
       const { data: vinculos, error: vincErr } = await supabaseAdmin
         .from('product_listings')
@@ -610,7 +594,7 @@ export class StockService {
   }) {
     let q = supabaseAdmin
       .from('stock_sync_logs')
-      .select('*, product:products(name, sku)')
+      .select('*, product:products(id, name, sku)')
       .order('created_at', { ascending: false })
       .limit(filters.limit ?? 200)
 
