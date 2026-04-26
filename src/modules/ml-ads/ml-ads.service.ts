@@ -77,10 +77,6 @@ export class MlAdsService {
       `${ML_BASE}/advertising/advertisers/${advertiserId}/brand_ads/campaigns`,
       { headers, params: { limit: 200 } },
     )
-    // Temp diagnostic: log first 500 chars of the raw response so we can see
-    // exactly which field names ML uses for this account.
-    this.logger.log(`[ml-ads.campaigns.raw] ${JSON.stringify(data).slice(0, 500)}`)
-
     // ML returns the list under .results (paginated) or directly under .campaigns
     const list = Array.isArray(data?.results) ? data.results
                : Array.isArray(data?.campaigns) ? data.campaigns
@@ -130,31 +126,28 @@ export class MlAdsService {
 
     if (campaigns.length === 0) return { ok: true, advertiser_id: advertiser.advertiser_id, campaigns: 0, reports: 0 }
 
-    // Map ML's varying field names. Brand Ads can return id as `campaign_id`
-    // or `external_id`; budget as `budget`, `daily_budget`, `daily_amount`,
-    // or `budget.daily`; type as `ad_type`, `product_id`, etc.
+    // Real shape (Brand Ads, Brazil PADS account):
+    //   { campaign_id: 649604, campaign_type: "automatic",
+    //     budget: { amount: 60, currency: "BRL" }, advertiser_id: 636197,
+    //     name, headline, status, items: [{ item_id }, ...] }
     const campaignRows = campaigns
       .map(c => {
-        const id = c.id ?? c.campaign_id ?? c.campaignId ?? c.external_id ?? null
-        // Skip if id is null/undefined or stringifies to "undefined"/"null"
-        if (id == null) return null
-        const sId = String(id)
+        const rawId = c.campaign_id ?? c.id
+        if (rawId == null) return null
+        const sId = String(rawId)
         if (sId === 'undefined' || sId === 'null' || !sId.trim()) return null
-        const budgetObj = c.budget as { daily?: number; amount?: number } | undefined
+        const budget = c.budget as { amount?: number } | undefined
+        const items  = Array.isArray(c.items) ? c.items : []
         return {
           id:            sId,
           advertiser_id: advertiser.advertiser_id,
-          name:          (c.name ?? c.title ?? c.campaign_name ?? null) as string | null,
-          status:        (c.status ?? c.state ?? null) as string | null,
-          daily_budget:  (
-            c.daily_budget ?? c.dailyBudget ?? c.daily_amount
-            ?? budgetObj?.daily ?? budgetObj?.amount
-            ?? (typeof c.budget === 'number' ? c.budget : null)
-            ?? null
-          ) as number | null,
-          type:          (c.ad_type ?? c.type ?? c.campaign_type ?? c.product ?? c.product_id ?? null) as string | null,
-          start_date:    (c.start_date ?? c.startDate ?? null) as string | null,
-          end_date:      (c.end_date ?? c.endDate ?? null) as string | null,
+          name:          (c.name ?? c.headline ?? '(sem nome)') as string,
+          status:        (c.status ?? 'active') as string,
+          daily_budget:  (budget?.amount ?? null) as number | null,
+          type:          (c.campaign_type ?? c.type ?? null) as string | null,
+          start_date:    (c.start_date ?? null) as string | null,
+          end_date:      (c.end_date ?? null) as string | null,
+          items,
           synced_at:     new Date().toISOString(),
         }
       })
@@ -184,32 +177,29 @@ export class MlAdsService {
     let totalReports = 0
     try {
       const metrics = await this.getMetricsRaw(advertiser.advertiser_id, dateFrom, dateTo)
-      // Same id-extraction as the campaign mapping above
       const validCampaignIds = new Set(campaignRows.map(c => c.id))
 
-      // Log first metric row so we can see actual field names ML returns
-      if (metrics.length > 0) {
-        this.logger.log(`[ml-ads.sync] sample metric: ${JSON.stringify(metrics[0])}`)
-      }
-
+      // Real shape (per-day): { campaign_id, date, metrics: { prints, clicks,
+      // ctr, cvr, acos, roas, attribution_order_conversions,
+      // attribution_order_amount, consumed_budget, cost_per_clicks, leads } }
       const reportRows = metrics
         .map(m => {
-          const rawCid = m.campaign_id ?? (m as Record<string, unknown>).campaignId
-          const cid = rawCid != null ? String(rawCid) : null
-          const d   = m.date ?? (m as Record<string, unknown>).day as string | undefined
+          const mr  = m as Record<string, unknown>
+          const cid = m.campaign_id != null ? String(m.campaign_id) : null
+          const d   = (m.date ?? mr.day) as string | undefined
           if (!cid || !d || !validCampaignIds.has(cid)) return null
-          const mr = m as Record<string, unknown>
+          const met = (mr.metrics ?? {}) as Record<string, unknown>
           return {
             campaign_id: cid,
             date:        d,
-            clicks:      Number(m.clicks ?? 0),
-            impressions: Number(m.impressions ?? 0),
-            ctr:         Number(m.ctr ?? 0),
-            spend:       Number(m.cost ?? mr.spend ?? mr.cost_amount ?? 0),
-            conversions: Number(m.conversions ?? 0),
-            revenue:     Number(m.total_revenue ?? m.attributed_revenue_brand_total ?? mr.revenue ?? 0),
-            roas:        Number(m.roas ?? 0),
-            acos:        Number(m.acos ?? 0),
+            clicks:      Number(met.clicks ?? 0),
+            impressions: Number(met.prints ?? met.impressions ?? 0),
+            ctr:         Number(met.ctr ?? 0),
+            spend:       Number(met.consumed_budget ?? met.cost ?? 0),
+            conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
+            revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? 0),
+            roas:        Number(met.roas ?? 0),
+            acos:        Number(met.acos ?? 0),
             synced_at:   new Date().toISOString(),
           }
         })
