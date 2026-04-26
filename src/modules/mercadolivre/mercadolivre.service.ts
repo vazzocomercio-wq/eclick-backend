@@ -142,10 +142,14 @@ export class MercadolivreService {
   // ── Multi-account helpers ─────────────────────────────────────────────────
 
   async getAllConnections(): Promise<MlConnection[]> {
+    // Most-recently-updated first so a fresh OAuth reconnection is preferred
+    // over any stale row that may still exist for the same or a previous
+    // seller_id. No user_id/is_active filter — the row from the OAuth
+    // callback may have user_id=null.
     const { data } = await supabaseAdmin
       .from('ml_connections')
       .select('*')
-      .order('created_at', { ascending: true })
+      .order('expires_at', { ascending: false })
 
     const fromMlConnections = (data || []) as MlConnection[]
     if (fromMlConnections.length > 0) return fromMlConnections
@@ -251,20 +255,14 @@ export class MercadolivreService {
   }
 
   async getValidToken(): Promise<{ token: string; sellerId: number }> {
-    try {
-      const connections = await this.getAllConnections()
-      if (!connections.length) {
-        console.error('[getValidToken] sem conexão ML no banco')
-        throw new UnauthorizedException('ML não conectado')
-      }
-      const conn = connections[0]
-      const token = await this.refreshIfNeeded(conn)
-      return { token, sellerId: conn.seller_id }
-    } catch (e: unknown) {
-      const err = e as { message?: string; stack?: string }
-      console.error('[getValidToken] ERRO:', err?.message, err?.stack)
-      throw e
+    const connections = await this.getAllConnections()
+    if (!connections.length) {
+      console.error('[getValidToken] sem conexão ML no banco')
+      throw new UnauthorizedException('ML não conectado')
     }
+    const conn = connections[0]
+    const token = await this.refreshIfNeeded(conn)
+    return { token, sellerId: conn.seller_id }
   }
 
   async getTokenForOrg(orgId: string): Promise<{ token: string; sellerId: number }> {
