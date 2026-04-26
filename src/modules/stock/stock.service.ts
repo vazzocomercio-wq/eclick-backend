@@ -604,6 +604,233 @@ export class StockService {
     }
   }
 
+  // ── Auto distribution (multichannel) ──────────────────────────────────────
+
+  /**
+   * Pre-flight check: can this product use distribution_mode='auto'?
+   * Auto requires ≥2 active channels, all integrated (OAuth connected),
+   * and at least one channel with sales in the last 30 days.
+   */
+  async canUseAutoMode(productId: string): Promise<{
+    can_use: boolean
+    reason?: string
+    ready_channels: string[]
+    missing_integration: string[]
+    missing_sales_data: string[]
+  }> {
+    const { data: distributions } = await supabaseAdmin
+      .from('channel_stock_distribution')
+      .select('channel, account_id, is_active')
+      .eq('product_id', productId)
+      .eq('is_active', true)
+
+    if (!distributions?.length) {
+      return {
+        can_use: false,
+        reason: 'Nenhum canal cadastrado na distribuição',
+        ready_channels: [],
+        missing_integration: [],
+        missing_sales_data: [],
+      }
+    }
+
+    if (distributions.length < 2) {
+      return {
+        can_use: false,
+        reason: 'Modo auto requer pelo menos 2 canais para distribuir',
+        ready_channels: distributions.map(d => d.channel as string),
+        missing_integration: [],
+        missing_sales_data: [],
+      }
+    }
+
+    const distChannels = distributions.map(d => d.channel as string)
+    const { data: channels } = await supabaseAdmin
+      .from('marketplace_channels')
+      .select('id, is_integrated, integration_status')
+      .in('id', distChannels)
+
+    const channelMap = new Map<string, { is_integrated: boolean; integration_status: string | null }>(
+      (channels ?? []).map(c => [c.id as string, { is_integrated: !!c.is_integrated, integration_status: c.integration_status as string | null }]),
+    )
+
+    const missing_integration: string[] = []
+    const ready_channels: string[] = []
+
+    for (const d of distributions) {
+      const ch = channelMap.get(d.channel as string)
+      if (!ch?.is_integrated || ch.integration_status !== 'connected') {
+        missing_integration.push(d.channel as string)
+      } else {
+        ready_channels.push(d.channel as string)
+      }
+    }
+
+    if (missing_integration.length > 0) {
+      return {
+        can_use: false,
+        reason: `Canais não integrados: ${missing_integration.join(', ')}`,
+        ready_channels,
+        missing_integration,
+        missing_sales_data: [],
+      }
+    }
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+    const { data: snapshots } = await supabaseAdmin
+      .from('product_sales_snapshots')
+      .select('platform, qty_sold')
+      .eq('product_id', productId)
+      .gte('snapshot_date', since)
+
+    const salesByChannel = new Map<string, number>()
+    for (const s of snapshots ?? []) {
+      const ch = s.platform as string
+      salesByChannel.set(ch, (salesByChannel.get(ch) ?? 0) + Number(s.qty_sold ?? 0))
+    }
+
+    const missing_sales_data: string[] = []
+    for (const ch of ready_channels) {
+      if (!salesByChannel.has(ch) || salesByChannel.get(ch) === 0) missing_sales_data.push(ch)
+    }
+
+    if (missing_sales_data.length === ready_channels.length) {
+      return {
+        can_use: false,
+        reason: 'Nenhum canal tem vendas nos últimos 30 dias',
+        ready_channels,
+        missing_integration: [],
+        missing_sales_data,
+      }
+    }
+
+    return {
+      can_use: true,
+      ready_channels,
+      missing_integration: [],
+      // Channels without sales still get the floor (10%)
+      missing_sales_data,
+    }
+  }
+
+  /** Compute target percentages from last 30d sales, with 10% floor per channel. */
+  async calculateAutoDistribution(productId: string): Promise<{
+    ok: boolean
+    message?: string
+    distribution?: { channel: string; percentage: number }[]
+  }> {
+    const check = await this.canUseAutoMode(productId)
+    if (!check.can_use) return { ok: false, message: check.reason }
+
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+    const { data: snapshots } = await supabaseAdmin
+      .from('product_sales_snapshots')
+      .select('platform, qty_sold')
+      .eq('product_id', productId)
+      .gte('snapshot_date', since)
+      .in('platform', check.ready_channels)
+
+    const salesByChannel = new Map<string, number>()
+    for (const ch of check.ready_channels) salesByChannel.set(ch, 0)
+    for (const s of snapshots ?? []) {
+      const ch = s.platform as string
+      salesByChannel.set(ch, (salesByChannel.get(ch) ?? 0) + Number(s.qty_sold ?? 0))
+    }
+
+    const totalSales = Array.from(salesByChannel.values()).reduce((s, v) => s + v, 0)
+
+    if (totalSales === 0) {
+      const equalPct = Math.floor(100 / check.ready_channels.length)
+      const distribution = check.ready_channels.map(ch => ({ channel: ch, percentage: equalPct }))
+      // Round-off into the first channel so we hit 100
+      const total = distribution.reduce((s, d) => s + d.percentage, 0)
+      if (total !== 100 && distribution.length) distribution[0].percentage += (100 - total)
+      return { ok: true, distribution }
+    }
+
+    const FLOOR = 10
+    const distribution: { channel: string; percentage: number }[] = []
+    for (const ch of check.ready_channels) {
+      const vendas = salesByChannel.get(ch) ?? 0
+      let pct = Math.round((vendas / totalSales) * 100)
+      if (pct < FLOOR) pct = FLOOR
+      distribution.push({ channel: ch, percentage: pct })
+    }
+
+    // Normalize to sum 100 by adjusting the channel with most sales
+    const total = distribution.reduce((s, d) => s + d.percentage, 0)
+    if (total !== 100) {
+      const sorted = [...distribution].sort(
+        (a, b) => (salesByChannel.get(b.channel) ?? 0) - (salesByChannel.get(a.channel) ?? 0),
+      )
+      sorted[0].percentage += (100 - total)
+    }
+
+    return { ok: true, distribution }
+  }
+
+  /** Apply the calculated auto distribution + log + re-sync ML. */
+  async applyAutoDistribution(productId: string, triggeredBy = 'user_manual') {
+    console.log(`[stock.auto] iniciando recálculo product_id=${productId} trigger=${triggeredBy}`)
+    const result = await this.calculateAutoDistribution(productId)
+
+    if (!result.ok || !result.distribution) {
+      console.log(`[stock.auto] não aplicado: ${result.message}`)
+      // Audit even when skipped, so the user sees why
+      await supabaseAdmin.from('distribution_recalc_log').insert({
+        product_id:           productId,
+        triggered_by:         triggeredBy,
+        channels_considered:  null,
+        channels_skipped:     [{ reason: result.message }],
+        result:               null,
+        applied:              false,
+      })
+      return result
+    }
+
+    const { data: oldDist } = await supabaseAdmin
+      .from('channel_stock_distribution')
+      .select('channel, percentage')
+      .eq('product_id', productId)
+      .eq('is_active', true)
+
+    const oldMap = new Map<string, number>(
+      (oldDist ?? []).map(d => [d.channel as string, Number(d.percentage ?? 0)]),
+    )
+
+    for (const d of result.distribution) {
+      const { error: updErr } = await supabaseAdmin
+        .from('channel_stock_distribution')
+        .update({
+          percentage:        d.percentage,
+          distribution_mode: 'auto',
+          updated_at:        new Date().toISOString(),
+        })
+        .eq('product_id', productId)
+        .eq('channel', d.channel)
+      if (updErr) console.error(`[stock.auto] update falhou ${d.channel}: ${updErr.message}`)
+    }
+
+    await supabaseAdmin.from('distribution_recalc_log').insert({
+      product_id:           productId,
+      triggered_by:         triggeredBy,
+      channels_considered:  result.distribution,
+      channels_skipped:     null,
+      result:               result.distribution.map(d => ({
+        channel: d.channel,
+        old_pct: oldMap.get(d.channel) ?? 0,
+        new_pct: d.percentage,
+      })),
+      applied:              true,
+    })
+
+    this.syncStockToAllChannels(productId, `auto_recalc_${triggeredBy}`)
+      .catch(e => console.error('[stock.auto] sync erro:', e?.message))
+
+    console.log(`[stock.auto] aplicado para ${productId}:`, result.distribution)
+    return result
+  }
+
   // ── Sync logs ─────────────────────────────────────────────────────────────
 
   async getSyncLogs(filters: {
