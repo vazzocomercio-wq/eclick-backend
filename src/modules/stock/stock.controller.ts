@@ -2,6 +2,7 @@ import {
   Controller, Get, Post, Patch, Delete,
   Param, Body, Query,
   UseGuards, HttpCode, HttpStatus,
+  HttpException, Logger,
 } from '@nestjs/common'
 import { StockService } from './stock.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
@@ -9,6 +10,8 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 @Controller('stock')
 @UseGuards(SupabaseAuthGuard)
 export class StockController {
+  private readonly logger = new Logger(StockController.name)
+
   constructor(private readonly svc: StockService) {}
 
   @Get(':product_id/full')
@@ -17,15 +20,25 @@ export class StockController {
   }
 
   @Patch(':stock_id/safety')
-  updateSafety(
+  async updateSafety(
     @Param('stock_id') stockId: string,
     @Body() body: {
-      safety_mode?: string
+      safety_mode?: 'percentage' | 'fixed'
       safety_percentage?: number
       safety_quantity?: number
     },
   ) {
-    return this.svc.updateSafety(stockId, body)
+    this.logger.log(`[safety] stockId=${stockId} body=${JSON.stringify(body)}`)
+    try {
+      const result = await this.svc.updateSafety(stockId, body)
+      this.logger.log(`[safety] sucesso id=${result?.id}`)
+      return result
+    } catch (e: any) {
+      this.logger.error(`[safety] ERRO: ${e?.message}`)
+      if (e?.stack) this.logger.error(`[safety] STACK: ${e.stack}`)
+      if (e instanceof HttpException) throw e
+      throw new HttpException(e?.message ?? 'Erro ao atualizar safety', 400)
+    }
   }
 
   @Get('distribution/:product_id')

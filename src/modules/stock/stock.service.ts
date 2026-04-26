@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, HttpException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
@@ -65,25 +65,34 @@ export class StockService {
     safety_percentage?: number
     safety_quantity?: number
   }) {
+    this.logger.log(`[updateSafety] stockId=${stockId} updates=${JSON.stringify(updates)}`)
+
+    const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    if (updates.safety_mode) payload.safety_mode = updates.safety_mode
+    if (updates.safety_percentage !== undefined) payload.safety_percentage = Number(updates.safety_percentage)
+    if (updates.safety_quantity !== undefined) payload.safety_quantity = Number(updates.safety_quantity)
+
     const { data, error } = await supabaseAdmin
       .from('product_stock')
-      .update({ ...updates, updated_at: new Date().toISOString() })
+      .update(payload)
       .eq('id', stockId)
       .select()
       .single()
 
-    if (error) throw error
+    if (error) {
+      this.logger.error(`[updateSafety] Supabase error code=${error.code} msg=${error.message} details=${error.details}`)
+      throw new HttpException(error.message, 400)
+    }
+
+    if (!data) {
+      this.logger.warn(`[updateSafety] sem linha retornada para stockId=${stockId}`)
+      throw new HttpException(`Stock ${stockId} não encontrado`, 404)
+    }
 
     // Re-sync with channels since available qty changed
-    const { data: ps } = await supabaseAdmin
-      .from('product_stock')
-      .select('product_id')
-      .eq('id', stockId)
-      .single()
-
-    if (ps?.product_id) {
-      this.syncStockToAllChannels(ps.product_id).catch(e =>
-        this.logger.warn('[safety] sync error:', e.message),
+    if (data.product_id) {
+      this.syncStockToAllChannels(data.product_id).catch(e =>
+        this.logger.warn(`[updateSafety] sync error: ${e?.message}`),
       )
     }
 
