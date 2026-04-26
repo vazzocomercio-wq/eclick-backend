@@ -27,13 +27,10 @@ export class OrdersIngestionService {
     dateTo: string,   // YYYY-MM-DD
     runId: string,
   ): Promise<IngestionStats> {
-    console.log(`[aggregator] ingestDateRange orgId=${orgId} from=${dateFrom} to=${dateTo}`)
-
     const { token, sellerId } = await this.mlClient.getTokenForOrg(orgId)
 
     // Build listing→product lookup map for this org (once, upfront)
     const listingMap = await this.buildListingMap(orgId)
-    console.log(`[aggregator] listingMap loaded: ${listingMap.size} listings`)
 
     const dates = this.buildDateRange(dateFrom, dateTo)
     const stats: IngestionStats = { ordersFound: 0, rowsUpserted: 0, apiCalls: 0, errors: [] }
@@ -71,16 +68,6 @@ export class OrdersIngestionService {
         const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId)
 
         if (rows.length > 0) {
-          // Log first row's keys so we can confirm columns match the table schema
-          console.log(`[aggregator] ${date}: ${rows.length} rows to upsert, cols:`, Object.keys(rows[0]).join(', '))
-          console.log(`[aggregator] ${date}: first row sample:`, JSON.stringify({
-            external_order_id: rows[0].external_order_id,
-            sku:               rows[0].sku,
-            source:            rows[0].source,
-            sale_price:        rows[0].sale_price,
-            organization_id:   rows[0].organization_id,
-          }))
-
           const BATCH = 100
           for (let b = 0; b < rows.length; b += BATCH) {
             const batch = rows.slice(b, b + BATCH)
@@ -91,8 +78,7 @@ export class OrdersIngestionService {
                 ignoreDuplicates: false,
               })
             if (error) {
-              console.error(`[aggregator] UPSERT FAILED on ${date} batch ${b}–${b + batch.length}:`, error.message)
-              console.error(`[aggregator] first row of failed batch:`, JSON.stringify(batch[0]))
+              console.error(`[aggregator] UPSERT FAILED on ${date} batch ${b}:`, error.message)
               stats.errors.push({ date, error: `upsert batch ${b}: ${error.message}` })
             } else {
               stats.rowsUpserted += batch.length
@@ -111,7 +97,6 @@ export class OrdersIngestionService {
           })
           .eq('id', runId)
 
-        console.log(`[aggregator] ${date}: ${orders.length} orders → ${rows.length} rows`)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`[aggregator] error on ${date}:`, msg)

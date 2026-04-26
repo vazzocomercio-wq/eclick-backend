@@ -63,9 +63,7 @@ export class ScraperService {
           platform:           'mercadolivre',
           method:             'api',
         }
-      } catch (e: any) {
-        console.log('[scraper/ml] API falhou, tentando HTML...', e.message)
-      }
+      } catch { /* fall back to HTML scrape */ }
     }
 
     const { data: html } = await axios.get(url, { headers: HEADERS })
@@ -192,7 +190,6 @@ export class ScraperService {
 
   async scrapeProduct(url: string): Promise<ScrapedProduct> {
     const platform = this.detectPlatform(url)
-    console.log(`[scraper] plataforma: ${platform} | url: ${url.substring(0, 80)}`)
 
     try {
       switch (platform) {

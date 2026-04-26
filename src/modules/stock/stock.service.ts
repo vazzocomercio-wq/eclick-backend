@@ -67,8 +67,6 @@ export class StockService {
     safety_percentage?: number
     safety_quantity?: number
   }) {
-    this.logger.log(`[updateSafety] stockId=${stockId} updates=${JSON.stringify(updates)}`)
-
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (updates.safety_mode) payload.safety_mode = updates.safety_mode
     if (updates.safety_percentage !== undefined) payload.safety_percentage = Number(updates.safety_percentage)
@@ -86,10 +84,7 @@ export class StockService {
       throw new HttpException(error.message, 400)
     }
 
-    if (!data) {
-      this.logger.warn(`[updateSafety] sem linha retornada para stockId=${stockId}`)
-      throw new HttpException(`Stock ${stockId} não encontrado`, 404)
-    }
+    if (!data) throw new HttpException(`Stock ${stockId} não encontrado`, 404)
 
     // Re-sync with channels since available qty changed
     if (data.product_id) {
@@ -159,8 +154,6 @@ export class StockService {
       .update({ reserved_quantity: newReserved, updated_at: new Date().toISOString() })
       .eq('id', stock.id)
 
-    this.logger.log(`[stock.reserve] +${params.quantity} | total reserved:${newReserved}`)
-
     this.syncStockToAllChannels(params.productId).catch(e =>
       this.logger.warn('[stock.reserve] sync error:', e.message),
     )
@@ -214,8 +207,6 @@ export class StockService {
       balance_after:  newQty,
     })
 
-    this.logger.log(`[stock.consume] ${reservation.quantity} un | ref:${referenceId}`)
-
     this.syncStockToAllChannels(reservation.product_id).catch(e =>
       this.logger.warn('[stock.consume] sync error:', e.message),
     )
@@ -250,8 +241,6 @@ export class StockService {
       .update({ status: 'released', released_at: new Date().toISOString() })
       .eq('id', reservation.id)
 
-    this.logger.log(`[stock.release] ${reservation.quantity} un liberado | ref:${referenceId}`)
-
     this.syncStockToAllChannels(reservation.product_id).catch(e =>
       this.logger.warn('[stock.release] sync error:', e.message),
     )
@@ -283,8 +272,6 @@ export class StockService {
         .from('stock_reservations')
         .update({ status: 'expired', released_at: new Date().toISOString() })
         .eq('id', r.id)
-
-      this.logger.log(`[stock.expire] reserva liberada | ref:${r.reference_id}`)
 
       this.syncStockToAllChannels(r.product_id).catch(e =>
         this.logger.warn('[stock.expire] sync error:', e.message),
@@ -446,7 +433,6 @@ export class StockService {
   // ── ML Sync ───────────────────────────────────────────────────────────────
 
   async syncAllProductsWithMlListing(): Promise<{ total: number; success: number; errors: number }> {
-    this.logger.log('[stock.sync-all] buscando produtos com vínculo ML ativo')
     const { data: vinculos, error } = await supabaseAdmin
       .from('product_listings')
       .select('product_id')
@@ -459,7 +445,6 @@ export class StockService {
     }
 
     const productIds = [...new Set((vinculos ?? []).map(v => v.product_id as string))]
-    this.logger.log(`[stock.sync-all] ${productIds.length} produto(s) único(s) para sincronizar`)
 
     let success = 0, errors = 0
     for (const productId of productIds) {

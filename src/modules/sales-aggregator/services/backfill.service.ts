@@ -106,22 +106,20 @@ export class BackfillService {
 
   @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC
   async dailyAggregation(): Promise<void> {
-    console.log('[aggregator] cron dailyAggregation iniciando')
     const { data: connections } = await supabaseAdmin
       .from('ml_connections')
       .select('organization_id')
     const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
-    console.log(`[aggregator] cron encontrou ${orgIds.length} orgs`)
 
     for (const orgId of orgIds) {
       try {
         await this.runDaily(orgId, null)
-        console.log(`[aggregator] cron daily iniciado para org ${orgId}`)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`[aggregator] cron daily falhou para org ${orgId}:`, msg)
       }
     }
+    if (orgIds.length > 0) console.log(`[aggregator] daily cron completo: ${orgIds.length} orgs`)
   }
 
   private async startRun(
@@ -173,7 +171,6 @@ export class BackfillService {
     }
 
     const runId = run.id as string
-    console.log(`[aggregator] run ${runId} criado (${runType}, ${days} dias, ${dateFrom}→${dateTo})`)
 
     // Fire and forget background processing
     const startedAt = Date.now()
@@ -196,7 +193,6 @@ export class BackfillService {
           })
           .eq('id', runId)
 
-        console.log(`[aggregator] run ${runId} completed in ${duration}s`)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`[aggregator] run ${runId} failed:`, msg)

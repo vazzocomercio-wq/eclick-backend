@@ -38,8 +38,6 @@ export class SnapshotsAggregationService {
     dateTo: string,
     runId: string,
   ): Promise<number> {
-    console.log(`[aggregator] aggregateDateRange orgId=${orgId} from=${dateFrom} to=${dateTo}`)
-
     // Fetch all qualifying orders in the range at once
     const { data: orders, error } = await supabaseAdmin
       .from('orders')
@@ -54,10 +52,7 @@ export class SnapshotsAggregationService {
       throw new Error(error.message)
     }
 
-    if (!orders?.length) {
-      console.log('[aggregator] no orders to aggregate for range')
-      return 0
-    }
+    if (!orders?.length) return 0
 
     // Aggregate by product + date + marketplace (specific)
     const snapMap = new Map<string, SnapshotRow>()
@@ -117,7 +112,6 @@ export class SnapshotsAggregationService {
       .update({ snapshots_inserted: totalUpserted })
       .eq('id', runId)
 
-    console.log(`[aggregator] snapshots upserted: ${totalUpserted}`)
     return totalUpserted
   }
 

@@ -30,7 +30,6 @@ export class CompetitorsController {
     @Headers('authorization') auth: string,
     @Body() body: CreateCompetitorDto,
   ) {
-    console.log('[competitors.create] body:', body)
     const orgId = await this.resolveOrgId(auth)
     return this.svc.create(orgId, body)
   }

@@ -37,10 +37,7 @@ export class WhatsAppAdapter {
         }
 
         for (const m of value.messages) {
-          if (m.type !== 'text' || !m.text?.body) {
-            this.logger.warn(`[wa.adapter] ignorando mensagem tipo=${m.type} id=${m.id}`)
-            continue
-          }
+          if (m.type !== 'text' || !m.text?.body) continue
           const waId = m.from
           result.push({
             text:                 m.text.body,

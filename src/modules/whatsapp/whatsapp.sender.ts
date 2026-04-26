@@ -20,7 +20,6 @@ export class WhatsAppSender {
     waConfig:  WhatsAppConfig
   }): Promise<{ success: boolean; message_id?: string; error?: string }> {
     const { phone, message, waConfig } = input
-    this.logger.log(`[wa.sender] enviando pra ${phone} via phone_number_id=${waConfig.phone_number_id}`)
 
     try {
       const { data } = await axios.post(
@@ -39,7 +38,6 @@ export class WhatsAppSender {
         },
       )
       const messageId = data?.messages?.[0]?.id
-      this.logger.log(`[wa.sender] resposta Meta: { wamid: ${messageId} }`)
       return { success: true, message_id: messageId }
     } catch (e: any) {
       const status = e?.response?.status ?? 0

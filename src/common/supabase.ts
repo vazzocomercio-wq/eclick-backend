@@ -15,13 +15,9 @@ if (!serviceRoleKey) {
     ' Database writes will fail.',
   )
 } else {
-  const prefix = serviceRoleKey.substring(0, 24)
   const isServiceRole =
     serviceRoleKey.startsWith('sb_secret_') ||
     serviceRoleKey.startsWith('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9')
-  console.log(
-    `[supabase] admin client initialised | key prefix: ${prefix}... | is service_role: ${isServiceRole}`,
-  )
   if (!isServiceRole) {
     console.error(
       '[supabase] ERROR: key does NOT look like a service_role key (expected sb_secret_* or eyJhbG...).' +

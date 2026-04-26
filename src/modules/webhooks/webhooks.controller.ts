@@ -32,17 +32,13 @@ export class WebhooksController {
     @Query('hub.challenge')    challenge: string,
     @Res()                     res: Response,
   ) {
-    this.logger.log(`[wa.webhook] verify mode=${mode} token=${token?.slice(0, 8)}…`)
     if (mode !== 'subscribe' || !token) return res.status(403).json({ error: 'Forbidden' })
 
     const config = await this.waConfig.findByVerifyToken(token)
-    if (!config) {
-      this.logger.warn(`[wa.webhook] verify_token desconhecido`)
-      return res.status(403).json({ error: 'Invalid verify_token' })
-    }
+    if (!config) return res.status(403).json({ error: 'Invalid verify_token' })
 
     await this.waConfig.update(config.id, { is_verified: true, last_verified_at: new Date().toISOString() })
-    this.logger.log(`[wa.webhook] verificado com sucesso config=${config.id}`)
+    this.logger.log(`[wa.webhook] verificado config=${config.id}`)
     return res.status(200).send(challenge)
   }
 
@@ -63,10 +59,7 @@ export class WebhooksController {
         })
 
         const messages = this.waAdapter.normalizeWebhook(body)
-        if (!messages.length) {
-          this.logger.log(`[wa.webhook] payload sem mensagens de texto — ignorado`)
-          return
-        }
+        if (!messages.length) return
 
         const config = await this.waConfig.findActive()
         if (!config) {
@@ -75,17 +68,12 @@ export class WebhooksController {
         }
 
         for (const msg of messages) {
-          this.logger.log(`[wa.webhook] mensagem recebida de +${msg.customer_phone}: "${msg.text.slice(0, 60)}"`)
-
           // Mark as read immediately (best-effort)
           this.waSender.markAsRead(config, msg.external_id).catch(() => { /* logged inside */ })
 
           // Resolve unified customer
           const customer = await this.customers.resolveByWhatsAppId(msg.customer_whatsapp_id, msg.customer_name)
-          if (!customer) {
-            this.logger.warn(`[wa.webhook] não consegui resolver cliente — pulando`)
-            continue
-          }
+          if (!customer) continue
 
           // Find or create conversation
           const conv = await this.conversations.upsertConversation({
@@ -135,7 +123,6 @@ export class WebhooksController {
             }
           }
 
-          this.logger.log(`[wa.webhook] processado: ${msg.customer_name} → ${result.decision} (${result.confidence}%)`)
         }
       } catch (err: any) {
         this.logger.error(`[wa.webhook] ERRO: ${err?.message}`, err?.stack)
@@ -223,8 +210,6 @@ export class WebhooksController {
         unified_customer_id: session.unified_customer_id ?? undefined,
         metadata:            { widget_id: widget.id, session_id: session.id },
       })
-
-      this.logger.log(`[widget.webhook] ${widget.name}: decision=${result.decision} conf=${result.confidence}%`)
 
       // Send response to widget caller
       if (result.decision === 'auto_send' && result.response) {

@@ -61,7 +61,6 @@ export class MercadoLivreClient {
       const status = e?.response?.status ?? 0
       if ((status === 429 || status >= 500) && attempt < 4) {
         const delay = Math.pow(2, attempt) * 1000
-        console.log(`[ml-client] retry ${attempt + 1}/4 after ${delay}ms (HTTP ${status})`)
         await new Promise(r => setTimeout(r, delay))
         return this.withRetry(fn, attempt + 1)
       }
@@ -100,8 +99,6 @@ export class MercadoLivreClient {
       if (total === null) total = data?.paging?.total ?? 0
       allOrders.push(...results)
       offset += 50
-
-      console.log(`[ml-client] ${dateFrom}→${dateTo} offset=${offset} fetched=${allOrders.length}/${total}`)
     } while (
       allOrders.length < (total ?? 0) &&
       allOrders.length < 1000 // safety cap

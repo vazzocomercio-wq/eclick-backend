@@ -68,10 +68,7 @@ export class CompetitorsService implements OnModuleInit {
 
   onModuleInit() {
     setTimeout(async () => {
-      this.logger.log('corrigindo listing_ids existentes...')
       await this.updateExistingListingIds()
-
-      this.logger.log('iniciando enriquecimento inicial...')
       const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
       for (const org of orgs ?? []) {
         await this.enrichAllCompetitors(org.id)
@@ -106,12 +103,13 @@ export class CompetitorsService implements OnModuleInit {
       if (updErr) {
         this.logger.warn(`failed to update listing_id id=${row.id}: ${updErr.message}`)
       } else {
-        this.logger.log(`corrigido ${row.id}: ${row.listing_id ?? '(null)'} → ${norm.itemId}`)
         updated++
       }
     }
 
-    this.logger.log(`updateExistingListingIds: ${updated} de ${data?.length ?? 0} corrigidos`)
+    if (updated > 0) {
+      this.logger.log(`updateExistingListingIds: ${updated} de ${data?.length ?? 0} corrigidos`)
+    }
   }
 
   // ── Core CRUD ─────────────────────────────────────────────────────────────────
@@ -271,26 +269,19 @@ export class CompetitorsService implements OnModuleInit {
     const listingId = norm?.itemId ?? (competitor.listing_id as string | null)
 
     if (norm && (norm.itemId !== competitor.listing_id || norm.cleanUrl !== competitor.url)) {
-      const { error: lidErr } = await supabaseAdmin
+      await supabaseAdmin
         .from('competitors')
         .update({ listing_id: norm.itemId, url: norm.cleanUrl })
         .eq('id', competitorId)
-      this.logger.log(`[enrichCompetitor] normalizado ${competitor.listing_id ?? '(null)'} → ${norm.itemId} | update: ${lidErr?.message ?? 'ok'}`)
     }
 
-    if (!listingId) {
-      this.logger.warn(`[enrichCompetitor] id=${competitorId} sem listing_id válido — skip`)
-      return null
-    }
-
-    this.logger.log(`[enrichCompetitor] iniciando enrich para listing_id=${listingId}`)
+    if (!listingId) return null
 
     // Token OAuth do banco (refresha se expirado)
     let token: string
     try {
-      const { token: t, sellerId } = await this.mlService.getValidToken()
+      const { token: t } = await this.mlService.getValidToken()
       token = t
-      this.logger.log(`[enrichCompetitor] token válido obtido | seller=${sellerId}`)
     } catch (e: unknown) {
       this.logger.error(`[enrichCompetitor] sem token ML válido: ${(e as Error).message} — skip`)
       return null
@@ -299,11 +290,9 @@ export class CompetitorsService implements OnModuleInit {
     let item: Record<string, unknown>
     try {
       item = await this.enrichFromML(listingId, token)
-      this.logger.log(`[enrichCompetitor] ML retornou id=${item.id} price=${item.price}`)
     } catch (e: unknown) {
       const status = (e as HttpException).getStatus?.() ?? 0
       if (status === 403 || status === 404) {
-        this.logger.warn(`[enrichCompetitor] ${status} com token — item pausado/removido, marcando inaccessible listing_id=${listingId}`)
         await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
       } else {
         this.logger.error(`[enrichCompetitor] ML fetch falhou ${status} listing_id=${listingId}: ${(e as Error).message}`)
@@ -318,7 +307,7 @@ export class CompetitorsService implements OnModuleInit {
     const shipping = (item as { shipping?: { free_shipping?: boolean } }).shipping
 
     // Update competitor record
-    const { error: updateErr } = await supabaseAdmin
+    await supabaseAdmin
       .from('competitors')
       .update({
         current_price:      price,
@@ -339,11 +328,9 @@ export class CompetitorsService implements OnModuleInit {
       })
       .eq('id', competitorId)
 
-    this.logger.log(`[enrichCompetitor] UPDATE competitors id=${competitorId}: ${updateErr?.message ?? 'ok'} | price=${price}`)
-
     // Save to price_history with new columns
     const now = new Date().toISOString()
-    const { error: phErr } = await supabaseAdmin
+    await supabaseAdmin
       .from('price_history')
       .insert({
         competitor_id:      competitorId,
@@ -356,8 +343,6 @@ export class CompetitorsService implements OnModuleInit {
         recorded_at:        now,
         checked_at:         now,
       })
-
-    this.logger.log(`[enrichCompetitor] INSERT price_history: ${phErr?.message ?? 'ok'}`)
 
     // Alert if price diff > 10%
     const myPrice = Number(competitor.my_price)
@@ -382,7 +367,6 @@ export class CompetitorsService implements OnModuleInit {
       }
     }
 
-    this.logger.log(`enriched ${listingId}: R$ ${price}`)
     return item
   }
 
@@ -396,12 +380,15 @@ export class CompetitorsService implements OnModuleInit {
       .eq('status', 'active')
       .not('url', 'is', null)
 
-    this.logger.log(`enriching ${competitors?.length ?? 0} competitors for org ${orgId}`)
+    if (!competitors?.length) return
+    let enriched = 0
 
-    for (const c of competitors ?? []) {
-      await this.enrichCompetitor(c.id)
+    for (const c of competitors) {
+      const r = await this.enrichCompetitor(c.id)
+      if (r) enriched++
       await new Promise(r => setTimeout(r, 500))
     }
+    this.logger.log(`[competitors.enrich] org=${orgId} enriched=${enriched}/${competitors.length}`)
   }
 
   // ── Snapshot (legacy) ─────────────────────────────────────────────────────────
@@ -510,7 +497,6 @@ export class CompetitorsService implements OnModuleInit {
 
   @Cron('0 */2 * * *')
   async scheduledEnrichment() {
-    this.logger.log('scheduled enrichment starting…')
     const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
     for (const org of orgs ?? []) {
       await this.enrichAllCompetitors(org.id)

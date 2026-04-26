@@ -24,7 +24,6 @@ export class StockCron {
   // for every product with at least one active distribution row in 'auto' mode
   @Cron('0 0 * * *')
   async recalcAutoDaily() {
-    this.logger.log('[cron.recalc] iniciando recálculo diário')
     try {
       const { data: rows } = await supabaseAdmin
         .from('channel_stock_distribution')
@@ -33,7 +32,7 @@ export class StockCron {
         .eq('is_active', true)
 
       const uniqueIds = [...new Set((rows ?? []).map(r => r.product_id as string))]
-      this.logger.log(`[cron.recalc] ${uniqueIds.length} produto(s) com modo auto ativo`)
+      if (uniqueIds.length === 0) return
 
       let success = 0, errors = 0
       for (const productId of uniqueIds) {
@@ -46,7 +45,7 @@ export class StockCron {
         }
       }
 
-      this.logger.log(`[cron.recalc] FIM: ${success}/${uniqueIds.length} ok, ${errors} erro`)
+      this.logger.log(`[cron.recalc] ${success}/${uniqueIds.length} ok, ${errors} erro`)
     } catch (err) {
       this.logger.error('[cron.recalc] falhou', err)
     }

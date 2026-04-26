@@ -18,22 +18,12 @@ export class SuppliersController {
   // supabase-auth.guard.ts but with explicit logging so failures are visible.
   private async resolveOrgId(auth: string | undefined): Promise<string> {
     const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
-    console.log('[suppliers] token recebido:', !!token)
-
-    const keyInUse = (process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? '')
-    console.log('[suppliers] supabase key prefix:', keyInUse.substring(0, 24), '| is service_role:', keyInUse.startsWith('sb_secret_') || keyInUse.startsWith('eyJhbGci'))
-
-    const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token ?? '')
-    console.log('[suppliers] user do supabase:', user?.id, userError?.message)
-
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
     const { data, error } = await supabaseAdmin
       .from('organization_members')
       .select('organization_id')
       .eq('user_id', user?.id ?? '')
       .single()
-    console.log('[suppliers] query organization_members result:', data, error?.message)
-    console.log('[suppliers] org encontrada:', data?.organization_id)
-
     if (error || !data) throw new HttpException('Organização não encontrada', 400)
     return data.organization_id as string
   }

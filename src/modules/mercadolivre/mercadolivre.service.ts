@@ -244,14 +244,12 @@ export class MercadolivreService {
 
   // Public fetch — no seller token. Safe to call for any MLB item.
   async getCompetitorItem(itemId: string): Promise<Record<string, unknown>> {
-    console.log('[competitor] buscando item público:', itemId)
     try {
       const { data } = await axios.get(`${ML_BASE}/items/${itemId}`, {
         params: {
           attributes: 'id,title,price,available_quantity,sold_quantity,thumbnail,pictures,seller_id,shipping,listing_type_id,permalink,category_id',
         },
       })
-      console.log('[competitor] item encontrado:', (data as any)?.title)
       return data as Record<string, unknown>
     } catch (e: any) {
       console.error('[competitor] erro:', { status: e.response?.status, data: e.response?.data, itemId })
@@ -719,7 +717,6 @@ export class MercadolivreService {
       })
 
       const platformQty = novaQtd + (stock.virtual_quantity ?? 0)
-      console.log(`[stock] produto=${vinculo.product_id} -${qtdDecrementar} → físico=${novaQtd} plataforma=${platformQty}`)
 
       // Sincronizar com ML (fire-and-forget)
       this.syncStockToListings(vinculo.product_id, platformQty)
@@ -727,7 +724,6 @@ export class MercadolivreService {
 
       // Pausa automática: (físico + virtual) ≤ mínimo
       if (stock.auto_pause_enabled && platformQty <= (stock.min_stock_to_pause ?? 0)) {
-        console.log(`[stock] PAUSA AUTO produto=${vinculo.product_id} platform_qty=${platformQty} ≤ min=${stock.min_stock_to_pause}`)
         await supabaseAdmin
           .from('products')
           .update({ status: 'paused' })
@@ -1173,7 +1169,6 @@ export class MercadolivreService {
         if (costsRes[i].status === 'fulfilled') costsMap[id] = (costsRes[i] as any).value.data?.senders?.[0]?.cost ?? 0
       })
 
-      console.log('[orders] shipping costs obtidos:', Object.keys(costsMap).length, costsMap)
     }
 
     // ── Item thumbnails in batch ──────────────────────────────────────────
@@ -1222,20 +1217,6 @@ export class MercadolivreService {
       const freteVendedor: number = o.shipping?.id != null
         ? (costsMap[o.shipping.id] ?? ship?.base_cost ?? 0)
         : 0
-
-      if (idx === 0) {
-        console.log('[orders] diagnóstico frete/tarifa #0:', {
-          order_id:             o.id,
-          total_amount:         totalAmount,
-          sale_fee_items:       (o.order_items ?? []).map((i: any) => ({ id: i.item?.id, sale_fee: i.sale_fee })),
-          tarifaSaleFee,
-          tarifaML,
-          costsMap_entry:       costsMap[o.shipping?.id],
-          ship_base_cost:       ship?.base_cost,
-          ship_receiver_cost:   ship?.cost_components?.receiver_shipping_cost,
-          freteVendedor,
-        })
-      }
 
       const lucroBruto = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
 
@@ -1344,8 +1325,6 @@ export class MercadolivreService {
     const from = dateFrom.slice(0, 10)
     const to   = dateTo.slice(0, 10)
 
-    console.log('[fin-summary] inicio - dateFrom:', from, 'dateTo:', to)
-
     let totalRevenue    = 0
     let totalOrders     = 0
     let paginationTotal = 0
@@ -1361,10 +1340,7 @@ export class MercadolivreService {
       const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
       pageResults = data?.results ?? []
 
-      if (offset === 0) {
-        paginationTotal = data?.paging?.total ?? 0
-        console.log(`[fin-summary] total ML: ${paginationTotal} pedidos`)
-      }
+      if (offset === 0) paginationTotal = data?.paging?.total ?? 0
 
       for (const order of pageResults) {
         totalRevenue += order.total_amount ?? 0
@@ -1372,10 +1348,7 @@ export class MercadolivreService {
       }
 
       offset += 50
-      console.log(`[fin-summary] offset=${offset} | acumulado=${totalOrders}/${paginationTotal} | página=${pageResults.length}`)
     } while (pageResults.length === 50 && totalOrders < paginationTotal)
-
-    console.log(`[fin-summary] FINAL: R$${totalRevenue.toFixed(2)} | ${totalOrders} pedidos (ML diz ${paginationTotal})`)
 
     return {
       total_revenue:  totalRevenue,
@@ -1669,10 +1642,8 @@ export class MercadolivreService {
         .eq('seller_id', tokenSellerId)
         .maybeSingle()
       resolvedOrgId = conn?.organization_id ?? null
-      console.log('[createFromListing] orgId resolved from ml_connections:', resolvedOrgId)
     }
     // resolvedOrgId may still be null — products table accepts null organization_id
-    console.log('[createFromListing] resolvedOrgId final:', resolvedOrgId)
 
     // Fetch item details + descriptions in parallel
     const [itemsRes, descRes] = await Promise.all([
@@ -1709,22 +1680,14 @@ export class MercadolivreService {
 
     for (let i = 0; i < listingIds.length; i++) {
       const mlId = listingIds[i]
-      console.log('[from-listing] iniciando para:', mlId)
 
       if (itemsRes[i].status === 'rejected') {
         const reason = (itemsRes[i] as PromiseRejectedResult).reason?.response?.data?.message ?? 'Falha ao buscar anúncio no ML'
-        console.error('[from-listing] ML item fetch failed:', mlId, reason)
         results.push({ listing_id: mlId, status: 'error', reason })
         continue
       }
 
       const item = (itemsRes[i] as PromiseFulfilledResult<any>).value.data
-      console.log('[from-listing] item ML:', {
-        id: item.id,
-        title: item.title?.substring(0, 40),
-        sku: item.seller_custom_field,
-        price: item.price,
-      })
       const desc =
         descRes[i].status === 'fulfilled'
           ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
@@ -1858,24 +1821,14 @@ export class MercadolivreService {
         created_at:       new Date().toISOString(),
       }
 
-      console.log('[from-listing] tentando INSERT com:', {
-        name: payload.name,
-        sku: payload.sku,
-        ml_listing_id: (payload as any).ml_listing_id,
-        price: payload.price,
-        organization_id: payload.organization_id,
-      })
-
       const { data: created, error } = await supabaseAdmin
         .from('products')
         .insert(payload)
         .select()
         .single()
 
-      console.log('[from-listing] INSERT resultado:', { data: created, error })
-
       if (error) {
-        console.error('[from-listing] ERRO INSERT:', error.code, error.message, error.details)
+        console.error('[from-listing] INSERT failed:', error.code, error.message)
         results.push({ listing_id: mlId, status: 'error', reason: error.message })
       } else {
         // Manter vínculo na nova tabela product_listings (fase 1 de refatoração)

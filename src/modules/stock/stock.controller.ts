@@ -28,14 +28,10 @@ export class StockController {
       safety_quantity?: number
     },
   ) {
-    this.logger.log(`[safety] stockId=${stockId} body=${JSON.stringify(body)}`)
     try {
-      const result = await this.svc.updateSafety(stockId, body)
-      this.logger.log(`[safety] sucesso id=${result?.id}`)
-      return result
+      return await this.svc.updateSafety(stockId, body)
     } catch (e: any) {
-      this.logger.error(`[safety] ERRO: ${e?.message}`)
-      if (e?.stack) this.logger.error(`[safety] STACK: ${e.stack}`)
+      this.logger.error(`[safety] ${e?.message}`)
       if (e instanceof HttpException) throw e
       throw new HttpException(e?.message ?? 'Erro ao atualizar safety', 400)
     }
@@ -88,14 +84,11 @@ export class StockController {
   @Post('sync/:product_id')
   @HttpCode(HttpStatus.OK)
   async sync(@Param('product_id') productId: string) {
-    this.logger.log(`[sync] forçando sync para product_id=${productId}`)
     try {
       await this.svc.syncStockToAllChannels(productId, 'manual_force_sync')
-      this.logger.log(`[sync] completo product_id=${productId}`)
       return { ok: true, productId }
     } catch (e: any) {
-      this.logger.error(`[sync] ERRO product_id=${productId}: ${e?.message}`)
-      if (e?.stack) this.logger.error(`[sync] STACK: ${e.stack}`)
+      this.logger.error(`[sync] product=${productId}: ${e?.message}`)
       if (e instanceof HttpException) throw e
       throw new HttpException(e?.message ?? 'Erro ao sincronizar', 400)
     }
@@ -116,12 +109,10 @@ export class StockController {
   @Post(':product_id/recalc-auto')
   @HttpCode(HttpStatus.OK)
   async recalcAuto(@Param('product_id') productId: string) {
-    this.logger.log(`[recalc-auto] product_id=${productId}`)
     try {
-      const result = await this.svc.applyAutoDistribution(productId, 'user_manual')
-      return result
+      return await this.svc.applyAutoDistribution(productId, 'user_manual')
     } catch (e: any) {
-      this.logger.error(`[recalc-auto] ERRO: ${e?.message}`)
+      this.logger.error(`[recalc-auto] ${e?.message}`)
       throw new HttpException(e?.message ?? 'Erro ao recalcular', 400)
     }
   }
@@ -136,17 +127,16 @@ export class StockController {
   @Post('sync-all')
   @HttpCode(HttpStatus.OK)
   async syncAll() {
-    this.logger.log('[sync-all] iniciando para todos os produtos vinculados ao ML')
     try {
       const result = await this.svc.syncAllProductsWithMlListing()
-      this.logger.log(`[sync-all] completo: ${result.success}/${result.total} ok, ${result.errors} erro`)
+      this.logger.log(`[sync-all] ${result.success}/${result.total} ok, ${result.errors} erro`)
       return {
         ok: true,
         ...result,
         message: `${result.success} produto(s) sincronizado(s)${result.errors > 0 ? `, ${result.errors} com erro` : ''}`,
       }
     } catch (e: any) {
-      this.logger.error(`[sync-all] ERRO: ${e?.message}`)
+      this.logger.error(`[sync-all] ${e?.message}`)
       if (e?.stack) this.logger.error(`[sync-all] STACK: ${e.stack}`)
       throw new HttpException(e?.message ?? 'Erro ao sincronizar', 400)
     }

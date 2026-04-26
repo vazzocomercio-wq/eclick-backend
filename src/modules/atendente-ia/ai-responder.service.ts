@@ -556,8 +556,6 @@ export class AiResponderService {
       }).catch(() => { /* fire-and-forget */ })
     }
 
-    // Single summary line per processed message — suppressed at idle.
-    this.logger.log(`[ai.processMessage] ${channel} → ${decision} (conf=${confidence}, ${durationMs}ms)`)
     return { decision, response: content, confidence, ai_message_id: savedMsg?.id }
   }
 
