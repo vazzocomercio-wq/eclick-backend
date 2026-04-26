@@ -108,6 +108,11 @@ export class StockController {
     return this.svc.canUseAutoMode(productId)
   }
 
+  @Get(':product_id/auto-preview')
+  autoPreview(@Param('product_id') productId: string) {
+    return this.svc.calculateAutoDistribution(productId)
+  }
+
   @Post(':product_id/recalc-auto')
   @HttpCode(HttpStatus.OK)
   async recalcAuto(@Param('product_id') productId: string) {
