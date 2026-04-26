@@ -738,14 +738,14 @@ export class MercadolivreService {
         .eq('id', stock.id)
 
       await supabaseAdmin.from('stock_movements').insert({
-        product_id:       vinculo.product_id,
-        product_stock_id: stock.id,
-        type:             'sale',
-        quantity:         qtdDecrementar,
-        reason:           `Venda automática: ${qtdVendida} un. anúncio ${listingId}`,
-        reference_type:   'ml_order',
-        reference_id:     String(orderId),
-        balance_after:    novaQtd,
+        product_id:     vinculo.product_id,
+        stock_id:       stock.id,
+        movement_type:  'sale',
+        quantity:       qtdDecrementar,
+        notes:          `Venda automática: ${qtdVendida} un. anúncio ${listingId}`,
+        reference_type: 'ml_order',
+        reference_id:   String(orderId),
+        balance_after:  novaQtd,
       })
 
       const platformQty = novaQtd + (stock.virtual_quantity ?? 0)

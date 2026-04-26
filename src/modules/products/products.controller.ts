@@ -48,8 +48,8 @@ export class ProductsController {
 
   // POST /products/stock/movement
   @Post('stock/movement')
-  createStockMovement(@Body() dto: CreateStockMovementDto) {
-    return this.products.createStockMovement(dto)
+  createStockMovement(@ReqUser() user: ReqUserPayload, @Body() dto: CreateStockMovementDto) {
+    return this.products.createStockMovement(dto, user.id)
   }
 
   // PATCH /products/stock/:id

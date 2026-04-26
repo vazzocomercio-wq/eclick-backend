@@ -204,14 +204,14 @@ export class StockService {
       .eq('id', reservation.id)
 
     await supabaseAdmin.from('stock_movements').insert({
-      product_id:    reservation.product_id,
-      product_stock_id: reservation.stock_id,
-      type:          'sale',
-      quantity:      reservation.quantity,
-      reason:        `Venda confirmada: ${reservation.quantity} un.`,
+      product_id:     reservation.product_id,
+      stock_id:       reservation.stock_id,
+      movement_type:  'sale',
+      quantity:       reservation.quantity,
+      notes:          `Venda confirmada: ${reservation.quantity} un.`,
       reference_type: reservation.reference_type,
-      reference_id:  reservation.reference_id,
-      balance_after: newQty,
+      reference_id:   reservation.reference_id,
+      balance_after:  newQty,
     })
 
     this.logger.log(`[stock.consume] ${reservation.quantity} un | ref:${referenceId}`)

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(node *)",
+      "Bash(npx next *)",
+      "Bash(echo \"EXIT_BACK=$?\")",
+      "Bash(echo \"EXIT_FRONT=$?\")",
+      "Bash(git commit -m 'feat\\(atendente-ia\\): onda 2 backend complete - widget module + webhook + cross-channel history *)",
+      "Bash(git commit -m 'fix\\(stock\\): map stock_movements columns to live schema \\(was 500ing\\) *)"
+    ]
+  }
+}

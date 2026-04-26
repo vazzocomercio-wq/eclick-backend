@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, NotFoundException, HttpException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { StockService } from '../stock/stock.service'
 
@@ -164,62 +164,74 @@ export class ProductsService {
     if (error) throw new Error(error.message)
   }
 
-  async createStockMovement(dto: CreateStockMovementDto) {
-    // Resolve stock record (use shared stock if no explicit stockId)
-    let stockId    = dto.product_stock_id ?? null
-    let currentQty = 0
-    let virtualQty = 0
-    if (!stockId) {
-      const { data: stock } = await supabaseAdmin
-        .from('product_stock')
-        .select('id, quantity, virtual_quantity')
-        .eq('product_id', dto.product_id)
-        .is('platform', null)
-        .maybeSingle()
-      stockId    = stock?.id              ?? null
-      currentQty = stock?.quantity        ?? 0
-      virtualQty = stock?.virtual_quantity ?? 0
-    } else {
-      const { data: stock } = await supabaseAdmin
-        .from('product_stock')
-        .select('quantity, virtual_quantity')
-        .eq('id', stockId)
-        .maybeSingle()
-      currentQty = stock?.quantity        ?? 0
-      virtualQty = stock?.virtual_quantity ?? 0
-    }
+  async createStockMovement(dto: CreateStockMovementDto, userId?: string | null) {
+    try {
+      // Resolve stock record (use shared stock if no explicit stockId)
+      let stockId    = dto.product_stock_id ?? null
+      let currentQty = 0
+      if (!stockId) {
+        const { data: stock } = await supabaseAdmin
+          .from('product_stock')
+          .select('id, quantity')
+          .eq('product_id', dto.product_id)
+          .is('platform', null)
+          .maybeSingle()
+        stockId    = stock?.id       ?? null
+        currentQty = stock?.quantity ?? 0
+      } else {
+        const { data: stock } = await supabaseAdmin
+          .from('product_stock')
+          .select('quantity')
+          .eq('id', stockId)
+          .maybeSingle()
+        currentQty = stock?.quantity ?? 0
+      }
 
-    // Insert movement record
-    const { error: mvError } = await supabaseAdmin
-      .from('stock_movements')
-      .insert({
-        product_id:       dto.product_id,
-        product_stock_id: stockId,
-        type:             dto.type,
-        quantity:         dto.quantity,
-        reason:           dto.reason ?? null,
-      })
-    if (mvError) throw new Error(mvError.message)
-
-    // Update stock quantity + sync to ML
-    if (stockId) {
-      const newQty = dto.type === 'adjustment'
+      // Compute final balance based on movement type
+      const balanceAfter = dto.type === 'adjustment'
         ? dto.quantity
         : dto.type === 'in' || dto.type === 'return'
           ? currentQty + dto.quantity
           : Math.max(0, currentQty - dto.quantity)
 
-      await supabaseAdmin
-        .from('product_stock')
-        .update({ quantity: newQty, updated_at: new Date().toISOString() })
-        .eq('id', stockId)
+      // Insert movement record — column names match the live schema:
+      //   stock_id (not product_stock_id), movement_type (not type),
+      //   notes (not reason), balance_after (NOT NULL), created_by
+      const { error: mvError } = await supabaseAdmin
+        .from('stock_movements')
+        .insert({
+          product_id:    dto.product_id,
+          stock_id:      stockId,
+          movement_type: dto.type,
+          quantity:      dto.quantity,
+          notes:         dto.reason ?? null,
+          balance_after: balanceAfter,
+          created_by:    userId ?? null,
+        })
+      if (mvError) {
+        console.error('[stock.movement] INSERT err:', mvError.code, mvError.message, mvError.details)
+        throw new HttpException(mvError.message, 400)
+      }
 
-      // Use new path so stock_sync_logs gets populated
-      this.stock.syncStockToAllChannels(dto.product_id, 'movement')
-        .catch((e: Error) => console.error('[stock-sync] movement sync falhou:', e.message))
+      // Update stock quantity + sync to ML
+      if (stockId) {
+        await supabaseAdmin
+          .from('product_stock')
+          .update({ quantity: balanceAfter, updated_at: new Date().toISOString() })
+          .eq('id', stockId)
+
+        // Use new path so stock_sync_logs gets populated
+        this.stock.syncStockToAllChannels(dto.product_id, 'movement')
+          .catch((e: Error) => console.error('[stock-sync] movement sync falhou:', e.message))
+      }
+
+      return { ok: true, type: dto.type, quantity: dto.quantity, balance_after: balanceAfter }
+    } catch (e: unknown) {
+      if (e instanceof HttpException) throw e
+      const err = e as Error
+      console.error('[stock.movement] ERRO:', err?.message, err?.stack)
+      throw new HttpException(err?.message ?? 'Erro ao criar movimento de estoque', 400)
     }
-
-    return { ok: true, type: dto.type, quantity: dto.quantity }
   }
 
   async updateStock(stockId: string, dto: UpdateStockDto) {
