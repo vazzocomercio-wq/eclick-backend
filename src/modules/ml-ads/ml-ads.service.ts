@@ -129,8 +129,9 @@ export class MlAdsService {
   }
 
   /**
-   * One call returns daily metrics for ALL campaigns in the date range.
-   * Each row carries campaign_id + date so we can group locally.
+   * Bulk-metrics call: ALL campaigns for one advertiser/product, daily.
+   * Some accounts return nothing here and require a per-campaign call —
+   * the caller falls back to getCampaignMetricsRaw when this is empty.
    */
   async getMetricsRaw(
     advertiserId: string,
@@ -151,14 +152,47 @@ export class MlAdsService {
         },
       },
     )
-    // Tolerant on shape: ML may return the rows under .metrics, .results,
-    // or directly as the body itself.
-    const rows: unknown =
-      Array.isArray(data?.metrics) ? data.metrics
-      : Array.isArray(data?.results) ? data.results
-      : Array.isArray(data) ? data
-      : []
-    return rows as DailyMetricRow[]
+    this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId} bulk: ${JSON.stringify(data).slice(0, 800)}`)
+    return this.extractMetricRows(data)
+  }
+
+  /** Per-campaign daily metrics — fallback when the bulk endpoint returns
+   * nothing. Stamps campaign_id onto rows that come back without it. */
+  async getCampaignMetricsRaw(
+    advertiserId: string,
+    campaignId:   string,
+    dateFrom:     string,
+    dateTo:       string,
+    product = 'PADS',
+  ): Promise<DailyMetricRow[]> {
+    const headers = await this.authHeaders()
+    const segment = this.productPath(product)
+    const { data } = await axios.get(
+      `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/${campaignId}/metrics`,
+      {
+        headers,
+        params: {
+          date_from:        dateFrom,
+          date_to:          dateTo,
+          aggregation_type: 'daily',
+        },
+      },
+    )
+    const rows = this.extractMetricRows(data)
+    return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
+  }
+
+  /** Tolerant on shape: ML may return rows under .metrics, .results, .data,
+   * directly as the body, or wrapped per-day under date keys. */
+  private extractMetricRows(data: unknown): DailyMetricRow[] {
+    const d = data as Record<string, unknown> | unknown[]
+    if (Array.isArray(d)) return d as DailyMetricRow[]
+    const dr = d as Record<string, unknown>
+    if (Array.isArray(dr?.metrics))   return dr.metrics as DailyMetricRow[]
+    if (Array.isArray(dr?.results))   return dr.results as DailyMetricRow[]
+    if (Array.isArray(dr?.data))      return dr.data as DailyMetricRow[]
+    if (Array.isArray(dr?.campaigns)) return dr.campaigns as DailyMetricRow[]
+    return []
   }
 
   // ── Sync ──────────────────────────────────────────────────────────────────
@@ -234,46 +268,62 @@ export class MlAdsService {
       }
       totalCampaigns += campaignRows.length
 
-      // Metrics — one call per advertiser/product
+      // Metrics — first try the bulk endpoint, then fall back to per-campaign
+      // calls if bulk returns nothing (some accounts only expose the latter).
+      let metrics: DailyMetricRow[] = []
       try {
-        const metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
-        const validCampaignIds = new Set(campaignRows.map(c => c.id))
-
-        // Real shape: { campaign_id, date, metrics: { prints, clicks, ctr,
-        // cvr, acos, roas, attribution_order_conversions,
-        // attribution_order_amount, consumed_budget, cost_per_clicks, leads } }
-        const reportRows = metrics
-          .map(m => {
-            const mr  = m as Record<string, unknown>
-            const cid = m.campaign_id != null ? String(m.campaign_id) : null
-            const d   = (m.date ?? mr.day) as string | undefined
-            if (!cid || !d || !validCampaignIds.has(cid)) return null
-            const met = (mr.metrics ?? {}) as Record<string, unknown>
-            return {
-              campaign_id: cid,
-              date:        d,
-              clicks:      Number(met.clicks ?? 0),
-              impressions: Number(met.prints ?? met.impressions ?? 0),
-              ctr:         Number(met.ctr ?? 0),
-              spend:       Number(met.consumed_budget ?? met.cost ?? 0),
-              conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
-              revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? 0),
-              roas:        Number(met.roas ?? 0),
-              acos:        Number(met.acos ?? 0),
-              synced_at:   new Date().toISOString(),
-            }
-          })
-          .filter((r): r is NonNullable<typeof r> => r !== null)
-
-        if (reportRows.length > 0) {
-          const { error: rErr } = await supabaseAdmin
-            .from('ml_ads_reports')
-            .upsert(reportRows, { onConflict: 'campaign_id,date' })
-          if (rErr) this.logger.warn(`[ml-ads.sync] reports upsert ${adv.advertiser_id}: ${rErr.message}`)
-          else totalReports += reportRows.length
-        }
+        metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
       } catch (e: any) {
-        this.logger.warn(`[ml-ads.sync] metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
+        this.logger.warn(`[ml-ads.sync] bulk metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
+      }
+
+      if (metrics.length === 0) {
+        this.logger.log(`[ml-ads.sync] bulk empty — falling back to per-campaign metrics for ${campaignRows.length} campanha(s)`)
+        for (const c of campaignRows) {
+          try {
+            const rows = await this.getCampaignMetricsRaw(adv.advertiser_id, c.id, dateFrom, dateTo, adv.product)
+            metrics.push(...rows)
+          } catch (e: any) {
+            this.logger.warn(`[ml-ads.sync] per-campaign ${c.id}: ${e?.response?.status ?? ''} ${e?.message}`)
+          }
+        }
+      }
+
+      // Real shape: { campaign_id, date, metrics: { prints, clicks, ctr,
+      // cvr, acos, roas, attribution_order_conversions,
+      // attribution_order_amount, consumed_budget, cost_per_clicks, leads } }
+      // No validCampaignIds filter — accept any row that has cid + date,
+      // even when all metrics are zero. Zero-rows still record activity-day.
+      const reportRows = metrics
+        .map(m => {
+          const mr  = m as Record<string, unknown>
+          const rawCid = m.campaign_id ?? (mr.campaignId as unknown)
+          const cid = rawCid != null ? String(rawCid) : null
+          const d   = (m.date ?? mr.day) as string | undefined
+          if (!cid || !d || cid === 'undefined' || cid === 'null') return null
+          const met = (mr.metrics ?? mr) as Record<string, unknown>
+          return {
+            campaign_id: cid,
+            date:        d,
+            clicks:      Number(met.clicks ?? 0),
+            impressions: Number(met.prints ?? met.impressions ?? 0),
+            ctr:         Number(met.ctr ?? 0),
+            spend:       Number(met.consumed_budget ?? met.cost ?? met.spend ?? 0),
+            conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
+            revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? met.revenue ?? 0),
+            roas:        Number(met.roas ?? 0),
+            acos:        Number(met.acos ?? 0),
+            synced_at:   new Date().toISOString(),
+          }
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null)
+
+      if (reportRows.length > 0) {
+        const { error: rErr } = await supabaseAdmin
+          .from('ml_ads_reports')
+          .upsert(reportRows, { onConflict: 'campaign_id,date' })
+        if (rErr) this.logger.warn(`[ml-ads.sync] reports upsert ${adv.advertiser_id}: ${rErr.message}`)
+        else totalReports += reportRows.length
       }
     }
 
