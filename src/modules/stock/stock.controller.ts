@@ -87,8 +87,18 @@ export class StockController {
 
   @Post('sync/:product_id')
   @HttpCode(HttpStatus.OK)
-  sync(@Param('product_id') productId: string) {
-    return this.svc.syncStockToAllChannels(productId)
+  async sync(@Param('product_id') productId: string) {
+    this.logger.log(`[sync] forçando sync para product_id=${productId}`)
+    try {
+      await this.svc.syncStockToAllChannels(productId)
+      this.logger.log(`[sync] completo product_id=${productId}`)
+      return { ok: true, productId }
+    } catch (e: any) {
+      this.logger.error(`[sync] ERRO product_id=${productId}: ${e?.message}`)
+      if (e?.stack) this.logger.error(`[sync] STACK: ${e.stack}`)
+      if (e instanceof HttpException) throw e
+      throw new HttpException(e?.message ?? 'Erro ao sincronizar', 400)
+    }
   }
 
   @Get('sync-logs')

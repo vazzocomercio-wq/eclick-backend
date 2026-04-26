@@ -440,12 +440,15 @@ export class StockService {
   // ── ML Sync ───────────────────────────────────────────────────────────────
 
   async syncStockToAllChannels(productId: string) {
+    this.logger.log(`[syncAll] iniciando product_id=${productId}`)
     const channelQtys = await this.calculateChannelQuantities(productId)
+    this.logger.log(`[syncAll] ${channelQtys.length} canal(is) calculado(s): ${JSON.stringify(channelQtys)}`)
     for (const cq of channelQtys) {
       if (cq.channel === 'mercadolivre') {
         await this.syncToMl(productId, cq.qty, cq.should_pause, cq.distribution_id)
       }
     }
+    this.logger.log(`[syncAll] completo product_id=${productId}`)
   }
 
   async syncToMl(
@@ -461,6 +464,22 @@ export class StockService {
       .eq('product_id', productId)
       .eq('platform', 'mercadolivre')
       .eq('is_active', true)
+
+    this.logger.log(`[syncMl] product_id=${productId} qty=${qty} pause=${shouldPause} | ${vinculos?.length ?? 0} vínculo(s) ML`)
+
+    if (!vinculos?.length) {
+      // Audit log even when there's nothing to push, so the user sees the dispatch
+      const { error: auditErr } = await supabaseAdmin.from('stock_sync_logs').insert({
+        product_id:    productId,
+        channel:       'mercadolivre',
+        sent_quantity: qty,
+        status:        'ignored',
+        error_message: 'Produto sem anúncios vinculados ao ML',
+        triggered_by:  triggeredBy,
+      })
+      if (auditErr) this.logger.warn(`[syncMl] audit log insert failed: ${auditErr.message}`)
+      return
+    }
 
     for (const v of vinculos ?? []) {
       const startTime = Date.now()
