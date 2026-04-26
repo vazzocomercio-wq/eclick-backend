@@ -15,6 +15,7 @@ export class StockService {
     safety: number; available: number; total_platform: number
     stock_id: string | null
     safety_mode: string; safety_percentage: number; safety_quantity: number
+    no_stock_record?: true
   }> {
     const { data: stock } = await supabaseAdmin
       .from('product_stock')
@@ -28,6 +29,7 @@ export class StockService {
         physical: 0, virtual: 0, reserved: 0,
         safety: 0, available: 0, total_platform: 0, stock_id: null,
         safety_mode: 'percentage', safety_percentage: 10, safety_quantity: 0,
+        no_stock_record: true,
       }
     }
 
@@ -506,6 +508,24 @@ export class StockService {
     triggeredBy = 'system_distribution',
   ) {
     console.log(`[STOCK-ML] === INICIO === productId:${productId} qty:${qty} pause:${shouldPause} trigger:${triggeredBy}`)
+
+    // Skip products without a product_stock row — without it qty was being
+    // silently treated as 0, which would erase the listing's actual quantity
+    // on ML. Better to log "ignored" and require an explicit stock record.
+    const calc = await this.calculateAvailable(productId)
+    if (calc.no_stock_record) {
+      console.log(`[STOCK-ML] productId=${productId} sem registro em product_stock — abortando sync`)
+      const { error: insErr } = await supabaseAdmin.from('stock_sync_logs').insert({
+        product_id:    productId,
+        channel:       'mercadolivre',
+        sent_quantity: 0,
+        status:        'ignored',
+        error_message: 'Produto sem registro de estoque cadastrado',
+        triggered_by:  triggeredBy,
+      })
+      if (insErr) console.error(`[STOCK-ML] erro ao inserir log no_stock_record: ${insErr.message}`)
+      return
+    }
 
     try {
       const { data: vinculos, error: vincErr } = await supabaseAdmin
