@@ -146,7 +146,56 @@ export class MercadolivreService {
       .from('ml_connections')
       .select('*')
       .order('created_at', { ascending: true })
-    return (data || []) as MlConnection[]
+
+    const fromMlConnections = (data || []) as MlConnection[]
+    if (fromMlConnections.length > 0) return fromMlConnections
+
+    // Fallback: token may have been written to api_credentials by a different
+    // OAuth flow (key/value rows: provider='mercadolivre', key_name in
+    // {access_token, refresh_token, expires_at, seller_id}). Reconstruct
+    // MlConnection rows by grouping on organization_id.
+    return this.getConnectionsFromApiCredentials()
+  }
+
+  private async getConnectionsFromApiCredentials(): Promise<MlConnection[]> {
+    const { data, error } = await supabaseAdmin
+      .from('api_credentials')
+      .select('organization_id, key_name, key_value, updated_at')
+      .eq('provider', 'mercadolivre')
+      .eq('is_active', true)
+      .in('key_name', ['access_token', 'refresh_token', 'expires_at', 'seller_id', 'nickname'])
+
+    if (error || !data?.length) return []
+
+    type Row = { organization_id: string | null; key_name: string; key_value: string; updated_at: string | null }
+    const grouped = new Map<string, { values: Record<string, string>; updated_at: string | null }>()
+
+    for (const r of data as Row[]) {
+      const key = r.organization_id ?? '__no_org__'
+      const cur = grouped.get(key) ?? { values: {}, updated_at: r.updated_at }
+      cur.values[r.key_name] = r.key_value
+      if (r.updated_at && (!cur.updated_at || r.updated_at > cur.updated_at)) cur.updated_at = r.updated_at
+      grouped.set(key, cur)
+    }
+
+    const conns: MlConnection[] = []
+    for (const [orgKey, { values, updated_at }] of grouped) {
+      const access  = values.access_token
+      const refresh = values.refresh_token
+      const seller  = Number(values.seller_id ?? 0)
+      const expires = values.expires_at
+      if (!access || !refresh || !seller || !expires) continue
+      conns.push({
+        organization_id: orgKey === '__no_org__' ? '' : orgKey,
+        seller_id:       seller,
+        access_token:    access,
+        refresh_token:   refresh,
+        expires_at:      expires,
+        nickname:        values.nickname ?? null,
+        created_at:      updated_at ?? undefined,
+      })
+    }
+    return conns
   }
 
   private async refreshIfNeeded(
@@ -171,10 +220,26 @@ export class MercadolivreService {
       const { access_token, refresh_token, expires_in } = response.data
       const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
 
-      await supabaseAdmin
-        .from('ml_connections')
-        .update({ access_token, refresh_token, expires_at: newExpiresAt })
-        .eq('seller_id', conn.seller_id)
+      // Update wherever the token lives: ml_connections (legacy), api_credentials,
+      // or both. Both updates are idempotent so running both is safe.
+      await Promise.all([
+        supabaseAdmin
+          .from('ml_connections')
+          .update({ access_token, refresh_token, expires_at: newExpiresAt })
+          .eq('seller_id', conn.seller_id),
+        supabaseAdmin
+          .from('api_credentials')
+          .update({ key_value: access_token, updated_at: new Date().toISOString() })
+          .eq('provider', 'mercadolivre').eq('key_name', 'access_token').eq('is_active', true),
+        supabaseAdmin
+          .from('api_credentials')
+          .update({ key_value: refresh_token, updated_at: new Date().toISOString() })
+          .eq('provider', 'mercadolivre').eq('key_name', 'refresh_token').eq('is_active', true),
+        supabaseAdmin
+          .from('api_credentials')
+          .update({ key_value: newExpiresAt, updated_at: new Date().toISOString() })
+          .eq('provider', 'mercadolivre').eq('key_name', 'expires_at').eq('is_active', true),
+      ])
 
       return access_token
     } catch (err: any) {
@@ -186,14 +251,20 @@ export class MercadolivreService {
   }
 
   async getValidToken(): Promise<{ token: string; sellerId: number }> {
-    const connections = await this.getAllConnections()
-    if (!connections.length) {
-      console.error('[getValidToken] sem conexão ML no banco')
-      throw new UnauthorizedException('ML não conectado')
+    try {
+      const connections = await this.getAllConnections()
+      if (!connections.length) {
+        console.error('[getValidToken] sem conexão ML no banco')
+        throw new UnauthorizedException('ML não conectado')
+      }
+      const conn = connections[0]
+      const token = await this.refreshIfNeeded(conn)
+      return { token, sellerId: conn.seller_id }
+    } catch (e: unknown) {
+      const err = e as { message?: string; stack?: string }
+      console.error('[getValidToken] ERRO:', err?.message, err?.stack)
+      throw e
     }
-    const conn = connections[0]
-    const token = await this.refreshIfNeeded(conn)
-    return { token, sellerId: conn.seller_id }
   }
 
   async getTokenForOrg(orgId: string): Promise<{ token: string; sellerId: number }> {

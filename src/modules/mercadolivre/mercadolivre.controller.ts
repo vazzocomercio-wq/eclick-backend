@@ -192,12 +192,20 @@ export class MercadolivreController {
   }
 
   // GET /ml/questions?status=UNANSWERED
+  // Always responds 200 — frontend (sidebar badges, etc.) polls this and
+  // can't tolerate 500s. Real errors are logged server-side.
   @Get('questions')
-  getQuestions(
+  async getQuestions(
     @ReqUser() user: ReqUserPayload,
     @Query('status') status?: string,
   ) {
-    return this.ml.getQuestions(user.orgId!, status?.toUpperCase() ?? 'UNANSWERED')
+    try {
+      return await this.ml.getQuestions(user.orgId!, status?.toUpperCase() ?? 'UNANSWERED')
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      console.error('[ml.questions] erro:', err?.message)
+      return { questions: [], total: 0, sellerId: null }
+    }
   }
 
   // POST /ml/questions/:id/answer  { text: string }
@@ -212,10 +220,16 @@ export class MercadolivreController {
     return this.ml.answerQuestion(user.orgId!, Number(id), body.text)
   }
 
-  // GET /ml/claims
+  // GET /ml/claims — always 200, see comment on /questions above.
   @Get('claims')
-  getClaims(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getClaims(user.orgId!)
+  async getClaims(@ReqUser() user: ReqUserPayload) {
+    try {
+      return await this.ml.getClaims(user.orgId!)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      console.error('[ml.claims] erro:', err?.message)
+      return { data: [], total: 0 }
+    }
   }
 
   // ── Catalog / Listings ────────────────────────────────────────────────────

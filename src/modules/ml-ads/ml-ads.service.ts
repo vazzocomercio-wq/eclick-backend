@@ -144,7 +144,12 @@ export class MlAdsService {
     const { error: upsertCampErr } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .upsert(campaignRows, { onConflict: 'id' })
-    if (upsertCampErr) throw new HttpException(`Falha upsert campaigns: ${upsertCampErr.message}`, 500)
+    if (upsertCampErr) {
+      if (this.isMissingTableError(upsertCampErr)) {
+        return { ok: false, advertiser_id: advertiser.advertiser_id, campaigns: 0, reports: 0, message: 'Tabelas ml_ads_* não existem — rode a migration 20260427_ml_ads.sql no Supabase' }
+      }
+      throw new HttpException(`Falha upsert campaigns: ${upsertCampErr.message}`, 500)
+    }
 
     // Pull last 30 days of metrics for each campaign
     const dateTo   = new Date().toISOString().slice(0, 10)
@@ -187,12 +192,41 @@ export class MlAdsService {
 
   // ── Read endpoints ────────────────────────────────────────────────────────
 
+  /** True when Supabase says the table or relation isn't there — treat as
+   * "no data yet" rather than a hard 500, since the SQL migration may not
+   * have been applied in this environment. */
+  private isMissingTableError(err: { code?: string; message?: string } | null): boolean {
+    if (!err) return false
+    const code = err.code ?? ''
+    const msg  = (err.message ?? '').toLowerCase()
+    return (
+      code === 'PGRST205' || code === 'PGRST204' || code === '42P01' ||
+      msg.includes('does not exist') ||
+      msg.includes('schema cache') ||
+      msg.includes('could not find the table')
+    )
+  }
+
+  private emptySummary() {
+    return {
+      totals: {
+        clicks: 0, impressions: 0, spend: 0,
+        conversions: 0, revenue: 0,
+        ctr: 0, roas: 0, acos: 0,
+      },
+      series: [] as Array<{ date: string; clicks: number; impressions: number; spend: number; conversions: number; revenue: number; ctr: number; roas: number; acos: number }>,
+    }
+  }
+
   async listCampaigns() {
     const { data, error } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .select('id, advertiser_id, name, status, daily_budget, type, start_date, end_date, synced_at')
       .order('name', { ascending: true })
-    if (error) throw new HttpException(error.message, 500)
+    if (error) {
+      if (this.isMissingTableError(error)) return []
+      throw new HttpException(error.message, 500)
+    }
     return data ?? []
   }
 
@@ -203,9 +237,13 @@ export class MlAdsService {
       .gte('date', dateFrom)
       .lte('date', dateTo)
       .order('date', { ascending: true })
-    if (error) throw new HttpException(error.message, 500)
+    if (error) {
+      if (this.isMissingTableError(error)) return this.emptySummary()
+      throw new HttpException(error.message, 500)
+    }
 
     const rows = data ?? []
+    if (rows.length === 0) return this.emptySummary()
 
     // Aggregate per-day across all campaigns
     const byDate = new Map<string, { date: string; clicks: number; impressions: number; spend: number; conversions: number; revenue: number }>()
@@ -250,15 +288,23 @@ export class MlAdsService {
 
   /** Per-campaign aggregation for the table view. */
   async getCampaignAggregation(dateFrom: string, dateTo: string) {
-    const { data: campaigns } = await supabaseAdmin
+    const { data: campaigns, error: cErr } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .select('id, name, status, daily_budget, type')
+    if (cErr) {
+      if (this.isMissingTableError(cErr)) return []
+      throw new HttpException(cErr.message, 500)
+    }
+    if (!campaigns?.length) return []
 
-    const { data: reports } = await supabaseAdmin
+    const { data: reports, error: rErr } = await supabaseAdmin
       .from('ml_ads_reports')
       .select('campaign_id, clicks, impressions, spend, conversions, revenue')
       .gte('date', dateFrom)
       .lte('date', dateTo)
+    if (rErr && !this.isMissingTableError(rErr)) {
+      throw new HttpException(rErr.message, 500)
+    }
 
     const aggByCamp = new Map<string, { clicks: number; impressions: number; spend: number; conversions: number; revenue: number }>()
     for (const r of reports ?? []) {
@@ -299,7 +345,10 @@ export class MlAdsService {
       .gte('date', dateFrom)
       .lte('date', dateTo)
       .order('date', { ascending: true })
-    if (error) throw new HttpException(error.message, 500)
+    if (error) {
+      if (this.isMissingTableError(error)) return []
+      throw new HttpException(error.message, 500)
+    }
     return data ?? []
   }
 
