@@ -4,7 +4,7 @@ import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
-const ML_ADS_BASE = 'https://api.mercadolibre.com/advertising/product_ads'
+const ML_BASE = 'https://api.mercadolibre.com'
 
 interface AdvertiserRaw {
   advertiser_id: string | number
@@ -20,7 +20,9 @@ interface CampaignRaw {
   start_date?: string
   end_date?: string
 }
-interface ReportMetrics {
+interface DailyMetricRow {
+  campaign_id?: string | number
+  date?: string
   clicks?:      number
   impressions?: number
   ctr?:         number
@@ -41,21 +43,24 @@ export class MlAdsService {
 
   // ── ML Ads API ────────────────────────────────────────────────────────────
 
+  // ML Ads requires Api-Version: 1 on every call — without it the endpoints
+  // return 404. Base path is /advertising (NOT /advertising/product_ads) and
+  // campaign + metrics calls live under /brand_ads/.
   private async authHeaders(): Promise<Record<string, string>> {
     const { token } = await this.ml.getValidToken()
     return {
       Authorization: `Bearer ${token}`,
-      'Api-Version': '2',
+      'Api-Version': '1',
       Accept: 'application/json',
     }
   }
 
-  /** Returns the first product_ads advertiser for the connected ML account.
+  /** Returns the first PADS advertiser for the connected ML account.
    * Never throws — caller treats null as "no advertiser configured". */
   async getAdvertiser(): Promise<{ advertiser_id: string; account_name: string | null } | null> {
     try {
       const headers = await this.authHeaders()
-      const { data } = await axios.get(`${ML_ADS_BASE}/advertisers`, {
+      const { data } = await axios.get(`${ML_BASE}/advertising/advertisers`, {
         headers,
         params: { product_id: 'PADS' },
       })
@@ -75,46 +80,45 @@ export class MlAdsService {
   async getCampaignsRaw(advertiserId: string): Promise<CampaignRaw[]> {
     const headers = await this.authHeaders()
     const { data } = await axios.get(
-      `${ML_ADS_BASE}/advertisers/${advertiserId}/campaigns`,
+      `${ML_BASE}/advertising/advertisers/${advertiserId}/brand_ads/campaigns`,
       { headers, params: { limit: 200 } },
     )
-    return Array.isArray(data?.results) ? (data.results as CampaignRaw[]) : []
+    // ML returns the list under .results (paginated) or directly under .campaigns
+    const list = Array.isArray(data?.results) ? data.results
+               : Array.isArray(data?.campaigns) ? data.campaigns
+               : []
+    return list as CampaignRaw[]
   }
 
   /**
-   * Per-day campaign metrics for the date range.
-   * Mercado Libre returns one row per (campaign, date) when date_grouping=day.
+   * One call returns daily metrics for ALL campaigns in the date range.
+   * Each row carries campaign_id + date so we can group locally.
    */
-  async getCampaignReportRaw(
+  async getMetricsRaw(
     advertiserId: string,
-    campaignId:   string,
     dateFrom:     string,
     dateTo:       string,
-  ): Promise<Array<ReportMetrics & { date: string }>> {
+  ): Promise<DailyMetricRow[]> {
     const headers = await this.authHeaders()
     const { data } = await axios.get(
-      `${ML_ADS_BASE}/advertisers/${advertiserId}/campaigns/${campaignId}/metrics`,
+      `${ML_BASE}/advertising/advertisers/${advertiserId}/brand_ads/campaigns/metrics`,
       {
         headers,
         params: {
-          date_from:      dateFrom,
-          date_to:        dateTo,
-          date_grouping:  'day',
+          date_from:        dateFrom,
+          date_to:          dateTo,
+          aggregation_type: 'daily',
         },
       },
     )
-    const rows = Array.isArray(data?.results) ? data.results : []
-    return rows.map((r: ReportMetrics & { date?: string }) => ({
-      date:        r.date ?? dateFrom,
-      clicks:      r.clicks ?? 0,
-      impressions: r.impressions ?? 0,
-      ctr:         r.ctr ?? 0,
-      cost:        r.cost ?? 0,
-      conversions: r.conversions ?? 0,
-      total_revenue: r.total_revenue ?? r.attributed_revenue_brand_total ?? 0,
-      acos:        r.acos ?? 0,
-      roas:        r.roas ?? 0,
-    }))
+    // Tolerant on shape: ML may return the rows under .metrics, .results,
+    // or directly as the body itself.
+    const rows: unknown =
+      Array.isArray(data?.metrics) ? data.metrics
+      : Array.isArray(data?.results) ? data.results
+      : Array.isArray(data) ? data
+      : []
+    return rows as DailyMetricRow[]
   }
 
   // ── Sync ──────────────────────────────────────────────────────────────────
@@ -151,39 +155,45 @@ export class MlAdsService {
       throw new HttpException(`Falha upsert campaigns: ${upsertCampErr.message}`, 500)
     }
 
-    // Pull last 30 days of metrics for each campaign
+    // Pull last 30 days of metrics in ONE call (returns all campaigns aggregated daily).
     const dateTo   = new Date().toISOString().slice(0, 10)
     const dateFrom = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10)
 
     let totalReports = 0
-    for (const c of campaigns) {
-      try {
-        const metrics = await this.getCampaignReportRaw(advertiser.advertiser_id, String(c.id), dateFrom, dateTo)
-        if (metrics.length === 0) continue
-        const rows = metrics.map(m => ({
-          campaign_id: String(c.id),
-          date:        m.date,
-          clicks:      m.clicks ?? 0,
-          impressions: m.impressions ?? 0,
-          ctr:         m.ctr ?? 0,
-          spend:       m.cost ?? 0,
-          conversions: m.conversions ?? 0,
-          revenue:     m.total_revenue ?? 0,
-          roas:        m.roas ?? 0,
-          acos:        m.acos ?? 0,
-          synced_at:   new Date().toISOString(),
-        }))
+    try {
+      const metrics = await this.getMetricsRaw(advertiser.advertiser_id, dateFrom, dateTo)
+      const validCampaignIds = new Set(campaigns.map(c => String(c.id)))
+
+      const reportRows = metrics
+        .map(m => {
+          const cid = m.campaign_id != null ? String(m.campaign_id) : null
+          const d   = m.date
+          if (!cid || !d || !validCampaignIds.has(cid)) return null
+          return {
+            campaign_id: cid,
+            date:        d,
+            clicks:      m.clicks ?? 0,
+            impressions: m.impressions ?? 0,
+            ctr:         m.ctr ?? 0,
+            spend:       m.cost ?? 0,
+            conversions: m.conversions ?? 0,
+            revenue:     m.total_revenue ?? m.attributed_revenue_brand_total ?? 0,
+            roas:        m.roas ?? 0,
+            acos:        m.acos ?? 0,
+            synced_at:   new Date().toISOString(),
+          }
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null)
+
+      if (reportRows.length > 0) {
         const { error: rErr } = await supabaseAdmin
           .from('ml_ads_reports')
-          .upsert(rows, { onConflict: 'campaign_id,date' })
-        if (rErr) {
-          this.logger.warn(`[ml-ads.sync] campaign=${c.id}: ${rErr.message}`)
-          continue
-        }
-        totalReports += rows.length
-      } catch (e: any) {
-        this.logger.warn(`[ml-ads.sync] campaign=${c.id} metrics falharam: ${e?.response?.status ?? ''} ${e?.message}`)
+          .upsert(reportRows, { onConflict: 'campaign_id,date' })
+        if (rErr) this.logger.warn(`[ml-ads.sync] reports upsert: ${rErr.message}`)
+        else totalReports = reportRows.length
       }
+    } catch (e: any) {
+      this.logger.warn(`[ml-ads.sync] metrics falharam: ${e?.response?.status ?? ''} ${e?.message}`)
     }
 
     this.logger.log(`[ml-ads.sync] ${campaigns.length} campanhas, ${totalReports} reports`)
