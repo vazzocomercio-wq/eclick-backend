@@ -49,39 +49,75 @@ export class MlAdsService {
     }
   }
 
-  /** Returns the first PADS advertiser for the connected ML account.
-   * Never throws — caller treats null as "no advertiser configured". */
-  async getAdvertiser(): Promise<{ advertiser_id: string; account_name: string | null } | null> {
-    try {
-      const headers = await this.authHeaders()
-      const { data } = await axios.get(`${ML_BASE}/advertising/advertisers`, {
-        headers,
-        params: { product_id: 'PADS' },
-      })
-      const arr = Array.isArray(data?.advertisers) ? (data.advertisers as AdvertiserRaw[]) : []
-      const first = arr[0]
-      if (!first) return null
-      return {
-        advertiser_id: String(first.advertiser_id),
-        account_name:  first.account_name ?? null,
-      }
-    } catch (e: any) {
-      this.logger.warn(`[ml-ads.advertiser] ${e?.response?.status ?? ''} ${e?.message ?? ''}`)
-      return null
-    }
+  // The path segment under /advertisers/{id}/ varies per product.
+  private readonly PRODUCTS = ['PADS', 'BADS', 'DISPLAY'] as const
+  private productPath(product: string): string {
+    if (product === 'PADS')    return 'product_ads'
+    if (product === 'BADS')    return 'brand_ads'
+    if (product === 'DISPLAY') return 'display'
+    return 'product_ads'
   }
 
-  async getCampaignsRaw(advertiserId: string): Promise<CampaignRaw[]> {
+  /** Returns the first advertiser found across PADS/BADS/DISPLAY (for the
+   * page header). Never throws. */
+  async getAdvertiser(): Promise<{ advertiser_id: string; account_name: string | null } | null> {
+    const all = await this.getAllAdvertisers()
+    const first = all[0]
+    if (!first) return null
+    return { advertiser_id: first.advertiser_id, account_name: first.account_name }
+  }
+
+  /** Fetches advertisers across all 3 product types in parallel and dedupes
+   * by advertiser_id (keeping the first product seen per id). */
+  async getAllAdvertisers(): Promise<Array<{ advertiser_id: string; product: string; account_name: string | null }>> {
     const headers = await this.authHeaders()
-    const { data } = await axios.get(
-      `${ML_BASE}/advertising/advertisers/${advertiserId}/brand_ads/campaigns`,
-      { headers, params: { limit: 200 } },
-    )
-    // ML returns the list under .results (paginated) or directly under .campaigns
-    const list = Array.isArray(data?.results) ? data.results
-               : Array.isArray(data?.campaigns) ? data.campaigns
-               : []
-    return list as CampaignRaw[]
+    const fetches = this.PRODUCTS.map(async product => {
+      try {
+        const { data } = await axios.get(`${ML_BASE}/advertising/advertisers`, {
+          headers, params: { product_id: product },
+        })
+        const arr = Array.isArray(data?.advertisers) ? (data.advertisers as AdvertiserRaw[]) : []
+        return arr.map(a => ({
+          advertiser_id: String(a.advertiser_id),
+          product,
+          account_name:  a.account_name ?? null,
+        }))
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.advertisers] ${product} ${e?.response?.status ?? ''} ${e?.message ?? ''}`)
+        return []
+      }
+    })
+    const results = (await Promise.all(fetches)).flat()
+    // Temp diagnostic — see how many advertisers + which products are returned
+    this.logger.log(`[ml-ads.advertisers] ${JSON.stringify(results)}`)
+
+    const dedup = new Map<string, { advertiser_id: string; product: string; account_name: string | null }>()
+    for (const r of results) {
+      if (!dedup.has(r.advertiser_id)) dedup.set(r.advertiser_id, r)
+    }
+    return [...dedup.values()]
+  }
+
+  /** Paginated fetch of all campaigns for one advertiser/product. */
+  async getCampaignsRaw(advertiserId: string, product = 'PADS'): Promise<CampaignRaw[]> {
+    const headers  = await this.authHeaders()
+    const segment  = this.productPath(product)
+    const url      = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns`
+    const all: CampaignRaw[] = []
+    const limit = 100
+    let offset  = 0
+    let pageLen = 0
+    do {
+      const { data } = await axios.get(url, { headers, params: { limit, offset } })
+      const list = Array.isArray(data?.results) ? data.results
+                 : Array.isArray(data?.campaigns) ? data.campaigns
+                 : []
+      all.push(...(list as CampaignRaw[]))
+      pageLen = list.length
+      offset += limit
+      if (offset > 1000) break // hard cap
+    } while (pageLen === limit)
+    return all
   }
 
   /**
@@ -92,10 +128,12 @@ export class MlAdsService {
     advertiserId: string,
     dateFrom:     string,
     dateTo:       string,
+    product = 'PADS',
   ): Promise<DailyMetricRow[]> {
     const headers = await this.authHeaders()
+    const segment = this.productPath(product)
     const { data } = await axios.get(
-      `${ML_BASE}/advertising/advertisers/${advertiserId}/brand_ads/campaigns/metrics`,
+      `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`,
       {
         headers,
         params: {
@@ -117,107 +155,122 @@ export class MlAdsService {
 
   // ── Sync ──────────────────────────────────────────────────────────────────
 
-  /** Fetch advertiser+campaigns+last-30d metrics and upsert into Supabase. */
+  /** Fetch every advertiser across PADS/BADS/DISPLAY, then their campaigns
+   * and last-30d metrics. Upserts everything into Supabase. */
   async syncAll(): Promise<{ ok: boolean; advertiser_id: string | null; campaigns: number; reports: number; message?: string }> {
-    const advertiser = await this.getAdvertiser()
-    if (!advertiser) return { ok: false, advertiser_id: null, campaigns: 0, reports: 0, message: 'Conta sem ML Ads ativo' }
+    const advertisers = await this.getAllAdvertisers()
+    if (advertisers.length === 0) {
+      return { ok: false, advertiser_id: null, campaigns: 0, reports: 0, message: 'Conta sem ML Ads ativo' }
+    }
 
-    const campaigns = await this.getCampaignsRaw(advertiser.advertiser_id)
-
-    if (campaigns.length === 0) return { ok: true, advertiser_id: advertiser.advertiser_id, campaigns: 0, reports: 0 }
-
-    // Real shape (Brand Ads, Brazil PADS account):
-    //   { campaign_id: 649604, campaign_type: "automatic",
-    //     budget: { amount: 60, currency: "BRL" }, advertiser_id: 636197,
-    //     name, headline, status, items: [{ item_id }, ...] }
-    const campaignRows = campaigns
-      .map(c => {
-        const rawId = c.campaign_id ?? c.id
-        if (rawId == null) return null
-        const sId = String(rawId)
-        if (sId === 'undefined' || sId === 'null' || !sId.trim()) return null
-        const budget = c.budget as { amount?: number } | undefined
-        const items  = Array.isArray(c.items) ? c.items : []
-        return {
-          id:            sId,
-          advertiser_id: advertiser.advertiser_id,
-          name:          (c.name ?? c.headline ?? '(sem nome)') as string,
-          status:        (c.status ?? 'active') as string,
-          daily_budget:  (budget?.amount ?? null) as number | null,
-          type:          (c.campaign_type ?? c.type ?? null) as string | null,
-          start_date:    (c.start_date ?? null) as string | null,
-          end_date:      (c.end_date ?? null) as string | null,
-          items,
-          synced_at:     new Date().toISOString(),
-        }
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-
-    // Sweep any pre-existing rows that were inserted with bad ids before this
-    // mapper was hardened. Best-effort — ignore the error.
+    // Sweep any pre-existing rows with bad ids before this mapper was hardened.
     await supabaseAdmin
       .from('ml_ads_campaigns')
       .delete()
       .in('id', ['undefined', 'null', ''])
 
-    const { error: upsertCampErr } = await supabaseAdmin
-      .from('ml_ads_campaigns')
-      .upsert(campaignRows, { onConflict: 'id' })
-    if (upsertCampErr) {
-      if (this.isMissingTableError(upsertCampErr)) {
-        return { ok: false, advertiser_id: advertiser.advertiser_id, campaigns: 0, reports: 0, message: 'Tabelas ml_ads_* não existem — rode a migration 20260427_ml_ads.sql no Supabase' }
-      }
-      throw new HttpException(`Falha upsert campaigns: ${upsertCampErr.message}`, 500)
-    }
-
-    // Pull last 30 days of metrics in ONE call (returns all campaigns aggregated daily).
     const dateTo   = new Date().toISOString().slice(0, 10)
     const dateFrom = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10)
 
-    let totalReports = 0
-    try {
-      const metrics = await this.getMetricsRaw(advertiser.advertiser_id, dateFrom, dateTo)
-      const validCampaignIds = new Set(campaignRows.map(c => c.id))
+    let totalCampaigns = 0
+    let totalReports   = 0
 
-      // Real shape (per-day): { campaign_id, date, metrics: { prints, clicks,
-      // ctr, cvr, acos, roas, attribution_order_conversions,
-      // attribution_order_amount, consumed_budget, cost_per_clicks, leads } }
-      const reportRows = metrics
-        .map(m => {
-          const mr  = m as Record<string, unknown>
-          const cid = m.campaign_id != null ? String(m.campaign_id) : null
-          const d   = (m.date ?? mr.day) as string | undefined
-          if (!cid || !d || !validCampaignIds.has(cid)) return null
-          const met = (mr.metrics ?? {}) as Record<string, unknown>
+    for (const adv of advertisers) {
+      // Campaigns for this advertiser
+      let campaigns: CampaignRaw[] = []
+      try {
+        campaigns = await this.getCampaignsRaw(adv.advertiser_id, adv.product)
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.sync] campaigns ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
+        continue
+      }
+      if (campaigns.length === 0) continue
+
+      // Real shape (Brand/Product Ads):
+      //   { campaign_id, campaign_type, name, headline, status,
+      //     budget: { amount, currency }, items: [{ item_id }, ...] }
+      const campaignRows = campaigns
+        .map(c => {
+          const rawId = c.campaign_id ?? c.id
+          if (rawId == null) return null
+          const sId = String(rawId)
+          if (sId === 'undefined' || sId === 'null' || !sId.trim()) return null
+          const budget = c.budget as { amount?: number } | undefined
+          const items  = Array.isArray(c.items) ? c.items : []
           return {
-            campaign_id: cid,
-            date:        d,
-            clicks:      Number(met.clicks ?? 0),
-            impressions: Number(met.prints ?? met.impressions ?? 0),
-            ctr:         Number(met.ctr ?? 0),
-            spend:       Number(met.consumed_budget ?? met.cost ?? 0),
-            conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
-            revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? 0),
-            roas:        Number(met.roas ?? 0),
-            acos:        Number(met.acos ?? 0),
-            synced_at:   new Date().toISOString(),
+            id:            sId,
+            advertiser_id: adv.advertiser_id,
+            name:          (c.name ?? c.headline ?? '(sem nome)') as string,
+            status:        (c.status ?? 'active') as string,
+            daily_budget:  (budget?.amount ?? null) as number | null,
+            type:          (c.campaign_type ?? c.type ?? adv.product) as string | null,
+            start_date:    (c.start_date ?? null) as string | null,
+            end_date:      (c.end_date ?? null) as string | null,
+            items,
+            synced_at:     new Date().toISOString(),
           }
         })
         .filter((r): r is NonNullable<typeof r> => r !== null)
 
-      if (reportRows.length > 0) {
-        const { error: rErr } = await supabaseAdmin
-          .from('ml_ads_reports')
-          .upsert(reportRows, { onConflict: 'campaign_id,date' })
-        if (rErr) this.logger.warn(`[ml-ads.sync] reports upsert: ${rErr.message}`)
-        else totalReports = reportRows.length
+      if (campaignRows.length === 0) continue
+
+      const { error: upsertCampErr } = await supabaseAdmin
+        .from('ml_ads_campaigns')
+        .upsert(campaignRows, { onConflict: 'id' })
+      if (upsertCampErr) {
+        if (this.isMissingTableError(upsertCampErr)) {
+          return { ok: false, advertiser_id: adv.advertiser_id, campaigns: 0, reports: 0, message: 'Tabelas ml_ads_* não existem — rode a migration 20260427_ml_ads.sql no Supabase' }
+        }
+        this.logger.warn(`[ml-ads.sync] upsert campaigns ${adv.advertiser_id}: ${upsertCampErr.message}`)
+        continue
       }
-    } catch (e: any) {
-      this.logger.warn(`[ml-ads.sync] metrics falharam: ${e?.response?.status ?? ''} ${e?.message}`)
+      totalCampaigns += campaignRows.length
+
+      // Metrics — one call per advertiser/product
+      try {
+        const metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
+        const validCampaignIds = new Set(campaignRows.map(c => c.id))
+
+        // Real shape: { campaign_id, date, metrics: { prints, clicks, ctr,
+        // cvr, acos, roas, attribution_order_conversions,
+        // attribution_order_amount, consumed_budget, cost_per_clicks, leads } }
+        const reportRows = metrics
+          .map(m => {
+            const mr  = m as Record<string, unknown>
+            const cid = m.campaign_id != null ? String(m.campaign_id) : null
+            const d   = (m.date ?? mr.day) as string | undefined
+            if (!cid || !d || !validCampaignIds.has(cid)) return null
+            const met = (mr.metrics ?? {}) as Record<string, unknown>
+            return {
+              campaign_id: cid,
+              date:        d,
+              clicks:      Number(met.clicks ?? 0),
+              impressions: Number(met.prints ?? met.impressions ?? 0),
+              ctr:         Number(met.ctr ?? 0),
+              spend:       Number(met.consumed_budget ?? met.cost ?? 0),
+              conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
+              revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? 0),
+              roas:        Number(met.roas ?? 0),
+              acos:        Number(met.acos ?? 0),
+              synced_at:   new Date().toISOString(),
+            }
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null)
+
+        if (reportRows.length > 0) {
+          const { error: rErr } = await supabaseAdmin
+            .from('ml_ads_reports')
+            .upsert(reportRows, { onConflict: 'campaign_id,date' })
+          if (rErr) this.logger.warn(`[ml-ads.sync] reports upsert ${adv.advertiser_id}: ${rErr.message}`)
+          else totalReports += reportRows.length
+        }
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.sync] metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
+      }
     }
 
-    this.logger.log(`[ml-ads.sync] ${campaigns.length} campanhas, ${totalReports} reports`)
-    return { ok: true, advertiser_id: advertiser.advertiser_id, campaigns: campaigns.length, reports: totalReports }
+    this.logger.log(`[ml-ads.sync] ${advertisers.length} advertisers, ${totalCampaigns} campanhas, ${totalReports} reports`)
+    return { ok: true, advertiser_id: advertisers[0].advertiser_id, campaigns: totalCampaigns, reports: totalReports }
   }
 
   // ── Read endpoints ────────────────────────────────────────────────────────
