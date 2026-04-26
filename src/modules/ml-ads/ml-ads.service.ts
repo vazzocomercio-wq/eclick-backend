@@ -67,8 +67,10 @@ export class MlAdsService {
     return { advertiser_id: first.advertiser_id, account_name: first.account_name }
   }
 
-  /** Fetches advertisers across all 3 product types in parallel and dedupes
-   * by advertiser_id (keeping the first product seen per id). */
+  /** Fetches advertisers across all 3 product types in parallel.
+   * Returns ALL (advertiser_id, product) pairs — same advertiser_id may
+   * appear under multiple products, and each product slot owns DIFFERENT
+   * campaigns, so we must NOT dedupe by advertiser_id alone. */
   async getAllAdvertisers(): Promise<Array<{ advertiser_id: string; product: string; account_name: string | null }>> {
     const headers = await this.authHeaders()
     const fetches = this.PRODUCTS.map(async product => {
@@ -88,35 +90,41 @@ export class MlAdsService {
       }
     })
     const results = (await Promise.all(fetches)).flat()
-    // Temp diagnostic — see how many advertisers + which products are returned
-    this.logger.log(`[ml-ads.advertisers] ${JSON.stringify(results)}`)
-
-    const dedup = new Map<string, { advertiser_id: string; product: string; account_name: string | null }>()
+    // Dedupe only on (advertiser_id, product) tuple — keep both PADS and
+    // BADS slots for the same numeric advertiser id.
+    const seen = new Set<string>()
+    const out: Array<{ advertiser_id: string; product: string; account_name: string | null }> = []
     for (const r of results) {
-      if (!dedup.has(r.advertiser_id)) dedup.set(r.advertiser_id, r)
+      const key = `${r.advertiser_id}|${r.product}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(r)
     }
-    return [...dedup.values()]
+    this.logger.log(`[ml-ads.advertisers] ${JSON.stringify(out)}`)
+    return out
   }
 
-  /** Paginated fetch of all campaigns for one advertiser/product. */
+  /** Paginated fetch of all campaigns for one advertiser/product.
+   * Loops until ML returns fewer rows than the page size. */
   async getCampaignsRaw(advertiserId: string, product = 'PADS'): Promise<CampaignRaw[]> {
     const headers  = await this.authHeaders()
     const segment  = this.productPath(product)
     const url      = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns`
     const all: CampaignRaw[] = []
-    const limit = 100
+    const limit = 50
     let offset  = 0
-    let pageLen = 0
-    do {
+    while (true) {
       const { data } = await axios.get(url, { headers, params: { limit, offset } })
       const list = Array.isArray(data?.results) ? data.results
                  : Array.isArray(data?.campaigns) ? data.campaigns
+                 : Array.isArray(data) ? data
                  : []
       all.push(...(list as CampaignRaw[]))
-      pageLen = list.length
+      this.logger.log(`[ml-ads.paginate] ${product}/${advertiserId} offset=${offset} got=${list.length} total=${all.length}`)
+      if (list.length < limit) break
       offset += limit
-      if (offset > 1000) break // hard cap
-    } while (pageLen === limit)
+      if (offset > 5000) break // hard safety cap
+    }
     return all
   }
 
