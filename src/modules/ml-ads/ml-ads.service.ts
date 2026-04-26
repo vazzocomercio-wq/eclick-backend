@@ -178,20 +178,49 @@ export class MlAdsService {
         },
       },
     )
+    this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId}/${campaignId} per-camp: ${JSON.stringify(data).slice(0, 600)}`)
     const rows = this.extractMetricRows(data)
     return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
   }
 
-  /** Tolerant on shape: ML may return rows under .metrics, .results, .data,
-   * directly as the body, or wrapped per-day under date keys. */
+  /** Tolerant on shape. PADS returns an array of per-campaign rows; BADS
+   * returns a per-advertiser dashboard with a series per metric:
+   *   { dashboard: { prints: [{x: "YYYY-MM-DD", y: 123}], clicks: [...], ... } }
+   * For the dashboard shape we zip the arrays by date and emit one row per
+   * day — caller stamps campaign_id afterwards (BADS = 1 campaign/advertiser). */
   private extractMetricRows(data: unknown): DailyMetricRow[] {
-    const d = data as Record<string, unknown> | unknown[]
-    if (Array.isArray(d)) return d as DailyMetricRow[]
-    const dr = d as Record<string, unknown>
-    if (Array.isArray(dr?.metrics))   return dr.metrics as DailyMetricRow[]
-    if (Array.isArray(dr?.results))   return dr.results as DailyMetricRow[]
-    if (Array.isArray(dr?.data))      return dr.data as DailyMetricRow[]
-    if (Array.isArray(dr?.campaigns)) return dr.campaigns as DailyMetricRow[]
+    if (Array.isArray(data)) return data as DailyMetricRow[]
+    const dr = (data ?? {}) as Record<string, unknown>
+
+    // BADS dashboard shape
+    const dashboard = (dr.dashboard ?? dr.metrics_dashboard) as Record<string, Array<{ x: string; y: number }>> | undefined
+    if (dashboard && typeof dashboard === 'object' && Array.isArray(dashboard.prints)) {
+      const dates = dashboard.prints.map(p => p.x)
+      return dates.map((date, i) => ({
+        date,
+        clicks:      Number(dashboard.clicks?.[i]?.y ?? 0),
+        impressions: Number(dashboard.prints?.[i]?.y ?? 0),
+        ctr:         Number(dashboard.ctr?.[i]?.y ?? 0),
+        cost:        Number(dashboard.spend?.[i]?.y ?? dashboard.consumed_budget?.[i]?.y ?? 0),
+        conversions: Number(
+          dashboard.attribution_order_conversions?.[i]?.y
+          ?? dashboard.conversions?.[i]?.y
+          ?? 0
+        ),
+        total_revenue: Number(
+          dashboard.attribution_order_amount?.[i]?.y
+          ?? dashboard.revenue?.[i]?.y
+          ?? 0
+        ),
+        roas: Number(dashboard.roas?.[i]?.y ?? 0),
+        acos: Number(dashboard.acos?.[i]?.y ?? 0),
+      } as DailyMetricRow))
+    }
+
+    if (Array.isArray(dr.metrics))   return dr.metrics as DailyMetricRow[]
+    if (Array.isArray(dr.results))   return dr.results as DailyMetricRow[]
+    if (Array.isArray(dr.data))      return dr.data as DailyMetricRow[]
+    if (Array.isArray(dr.campaigns)) return dr.campaigns as DailyMetricRow[]
     return []
   }
 
@@ -287,6 +316,13 @@ export class MlAdsService {
             this.logger.warn(`[ml-ads.sync] per-campaign ${c.id}: ${e?.response?.status ?? ''} ${e?.message}`)
           }
         }
+      }
+
+      // BADS dashboard rows have no campaign_id (it's per-advertiser). When
+      // there's exactly one campaign for this advertiser/product, stamp it.
+      if (campaignRows.length === 1) {
+        const onlyCid = campaignRows[0].id
+        metrics = metrics.map(m => ({ ...m, campaign_id: m.campaign_id ?? onlyCid }))
       }
 
       // Real shape: { campaign_id, date, metrics: { prints, clicks, ctr,
