@@ -367,7 +367,7 @@ export class StockService {
 
       return {
         channel:         d.channel,
-        account_id:      d.account_id,
+        account_id:      null, // column doesn't exist on this table; kept in shape for future per-account distribution
         qty:             should_pause ? 0 : qty,
         should_pause,
         distribution_id: d.id,
@@ -396,11 +396,15 @@ export class StockService {
     max_quantity?: number | null
     priority?: number
   }) {
+    // onConflict was 'product_id,channel,account_id' but account_id doesn't
+    // exist on this table — the conflict resolver was effectively disabled,
+    // which would create duplicate rows on a second save for the same
+    // (product, channel). Use the real composite key instead.
     const { data: result, error } = await supabaseAdmin
       .from('channel_stock_distribution')
       .upsert(
         { ...data, is_active: true, updated_at: new Date().toISOString() },
-        { onConflict: 'product_id,channel,account_id' },
+        { onConflict: 'product_id,channel' },
       )
       .select()
       .single()
@@ -618,11 +622,19 @@ export class StockService {
     missing_integration: string[]
     missing_sales_data: string[]
   }> {
-    const { data: distributions } = await supabaseAdmin
+    console.log(`[auto-check] productId=${productId}`)
+
+    // Note: account_id removed from SELECT — column doesn't exist on
+    // channel_stock_distribution; previous version errored silently and
+    // returned data=null, falling into the "Nenhum canal cadastrado" branch
+    // even when there were perfectly good rows in the table.
+    const { data: distributions, error } = await supabaseAdmin
       .from('channel_stock_distribution')
-      .select('channel, account_id, is_active')
+      .select('channel, is_active, distribution_mode')
       .eq('product_id', productId)
       .eq('is_active', true)
+
+    console.log(`[auto-check] rows=${distributions?.length ?? 0} err=${error?.message ?? 'none'} data=${JSON.stringify(distributions)}`)
 
     if (!distributions?.length) {
       return {
