@@ -3,6 +3,7 @@ import {
   Param, Body, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { AgentsService } from './agents.service'
+import { ConversationsService } from './conversations.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -11,7 +12,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('atendente-ia')
 @UseGuards(SupabaseAuthGuard)
 export class AgentsController {
-  constructor(private readonly svc: AgentsService) {}
+  constructor(
+    private readonly svc:           AgentsService,
+    private readonly conversations: ConversationsService,
+  ) {}
 
   // ── Agents ────────────────────────────────────────────────────────────────
 
@@ -112,6 +116,12 @@ export class AgentsController {
     return this.svc.createTraining(agentId, body)
   }
 
+  @Patch('training/:id/validate')
+  @HttpCode(HttpStatus.OK)
+  validateTraining(@Param('id') id: string) {
+    return this.svc.validateTraining(id)
+  }
+
   @Delete('training/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   deleteTraining(@Param('id') id: string) {
@@ -129,5 +139,26 @@ export class AgentsController {
     const defaultFrom = new Date(Date.now() - 30 * 86400 * 1000).toISOString().split('T')[0]
     const defaultTo   = new Date().toISOString().split('T')[0]
     return this.svc.getAnalytics(agentId, from ?? defaultFrom, to ?? defaultTo)
+  }
+
+  @Get('analytics/top-questions')
+  topQuestions(
+    @ReqUser() u: ReqUserPayload,
+    @Query('limit') limit?: string,
+  ) {
+    return this.conversations.topQuestions(u.orgId!, limit ? Number(limit) : 10)
+  }
+
+  @Get('analytics/by-agent')
+  byAgent(
+    @ReqUser() u: ReqUserPayload,
+    @Query('days') days?: string,
+  ) {
+    return this.conversations.performanceByAgent(u.orgId!, days ? Number(days) : 30)
+  }
+
+  @Get('analytics/insights')
+  insights(@Query('limit') limit?: string) {
+    return this.conversations.listInsights(limit ? Number(limit) : 10)
   }
 }

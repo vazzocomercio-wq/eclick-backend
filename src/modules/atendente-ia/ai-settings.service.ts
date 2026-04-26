@@ -11,6 +11,13 @@ export interface AiModuleSettings {
   embedding_model?: string
   auto_send_threshold?: number
   queue_threshold?: number
+  // 5 wave-1 sessão 3 UI toggles (require ALTER from
+  // 20260426_ai_module_settings_toggles.sql)
+  show_tokens?: boolean
+  capture_edits?: boolean
+  auto_retrain?: boolean
+  notify_escalation?: boolean
+  notify_daily?: boolean
 }
 
 @Injectable()
@@ -53,6 +60,11 @@ export class AiSettingsService {
         embedding_model:     'text-embedding-3-small',
         auto_send_threshold: 80,
         queue_threshold:     50,
+        show_tokens:         true,
+        capture_edits:       true,
+        auto_retrain:        false,
+        notify_escalation:   true,
+        notify_daily:        false,
       }
     }
     return data as AiModuleSettings
@@ -63,6 +75,7 @@ export class AiSettingsService {
     for (const k of [
       'show_cost_estimates', 'classifier_provider', 'classifier_model',
       'embedding_provider', 'embedding_model', 'auto_send_threshold', 'queue_threshold',
+      'show_tokens', 'capture_edits', 'auto_retrain', 'notify_escalation', 'notify_daily',
     ] as const) {
       if (updates[k] !== undefined) payload[k] = updates[k]
     }

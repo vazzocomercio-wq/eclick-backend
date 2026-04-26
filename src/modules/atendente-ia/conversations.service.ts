@@ -265,4 +265,99 @@ export class ConversationsService {
 
     return data
   }
+
+  // ── Analytics aggregations (used by /analytics page) ──────────────────────
+
+  /**
+   * Top-N most frequent customer questions across all conversations of an org.
+   * Groups by lowercased content prefix (60 chars) so "Bivolt?" and "bivolt?"
+   * count together. Naive but useful for the FAQ extraction UX.
+   */
+  async topQuestions(orgId: string, limit = 10) {
+    const { data: convs } = await supabaseAdmin
+      .from('ai_conversations')
+      .select('id')
+      .eq('organization_id', orgId)
+    const convIds = (convs ?? []).map(c => c.id as string)
+    if (!convIds.length) return []
+
+    const { data: msgs } = await supabaseAdmin
+      .from('ai_messages')
+      .select('content, sent_at')
+      .eq('role', 'customer')
+      .in('conversation_id', convIds)
+      .order('sent_at', { ascending: false })
+      .limit(2000)
+
+    const counts = new Map<string, { sample: string; count: number; lastAt: string }>()
+    for (const m of msgs ?? []) {
+      const raw = (m.content as string ?? '').trim()
+      if (raw.length < 8) continue
+      const key = raw.toLowerCase().slice(0, 60)
+      const existing = counts.get(key)
+      if (existing) {
+        existing.count++
+        if ((m.sent_at as string) > existing.lastAt) existing.lastAt = m.sent_at as string
+      } else {
+        counts.set(key, { sample: raw, count: 1, lastAt: m.sent_at as string })
+      }
+    }
+    return Array.from(counts.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit)
+      .map(x => ({ question: x.sample, count: x.count, last_at: x.lastAt }))
+  }
+
+  /**
+   * Performance comparison row per agent over the last `days` window.
+   * Reads from ai_agent_analytics (already aggregated daily).
+   */
+  async performanceByAgent(orgId: string, days = 30) {
+    const { data: agents } = await supabaseAdmin
+      .from('ai_agents')
+      .select('id, name, model_id')
+      .eq('organization_id', orgId)
+    if (!agents?.length) return []
+
+    const since = new Date(Date.now() - days * 86400 * 1000).toISOString().split('T')[0]
+    const ids = agents.map(a => a.id as string)
+    const { data: analytics } = await supabaseAdmin
+      .from('ai_agent_analytics')
+      .select('agent_id, messages_received, messages_auto_replied, messages_escalated, avg_confidence')
+      .in('agent_id', ids)
+      .gte('date', since)
+
+    const byAgent = new Map<string, { received: number; auto: number; escalated: number; confidenceSum: number; confidenceN: number }>()
+    for (const r of analytics ?? []) {
+      const cur = byAgent.get(r.agent_id as string) ?? { received: 0, auto: 0, escalated: 0, confidenceSum: 0, confidenceN: 0 }
+      cur.received   += r.messages_received     ?? 0
+      cur.auto       += r.messages_auto_replied ?? 0
+      cur.escalated  += r.messages_escalated    ?? 0
+      if (r.avg_confidence != null && r.avg_confidence > 0) {
+        cur.confidenceSum += r.avg_confidence
+        cur.confidenceN++
+      }
+      byAgent.set(r.agent_id as string, cur)
+    }
+
+    return agents.map(a => {
+      const v = byAgent.get(a.id as string) ?? { received: 0, auto: 0, escalated: 0, confidenceSum: 0, confidenceN: 0 }
+      const autoRate = v.received > 0 ? Math.round((v.auto / v.received) * 100) : 0
+      const avgConf  = v.confidenceN > 0 ? Math.round(v.confidenceSum / v.confidenceN) : 0
+      return {
+        agent_id: a.id, agent_name: a.name, model_id: a.model_id,
+        messages: v.received, auto_pct: autoRate, escalated: v.escalated, avg_confidence: avgConf,
+      }
+    }).sort((a, b) => b.messages - a.messages)
+  }
+
+  async listInsights(limit = 10) {
+    const { data, error } = await supabaseAdmin
+      .from('ai_insights')
+      .select('id, type, data, generated_at, expires_at')
+      .order('generated_at', { ascending: false })
+      .limit(limit)
+    if (error) return []
+    return data ?? []
+  }
 }

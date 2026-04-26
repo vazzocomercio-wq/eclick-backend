@@ -235,6 +235,23 @@ export class AgentsService {
     return { ok: true }
   }
 
+  /**
+   * Mark a training example as validated by a human reviewer.
+   * Convention: source='validated' means a human looked at it and approved.
+   * Defaults to 'manual' creation, becomes 'human_edit' when auto-captured
+   * from a /conversas edit, and 'validated' once a human confirms.
+   */
+  async validateTraining(trainingId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('ai_training_examples')
+      .update({ source: 'validated' })
+      .eq('id', trainingId)
+      .select()
+      .single()
+    if (error) throw error
+    return data
+  }
+
   // ── Analytics ─────────────────────────────────────────────────────────────
 
   async getAnalytics(agentId: string, from: string, to: string) {
