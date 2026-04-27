@@ -164,139 +164,14 @@ export class MlAdsService {
     }
   }
 
-  /** TEMP DEBUG — final round: try expand/include flags, hit a single
-   * item directly, hit /items/{id}/metrics with daily aggregation, and
-   * (Z6) fetch each of the last 3 days separately to see if per-day
-   * aggregates differ. Everything via console.log so no logger filter
-   * can hide lines. */
-  private async probeDailyVariants(
-    advertiserId: string,
-    _sampleCampaignId: string | null,
-    dateFrom: string,
-    dateTo:   string,
-  ): Promise<void> {
-    const { token } = await this.ml.getValidToken()
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      'Api-Version': '2',
-      Accept: 'application/json',
-    }
-    const SITE    = 'MLB'
-    const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
-    const cid     = '352259862'
-
-    type ItemMin = {
-      item_id?: unknown; id?: unknown
-      metrics?: { clicks?: number; prints?: number; cost?: number }
-    }
-
-    // Pull the freshest items list with metrics so we can pick an item with
-    // real activity (metrics.prints > 0) for the per-item probes.
-    let itemId: string | null = null
-    try {
-      const res = await axios.get(`${baseUrl}/items/search`, {
-        headers,
-        params: {
-          date_from: dateFrom, date_to: dateTo,
-          campaign_id: cid,
-          metrics:    'clicks,prints,cost,total_amount',
-        },
-      })
-      const list = (Array.isArray(res.data?.results) ? res.data.results : []) as ItemMin[]
-      const withTraffic = list.find(i => (i.metrics?.prints ?? 0) > 0) ?? list[0] ?? null
-      itemId = withTraffic ? String(withTraffic.item_id ?? withTraffic.id ?? '') : null
-      console.log(`[ml-ads.daily.probe5] picked itemId=${itemId} from ${list.length} items`)
-    } catch (e: any) {
-      console.log(`[ml-ads.daily.probe5] item lookup failed: ${e?.response?.status ?? 'ERR'} ${e?.message ?? ''}`)
-    }
-
-    const dump = (label: string, status: number | string, body: unknown) => {
-      const json = body && typeof body === 'object' ? body as Record<string, unknown> : {}
-      const size = JSON.stringify(json).length
-      const results = Array.isArray((json as { results?: unknown }).results)
-        ? (json as { results: unknown[] }).results : null
-      console.log(`[ml-ads.daily.probe5] ${label} status=${status} size=${size}b results=${results?.length ?? 'n/a'}`)
-      const first = results?.[0] as Record<string, unknown> | undefined
-      if (first) {
-        console.log(`[ml-ads.daily.probe5] ${label} firstItem keys: ${JSON.stringify(Object.keys(first))}`)
-        const interesting = ['metrics', 'metrics_daily', 'daily', 'time_series', 'history', 'breakdown']
-          .filter(k => first[k] !== undefined)
-        console.log(`[ml-ads.daily.probe5] ${label} interesting fields: ${JSON.stringify(interesting)}`)
-        for (const k of interesting) {
-          console.log(`[ml-ads.daily.probe5] ${label} firstItem.${k}: ${JSON.stringify(first[k]).slice(0, 800)}`)
-        }
-      }
-      console.log(`[ml-ads.daily.probe5] ${label} body[0..1500]: ${JSON.stringify(json).slice(0, 1500)}`)
-    }
-
-    type Probe = { name: string; method: 'get'; url: string; params: Record<string, string> }
-    const probes: Probe[] = [
-      { name: 'Z1: /items/search ?expand=metrics_daily', method: 'get',
-        url: `${baseUrl}/items/search`,
-        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
-          metrics: 'clicks,prints,cost', expand: 'metrics_daily' } },
-      { name: 'Z2: /items/search ?expand=daily', method: 'get',
-        url: `${baseUrl}/items/search`,
-        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
-          metrics: 'clicks,prints,cost', expand: 'daily' } },
-      { name: 'Z3: /items/search ?include=metrics_daily', method: 'get',
-        url: `${baseUrl}/items/search`,
-        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
-          metrics: 'clicks,prints,cost', include: 'metrics_daily' } },
-    ]
-    if (itemId) {
-      probes.push({
-        name: `Z4: GET /items/${itemId} (single item)`,
-        method: 'get', url: `${baseUrl}/items/${itemId}`,
-        params: { date_from: dateFrom, date_to: dateTo, metrics: 'clicks,prints,cost' },
-      })
-      probes.push({
-        name: `Z5: GET /items/${itemId}/metrics + aggregation=daily`,
-        method: 'get', url: `${baseUrl}/items/${itemId}/metrics`,
-        params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily',
-          metrics: 'clicks,prints,cost,total_amount' },
-      })
-    }
-
-    for (const p of probes) {
-      try {
-        const res = await axios.get(p.url, { headers, params: p.params })
-        dump(p.name, res.status, res.data)
-      } catch (e: any) {
-        const status = e?.response?.status ?? 'ERR'
-        const body   = JSON.stringify(e?.response?.data ?? e?.message ?? 'no body').slice(0, 500)
-        console.log(`[ml-ads.daily.probe5] ${p.name} → ${status} ${body}`)
-      }
-    }
-
-    // Z6: 3 separate calls, one per day for the last 3 days, see if the
-    // per-day aggregates actually differ — proves we can build the series
-    // by calling once per day if no native daily breakdown exists.
-    const today = new Date()
-    for (let i = 1; i <= 3; i++) {
-      const d = new Date(today.getTime() - i * 86_400_000).toISOString().slice(0, 10)
-      try {
-        const res = await axios.get(`${baseUrl}/items/search`, {
-          headers,
-          params: { date_from: d, date_to: d, campaign_id: cid, metrics: 'clicks,prints,cost' },
-        })
-        const list = (Array.isArray(res.data?.results) ? res.data.results : []) as ItemMin[]
-        const totals = list.reduce((acc, it) => ({
-          clicks: acc.clicks + Number(it.metrics?.clicks ?? 0),
-          prints: acc.prints + Number(it.metrics?.prints ?? 0),
-          cost:   acc.cost   + Number(it.metrics?.cost ?? 0),
-        }), { clicks: 0, prints: 0, cost: 0 })
-        console.log(`[ml-ads.daily.probe5] Z6 day=${d} status=${res.status} items=${list.length} clicks=${totals.clicks} prints=${totals.prints} cost=${totals.cost.toFixed(2)}`)
-      } catch (e: any) {
-        const status = e?.response?.status ?? 'ERR'
-        console.log(`[ml-ads.daily.probe5] Z6 day=${d} → ${status} ${e?.message ?? ''}`)
-      }
-    }
-  }
-
-  /** PADS metrics live on the v2 /campaigns/search endpoint. Returns one
-   * row per (campaign_id, date) using metrics_daily when ML provides it,
-   * else a single summary row dated to dateTo. Paginates 50 at a time. */
+  /** PADS metrics — ML's v2 API doesn't expose a native daily breakdown
+   * on /campaigns or /items, but per-day calls (date_from=date_to=<day>)
+   * return correct totals for that day. We loop the date range, fanning
+   * out 5 days in parallel per batch, paginating items within each day,
+   * and aggregating item rows into per-(campaign_id, date) records.
+   *
+   * Output: one DailyMetricRow per (campaign that had activity, day in
+   * range), with derived ctr/acos/roas calculated from the totals. */
   private async getPadsMetrics(
     advertiserId: string,
     dateFrom:     string,
@@ -308,70 +183,97 @@ export class MlAdsService {
       'Api-Version': '2',
       Accept: 'application/json',
     }
-    const url = `${ML_BASE}/advertising/MLB/advertisers/${advertiserId}/product_ads/campaigns/search`
+    const url = `${ML_BASE}/advertising/MLB/advertisers/${advertiserId}/product_ads/items/search`
 
-    const all: Array<Record<string, unknown>> = []
-    const limit = 50
-    let offset  = 0
-    let firstCampaignId: string | null = null
-    while (true) {
-      const { data } = await axios.get(url, {
-        headers,
-        params: {
-          limit, offset,
-          date_from:        dateFrom,
-          date_to:          dateTo,
-          metrics:          this.PADS_METRIC_FIELDS,
-          metrics_summary:  'true',
-        },
-      })
-      const results = Array.isArray(data?.results) ? data.results : []
-      all.push(...results)
-      if (!firstCampaignId && results[0]?.id) firstCampaignId = String(results[0].id)
-      if (results.length < limit) break
-      offset += limit
-      if (offset > 5000) break
-    }
-
-    // TEMP — fire daily-variant probes in the background so we can see in
-    // the logs which param shape returns a per-day array. Doesn't await:
-    // the main flow returns the summary rows immediately.
-    this.probeDailyVariants(advertiserId, firstCampaignId, dateFrom, dateTo).catch(() => {})
-
-    this.logger.log(`[ml-ads.pads.search] ${advertiserId}: ${all.length} campanhas com métricas`)
-
-    const out: DailyMetricRow[] = []
-    for (const c of all) {
-      const rawId = (c.id ?? (c as Record<string, unknown>).campaign_id) as string | number | undefined
-      if (rawId == null) continue
-      const cid = String(rawId)
-
-      const daily = Array.isArray(c.metrics_daily) ? c.metrics_daily as Array<Record<string, unknown>> : null
-      if (daily && daily.length > 0) {
-        for (const d of daily) {
-          out.push(this.toRow(cid, d, (d.date as string) ?? dateTo))
-        }
-      } else {
-        const summary = (c.metrics ?? {}) as Record<string, unknown>
-        out.push(this.toRow(cid, summary, dateTo))
+    // Build inclusive list of YYYY-MM-DD dates from dateFrom .. dateTo
+    const dates: string[] = []
+    {
+      const cur = new Date(dateFrom + 'T00:00:00Z')
+      const end = new Date(dateTo   + 'T00:00:00Z')
+      while (cur.getTime() <= end.getTime()) {
+        dates.push(cur.toISOString().slice(0, 10))
+        cur.setUTCDate(cur.getUTCDate() + 1)
       }
     }
-    return out
-  }
 
-  private toRow(campaignId: string, m: Record<string, unknown>, date: string): DailyMetricRow {
-    return {
-      campaign_id:                    campaignId,
-      date,
-      clicks:                         Number(m.clicks ?? 0),
-      impressions:                    Number(m.prints ?? 0),
-      ctr:                            Number(m.ctr ?? 0),
-      cost:                           Number(m.cost ?? 0),
-      conversions:                    Number(m.units_quantity ?? 0),
-      total_revenue:                  Number(m.total_amount ?? 0),
-      roas:                           Number(m.roas ?? 0),
-      acos:                           Number(m.acos ?? 0),
+    type Agg = { clicks: number; prints: number; cost: number; total_amount: number; units_quantity: number }
+    const out: DailyMetricRow[] = []
+    let processedDays = 0
+    let failedDays    = 0
+
+    /** Fetch all items for a single day (paginated) and aggregate per
+     * campaign_id. Returns the per-campaign Map for that day. */
+    const fetchDay = async (date: string): Promise<Map<string, Agg>> => {
+      const byCamp = new Map<string, Agg>()
+      const limit = 50
+      let offset  = 0
+      while (true) {
+        const { data } = await axios.get(url, {
+          headers,
+          params: {
+            date_from: date,
+            date_to:   date,
+            metrics:   this.PADS_METRIC_FIELDS,
+            limit,
+            offset,
+          },
+        })
+        const results: Array<Record<string, unknown>> = Array.isArray(data?.results) ? data.results : []
+        for (const item of results) {
+          const cid = String(item.campaign_id ?? '')
+          if (!cid) continue
+          const m = (item.metrics ?? {}) as Record<string, unknown>
+          const cur = byCamp.get(cid) ?? { clicks: 0, prints: 0, cost: 0, total_amount: 0, units_quantity: 0 }
+          cur.clicks         += Number(m.clicks ?? 0)
+          cur.prints         += Number(m.prints ?? 0)
+          cur.cost           += Number(m.cost ?? 0)
+          cur.total_amount   += Number(m.total_amount ?? 0)
+          cur.units_quantity += Number(m.units_quantity ?? 0)
+          byCamp.set(cid, cur)
+        }
+        if (results.length < limit) break
+        offset += limit
+        if (offset > 5000) break // safety cap
+      }
+      return byCamp
     }
+
+    // Fan out 5 days at a time so we don't slam the API serially or
+    // saturate it with 30 parallel requests at once.
+    const batchSize = 5
+    for (let i = 0; i < dates.length; i += batchSize) {
+      const batch = dates.slice(i, i + batchSize)
+      const results = await Promise.allSettled(batch.map(d =>
+        fetchDay(d).then(map => ({ date: d, map })),
+      ))
+      for (const r of results) {
+        if (r.status !== 'fulfilled') { failedDays++; continue }
+        processedDays++
+        const { date, map } = r.value
+        for (const [cid, agg] of map) {
+          // Skip campaign-days with zero activity to keep the table lean.
+          if (agg.prints === 0 && agg.clicks === 0 && agg.cost === 0) continue
+          const ctr  = agg.prints > 0 ? agg.clicks / agg.prints : 0
+          const acos = agg.total_amount > 0 ? agg.cost / agg.total_amount : 0
+          const roas = agg.cost > 0 ? agg.total_amount / agg.cost : 0
+          out.push({
+            campaign_id:   cid,
+            date,
+            clicks:        agg.clicks,
+            impressions:   agg.prints,
+            ctr,
+            cost:          agg.cost,
+            conversions:   agg.units_quantity,
+            total_revenue: agg.total_amount,
+            roas,
+            acos,
+          })
+        }
+      }
+    }
+
+    this.logger.log(`[ml-ads.pads.search] ${advertiserId}: ${out.length} campanhas-dias gerados (${processedDays}/${dates.length} dias ok${failedDays ? `, ${failedDays} falharam` : ''})`)
+    return out
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
