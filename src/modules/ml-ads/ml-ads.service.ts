@@ -156,6 +156,45 @@ export class MlAdsService {
     return this.extractMetricRows(data)
   }
 
+  /** TEMP DEBUG — fires 4 candidate PADS metric endpoints in parallel and
+   * logs whether each is 200 (with first 600c of body) or 4xx/5xx. Used
+   * to discover which path Mercado Libre actually exposes for this account.
+   * Remove after the real endpoint is identified. */
+  async probePadsEndpoints(advertiserId: string, dateFrom: string, dateTo: string): Promise<void> {
+    const headers = await this.authHeaders()
+    const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', aggregation: 'daily' }
+
+    const candidates: Array<{ label: string; url: string }> = [
+      {
+        label: 'A: /product_ads/campaigns?date_from=...',
+        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/campaigns`,
+      },
+      {
+        label: 'B: /product_ads/report',
+        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/report`,
+      },
+      {
+        label: 'C: /product_ads/advertisers/{id}/campaigns/metrics',
+        url:   `${ML_BASE}/advertising/product_ads/advertisers/${advertiserId}/campaigns/metrics`,
+      },
+      {
+        label: 'D: /product_ads/metrics (no /campaigns/)',
+        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/metrics`,
+      },
+    ]
+
+    await Promise.all(candidates.map(async ({ label, url }) => {
+      try {
+        const { status, data } = await axios.get(url, { headers, params })
+        this.logger.log(`[ml-ads.pads.probe] ${label} → ${status} shape: ${JSON.stringify(data).slice(0, 600)}`)
+      } catch (e: any) {
+        const status = e?.response?.status ?? '?'
+        const msg    = e?.response?.data?.message ?? e?.message ?? ''
+        this.logger.log(`[ml-ads.pads.probe] ${label} → ${status} ${msg}`)
+      }
+    }))
+  }
+
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
    * nothing. Stamps campaign_id onto rows that come back without it. */
   async getCampaignMetricsRaw(
@@ -296,6 +335,11 @@ export class MlAdsService {
         continue
       }
       totalCampaigns += campaignRows.length
+
+      // TEMP probe: discover which PADS metrics URL this account exposes.
+      if (adv.product === 'PADS') {
+        await this.probePadsEndpoints(adv.advertiser_id, dateFrom, dateTo)
+      }
 
       // Metrics — first try the bulk endpoint, then fall back to per-campaign
       // calls if bulk returns nothing (some accounts only expose the latter).
