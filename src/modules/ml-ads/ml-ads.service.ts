@@ -195,10 +195,9 @@ export class MlAdsService {
     throw lastErr
   }
 
-  /** TEMP DEBUG — hits 4 candidate v2 endpoints (legacy paths were
-   * deprecated 2026-02-26 in favour of /advertising/{SITE_ID}/...
-   * with Api-Version: 2). Logs status + first 400c of body for each so
-   * we can identify which one this account exposes. Never throws. */
+  /** TEMP DEBUG — probes the v2 endpoints that include both SITE_ID and
+   * advertiser_id in the path. Logs status + first 500c of body for
+   * each so we can see permission/scope errors. Never throws. */
   async probeV2Endpoints(
     advertiserId: string,
     sampleCampaignId: string | null,
@@ -213,28 +212,45 @@ export class MlAdsService {
     }
     const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
     const SITE = 'MLB'
+    const advBase = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
 
-    const candidates: Array<{ tag: string; url: string; params?: Record<string, string> }> = [
-      { tag: 'A: /MLB/product_ads/campaigns',
-        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns`, params },
-      { tag: 'B: /MLB/product_ads/campaigns/metrics',
-        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns/metrics`, params },
+    const candidates: Array<{
+      tag: string; method: 'get' | 'post'; url: string;
+      params?: Record<string, string>; data?: unknown;
+    }> = [
+      { tag: 'E: /MLB/advertisers/{id}/product_ads/campaigns',
+        method: 'get', url: `${advBase}/campaigns` },
+      { tag: 'F: /MLB/advertisers/{id}/product_ads/campaigns/metrics',
+        method: 'get', url: `${advBase}/campaigns/metrics`, params },
+      { tag: 'G: /MLB/advertisers/{id}/product_ads/campaigns/search (GET)',
+        method: 'get', url: `${advBase}/campaigns/search` },
       ...(sampleCampaignId ? [{
-        tag: `C: /MLB/product_ads/campaigns/${sampleCampaignId}/metrics`,
-        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns/${sampleCampaignId}/metrics`, params,
+        tag: `H: /MLB/advertisers/{id}/product_ads/campaigns/${sampleCampaignId}`,
+        method: 'get' as const, url: `${advBase}/campaigns/${sampleCampaignId}`,
       }] : []),
-      { tag: 'D: /advertisers?product_id=PADS (v2)',
-        url: `${ML_BASE}/advertising/advertisers`, params: { product_id: 'PADS' } },
     ]
 
-    await Promise.all(candidates.map(async ({ tag, url, params: p }) => {
+    await Promise.all(candidates.map(async (c) => {
+      const log = (status: number | string, body: unknown) =>
+        this.logger.log(`[ml-ads.v2b.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 500) ?? ''}`)
       try {
-        const { status, data } = await axios.get(url, { headers, params: p })
-        this.logger.log(`[ml-ads.v2.probe] ${tag} → ${status} ${JSON.stringify(data).slice(0, 400)}`)
+        const res = c.method === 'get'
+          ? await axios.get(c.url, { headers, params: c.params })
+          : await axios.post(c.url, c.data ?? {}, { headers, params: c.params })
+        log(res.status, res.data)
       } catch (e: any) {
         const status = e?.response?.status ?? '?'
-        const body   = e?.response?.data
-        this.logger.log(`[ml-ads.v2.probe] ${tag} → ${status} ${JSON.stringify(body)?.slice(0, 400) ?? e?.message}`)
+        const body   = e?.response?.data ?? e?.message
+        log(status, body)
+        // G: if GET 405/404 specifically, retry as POST {} to test that path shape
+        if (c.tag.startsWith('G:') && (status === 405 || status === 404)) {
+          try {
+            const res2 = await axios.post(c.url, {}, { headers })
+            log(`POST-${res2.status}`, res2.data)
+          } catch (e2: any) {
+            log(`POST-${e2?.response?.status ?? '?'}`, e2?.response?.data ?? e2?.message)
+          }
+        }
       }
     }))
   }
