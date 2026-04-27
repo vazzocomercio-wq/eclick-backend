@@ -22,6 +22,7 @@ import { WidgetsModule } from './modules/widgets/widgets.module'
 import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
 import { LeadBridgeModule } from './modules/lead-bridge/lead-bridge.module'
 import { AdsAiModule } from './modules/ads-ai/ads-ai.module'
+import { EnrichmentModule } from './modules/enrichment/enrichment.module'
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { AdsAiModule } from './modules/ads-ai/ads-ai.module'
     MlAdsModule,
     LeadBridgeModule,
     AdsAiModule,
+    EnrichmentModule,
   ],
   controllers: [AppController],
   providers: [AppService],
