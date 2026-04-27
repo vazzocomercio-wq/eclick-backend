@@ -164,13 +164,16 @@ export class MlAdsService {
     }
   }
 
-  /** TEMP DEBUG — sequential probes of 5 /items + per-campaign-detail
-   * candidates. Uses console.log directly (bypassing the Nest logger) so
-   * we're sure no log filter swallows lines. Each probe has its own
-   * try/catch and emits a line in BOTH the success and error paths. */
+  /** TEMP DEBUG — three GET /items/search variants. For each, logs 3
+   * SEPARATE lines so we never get cut at 500c:
+   *   a) status + body byte size
+   *   b) Object.keys(results[0])      — what fields the item has
+   *   c) JSON.stringify(results[0].metrics) — actual metric payload
+   * Plus a 'firstItem.metrics_daily' dump when present, since that's
+   * the field we're hunting for. */
   private async probeDailyVariants(
     advertiserId: string,
-    sampleCampaignId: string | null,
+    _sampleCampaignId: string | null,
     dateFrom: string,
     dateTo:   string,
   ): Promise<void> {
@@ -182,63 +185,40 @@ export class MlAdsService {
     }
     const SITE    = 'MLB'
     const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
+    const cid     = '352259862' // Torneiras — confirmed traffic
+    const dates   = { date_from: dateFrom, date_to: dateTo }
 
-    // Hardcode 352259862 (Torneiras) as the traffic-having campaign per the
-    // user's spec — overrides whatever the summary sweep returned first.
-    const cid = '352259862'
-    const dates = { date_from: dateFrom, date_to: dateTo }
-    const itemMetrics = 'clicks,prints,cost,total_amount,units_quantity'
-
-    type Probe = {
-      name:   string
-      method: 'get' | 'post'
-      url:    string
-      params?: Record<string, string>
-      data?:  unknown
-    }
-
-    const probes: Probe[] = [
-      { name: 'X1: GET /items/search + campaign_id + metrics',
-        method: 'get',
-        url: `${baseUrl}/items/search`,
-        params: { ...dates, campaign_id: cid, metrics: itemMetrics } },
-      { name: 'X2: GET /items/search + campaign_id + aggregation=daily',
-        method: 'get',
-        url: `${baseUrl}/items/search`,
+    const probes: Array<{ name: string; params: Record<string, string> }> = [
+      { name: 'Y1: + aggregation=daily',
         params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
-      { name: 'X3: POST /items/search + json body + aggregation:daily',
-        method: 'post',
-        url: `${baseUrl}/items/search`,
-        data: {
-          campaign_id: cid,
-          date_from:   dateFrom,
-          date_to:     dateTo,
-          aggregation: 'daily',
-          metrics:     ['clicks', 'prints', 'cost', 'total_amount'],
-        } },
-      { name: `X4: GET /campaigns/${cid} + aggregation=daily`,
-        method: 'get',
-        url: `${baseUrl}/campaigns/${cid}`,
-        params: { ...dates, aggregation: 'daily', metrics: 'clicks,prints,cost' } },
-      { name: `X5: GET /campaigns/${cid}/metrics + aggregation=daily`,
-        method: 'get',
-        url: `${baseUrl}/campaigns/${cid}/metrics`,
-        params: { ...dates, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
+      { name: 'Y2: NO aggregation (default)',
+        params: { ...dates, campaign_id: cid, metrics: 'clicks,prints,cost,total_amount' } },
+      { name: 'Y3: agg=daily + metrics_summary=false',
+        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics_summary: 'false', metrics: 'clicks,prints,cost' } },
     ]
 
-    // Sequential, individual try/catch, console.log direct so no logger
-    // filter or buffer can swallow lines.
     for (const p of probes) {
       try {
-        const res = p.method === 'get'
-          ? await axios.get(p.url, { headers, params: p.params })
-          : await axios.post(p.url, p.data ?? {}, { headers, params: p.params })
-        const body = JSON.stringify(res.data ?? '').slice(0, 500)
-        console.log(`[ml-ads.daily.probe3] ${p.name} → ${res.status} ${body}`)
+        const res = await axios.get(`${baseUrl}/items/search`, { headers, params: p.params })
+        const body = res.data ?? {}
+        const results = Array.isArray(body?.results) ? body.results : []
+        const first = results[0] ?? null
+        const size = JSON.stringify(body).length
+
+        console.log(`[ml-ads.daily.probe4] ${p.name} status=${res.status} size=${size}b results=${results.length}`)
+        if (first) {
+          console.log(`[ml-ads.daily.probe4] ${p.name} firstItem keys: ${JSON.stringify(Object.keys(first))}`)
+          console.log(`[ml-ads.daily.probe4] ${p.name} firstItem.metrics: ${JSON.stringify(first.metrics)}`)
+          if (first.metrics_daily !== undefined) {
+            console.log(`[ml-ads.daily.probe4] ${p.name} firstItem.metrics_daily: ${JSON.stringify(first.metrics_daily).slice(0, 1000)}`)
+          }
+        } else {
+          console.log(`[ml-ads.daily.probe4] ${p.name} (sem results) body=${JSON.stringify(body).slice(0, 500)}`)
+        }
       } catch (e: any) {
         const status = e?.response?.status ?? 'ERR'
         const body   = JSON.stringify(e?.response?.data ?? e?.message ?? 'no body').slice(0, 500)
-        console.log(`[ml-ads.daily.probe3] ${p.name} → ${status} ${body}`)
+        console.log(`[ml-ads.daily.probe4] ${p.name} → ${status} ${body}`)
       }
     }
   }
