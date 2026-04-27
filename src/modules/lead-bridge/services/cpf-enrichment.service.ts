@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
-import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { LeadBridgeService } from '../lead-bridge.service'
-
-const BIGDATA_URL = 'https://plataforma.bigdatacorp.com.br/pessoas'
+import { getProvider } from './cpf-providers'
 
 @Injectable()
 export class CpfEnrichmentService {
@@ -12,15 +10,16 @@ export class CpfEnrichmentService {
   constructor(private readonly leadBridge: LeadBridgeService) {}
 
   /**
-   * Fire-and-forget enrichment. Reads the org's CPF API config, calls the
-   * configured provider, stamps enrichment_data + enriched on the conversion
-   * row. Never throws — all errors are logged warnings.
+   * Fire-and-forget enrichment dispatched through the provider registry.
+   * Reads org config (provider id + api_key), runs the matching adapter,
+   * stamps enrichment_data + normalized fields back on the conversion.
+   * Never throws — all errors logged warns.
    */
   async enrich(conversionId: string): Promise<void> {
     try {
       const { data: conv } = await supabaseAdmin
         .from('lead_bridge_conversions')
-        .select('id, organization_id, cpf, consent_enrichment, enriched')
+        .select('id, organization_id, cpf, consent_enrichment, enriched, full_name, phone, email')
         .eq('id', conversionId)
         .maybeSingle()
       if (!conv || conv.enriched || !conv.consent_enrichment || !conv.cpf) return
@@ -28,56 +27,36 @@ export class CpfEnrichmentService {
       const config = await this.leadBridge.getConfig(conv.organization_id as string)
       if (!config.cpf_enrichment_enabled || !config.cpf_api_key) return
 
-      const provider = (config.cpf_provider ?? 'bigdatacorp').toLowerCase()
-      let result: Record<string, unknown> | null = null
-      if (provider === 'bigdatacorp') {
-        result = await this.callBigDataCorp(conv.cpf as string, config.cpf_api_key)
-      } else {
-        this.logger.warn(`[cpf.enrich] provider desconhecido: ${provider}`)
+      const provider = getProvider(config.cpf_provider ?? 'bigdatacorp')
+      if (!provider) {
+        this.logger.warn(`[cpf.enrich] provider desconhecido: ${config.cpf_provider}`)
+        return
       }
 
-      if (!result) return
+      const result = await provider.enrich(conv.cpf as string, config.cpf_api_key)
+      if (!result.success) {
+        this.logger.warn(`[cpf.enrich] ${provider.id} falhou: ${result.error}`)
+        return
+      }
+
+      // Backfill conversion fields when the provider returned them AND the
+      // conversion didn't already have them filled by the user.
+      const patch: Record<string, unknown> = {
+        enriched: true,
+        enriched_at: new Date().toISOString(),
+        enrichment_data: result.raw_response ?? {},
+      }
+      if (!conv.full_name && result.name)  patch.full_name = result.name
+      if (!conv.phone     && result.phone) patch.phone     = result.phone
+      if (!conv.email     && result.email) patch.email     = result.email
+
       await supabaseAdmin
         .from('lead_bridge_conversions')
-        .update({
-          enriched: true,
-          enriched_at: new Date().toISOString(),
-          enrichment_data: result,
-        })
+        .update(patch)
         .eq('id', conversionId)
     } catch (e: unknown) {
       const err = e as { message?: string }
       this.logger.warn(`[cpf.enrich] ${conversionId}: ${err?.message}`)
-    }
-  }
-
-  /** Big Data Corp /pessoas endpoint. Token can be either "AccessToken:TokenId"
-   * (colon-separated, easy to store in one field) or just the AccessToken,
-   * in which case TokenId is read from CPF_TOKEN_ID env. */
-  private async callBigDataCorp(cpf: string, key: string): Promise<Record<string, unknown> | null> {
-    let accessToken = key
-    let tokenId     = process.env.BIGDATA_TOKEN_ID ?? ''
-    if (key.includes(':')) {
-      const [a, b] = key.split(':')
-      accessToken = a
-      tokenId     = b ?? tokenId
-    }
-    if (!accessToken || !tokenId) {
-      this.logger.warn('[cpf.enrich] big data corp: AccessToken+TokenId não configurados')
-      return null
-    }
-
-    try {
-      const { data } = await axios.post(
-        BIGDATA_URL,
-        { Datasets: 'basic_data', q: `doc{${cpf.replace(/\D/g, '')}}` },
-        { headers: { AccessToken: accessToken, TokenId: tokenId } },
-      )
-      return (data ?? null) as Record<string, unknown> | null
-    } catch (e: any) {
-      const status = e?.response?.status ?? '?'
-      this.logger.warn(`[cpf.enrich] big data corp ${status}: ${e?.message}`)
-      return null
     }
   }
 }
