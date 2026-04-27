@@ -164,6 +164,73 @@ export class MlAdsService {
     }
   }
 
+  /** TEMP DEBUG — fires 6 candidate "give me daily series" param shapes
+   * against the working /campaigns/search endpoint and a couple of items
+   * variants in parallel. Logs status + first 800c of body so we can
+   * spot which shape returns a per-day array.
+   *
+   * Currently called once per PADS advertiser at the top of getPadsMetrics
+   * for one sync — remove after the daily shape is identified. */
+  private async probeDailyVariants(
+    advertiserId: string,
+    sampleCampaignId: string | null,
+    dateFrom: string,
+    dateTo:   string,
+  ): Promise<void> {
+    const { token } = await this.ml.getValidToken()
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Api-Version': '2',
+      Accept: 'application/json',
+    }
+    const SITE = 'MLB'
+    const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
+    const baseParams = {
+      date_from: dateFrom, date_to: dateTo,
+      metrics:   this.PADS_METRIC_FIELDS,
+    }
+
+    const candidates: Array<{
+      tag: string; method: 'get'; url: string; params: Record<string, string>;
+    }> = [
+      { tag: 'V1: aggregation=daily',
+        method: 'get', url: `${baseUrl}/campaigns/search`,
+        params: { ...baseParams, aggregation: 'daily' } },
+      { tag: 'V2: aggregation=daily + breakdown=date',
+        method: 'get', url: `${baseUrl}/campaigns/search`,
+        params: { ...baseParams, aggregation: 'daily', breakdown: 'date' } },
+      { tag: 'V3: aggregation_type=daily',
+        method: 'get', url: `${baseUrl}/campaigns/search`,
+        params: { ...baseParams, aggregation_type: 'daily' } },
+      { tag: 'V4: group_by=date',
+        method: 'get', url: `${baseUrl}/campaigns/search`,
+        params: { ...baseParams, group_by: 'date' } },
+      ...(sampleCampaignId ? [
+        { tag: `V5: /campaigns/${sampleCampaignId}/items/search + agg=daily`,
+          method: 'get' as const,
+          url: `${baseUrl}/campaigns/${sampleCampaignId}/items/search`,
+          params: { ...baseParams, aggregation: 'daily' } },
+        { tag: `V6: /items/search?campaign_ids=${sampleCampaignId} + agg=daily`,
+          method: 'get' as const,
+          url: `${baseUrl}/items/search`,
+          params: { ...baseParams, aggregation: 'daily', campaign_ids: sampleCampaignId } },
+      ] : []),
+    ]
+
+    await Promise.all(candidates.map(async (c) => {
+      const log = (status: number | string, body: unknown) =>
+        this.logger.log(`[ml-ads.daily.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
+      try {
+        const res = await axios.get(c.url, { headers, params: c.params })
+        log(res.status, res.data)
+      } catch (e: any) {
+        const status = e?.response?.status ?? '?'
+        const body   = e?.response?.data ?? e?.message
+        log(status, body)
+      }
+    }))
+  }
+
   /** PADS metrics live on the v2 /campaigns/search endpoint. Returns one
    * row per (campaign_id, date) using metrics_daily when ML provides it,
    * else a single summary row dated to dateTo. Paginates 50 at a time. */
@@ -183,6 +250,7 @@ export class MlAdsService {
     const all: Array<Record<string, unknown>> = []
     const limit = 50
     let offset  = 0
+    let firstCampaignId: string | null = null
     while (true) {
       const { data } = await axios.get(url, {
         headers,
@@ -196,10 +264,16 @@ export class MlAdsService {
       })
       const results = Array.isArray(data?.results) ? data.results : []
       all.push(...results)
+      if (!firstCampaignId && results[0]?.id) firstCampaignId = String(results[0].id)
       if (results.length < limit) break
       offset += limit
       if (offset > 5000) break
     }
+
+    // TEMP — fire daily-variant probes in the background so we can see in
+    // the logs which param shape returns a per-day array. Doesn't await:
+    // the main flow returns the summary rows immediately.
+    this.probeDailyVariants(advertiserId, firstCampaignId, dateFrom, dateTo).catch(() => {})
 
     this.logger.log(`[ml-ads.pads.search] ${advertiserId}: ${all.length} campanhas com métricas`)
 
