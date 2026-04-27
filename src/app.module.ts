@@ -20,6 +20,7 @@ import { WhatsAppModule } from './modules/whatsapp/whatsapp.module'
 import { WebhooksModule } from './modules/webhooks/webhooks.module'
 import { WidgetsModule } from './modules/widgets/widgets.module'
 import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
+import { LeadBridgeModule } from './modules/lead-bridge/lead-bridge.module'
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
     WidgetsModule,
     WebhooksModule,
     MlAdsModule,
+    LeadBridgeModule,
   ],
   controllers: [AppController],
   providers: [AppService],
