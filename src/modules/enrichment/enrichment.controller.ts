@@ -78,6 +78,23 @@ export class EnrichmentController {
       { success: false, quality: 'error' as const, data: {}, error: 'fallback', cost_cents: 0, duration_ms: 0, provider: null, cache_hit: false, attempts: [] })
   }
 
+  /** Enrich N pending unified_customers in this org. Body: { limit?: number }
+   * (default 25, max 100). Sequential to spread provider load. */
+  @Post('batch')
+  batch(@ReqUser() u: ReqUserPayload, @Body() body: { limit?: number }) {
+    return this.safe('batch',
+      () => this.svc.enrichBatch(u.orgId ?? '', Number(body?.limit ?? 25), u.id),
+      { processed: 0, full: 0, partial: 0, failed: 0, skipped: 0, results: [] })
+  }
+
+  /** Enrich one specific customer (manual button on /clientes detail). */
+  @Post('customer/:id')
+  enrichOne(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.safe('customer.enrich',
+      () => this.svc.enrichCustomer(u.orgId ?? '', id, u.id),
+      { customer_id: id, status: 'failed' as const, provider: null, fields_filled: 0 })
+  }
+
   // ── Stats / Log ──
   @Get('log')
   log(

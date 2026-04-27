@@ -1,4 +1,5 @@
 import { Injectable, Inject, Logger } from '@nestjs/common'
+import { supabaseAdmin } from '../../common/supabase'
 import { ENRICHMENT_PROVIDERS, BaseEnrichmentProvider, EnrichmentResult } from './providers'
 import { EnrichmentRoutingService, QueryType } from './services/routing.service'
 import { EnrichmentCacheService } from './services/cache.service'
@@ -176,5 +177,107 @@ export class EnrichmentService {
     const row = await this.cost.getProvider(orgId, code)
     if (!row || !row.api_key) return { ok: false, message: 'Sem api_key configurada' }
     return await provider.healthCheck({ api_key: row.api_key, api_secret: row.api_secret, base_url: row.base_url })
+  }
+
+  /** Enrich one unified_customer: pick the best query vector (cpf > phone >
+   * whatsapp), call enrich(), then merge the result back into the row. */
+  async enrichCustomer(orgId: string, customerId: string, userId?: string | null): Promise<{
+    customer_id: string
+    status: 'full' | 'partial' | 'failed' | 'skipped'
+    provider: string | null
+    fields_filled: number
+  }> {
+    const { data: c } = await supabaseAdmin
+      .from('unified_customers')
+      .select('id, cpf, phone, whatsapp_id, email, organization_id')
+      .eq('id', customerId)
+      .maybeSingle()
+    if (!c) return { customer_id: customerId, status: 'skipped', provider: null, fields_filled: 0 }
+
+    let qt: QueryType | null = null
+    let qv: string | null = null
+    if (c.cpf)              { qt = 'cpf';      qv = c.cpf }
+    else if (c.phone)       { qt = 'phone';    qv = c.phone }
+    else if (c.whatsapp_id) { qt = 'whatsapp'; qv = c.whatsapp_id }
+    if (!qt || !qv) {
+      await supabaseAdmin.from('unified_customers')
+        .update({ enrichment_status: 'failed', enriched_at: new Date().toISOString() })
+        .eq('id', customerId)
+      return { customer_id: customerId, status: 'skipped', provider: null, fields_filled: 0 }
+    }
+
+    const result = await this.enrich({
+      organization_id: orgId, user_id: userId ?? null,
+      query_type: qt, query_value: qv,
+      customer_id: customerId, trigger_source: 'batch',
+    })
+
+    const patch: Record<string, unknown> = {
+      enrichment_status:  result.quality === 'full' ? 'full' : result.quality === 'partial' ? 'partial' : 'failed',
+      enrichment_quality: result.quality,
+      enriched_at:        new Date().toISOString(),
+      enrichment_data:    result.data ?? {},
+    }
+
+    let filled = 0
+    const d = result.data ?? {}
+    if (d.full_name && !c.cpf) { /* don't overwrite display_name from enrichment unless missing — handled below */ }
+    if (d.cpf)        { patch.cpf  = d.cpf;  filled++ }
+    if (d.cnpj)       { patch.cnpj = d.cnpj; filled++ }
+    if (d.birth_date) { patch.birth_date = d.birth_date; filled++ }
+    if (d.gender)     { patch.gender = d.gender; filled++ }
+    const firstEmail = d.emails?.find(e => e.is_valid !== false)?.address
+    if (firstEmail && !c.email) { patch.email = firstEmail; patch.validated_email = true; filled++ }
+    else if (firstEmail)        { patch.validated_email = true }
+    const firstPhone = d.phones?.[0]
+    if (firstPhone?.number && !c.phone) { patch.phone = firstPhone.number; filled++ }
+    if (firstPhone?.is_active) patch.validated_phone = true
+    const wa = d.phones?.find(p => p.is_whatsapp)
+    if (wa?.number && !c.whatsapp_id) { patch.whatsapp_id = wa.number; filled++ }
+    if (wa) patch.validated_whatsapp = true
+
+    await supabaseAdmin.from('unified_customers').update(patch).eq('id', customerId)
+
+    return {
+      customer_id: customerId,
+      status: patch.enrichment_status as 'full' | 'partial' | 'failed',
+      provider: result.provider,
+      fields_filled: filled,
+    }
+  }
+
+  /** Pick up to N pending unified_customers (in this org) that have at
+   * least one queryable identifier and enrich them serially. Returns
+   * counters for the UI. Sleeps 600ms between calls to spread provider
+   * load. */
+  async enrichBatch(orgId: string, limit: number, userId?: string | null): Promise<{
+    processed: number; full: number; partial: number; failed: number; skipped: number
+    results: Array<{ customer_id: string; status: string; provider: string | null; fields_filled: number }>
+  }> {
+    const cap = Math.min(Math.max(limit, 1), 100)
+    const { data: pending } = await supabaseAdmin
+      .from('unified_customers')
+      .select('id, cpf, phone, whatsapp_id')
+      .eq('organization_id', orgId)
+      .or('enrichment_status.is.null,enrichment_status.eq.pending')
+      .or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
+      .limit(cap)
+
+    const rows = pending ?? []
+    let full = 0, partial = 0, failed = 0, skipped = 0
+    const results: Array<{ customer_id: string; status: string; provider: string | null; fields_filled: number }> = []
+
+    for (const r of rows) {
+      const res = await this.enrichCustomer(orgId, r.id, userId)
+      results.push(res)
+      if (res.status === 'full')         full++
+      else if (res.status === 'partial') partial++
+      else if (res.status === 'failed')  failed++
+      else                                skipped++
+      await new Promise(r => setTimeout(r, 600))
+    }
+
+    if (rows.length) this.logger.log(`[enrich.batch] org=${orgId} processed=${rows.length} full=${full} partial=${partial} failed=${failed} skipped=${skipped}`)
+    return { processed: rows.length, full, partial, failed, skipped, results }
   }
 }
