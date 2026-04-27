@@ -47,6 +47,36 @@ export interface MlBuyerBilling {
   name:       string | null
 }
 
+/** Raw shape returned by both /orders/billing-info/{site}/{id} and the
+ * legacy /orders/{id}/billing_info endpoints — the structured object that
+ * lives at `data.buyer.billing_info`. */
+export interface MlBillingInfoRaw {
+  id?:           string
+  identification?: { type?: string; number?: string }
+  name?:         string
+  last_name?:    string
+  doc_type?:     string                 // legacy parity
+  doc_number?:   string                 // legacy parity
+  address?: {
+    country_id?:    string
+    state?:         { id?: string; name?: string }
+    city?:          { id?: string; name?: string }
+    zip_code?:      string
+    street_name?:   string
+    street_number?: string
+    comment?:       string
+    neighborhood?:  { id?: string; name?: string }
+  }
+  taxes?: unknown
+}
+
+/** Resultado do orchestrator de 2 passos. */
+export interface MlBillingFetchResult {
+  billing:        MlBillingInfoRaw | null
+  billingInfoId:  string | null
+  log:            string[]
+}
+
 @Injectable()
 export class MercadoLivreClient {
   private lastRequestAt = 0
@@ -130,58 +160,142 @@ export class MercadoLivreClient {
     }
   }
 
-  /** Pull billing info for one order. Caller is responsible for the 1 req/sec
-   * pacing — this method does NOT go through the shared rate-limiter so it
-   * doesn't compete with order-search and shipment bursts. Never throws:
-   * 401/403/404 (token expired or order out of CPF visibility window) and
-   * timeouts all return null.
-   *
-   * Sends `x-version: 2` per ML's recommendation for the new billing endpoint.
-   * Note: ML does NOT release email/phone here for most B2C sales (LGPD).
-   * The fix for those is the enrichment cascade (Direct Data with the CPF
-   * returned here will resolve full phones/emails). */
-  async fetchBillingInfo(token: string, externalOrderId: number): Promise<MlBuyerBilling | null> {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await axios.get<any>(`${ML_BASE}/orders/${externalOrderId}/billing_info`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'x-version':   '2',
-        },
+  /** PASSO 1 do fluxo oficial — `GET /orders/{id}` retorna o pedido inteiro,
+   * incluindo `buyer.billing_info.id` que precisamos pra resolver dados
+   * fiscais no PASSO 2. Sempre envia `x-version: 2`. Lança em erro pra que o
+   * orchestrator capture status (404 = pedido fora de janela). */
+  async fetchOrder(token: string, externalOrderId: number | string): Promise<unknown> {
+    const { data } = await axios.get(`${ML_BASE}/orders/${externalOrderId}`, {
+      headers: { Authorization: `Bearer ${token}`, 'x-version': '2' },
+      timeout: 8_000,
+    })
+    return data
+  }
+
+  /** PASSO 2 (NOVO endpoint recomendado pela ML).
+   * `GET /orders/billing-info/{site_id}/{billing_info_id}` retorna o objeto
+   * completo de billing fiscal (identification + nome + endereço). */
+  async fetchBillingInfoById(
+    token: string,
+    siteId: string,
+    billingInfoId: string,
+  ): Promise<MlBillingInfoRaw | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await axios.get<any>(
+      `${ML_BASE}/orders/billing-info/${siteId}/${billingInfoId}`,
+      {
+        headers: { Authorization: `Bearer ${token}`, 'x-version': '2' },
         timeout: 8_000,
-      })
-      const buyer    = (data?.buyer ?? {}) as Record<string, unknown>
-      const billing  = (buyer.billing_info ?? {}) as Record<string, unknown>
-      const phoneObj = (buyer.phone ?? {}) as Record<string, unknown>
-      const phoneStr = phoneObj.area_code && phoneObj.number
-        ? `${phoneObj.area_code}${phoneObj.number}`
-        : ((phoneObj.number as string) ?? null)
-      const billingName = (billing.name as string | undefined) ?? null
-      const composedName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
-      const fullName = billingName ?? composedName
-      return {
-        doc_type:   (billing.doc_type as string)   ?? null,
-        doc_number: ((billing.doc_number as string) ?? '').replace(/\D/g, '') || null,
-        email:      (buyer.email as string)        ?? null,
-        phone:      phoneStr ? phoneStr.replace(/\D/g, '') : null,
-        name:       fullName,
+      },
+    )
+    return (data?.buyer?.billing_info ?? data?.billing_info ?? null) as MlBillingInfoRaw | null
+  }
+
+  /** PASSO 2 (LEGADO — fallback).
+   * `GET /orders/{id}/billing_info` ainda funciona em alguns casos mas será
+   * descontinuado. Usado apenas se PASSO 2 NOVO falhou ou se não temos o
+   * billing_info_id. */
+  async fetchBillingInfoLegacy(token: string, externalOrderId: number | string): Promise<MlBillingInfoRaw | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await axios.get<any>(`${ML_BASE}/orders/${externalOrderId}/billing_info`, {
+      headers: { Authorization: `Bearer ${token}`, 'x-version': '2' },
+      timeout: 8_000,
+    })
+    return (data?.buyer?.billing_info ?? null) as MlBillingInfoRaw | null
+  }
+
+  /** Orchestrator do fluxo de 2 passos. Nunca lança. Retorna sempre um log
+   * estruturado pra observabilidade — cada chamada produz uma linha
+   *   `[ml-sync.billing] order=X cpf=Y log=order_fetched|billing_v2_ok|...`
+   * no consumer.
+   *
+   * Cascade:
+   *   1. fetchOrder → extrai buyer.billing_info.id
+   *   2a. Se temos id → fetchBillingInfoById (NOVO)
+   *   2b. Se 2a falhou OU sem id → fetchBillingInfoLegacy (LEGADO)
+   *
+   * Quando ambos falharem retorna { billing: null, billingInfoId: null }
+   * — o caller deve stampar buyer_billing_fetched_at = now() pra não tentar
+   * de novo o mesmo pedido falho. */
+  async fetchCompleteBillingForOrder(
+    token: string,
+    externalOrderId: number | string,
+  ): Promise<MlBillingFetchResult> {
+    const log: string[] = []
+    let billingInfoId: string | null = null
+
+    // PASSO 1
+    let orderData: { buyer?: { billing_info?: { id?: string } } } | null = null
+    try {
+      orderData = (await this.fetchOrder(token, externalOrderId)) as typeof orderData
+      log.push('order_fetched')
+      billingInfoId = orderData?.buyer?.billing_info?.id ?? null
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status ?? 0
+      log.push(`order_failed:${status}`)
+      // mesmo sem o ID podemos tentar o legado
+    }
+
+    // PASSO 2A — endpoint NOVO
+    if (billingInfoId) {
+      try {
+        const billing = await this.fetchBillingInfoById(token, 'MLB', billingInfoId)
+        if (billing) {
+          log.push(`billing_v2_ok:${billingInfoId}`)
+          return { billing, billingInfoId, log }
+        }
+        log.push('billing_v2_empty')
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } })?.response?.status ?? 0
+        log.push(`billing_v2_failed:${status}`)
       }
-    } catch {
-      // 401/403/404/timeout/network — any failure: return null and let the
-      // caller stamp buyer_billing_fetched_at anyway so we don't retry forever.
-      return null
+    } else {
+      log.push('no_billing_info_id')
+    }
+
+    // PASSO 2B — endpoint LEGADO
+    try {
+      const billing = await this.fetchBillingInfoLegacy(token, externalOrderId)
+      if (billing) {
+        log.push('billing_legacy_ok')
+        return { billing, billingInfoId, log }
+      }
+      log.push('billing_legacy_empty')
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status ?? 0
+      log.push(`billing_legacy_failed:${status}`)
+    }
+
+    return { billing: null, billingInfoId, log }
+  }
+
+  /** @deprecated Substitua por `fetchCompleteBillingForOrder`. Mantido para
+   * compatibilidade até C2 atualizar todos os consumidores. */
+  async fetchBillingInfo(token: string, externalOrderId: number): Promise<MlBuyerBilling | null> {
+    const result = await this.fetchCompleteBillingForOrder(token, externalOrderId)
+    if (!result.billing) return null
+    const b = result.billing
+    const docNumber = b.identification?.number ?? b.doc_number ?? null
+    const docType   = b.identification?.type   ?? b.doc_type   ?? null
+    const fullName  = [b.name, b.last_name].filter(Boolean).join(' ').trim() || null
+    return {
+      doc_type:   docType,
+      doc_number: docNumber ? docNumber.replace(/\D/g, '') || null : null,
+      email:      null, // ML não fornece (LGPD)
+      phone:      null, // vem via fetchBuyerUser quando necessário
+      name:       fullName,
     }
   }
 
-  /** Pull buyer profile via /users/{id}. Used as a fallback for phone/email
-   * since billing_info often returns these blank for LGPD reasons. ML
-   * enforces ~50 req/sec on this endpoint — the shared rateLimit() handles
-   * pacing well below that. Never throws. */
+  /** Pull buyer profile via /users/{id}. Usado APENAS quando billing veio
+   * vazio — para preencher phone/first_name/last_name. NÃO usar pra email
+   * (LGPD; email só vem do enrichment cascade). Nunca lança. */
   async fetchBuyerUser(token: string, buyerId: number): Promise<{
     first_name: string | null
     last_name:  string | null
-    email:      string | null
     phone:      string | null
+    /** @deprecated sempre null — ML não fornece email via /users (LGPD). */
+    email?:     string | null
   } | null> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -202,7 +316,6 @@ export class MercadoLivreClient {
       return {
         first_name: (data?.first_name as string) ?? null,
         last_name:  (data?.last_name  as string) ?? null,
-        email:      (data?.email      as string) ?? null,
         phone:      pickPhone(phoneObj) ?? pickPhone(altObj),
       }
     } catch {
