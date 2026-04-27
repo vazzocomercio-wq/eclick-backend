@@ -16,8 +16,8 @@ export class MlBillingFetcherService {
 
   constructor(private readonly ml: MercadolivreService) {}
 
-  /** Hit /orders/{id}/billing_info for one order. Never throws —
-   * returns the parsed fields or null. */
+  /** Hit /orders/{id}/billing_info for one order. Sends `x-version: 2` per
+   * ML's recommendation. Never throws — returns the parsed fields or null. */
   async fetchOne(externalOrderId: string, token: string): Promise<{
     doc_type: string | null
     doc_number: string | null
@@ -27,7 +27,7 @@ export class MlBillingFetcherService {
   } | null> {
     try {
       const { data } = await axios.get(`${ML_BASE}/orders/${externalOrderId}/billing_info`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, 'x-version': '2' },
         timeout: 12_000,
       })
       const buyer    = (data?.buyer ?? {}) as Record<string, unknown>
@@ -36,13 +36,14 @@ export class MlBillingFetcherService {
       const phoneStr = phoneObj.area_code && phoneObj.number
         ? `${phoneObj.area_code}${phoneObj.number}`
         : ((phoneObj.number as string) ?? null)
-      const fullName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
+      const billingName  = (billing.name as string | undefined) ?? null
+      const composedName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
       return {
         doc_type:   (billing.doc_type as string)   ?? null,
         doc_number: ((billing.doc_number as string) ?? '').replace(/\D/g, '') || null,
         email:      (buyer.email as string)        ?? null,
         phone:      phoneStr ? phoneStr.replace(/\D/g, '') : null,
-        name:       fullName,
+        name:       billingName ?? composedName,
       }
     } catch (e: any) {
       const status = e?.response?.status
@@ -50,6 +51,111 @@ export class MlBillingFetcherService {
       if (status === 401 || status === 403 || status === 404) return null
       this.logger.warn(`[ml.billing.fetch] order=${externalOrderId}: ${status ?? ''} ${e?.message ?? ''}`)
       return null
+    }
+  }
+
+  /** Pull buyer profile via /users/{id}. Used as a fallback for phone/email
+   * since billing_info often returns these blank for LGPD reasons. */
+  async fetchBuyerUser(buyerId: number, token: string): Promise<{
+    first_name: string | null
+    last_name:  string | null
+    email:      string | null
+    phone:      string | null
+  } | null> {
+    try {
+      const { data } = await axios.get(`${ML_BASE}/users/${buyerId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5_000,
+      })
+      const phoneObj = (data?.phone ?? {}) as Record<string, unknown>
+      const altObj   = (data?.alternative_phone ?? {}) as Record<string, unknown>
+      const pickPhone = (o: Record<string, unknown>) => {
+        const ac = (o.area_code as string) ?? ''
+        const n  = (o.number    as string) ?? ''
+        const joined = `${ac}${n}`.replace(/\D/g, '')
+        return joined.length >= 10 ? joined : null
+      }
+      return {
+        first_name: (data?.first_name as string) ?? null,
+        last_name:  (data?.last_name  as string) ?? null,
+        email:      (data?.email      as string) ?? null,
+        phone:      pickPhone(phoneObj) ?? pickPhone(altObj),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** Manual single-order refetch. Powers POST /ml/orders/:id/refetch-billing
+   * — UI button on the order detail card when buyer fields are missing. */
+  async refetchOne(externalOrderId: string): Promise<{
+    ok:    boolean
+    order_id: string
+    buyer: {
+      doc_type:   string | null
+      doc_number: string | null
+      email:      string | null
+      phone:      string | null
+      name:       string | null
+    } | null
+    message?: string
+  }> {
+    let token: string
+    try {
+      ;({ token } = await this.ml.getValidToken())
+    } catch {
+      return { ok: false, order_id: externalOrderId, buyer: null, message: 'Token ML inválido — reconecte a conta' }
+    }
+
+    // Pull the order row to know the buyer_id (for /users fallback)
+    const { data: orderRow } = await supabaseAdmin
+      .from('orders')
+      .select('id, raw_data')
+      .eq('external_order_id', externalOrderId)
+      .limit(1)
+      .maybeSingle()
+
+    const buyerId = ((orderRow?.raw_data as { buyer?: { id?: number } } | null)?.buyer?.id) ?? null
+
+    const billing = await this.fetchOne(externalOrderId, token)
+    let userInfo: Awaited<ReturnType<typeof this.fetchBuyerUser>> = null
+    if (buyerId && (!billing?.phone || !billing?.email)) {
+      userInfo = await this.fetchBuyerUser(buyerId, token)
+    }
+
+    const phone = billing?.phone ?? userInfo?.phone ?? null
+    const email = billing?.email ?? userInfo?.email ?? null
+    const composedFromUser = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
+    const name  = billing?.name ?? composedFromUser ?? null
+
+    const patch: Record<string, unknown> = {
+      buyer_billing_fetched_at: new Date().toISOString(),
+    }
+    if (billing?.doc_number) patch.buyer_doc_number = billing.doc_number
+    if (billing?.doc_type)   patch.buyer_doc_type   = billing.doc_type
+    if (email)               patch.buyer_email      = email
+    if (phone)               patch.buyer_phone      = phone
+    if (name)                patch.buyer_name       = name
+
+    const { error } = await supabaseAdmin
+      .from('orders')
+      .update(patch)
+      .eq('external_order_id', externalOrderId)
+    if (error) {
+      this.logger.error(`[ml.billing.refetch] external=${externalOrderId} db=${error.message}`)
+      return { ok: false, order_id: externalOrderId, buyer: null, message: error.message }
+    }
+
+    return {
+      ok: true,
+      order_id: externalOrderId,
+      buyer: {
+        doc_type:   billing?.doc_type   ?? null,
+        doc_number: billing?.doc_number ?? null,
+        email,
+        phone,
+        name,
+      },
     }
   }
 
@@ -86,7 +192,7 @@ export class MlBillingFetcherService {
 
     const { data: orders } = await supabaseAdmin
       .from('orders')
-      .select('id, external_order_id, organization_id')
+      .select('id, external_order_id, organization_id, raw_data')
       .is('buyer_billing_fetched_at', null)
       .not('external_order_id', 'is', null)
       .limit(limit)
@@ -98,23 +204,34 @@ export class MlBillingFetcherService {
       const ext = o.external_order_id as string
       const billing = await this.fetchOne(ext, token)
 
+      const buyerId = ((o.raw_data as { buyer?: { id?: number } } | null)?.buyer?.id) ?? null
+      let userInfo: Awaited<ReturnType<typeof this.fetchBuyerUser>> = null
+      if (buyerId && (!billing?.phone || !billing?.email)) {
+        userInfo = await this.fetchBuyerUser(buyerId, token)
+      }
+
+      const phone = billing?.phone ?? userInfo?.phone ?? null
+      const email = billing?.email ?? userInfo?.email ?? null
+      const composedFromUser = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
+      const name  = billing?.name ?? composedFromUser ?? null
+
       const patch: Record<string, unknown> = {
         buyer_billing_fetched_at: new Date().toISOString(),
       }
       if (billing?.doc_number) patch.buyer_doc_number = billing.doc_number
       if (billing?.doc_type)   patch.buyer_doc_type   = billing.doc_type
-      if (billing?.email)      patch.buyer_email      = billing.email
-      if (billing?.phone)      patch.buyer_phone      = billing.phone
-      if (billing?.name)       patch.buyer_name       = billing.name
+      if (email)               patch.buyer_email      = email
+      if (phone)               patch.buyer_phone      = phone
+      if (name)                patch.buyer_name       = name
 
       const { error: upErr } = await supabaseAdmin
         .from('orders').update(patch).eq('id', o.id)
 
       if (upErr) { errors++; continue }
       if (billing?.doc_number) withCpf++
-      if (billing?.email)      withEmail++
-      if (billing?.phone)      withPhone++
-      if (!billing?.doc_number && !billing?.email && !billing?.phone) noData++
+      if (email) withEmail++
+      if (phone) withPhone++
+      if (!billing?.doc_number && !email && !phone) noData++
 
       // 1 req/sec budget for the ML billing endpoint
       await new Promise(r => setTimeout(r, 1100))

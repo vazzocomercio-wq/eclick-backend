@@ -154,25 +154,48 @@ export class OrdersIngestionService {
     const toFetch = externalIds.filter(id => !out.has(id))
     if (toFetch.length === 0) return out
 
-    let withCpf = 0, miss = 0
+    // Index buyer.id by external order id so we can fall back to /users/{id}
+    // for phone/email when billing_info returns blank (most B2C sales — LGPD).
+    const buyerIdByOrder = new Map<string, number | null>()
+    for (const o of orders) buyerIdByOrder.set(String(o.id), o.buyer?.id ?? null)
+
+    let withCpf = 0, withPhone = 0, miss = 0
     for (const id of toFetch) {
       const billing = await this.mlClient.fetchBillingInfo(token, Number(id))
       stats.apiCalls++
+
+      // /users/{buyer_id} only when we still need phone or email after billing
+      const buyerId = buyerIdByOrder.get(id) ?? null
+      let userInfo: Awaited<ReturnType<typeof this.mlClient.fetchBuyerUser>> = null
+      if (buyerId && (!billing?.phone || !billing?.email)) {
+        userInfo = await this.mlClient.fetchBuyerUser(token, buyerId)
+        stats.apiCalls++
+      }
+
+      const phone = billing?.phone ?? userInfo?.phone ?? null
+      const email = billing?.email ?? userInfo?.email ?? null
+      const composedFromUser = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
+      const name  = billing?.name ?? composedFromUser ?? null
+
       out.set(id, {
         doc_type:   billing?.doc_type   ?? null,
         doc_number: billing?.doc_number ?? null,
-        email:      billing?.email      ?? null,
-        phone:      billing?.phone      ?? null,
-        name:       billing?.name       ?? null,
+        email,
+        phone,
+        name,
         fetched_at: new Date().toISOString(),
       })
       if (billing?.doc_number) withCpf++
       else miss++
+      if (phone) withPhone++
+
       // 1.1s budget for ML's billing endpoint (1 req/sec)
       await new Promise(r => setTimeout(r, 1100))
     }
 
-    this.logger.log(`[aggregator.billing] fetched=${toFetch.length} cpf=${withCpf} no_data=${miss}`)
+    this.logger.log(
+      `[aggregator.billing] fetched=${toFetch.length} cpf=${withCpf} phone=${withPhone} no_data=${miss}`,
+    )
     return out
   }
 

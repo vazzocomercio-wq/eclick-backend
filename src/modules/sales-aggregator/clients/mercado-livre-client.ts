@@ -134,12 +134,20 @@ export class MercadoLivreClient {
    * pacing — this method does NOT go through the shared rate-limiter so it
    * doesn't compete with order-search and shipment bursts. Never throws:
    * 401/403/404 (token expired or order out of CPF visibility window) and
-   * timeouts all return null. */
+   * timeouts all return null.
+   *
+   * Sends `x-version: 2` per ML's recommendation for the new billing endpoint.
+   * Note: ML does NOT release email/phone here for most B2C sales (LGPD).
+   * The fix for those is the enrichment cascade (Direct Data with the CPF
+   * returned here will resolve full phones/emails). */
   async fetchBillingInfo(token: string, externalOrderId: number): Promise<MlBuyerBilling | null> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data } = await axios.get<any>(`${ML_BASE}/orders/${externalOrderId}/billing_info`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'x-version':   '2',
+        },
         timeout: 8_000,
       })
       const buyer    = (data?.buyer ?? {}) as Record<string, unknown>
@@ -148,7 +156,9 @@ export class MercadoLivreClient {
       const phoneStr = phoneObj.area_code && phoneObj.number
         ? `${phoneObj.area_code}${phoneObj.number}`
         : ((phoneObj.number as string) ?? null)
-      const fullName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
+      const billingName = (billing.name as string | undefined) ?? null
+      const composedName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
+      const fullName = billingName ?? composedName
       return {
         doc_type:   (billing.doc_type as string)   ?? null,
         doc_number: ((billing.doc_number as string) ?? '').replace(/\D/g, '') || null,
@@ -159,6 +169,43 @@ export class MercadoLivreClient {
     } catch {
       // 401/403/404/timeout/network — any failure: return null and let the
       // caller stamp buyer_billing_fetched_at anyway so we don't retry forever.
+      return null
+    }
+  }
+
+  /** Pull buyer profile via /users/{id}. Used as a fallback for phone/email
+   * since billing_info often returns these blank for LGPD reasons. ML
+   * enforces ~50 req/sec on this endpoint — the shared rateLimit() handles
+   * pacing well below that. Never throws. */
+  async fetchBuyerUser(token: string, buyerId: number): Promise<{
+    first_name: string | null
+    last_name:  string | null
+    email:      string | null
+    phone:      string | null
+  } | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await this.withRetry<any>(() =>
+        axios.get(`${ML_BASE}/users/${buyerId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5_000,
+        }),
+      )
+      const phoneObj = (data?.phone ?? {}) as Record<string, unknown>
+      const altObj   = (data?.alternative_phone ?? {}) as Record<string, unknown>
+      const pickPhone = (o: Record<string, unknown>) => {
+        const ac = (o.area_code as string) ?? ''
+        const n  = (o.number    as string) ?? ''
+        const joined = `${ac}${n}`.replace(/\D/g, '')
+        return joined.length >= 10 ? joined : null
+      }
+      return {
+        first_name: (data?.first_name as string) ?? null,
+        last_name:  (data?.last_name  as string) ?? null,
+        email:      (data?.email      as string) ?? null,
+        phone:      pickPhone(phoneObj) ?? pickPhone(altObj),
+      }
+    } catch {
       return null
     }
   }

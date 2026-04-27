@@ -62,6 +62,20 @@ export class MercadolivreController {
     }
   }
 
+  // POST /ml/orders/:order_id/refetch-billing — single-order re-fetch from
+  // ML for the order detail card. Calls /orders/{id}/billing_info plus
+  // /users/{buyer_id} for phone/email fallback. Returns the resolved buyer.
+  @Post('orders/:order_id/refetch-billing')
+  @HttpCode(HttpStatus.OK)
+  async refetchOrderBilling(@Param('order_id') orderId: string) {
+    try {
+      return await this.billingFetcher.refetchOne(orderId)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      return { ok: false, order_id: orderId, buyer: null, message: err?.message ?? 'erro' }
+    }
+  }
+
   // GET /ml/competitors/preview?url=...
   @Get('competitors/preview')
   async previewCompetitor(@Query('url') url: string) {

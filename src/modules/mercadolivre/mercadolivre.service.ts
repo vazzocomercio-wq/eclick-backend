@@ -1272,6 +1272,34 @@ export class MercadolivreService {
       })
     }
 
+    // ── Buyer billing lookup from DB (CPF/email/phone/name) ──────────────
+    // /orders/search doesn't return doc_number/email/phone — they live in
+    // the orders table after the aggregator hits /orders/{id}/billing_info.
+    const orderIds = orders.map((o: any) => String(o.id))
+    const buyerByOrder: Record<string, {
+      doc_type: string | null; doc_number: string | null
+      email: string | null; phone: string | null; name: string | null
+      fetched_at: string | null
+    }> = {}
+    if (orderIds.length > 0) {
+      const { data: buyerRows } = await supabaseAdmin
+        .from('orders')
+        .select('external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_billing_fetched_at')
+        .in('external_order_id', orderIds)
+      for (const r of buyerRows ?? []) {
+        const ext = r.external_order_id as string
+        if (!ext || buyerByOrder[ext]) continue
+        buyerByOrder[ext] = {
+          doc_type:   (r.buyer_doc_type   as string | null) ?? null,
+          doc_number: (r.buyer_doc_number as string | null) ?? null,
+          email:      (r.buyer_email      as string | null) ?? null,
+          phone:      (r.buyer_phone      as string | null) ?? null,
+          name:       (r.buyer_name       as string | null) ?? null,
+          fetched_at: (r.buyer_billing_fetched_at as string | null) ?? null,
+        }
+      }
+    }
+
     const enriched = orders.map((o: any, idx: number) => {
       const ship        = shipMap[o.shipping?.id] ?? null
       const totalAmount: number = o.total_amount ?? 0
@@ -1308,6 +1336,7 @@ export class MercadolivreService {
         contribMarginPct = totalAmount > 0 ? Math.round((cm / totalAmount) * 10000) / 100 : 0
       }
 
+      const dbBuyer = buyerByOrder[String(o.id)] ?? null
       return {
         order_id:      o.id,
         status:        o.status,
@@ -1317,10 +1346,17 @@ export class MercadolivreService {
         total_amount:  totalAmount,
         paid_amount:   o.paid_amount ?? totalAmount,
         buyer: {
-          id:         o.buyer?.id ?? null,
-          nickname:   o.buyer?.nickname ?? null,
-          first_name: o.buyer?.first_name ?? null,
-          last_name:  o.buyer?.last_name ?? null,
+          id:               o.buyer?.id ?? null,
+          nickname:         o.buyer?.nickname ?? null,
+          first_name:       o.buyer?.first_name ?? null,
+          last_name:        o.buyer?.last_name ?? null,
+          // From the orders table (populated by /orders/{id}/billing_info)
+          doc_type:         dbBuyer?.doc_type   ?? null,
+          doc_number:       dbBuyer?.doc_number ?? null,
+          full_name:        dbBuyer?.name       ?? null,
+          email:            dbBuyer?.email      ?? null,
+          phone:            dbBuyer?.phone      ?? null,
+          billing_fetched_at: dbBuyer?.fetched_at ?? null,
         },
         order_items: (o.order_items ?? []).map((i: any) => ({
           item_id:              i.item?.id ?? null,
