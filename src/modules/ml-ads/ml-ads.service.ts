@@ -137,48 +137,62 @@ export class MlAdsService {
 
   /**
    * Bulk-metrics call: ALL campaigns for one advertiser/product, daily.
-   * Endpoint and params differ per product. Caller falls back to
-   * getCampaignMetricsRaw when this returns empty.
+   * BADS uses /campaigns/metrics with aggregation_type=daily and returns
+   * the dashboard shape. PADS gets two attempts at the same endpoint:
+   *   1) without campaign_ids (sometimes works)
+   *   2) with campaign_ids=<csv> from the freshly-upserted campaigns
+   * Caller falls back to getCampaignMetricsRaw when both return empty.
    */
   async getMetricsRaw(
     advertiserId: string,
     dateFrom:     string,
     dateTo:       string,
     product = 'PADS',
+    campaignIds: string[] = [],
   ): Promise<DailyMetricRow[]> {
     const headers = await this.authHeaders()
     const segment = this.productPath(product)
+    const url     = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
 
-    let url: string
-    let params: Record<string, string>
-    if (product === 'PADS') {
-      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns`
-      params = {
-        date_from:   dateFrom,
-        date_to:     dateTo,
-        aggregation: 'daily',
-        metrics:     this.PADS_METRIC_FIELDS,
-      }
-    } else {
-      // BADS keeps the legacy aggregation_type param — flipping it to
-      // `aggregation` made the call 400 in the last commit.
-      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
-      params = {
-        date_from:        dateFrom,
-        date_to:          dateTo,
-        aggregation_type: 'daily',
+    if (product !== 'PADS') {
+      // BADS / DISPLAY — single attempt, legacy aggregation_type param.
+      const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
+      try {
+        const { data } = await axios.get(url, { headers, params })
+        return this.extractMetricRows(data)
+      } catch (e: any) {
+        const status = e?.response?.status ?? '?'
+        const msg    = e?.response?.data?.message ?? e?.message ?? ''
+        this.logger.warn(`[ml-ads.bulk.${status}] ${product}/${advertiserId}: ${msg}`)
+        throw e
       }
     }
 
-    try {
-      const { data } = await axios.get(url, { headers, params })
-      return this.extractMetricRows(data)
-    } catch (e: any) {
-      const status = e?.response?.status ?? '?'
-      const msg    = e?.response?.data?.message ?? e?.message ?? ''
-      this.logger.warn(`[ml-ads.bulk.${status}] ${product}/${advertiserId}: ${msg}`)
-      throw e
+    // PADS — try attempt 1 (no campaign_ids), then attempt 2 with the csv list.
+    const baseParams = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
+    const attempts: Array<{ tag: string; params: Record<string, string> }> = [
+      { tag: 'no-ids', params: baseParams },
+    ]
+    if (campaignIds.length > 0) {
+      attempts.push({
+        tag: 'with-ids',
+        params: { ...baseParams, campaign_ids: campaignIds.join(',') },
+      })
     }
+
+    let lastErr: unknown = null
+    for (const a of attempts) {
+      try {
+        const { data } = await axios.get(url, { headers, params: a.params })
+        return this.extractMetricRows(data)
+      } catch (e: any) {
+        const status = e?.response?.status ?? '?'
+        const body   = e?.response?.data
+        this.logger.warn(`[ml-ads.pads.bulk.attempt] ${a.tag} ${status} url=${url} body=${JSON.stringify(body)?.slice(0, 400)}`)
+        lastErr = e
+      }
+    }
+    throw lastErr
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
@@ -336,7 +350,10 @@ export class MlAdsService {
       // calls if bulk returns nothing (some accounts only expose the latter).
       let metrics: DailyMetricRow[] = []
       try {
-        metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
+        metrics = await this.getMetricsRaw(
+          adv.advertiser_id, dateFrom, dateTo, adv.product,
+          campaignRows.map(c => c.id),
+        )
       } catch (e: any) {
         this.logger.warn(`[ml-ads.sync] bulk metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
       }
