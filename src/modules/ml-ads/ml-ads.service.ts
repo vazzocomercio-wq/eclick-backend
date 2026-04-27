@@ -100,7 +100,6 @@ export class MlAdsService {
       seen.add(key)
       out.push(r)
     }
-    this.logger.log(`[ml-ads.advertisers] ${JSON.stringify(out)}`)
     return out
   }
 
@@ -120,7 +119,6 @@ export class MlAdsService {
                  : Array.isArray(data) ? data
                  : []
       all.push(...(list as CampaignRaw[]))
-      this.logger.log(`[ml-ads.paginate] ${product}/${advertiserId} offset=${offset} got=${list.length} total=${all.length}`)
       if (list.length < limit) break
       offset += limit
       if (offset > 5000) break // hard safety cap
@@ -174,12 +172,11 @@ export class MlAdsService {
 
     try {
       const { data } = await axios.get(url, { headers, params })
-      this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId} bulk: ${JSON.stringify(data).slice(0, 800)}`)
       return this.extractMetricRows(data)
     } catch (e: any) {
       const status = e?.response?.status ?? '?'
-      const body   = e?.response?.data
-      this.logger.error(`[ml-ads.metrics.bulk.${status}] ${product}/${advertiserId} url=${url} params=${JSON.stringify(params)} body=${JSON.stringify(body)}`)
+      const msg    = e?.response?.data?.message ?? e?.message ?? ''
+      this.logger.warn(`[ml-ads.bulk.${status}] ${product}/${advertiserId}: ${msg}`)
       throw e
     }
   }
@@ -215,19 +212,9 @@ export class MlAdsService {
       }
     }
 
-    // TEMP — log full URL so we can see exactly what's being requested
-    this.logger.log(`[ml-ads.per-camp.url] ${product}/${advertiserId}/${campaignId} GET ${url}?${new URLSearchParams(params).toString()}`)
-
-    try {
-      const { data } = await axios.get(url, { headers, params })
-      const rows = this.extractMetricRows(data)
-      return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
-    } catch (e: any) {
-      const status = e?.response?.status ?? '?'
-      const body   = e?.response?.data
-      this.logger.error(`[ml-ads.per-camp.${status}] ${product}/${advertiserId}/${campaignId} body=${JSON.stringify(body)}`)
-      throw e
-    }
+    const { data } = await axios.get(url, { headers, params })
+    const rows = this.extractMetricRows(data)
+    return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
   }
 
   /** Tolerant on shape. PADS returns an array of per-campaign rows; BADS
@@ -287,7 +274,8 @@ export class MlAdsService {
       .delete()
       .in('id', ['undefined', 'null', ''])
 
-    const dateTo   = new Date().toISOString().slice(0, 10)
+    // ML Ads only accepts up to yesterday — today's row isn't closed yet.
+    const dateTo   = new Date(Date.now() - 1 * 86_400_000).toISOString().slice(0, 10)
     const dateFrom = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10)
 
     let totalCampaigns = 0
@@ -354,7 +342,6 @@ export class MlAdsService {
       }
 
       if (metrics.length === 0) {
-        this.logger.log(`[ml-ads.sync] bulk empty — falling back to per-campaign metrics for ${campaignRows.length} campanha(s)`)
         for (const c of campaignRows) {
           try {
             const rows = await this.getCampaignMetricsRaw(adv.advertiser_id, c.id, dateFrom, dateTo, adv.product)
