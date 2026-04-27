@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
+import { Cron, CronExpression } from '@nestjs/schedule'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from './mercadolivre.service'
@@ -101,5 +102,18 @@ export class MlBillingFetcherService {
       this.logger.log(`[ml.billing.batch] processed=${orders.length} hits=${hits} no_data=${noData} errors=${errors}`)
     }
     return { processed: orders.length, hits, no_data: noData, errors }
+  }
+
+  /** Hourly cron — fetches up to 50 unfetched orders. With ~13.5k orders
+   * outstanding the backfill takes about 4-5 hours of cron + a manual
+   * "Buscar agora" trigger from the UI for an immediate top-up. */
+  @Cron(CronExpression.EVERY_HOUR)
+  async cron() {
+    try {
+      await this.fetchBatch(50)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      this.logger.error(`[ml.billing.cron] ${err?.message}`)
+    }
   }
 }

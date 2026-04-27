@@ -12,6 +12,7 @@ import {
   BadRequestException,
 } from '@nestjs/common'
 import { MercadolivreService } from './mercadolivre.service'
+import { MlBillingFetcherService } from './ml-billing-fetcher.service'
 import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -27,7 +28,23 @@ export class MercadolivreController {
   constructor(
     private readonly ml: MercadolivreService,
     private readonly scraper: ScraperService,
+    private readonly billingFetcher: MlBillingFetcherService,
   ) {}
+
+  // POST /ml/orders/fetch-billing — manual trigger of the buyer-billing
+  // batch. Body: { limit?: number }. Caps at 200 per request to keep
+  // ML's 1 req/sec rate-limit from blowing past a 4-min HTTP timeout.
+  @Post('orders/fetch-billing')
+  @HttpCode(HttpStatus.OK)
+  async fetchBilling(@Body() body: { limit?: number }) {
+    try {
+      const limit = Math.min(Math.max(Number(body?.limit ?? 50), 1), 200)
+      return await this.billingFetcher.fetchBatch(limit)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      return { processed: 0, hits: 0, no_data: 0, errors: 1, message: err?.message ?? 'erro' }
+    }
+  }
 
   // GET /ml/competitors/preview?url=...
   @Get('competitors/preview')
