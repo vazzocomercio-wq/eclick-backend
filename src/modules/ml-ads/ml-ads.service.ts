@@ -195,6 +195,50 @@ export class MlAdsService {
     throw lastErr
   }
 
+  /** TEMP DEBUG — hits 4 candidate v2 endpoints (legacy paths were
+   * deprecated 2026-02-26 in favour of /advertising/{SITE_ID}/...
+   * with Api-Version: 2). Logs status + first 400c of body for each so
+   * we can identify which one this account exposes. Never throws. */
+  async probeV2Endpoints(
+    advertiserId: string,
+    sampleCampaignId: string | null,
+    dateFrom: string,
+    dateTo:   string,
+  ): Promise<void> {
+    const { token } = await this.ml.getValidToken()
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Api-Version': '2',
+      Accept: 'application/json',
+    }
+    const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
+    const SITE = 'MLB'
+
+    const candidates: Array<{ tag: string; url: string; params?: Record<string, string> }> = [
+      { tag: 'A: /MLB/product_ads/campaigns',
+        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns`, params },
+      { tag: 'B: /MLB/product_ads/campaigns/metrics',
+        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns/metrics`, params },
+      ...(sampleCampaignId ? [{
+        tag: `C: /MLB/product_ads/campaigns/${sampleCampaignId}/metrics`,
+        url: `${ML_BASE}/advertising/${SITE}/product_ads/campaigns/${sampleCampaignId}/metrics`, params,
+      }] : []),
+      { tag: 'D: /advertisers?product_id=PADS (v2)',
+        url: `${ML_BASE}/advertising/advertisers`, params: { product_id: 'PADS' } },
+    ]
+
+    await Promise.all(candidates.map(async ({ tag, url, params: p }) => {
+      try {
+        const { status, data } = await axios.get(url, { headers, params: p })
+        this.logger.log(`[ml-ads.v2.probe] ${tag} → ${status} ${JSON.stringify(data).slice(0, 400)}`)
+      } catch (e: any) {
+        const status = e?.response?.status ?? '?'
+        const body   = e?.response?.data
+        this.logger.log(`[ml-ads.v2.probe] ${tag} → ${status} ${JSON.stringify(body)?.slice(0, 400) ?? e?.message}`)
+      }
+    }))
+  }
+
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
    * nothing. Stamps campaign_id onto rows that come back without it. */
   async getCampaignMetricsRaw(
@@ -345,6 +389,17 @@ export class MlAdsService {
         continue
       }
       totalCampaigns += campaignRows.length
+
+      // TEMP — probe the new /advertising/MLB/... v2 endpoints (legacy
+      // PADS paths were deprecated 2026-02-26). Result-only, doesn't change
+      // the main flow below.
+      if (adv.product === 'PADS') {
+        await this.probeV2Endpoints(
+          adv.advertiser_id,
+          campaignRows[0]?.id ?? null,
+          dateFrom, dateTo,
+        )
+      }
 
       // Metrics — first try the bulk endpoint, then fall back to per-campaign
       // calls if bulk returns nothing (some accounts only expose the latter).
