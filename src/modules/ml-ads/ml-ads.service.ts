@@ -195,16 +195,17 @@ export class MlAdsService {
     throw lastErr
   }
 
-  /** TEMP DEBUG — hypothesis: this v2 API exposes only /search endpoints
-   * with POST bodies, not REST. Probes 5 such variants. Logs status +
-   * first 500c of body. Never throws. */
+  /** TEMP DEBUG — Q (GET /campaigns/search?include_metrics=true) returned
+   * a 400 with "The [metrics] field is required if you request aggregation".
+   * That's the sentinel: this endpoint accepts metrics, we just need the
+   * full metrics= list. Probes both aggregation= and aggregation_type=
+   * variants in parallel so we know which key name the v2 endpoint wants. */
   async probeV2Endpoints(
     advertiserId: string,
-    sampleCampaignId: string | null,
+    _sampleCampaignId: string | null,
     dateFrom: string,
     dateTo:   string,
   ): Promise<void> {
-    if (!sampleCampaignId) return
     const { token } = await this.ml.getValidToken()
     const headers = {
       Authorization: `Bearer ${token}`,
@@ -212,45 +213,32 @@ export class MlAdsService {
       Accept: 'application/json',
     }
     const SITE = 'MLB'
-    const advBase = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
-    const cidNum  = Number(sampleCampaignId)
+    const url  = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads/campaigns/search`
 
-    const candidates: Array<{
-      tag: string; method: 'get' | 'post'; url: string;
-      params?: Record<string, string>; data?: unknown;
-    }> = [
-      { tag: `N: POST /items/search`,
-        method: 'post', url: `${advBase}/items/search`,
-        data: { campaign_ids: [cidNum], limit: 10 } },
-      { tag: `O: POST /reports/search`,
-        method: 'post', url: `${advBase}/reports/search`,
-        data: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', campaign_ids: [cidNum] } },
-      { tag: `P: POST /metrics/search`,
-        method: 'post', url: `${advBase}/metrics/search`,
-        data: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', campaign_ids: [cidNum] } },
-      { tag: `Q: GET /campaigns/search?include_metrics=true`,
-        method: 'get', url: `${advBase}/campaigns/search`,
-        params: {
-          date_from: dateFrom, date_to: dateTo,
-          aggregation_type: 'daily', include_metrics: 'true',
-        } },
-      { tag: `R: POST /campaigns/search (with metrics + dates in body)`,
-        method: 'post', url: `${advBase}/campaigns/search`,
-        data: {
-          date_from: dateFrom, date_to: dateTo,
-          aggregation_type: 'daily',
-          metrics: ['prints', 'clicks', 'spend', 'revenue'],
-          campaign_ids: [cidNum],
-        } },
+    const METRICS = [
+      'clicks','prints','ctr','cost','direct_amount','indirect_amount',
+      'cpc','acos','roas','direct_units_quantity','indirect_units_quantity',
+      'total_amount','units_quantity','direct_items_quantity',
+      'indirect_items_quantity','organic_units_quantity',
+      'organic_items_quantity','organic_amount',
+    ].join(',')
+
+    const candidates: Array<{ tag: string; params: Record<string, string> }> = [
+      {
+        tag: 'agg=daily',
+        params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily', metrics: METRICS },
+      },
+      {
+        tag: 'agg_type=daily',
+        params: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', metrics: METRICS },
+      },
     ]
 
-    await Promise.all(candidates.map(async (c) => {
+    await Promise.all(candidates.map(async ({ tag, params }) => {
       const log = (status: number | string, body: unknown) =>
-        this.logger.log(`[ml-ads.v2d.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 500) ?? ''}`)
+        this.logger.log(`[ml-ads.v2e.probe] ${tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
       try {
-        const res = c.method === 'get'
-          ? await axios.get(c.url, { headers, params: c.params })
-          : await axios.post(c.url, c.data ?? {}, { headers, params: c.params })
+        const res = await axios.get(url, { headers, params })
         log(res.status, res.data)
       } catch (e: any) {
         const status = e?.response?.status ?? '?'
