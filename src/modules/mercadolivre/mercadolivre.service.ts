@@ -1272,30 +1272,43 @@ export class MercadolivreService {
       })
     }
 
-    // ── Buyer billing lookup from DB (CPF/email/phone/name) ──────────────
-    // /orders/search doesn't return doc_number/email/phone — they live in
-    // the orders table after the aggregator hits /orders/{id}/billing_info.
+    // ── Buyer billing lookup from DB (CPF/email/phone/name + endereço fiscal)
+    // /orders/search doesn't return doc_number/address — they live in the
+    // orders table after the 2-step billing pipeline runs.
     const orderIds = orders.map((o: any) => String(o.id))
     const buyerByOrder: Record<string, {
-      doc_type: string | null; doc_number: string | null
-      email: string | null; phone: string | null; name: string | null
-      fetched_at: string | null
+      doc_type:        string | null
+      doc_number:      string | null
+      email:           string | null
+      phone:           string | null
+      name:            string | null
+      last_name:       string | null
+      billing_info_id: string | null
+      billing_address: Record<string, unknown> | null
+      billing_country: string | null
+      fetched_at:      string | null
     }> = {}
     if (orderIds.length > 0) {
       const { data: buyerRows } = await supabaseAdmin
         .from('orders')
-        .select('external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_billing_fetched_at')
+        .select(
+          'external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_last_name, buyer_billing_info_id, billing_address, billing_country, buyer_billing_fetched_at',
+        )
         .in('external_order_id', orderIds)
       for (const r of buyerRows ?? []) {
         const ext = r.external_order_id as string
         if (!ext || buyerByOrder[ext]) continue
         buyerByOrder[ext] = {
-          doc_type:   (r.buyer_doc_type   as string | null) ?? null,
-          doc_number: (r.buyer_doc_number as string | null) ?? null,
-          email:      (r.buyer_email      as string | null) ?? null,
-          phone:      (r.buyer_phone      as string | null) ?? null,
-          name:       (r.buyer_name       as string | null) ?? null,
-          fetched_at: (r.buyer_billing_fetched_at as string | null) ?? null,
+          doc_type:        (r.buyer_doc_type        as string | null) ?? null,
+          doc_number:      (r.buyer_doc_number      as string | null) ?? null,
+          email:           (r.buyer_email           as string | null) ?? null,
+          phone:           (r.buyer_phone           as string | null) ?? null,
+          name:            (r.buyer_name            as string | null) ?? null,
+          last_name:       (r.buyer_last_name       as string | null) ?? null,
+          billing_info_id: (r.buyer_billing_info_id as string | null) ?? null,
+          billing_address: (r.billing_address       as Record<string, unknown> | null) ?? null,
+          billing_country: (r.billing_country       as string | null) ?? null,
+          fetched_at:      (r.buyer_billing_fetched_at as string | null) ?? null,
         }
       }
     }
@@ -1350,13 +1363,17 @@ export class MercadolivreService {
           nickname:         o.buyer?.nickname ?? null,
           first_name:       o.buyer?.first_name ?? null,
           last_name:        o.buyer?.last_name ?? null,
-          // From the orders table (populated by /orders/{id}/billing_info)
-          doc_type:         dbBuyer?.doc_type   ?? null,
-          doc_number:       dbBuyer?.doc_number ?? null,
-          full_name:        dbBuyer?.name       ?? null,
-          email:            dbBuyer?.email      ?? null,
-          phone:            dbBuyer?.phone      ?? null,
-          billing_fetched_at: dbBuyer?.fetched_at ?? null,
+          // From the orders table (populated by the 2-step billing pipeline)
+          doc_type:           dbBuyer?.doc_type        ?? null,
+          doc_number:         dbBuyer?.doc_number      ?? null,
+          full_name:          dbBuyer?.name            ?? null,
+          billing_last_name:  dbBuyer?.last_name       ?? null,
+          billing_info_id:    dbBuyer?.billing_info_id ?? null,
+          billing_address:    dbBuyer?.billing_address ?? null,
+          billing_country:    dbBuyer?.billing_country ?? null,
+          email:              dbBuyer?.email           ?? null,
+          phone:              dbBuyer?.phone           ?? null,
+          billing_fetched_at: dbBuyer?.fetched_at      ?? null,
         },
         order_items: (o.order_items ?? []).map((i: any) => ({
           item_id:              i.item?.id ?? null,
