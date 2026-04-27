@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common'
+import { EnrichmentService } from './enrichment.service'
+import { EnrichmentController } from './enrichment.controller'
 import { EnrichmentCacheService } from './services/cache.service'
 import { EnrichmentRoutingService } from './services/routing.service'
 import { EnrichmentConsentService } from './services/consent.service'
@@ -7,7 +9,9 @@ import { EnrichmentCostTrackerService } from './services/cost-tracker.service'
 import { ALL_PROVIDERS, enrichmentRegistryProvider, ENRICHMENT_PROVIDERS } from './providers'
 
 @Module({
+  controllers: [EnrichmentController],
   providers: [
+    EnrichmentService,
     EnrichmentCacheService,
     EnrichmentRoutingService,
     EnrichmentConsentService,
@@ -17,6 +21,7 @@ import { ALL_PROVIDERS, enrichmentRegistryProvider, ENRICHMENT_PROVIDERS } from 
     enrichmentRegistryProvider,
   ],
   exports: [
+    EnrichmentService,
     EnrichmentCacheService,
     EnrichmentRoutingService,
     EnrichmentConsentService,
