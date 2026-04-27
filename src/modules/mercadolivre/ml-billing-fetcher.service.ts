@@ -53,15 +53,35 @@ export class MlBillingFetcherService {
     }
   }
 
+  /** Count orders still missing billing info — used by the "Buscar CPFs no ML"
+   * button in /clientes to surface remaining work. */
+  async countPending(): Promise<number> {
+    const { count } = await supabaseAdmin
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .is('buyer_billing_fetched_at', null)
+      .not('external_order_id', 'is', null)
+    return count ?? 0
+  }
+
   /** Fetch billing for up to `limit` orders that don't have it yet.
    * Sequential (1 req/sec via small sleep) to respect ML rate limit.
-   * Returns counts of processed / hits / no-data. */
-  async fetchBatch(limit = 50): Promise<{ processed: number; hits: number; no_data: number; errors: number }> {
+   * Returns per-field hit counts so the UI can show "X CPFs / Y emails". */
+  async fetchBatch(limit = 50): Promise<{
+    processed: number
+    with_cpf:  number
+    with_email: number
+    with_phone: number
+    no_data:   number
+    errors:    number
+  }> {
+    const empty = { processed: 0, with_cpf: 0, with_email: 0, with_phone: 0, no_data: 0, errors: 0 }
+
     let token: string
     try {
       ;({ token } = await this.ml.getValidToken())
     } catch {
-      return { processed: 0, hits: 0, no_data: 0, errors: 0 }
+      return empty
     }
 
     const { data: orders } = await supabaseAdmin
@@ -71,9 +91,9 @@ export class MlBillingFetcherService {
       .not('external_order_id', 'is', null)
       .limit(limit)
 
-    if (!orders?.length) return { processed: 0, hits: 0, no_data: 0, errors: 0 }
+    if (!orders?.length) return empty
 
-    let hits = 0, noData = 0, errors = 0
+    let withCpf = 0, withEmail = 0, withPhone = 0, noData = 0, errors = 0
     for (const o of orders) {
       const ext = o.external_order_id as string
       const billing = await this.fetchOne(ext, token)
@@ -91,17 +111,28 @@ export class MlBillingFetcherService {
         .from('orders').update(patch).eq('id', o.id)
 
       if (upErr) { errors++; continue }
-      if (billing?.doc_number || billing?.email || billing?.phone) hits++
-      else noData++
+      if (billing?.doc_number) withCpf++
+      if (billing?.email)      withEmail++
+      if (billing?.phone)      withPhone++
+      if (!billing?.doc_number && !billing?.email && !billing?.phone) noData++
 
       // 1 req/sec budget for the ML billing endpoint
       await new Promise(r => setTimeout(r, 1100))
     }
 
-    if (hits + noData + errors > 0) {
-      this.logger.log(`[ml.billing.batch] processed=${orders.length} hits=${hits} no_data=${noData} errors=${errors}`)
+    if (withCpf + withEmail + withPhone + noData + errors > 0) {
+      this.logger.log(
+        `[ml.billing.batch] processed=${orders.length} cpf=${withCpf} email=${withEmail} phone=${withPhone} no_data=${noData} errors=${errors}`,
+      )
     }
-    return { processed: orders.length, hits, no_data: noData, errors }
+    return {
+      processed:  orders.length,
+      with_cpf:   withCpf,
+      with_email: withEmail,
+      with_phone: withPhone,
+      no_data:    noData,
+      errors,
+    }
   }
 
   /** Hourly cron — fetches up to 50 unfetched orders. With ~13.5k orders

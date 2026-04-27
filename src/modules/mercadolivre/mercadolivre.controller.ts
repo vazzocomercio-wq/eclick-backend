@@ -34,6 +34,7 @@ export class MercadolivreController {
   // POST /ml/orders/fetch-billing — manual trigger of the buyer-billing
   // batch. Body: { limit?: number }. Caps at 200 per request to keep
   // ML's 1 req/sec rate-limit from blowing past a 4-min HTTP timeout.
+  // The /clientes button can be re-clicked to drain the queue.
   @Post('orders/fetch-billing')
   @HttpCode(HttpStatus.OK)
   async fetchBilling(@Body() body: { limit?: number }) {
@@ -42,7 +43,22 @@ export class MercadolivreController {
       return await this.billingFetcher.fetchBatch(limit)
     } catch (e: unknown) {
       const err = e as { message?: string }
-      return { processed: 0, hits: 0, no_data: 0, errors: 1, message: err?.message ?? 'erro' }
+      return {
+        processed: 0, with_cpf: 0, with_email: 0, with_phone: 0,
+        no_data: 0, errors: 1, message: err?.message ?? 'erro',
+      }
+    }
+  }
+
+  // GET /ml/orders/billing-pending-count — # of orders still missing
+  // buyer_billing_fetched_at. Drives the counter on the /clientes button.
+  @Get('orders/billing-pending-count')
+  async fetchBillingPendingCount() {
+    try {
+      const count = await this.billingFetcher.countPending()
+      return { count }
+    } catch {
+      return { count: 0 }
     }
   }
 
