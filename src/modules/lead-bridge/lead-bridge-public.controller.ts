@@ -2,6 +2,8 @@ import { Controller, Get, Post, Param, Body, Req, Logger, HttpException } from '
 import type { Request } from 'express'
 import { LeadBridgeService } from './lead-bridge.service'
 import { CustomerIdentityService } from '../customers/customer-identity.service'
+import { CpfEnrichmentService } from './services/cpf-enrichment.service'
+import { WhatsAppTriggerService } from './services/whatsapp-trigger.service'
 import { supabaseAdmin } from '../../common/supabase'
 
 @Controller('lb')
@@ -11,6 +13,8 @@ export class LeadBridgePublicController {
   constructor(
     private readonly svc: LeadBridgeService,
     private readonly customers: CustomerIdentityService,
+    private readonly cpfEnrich: CpfEnrichmentService,
+    private readonly waTrigger: WhatsAppTriggerService,
   ) {}
 
   /** GET /lb/:token — landing-page metadata. Logs a scan as a side effect. */
@@ -80,6 +84,16 @@ export class LeadBridgePublicController {
             .update({ unified_customer_id: customer.id })
             .eq('id', result.conversion.id)
         }
+      }
+
+      // Fire-and-forget side effects — never block the user response.
+      const convId = result.conversion.id as string
+      if (body.consent_enrichment && body.cpf) {
+        this.cpfEnrich.enrich(convId).catch(() => { /* logged inside */ })
+      }
+      if (body.consent_whatsapp && phone) {
+        this.waTrigger.sendWelcome(convId).catch(() => { /* logged inside */ })
+        this.waTrigger.startJourneyRun(convId, result.link.channel as string).catch(() => { /* logged inside */ })
       }
 
       return {
