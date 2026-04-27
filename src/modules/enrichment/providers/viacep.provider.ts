@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { Injectable } from '@nestjs/common'
-import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, elapsed } from './base-provider'
+import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckResult, EMPTY_RESULT, elapsed } from './base-provider'
 
 /**
  * ViaCEP — public Correios CEP lookup.
@@ -13,6 +13,16 @@ import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, 
 @Injectable()
 export class ViaCepProvider extends BaseEnrichmentProvider {
   readonly code = 'viacep'
+
+  async healthCheck(_creds: ProviderCreds): Promise<HealthCheckResult> {
+    try {
+      const { data } = await axios.get('https://viacep.com.br/ws/01001000/json/', { timeout: 5_000 })
+      return data?.cep ? { ok: true, message: 'Conectado · serviço público dos Correios' }
+                       : { ok: false, message: 'Resposta inesperada' }
+    } catch (e: any) {
+      return { ok: false, message: e?.message ?? 'Falha ao consultar' }
+    }
+  }
 
   async enrichCPF(_cpf: string, _creds: ProviderCreds): Promise<EnrichmentResult> { void _cpf; return EMPTY_RESULT }
   async enrichCNPJ(_cnpj: string, _creds: ProviderCreds): Promise<EnrichmentResult> { void _cnpj; return EMPTY_RESULT }

@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { Injectable } from '@nestjs/common'
-import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, elapsed } from './base-provider'
+import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckResult, EMPTY_RESULT, elapsed } from './base-provider'
 
 /**
  * Big Data Corp — pessoas + empresas.
@@ -37,6 +37,16 @@ export class BigDataCorpProvider extends BaseEnrichmentProvider {
       return { ok: true, data: data ?? {} }
     } catch (e: any) {
       return { ok: false, error: `${e?.response?.status ?? ''} ${e?.message ?? ''}`.trim() }
+    }
+  }
+
+  async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
+    const auth = this.parseAuth(creds)
+    if (!auth) return { ok: false, message: 'Formato esperado: AccessToken:TokenId' }
+    return {
+      ok: true,
+      message: 'Credenciais configuradas · Big Data Corp não expõe endpoint gratuito de saldo',
+      metadata: { token_prefix: auth.accessToken.slice(0, 6) + '…' },
     }
   }
 

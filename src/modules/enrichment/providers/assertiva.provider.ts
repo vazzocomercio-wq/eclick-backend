@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { Injectable } from '@nestjs/common'
-import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, elapsed } from './base-provider'
+import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckResult, EMPTY_RESULT, elapsed } from './base-provider'
 
 /**
  * Assertiva Soluções — Localize CPF/CNPJ.
@@ -62,6 +62,15 @@ export class AssertivaProvider extends BaseEnrichmentProvider {
         state:        String(e0.uf ?? ''),
       } : undefined,
     }
+  }
+
+  async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
+    if (!creds.api_key || !creds.api_key.includes(':')) {
+      return { ok: false, message: 'Formato esperado: client_id:client_secret' }
+    }
+    const token = await this.getToken(creds)
+    if (!token) return { ok: false, message: 'OAuth falhou — credenciais inválidas' }
+    return { ok: true, message: 'OAuth ok · client_credentials válido' }
   }
 
   async enrichCPF(cpf: string, creds: ProviderCreds): Promise<EnrichmentResult> {

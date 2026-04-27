@@ -164,19 +164,17 @@ export class EnrichmentService {
     return { ...this.emptyResult(), quality: 'error', error, duration_ms: Date.now() - t0, provider: null, cache_hit: false, attempts: [] }
   }
 
-  /** Test provider credentials by hitting a benign endpoint. */
-  async testProvider(orgId: string, code: string): Promise<{ ok: boolean; message: string }> {
+  /** Test provider credentials via the per-provider healthCheck — each
+   * provider hits a free endpoint (balance/OAuth/shape) so the test
+   * never consumes a paid quota. */
+  async testProvider(orgId: string, code: string): Promise<{ ok: boolean; message: string; metadata?: Record<string, unknown> }> {
     const provider = this.registry.get(code)
     if (!provider) return { ok: false, message: 'Provedor desconhecido' }
     if (code === 'viacep') {
-      const r = await provider.enrichCEP('01001000', { api_key: null, api_secret: null, base_url: null })
-      return { ok: r.success, message: r.success ? 'OK' : (r.error ?? 'Sem resposta') }
+      return await provider.healthCheck({ api_key: null, api_secret: null, base_url: null })
     }
     const row = await this.cost.getProvider(orgId, code)
     if (!row || !row.api_key) return { ok: false, message: 'Sem api_key configurada' }
-    // Use CEP probe when supported (free), else attempt a CPF dry-run
-    const cepRes = await provider.enrichCEP('01001000', { api_key: row.api_key, api_secret: row.api_secret, base_url: row.base_url })
-    if (cepRes.quality !== 'empty') return { ok: cepRes.quality !== 'error', message: cepRes.error ?? 'OK' }
-    return { ok: true, message: 'Credenciais aceitas (CEP não suportado por este provedor — sem cobrança)' }
+    return await provider.healthCheck({ api_key: row.api_key, api_secret: row.api_secret, base_url: row.base_url })
   }
 }

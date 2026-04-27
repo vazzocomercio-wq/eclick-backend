@@ -55,9 +55,18 @@ export interface ProviderCreds {
   base_url?:   string | null
 }
 
-/** Every provider implements all 6 methods. Methods unsupported by a
- * given provider should return { success:false, quality:'empty' } so
- * the orchestrator falls through to the next fallback in the cascade. */
+/** Result of a credentials health-check. NEVER consumes a paid quota —
+ * each provider's implementation hits a free endpoint (balance, OAuth,
+ * shape validation) so the user can verify the api_key safely. */
+export interface HealthCheckResult {
+  ok:      boolean
+  message: string
+  metadata?: Record<string, unknown>
+}
+
+/** Every provider implements all 6 enrichment methods + healthCheck.
+ * Methods unsupported by a given provider should return EMPTY_RESULT
+ * so the orchestrator falls through to the next fallback. */
 export abstract class BaseEnrichmentProvider {
   abstract readonly code: string
   abstract enrichCPF(cpf: string, creds: ProviderCreds): Promise<EnrichmentResult>
@@ -66,6 +75,14 @@ export abstract class BaseEnrichmentProvider {
   abstract validateEmail(email: string, creds: ProviderCreds): Promise<EnrichmentResult>
   abstract validateWhatsApp(phone: string, creds: ProviderCreds): Promise<EnrichmentResult>
   abstract enrichCEP(cep: string, creds: ProviderCreds): Promise<EnrichmentResult>
+
+  /** Free credentials probe used by the "Testar" button. Defaults to
+   * api_key shape validation; providers with a real free endpoint
+   * (balance, OAuth token) override this. */
+  async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
+    if (!creds.api_key) return { ok: false, message: 'Sem api_key configurada' }
+    return { ok: true, message: 'Credenciais configuradas — sem endpoint gratuito de teste para este provedor' }
+  }
 }
 
 /** Cheap timing helper: returns ms elapsed since `t0`. */

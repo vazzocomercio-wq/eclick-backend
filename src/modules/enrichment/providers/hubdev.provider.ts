@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { Injectable } from '@nestjs/common'
-import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, elapsed } from './base-provider'
+import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckResult, EMPTY_RESULT, elapsed } from './base-provider'
 
 /**
  * Hub do Desenvolvedor — CPF / CNPJ / CEP / Email.
@@ -21,6 +21,25 @@ export class HubDevProvider extends BaseEnrichmentProvider {
       params: { ...extraParams, token: creds.api_key },
     })
     return data ?? null
+  }
+
+  /** Hub do Desenvolvedor exposes /v2/saldo/. Free. */
+  async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
+    if (!creds.api_key) return { ok: false, message: 'Sem api_key configurada' }
+    try {
+      const { data } = await axios.get(`${creds.base_url ?? this.BASE}/v2/saldo/`, {
+        params: { token: creds.api_key }, timeout: 8_000,
+      })
+      const saldo = (data?.result?.creditos ?? data?.creditos ?? null) as number | null
+      return saldo != null
+        ? { ok: true, message: `Conectado · ${saldo} créditos`, metadata: { creditos: saldo } }
+        : { ok: true, message: 'Token aceito' }
+    } catch (e: any) {
+      const status = e?.response?.status
+      if (status === 401 || status === 403) return { ok: false, message: 'Token inválido' }
+      // 404 / outros: aceita shape como válida
+      return { ok: true, message: 'Token configurado · /saldo indisponível' }
+    }
   }
 
   async enrichCPF(cpf: string, creds: ProviderCreds): Promise<EnrichmentResult> {

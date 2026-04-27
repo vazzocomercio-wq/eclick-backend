@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { Injectable } from '@nestjs/common'
-import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, EMPTY_RESULT, elapsed } from './base-provider'
+import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckResult, EMPTY_RESULT, elapsed } from './base-provider'
 
 /**
  * Direct Data — CadastroPessoaFisica + CadastroPessoaFisicaPorTelefone + Cep.
@@ -69,6 +69,26 @@ export class DirectDataProvider extends BaseEnrichmentProvider {
     const meta = (body.metaDados ?? body.metadados) as Record<string, unknown> | undefined
     if (meta && Number(meta.resultadoId ?? 0) !== 1) return null
     return (body.retorno ?? null) as Record<string, unknown> | null
+  }
+
+  /** Direct Data exposes /api/Saldo for credit lookup. Free.
+   * If unavailable, fall back to a shape-only check. */
+  async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
+    if (!creds.api_key) return { ok: false, message: 'Sem api_key configurada' }
+    try {
+      const { data } = await axios.get(`${creds.base_url ?? this.BASE}/Saldo`, {
+        params: { TOKEN: creds.api_key }, timeout: 8_000,
+      })
+      const saldo = (data?.retorno?.saldo ?? data?.saldo ?? null) as number | null
+      if (saldo != null) return { ok: true, message: `Conectado · saldo R$ ${Number(saldo).toFixed(2)}`, metadata: { saldo } }
+      return { ok: true, message: 'Conectado · resposta sem campo saldo' }
+    } catch (e: any) {
+      const status = e?.response?.status
+      // 404 means /Saldo doesn't exist on this account — accept the token shape silently
+      if (status === 404) return { ok: true, message: 'Token aceito · /Saldo não disponível' }
+      if (status === 401 || status === 403) return { ok: false, message: 'TOKEN inválido' }
+      return { ok: false, message: e?.message ?? 'Falha na conexão' }
+    }
   }
 
   async enrichCPF(cpf: string, creds: ProviderCreds): Promise<EnrichmentResult> {
