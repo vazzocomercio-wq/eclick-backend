@@ -183,17 +183,36 @@ export class CustomerIdentityService {
     search?:            string
     channel?:           string
     limit?:             number
+    page?:              number
+    per_page?:          number
+    sort_by?:           string
+    sort_dir?:          'asc' | 'desc'
     enrichment_status?: string                  // 'pending' | 'partial' | 'full' | 'failed'
     has_cpf?:           boolean
     has_phone?:         boolean
     has_whatsapp?:      boolean
     has_email?:         boolean
+    is_vip?:            boolean                 // tags @> ['vip']
+    is_blocked?:        boolean                 // tags @> ['blocked']
+    /** When true, returns array shape (legacy callers). When false, returns
+     * paginated envelope { data, total, page, per_page }. */
+    legacy?:            boolean
   } = {}) {
+    const sortBy  = filters.sort_by  ?? 'last_contact_at'
+    const sortDir = filters.sort_dir === 'asc'
+
+    const isLegacy = filters.legacy === true || (!filters.page && !filters.per_page)
+    const perPage  = isLegacy
+      ? Math.min(Math.max(filters.limit ?? 200, 1), 1000)
+      : Math.min(Math.max(filters.per_page ?? 25, 1), 200)
+    const page = isLegacy ? 1 : Math.max(filters.page ?? 1, 1)
+    const offset = (page - 1) * perPage
+
     let q = supabaseAdmin
       .from('unified_customers')
-      .select('*')
-      .order('last_contact_at', { ascending: false })
-      .limit(filters.limit ?? 200)
+      .select('*', { count: isLegacy ? undefined : 'exact' })
+      .order(sortBy, { ascending: sortDir })
+      .range(offset, offset + perPage - 1)
 
     if (filters.search) {
       const s = filters.search.replace(/%/g, '')
@@ -205,10 +224,14 @@ export class CustomerIdentityService {
     if (filters.has_phone)          q = q.not('phone', 'is', null)
     if (filters.has_whatsapp)       q = q.not('whatsapp_id', 'is', null)
     if (filters.has_email)          q = q.not('email', 'is', null)
+    if (filters.is_vip)             q = q.contains('tags', ['vip'])
+    if (filters.is_blocked)         q = q.contains('tags', ['blocked'])
 
-    const { data, error } = await q
+    const { data, error, count } = await q
     if (error) throw new HttpException(error.message, 500)
-    return data ?? []
+
+    if (isLegacy) return data ?? []
+    return { data: data ?? [], total: count ?? 0, page, per_page: perPage }
   }
 
   async get(id: string) {
@@ -232,6 +255,28 @@ export class CustomerIdentityService {
       .single()
     if (error) throw new HttpException(error.message, 400)
     return data
+  }
+
+  /** Toggle a tag on/off — used by VIP / Blocked toggles in /clientes. */
+  async setTag(id: string, tag: string, on: boolean) {
+    const { data: cur } = await supabaseAdmin
+      .from('unified_customers')
+      .select('tags')
+      .eq('id', id)
+      .maybeSingle()
+    const tags = new Set<string>((cur?.tags as string[] | null) ?? [])
+    if (on) tags.add(tag); else tags.delete(tag)
+    return this.update(id, { tags: [...tags] })
+  }
+
+  /** Hard delete — used by /clientes row "Excluir" action. */
+  async remove(id: string) {
+    const { error } = await supabaseAdmin
+      .from('unified_customers')
+      .delete()
+      .eq('id', id)
+    if (error) throw new HttpException(error.message, 400)
+    return { ok: true }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
