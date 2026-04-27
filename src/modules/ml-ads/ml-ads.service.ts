@@ -162,17 +162,26 @@ export class MlAdsService {
         metrics:     this.PADS_METRIC_FIELDS,
       }
     } else {
+      // BADS keeps the legacy aggregation_type param — flipping it to
+      // `aggregation` made the call 400 in the last commit.
       url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
       params = {
-        date_from:   dateFrom,
-        date_to:     dateTo,
-        aggregation: 'daily',
+        date_from:        dateFrom,
+        date_to:          dateTo,
+        aggregation_type: 'daily',
       }
     }
 
-    const { data } = await axios.get(url, { headers, params })
-    this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId} bulk: ${JSON.stringify(data).slice(0, 800)}`)
-    return this.extractMetricRows(data)
+    try {
+      const { data } = await axios.get(url, { headers, params })
+      this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId} bulk: ${JSON.stringify(data).slice(0, 800)}`)
+      return this.extractMetricRows(data)
+    } catch (e: any) {
+      const status = e?.response?.status ?? '?'
+      const body   = e?.response?.data
+      this.logger.error(`[ml-ads.metrics.bulk.${status}] ${product}/${advertiserId} url=${url} params=${JSON.stringify(params)} body=${JSON.stringify(body)}`)
+      throw e
+    }
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
@@ -200,15 +209,25 @@ export class MlAdsService {
     } else {
       url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/${campaignId}/metrics`
       params = {
-        date_from:   dateFrom,
-        date_to:     dateTo,
-        aggregation: 'daily',
+        date_from:        dateFrom,
+        date_to:          dateTo,
+        aggregation_type: 'daily',
       }
     }
 
-    const { data } = await axios.get(url, { headers, params })
-    const rows = this.extractMetricRows(data)
-    return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
+    // TEMP — log full URL so we can see exactly what's being requested
+    this.logger.log(`[ml-ads.per-camp.url] ${product}/${advertiserId}/${campaignId} GET ${url}?${new URLSearchParams(params).toString()}`)
+
+    try {
+      const { data } = await axios.get(url, { headers, params })
+      const rows = this.extractMetricRows(data)
+      return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
+    } catch (e: any) {
+      const status = e?.response?.status ?? '?'
+      const body   = e?.response?.data
+      this.logger.error(`[ml-ads.per-camp.${status}] ${product}/${advertiserId}/${campaignId} body=${JSON.stringify(body)}`)
+      throw e
+    }
   }
 
   /** Tolerant on shape. PADS returns an array of per-campaign rows; BADS
