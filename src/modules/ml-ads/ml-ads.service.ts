@@ -195,9 +195,9 @@ export class MlAdsService {
     throw lastErr
   }
 
-  /** TEMP DEBUG — probes 5 candidate v2 metrics endpoints under the
-   * confirmed-working path /advertising/MLB/advertisers/{id}/product_ads/...
-   * Logs status + first 500c of body. Never throws. */
+  /** TEMP DEBUG — hypothesis: this v2 API exposes only /search endpoints
+   * with POST bodies, not REST. Probes 5 such variants. Logs status +
+   * first 500c of body. Never throws. */
   async probeV2Endpoints(
     advertiserId: string,
     sampleCampaignId: string | null,
@@ -211,31 +211,42 @@ export class MlAdsService {
       'Api-Version': '2',
       Accept: 'application/json',
     }
-    const dateParams = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
     const SITE = 'MLB'
     const advBase = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
+    const cidNum  = Number(sampleCampaignId)
 
     const candidates: Array<{
       tag: string; method: 'get' | 'post'; url: string;
       params?: Record<string, string>; data?: unknown;
     }> = [
-      { tag: `I: GET /campaigns/${sampleCampaignId}`,
-        method: 'get', url: `${advBase}/campaigns/${sampleCampaignId}` },
-      { tag: `J: GET /campaigns/${sampleCampaignId}/metrics`,
-        method: 'get', url: `${advBase}/campaigns/${sampleCampaignId}/metrics`, params: dateParams },
-      { tag: `K: GET /items?campaign_id=${sampleCampaignId}`,
-        method: 'get', url: `${advBase}/items`, params: { campaign_id: sampleCampaignId } },
-      { tag: `L: GET /items/metrics?campaign_ids=${sampleCampaignId}`,
-        method: 'get', url: `${advBase}/items/metrics`,
-        params: { ...dateParams, campaign_ids: sampleCampaignId } },
-      { tag: 'M: POST /campaigns/metrics/search',
-        method: 'post', url: `${advBase}/campaigns/metrics/search`,
-        data: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', campaign_ids: [Number(sampleCampaignId)] } },
+      { tag: `N: POST /items/search`,
+        method: 'post', url: `${advBase}/items/search`,
+        data: { campaign_ids: [cidNum], limit: 10 } },
+      { tag: `O: POST /reports/search`,
+        method: 'post', url: `${advBase}/reports/search`,
+        data: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', campaign_ids: [cidNum] } },
+      { tag: `P: POST /metrics/search`,
+        method: 'post', url: `${advBase}/metrics/search`,
+        data: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', campaign_ids: [cidNum] } },
+      { tag: `Q: GET /campaigns/search?include_metrics=true`,
+        method: 'get', url: `${advBase}/campaigns/search`,
+        params: {
+          date_from: dateFrom, date_to: dateTo,
+          aggregation_type: 'daily', include_metrics: 'true',
+        } },
+      { tag: `R: POST /campaigns/search (with metrics + dates in body)`,
+        method: 'post', url: `${advBase}/campaigns/search`,
+        data: {
+          date_from: dateFrom, date_to: dateTo,
+          aggregation_type: 'daily',
+          metrics: ['prints', 'clicks', 'spend', 'revenue'],
+          campaign_ids: [cidNum],
+        } },
     ]
 
     await Promise.all(candidates.map(async (c) => {
       const log = (status: number | string, body: unknown) =>
-        this.logger.log(`[ml-ads.v2c.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 500) ?? ''}`)
+        this.logger.log(`[ml-ads.v2d.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 500) ?? ''}`)
       try {
         const res = c.method === 'get'
           ? await axios.get(c.url, { headers, params: c.params })
