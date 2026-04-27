@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
-import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
+import { MercadoLivreClient, MlOrder, MlBuyerBilling } from '../clients/mercado-livre-client'
 
 interface ProductInfo {
   product_id: string
@@ -17,8 +17,12 @@ interface IngestionStats {
   errors: Array<{ date: string; error: string }>
 }
 
+type BuyerSnapshot = MlBuyerBilling & { fetched_at: string | null }
+
 @Injectable()
 export class OrdersIngestionService {
+  private readonly logger = new Logger(OrdersIngestionService.name)
+
   constructor(private readonly mlClient: MercadoLivreClient) {}
 
   async ingestDateRange(
@@ -64,8 +68,14 @@ export class OrdersIngestionService {
           })
         }
 
+        // Fetch buyer billing for orders we haven't billed yet (CPF/email/phone).
+        // Reuses any cached value already in DB so we never re-hit ML for the
+        // same order. New orders get 1.1s pacing → no 429s on the billing
+        // endpoint. The downstream sync_buyer_to_unified trigger fires per row.
+        const buyerMap = await this.fetchBuyersForOrders(orders, token, stats)
+
         // Build rows for every order item
-        const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId)
+        const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId, buyerMap)
 
         if (rows.length > 0) {
           const BATCH = 100
@@ -107,12 +117,72 @@ export class OrdersIngestionService {
     return stats
   }
 
+  /** For every order in this batch, return the buyer info we'll attach to
+   * each row. Reads existing rows from `orders` first so already-fetched
+   * orders don't re-hit ML; new ones are fetched serially with 1.1s pacing.
+   * On any failure we still stamp `buyer_billing_fetched_at = now()` so the
+   * row is treated as "tried" and not retried by the manual top-up button. */
+  private async fetchBuyersForOrders(
+    orders: MlOrder[],
+    token: string,
+    stats: IngestionStats,
+  ): Promise<Map<string, BuyerSnapshot>> {
+    const out = new Map<string, BuyerSnapshot>()
+    if (orders.length === 0) return out
+
+    const externalIds = [...new Set(orders.map(o => String(o.id)))]
+
+    // 1. What's already cached in DB (prevents re-fetching across re-syncs)
+    const { data: existing } = await supabaseAdmin
+      .from('orders')
+      .select('external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_billing_fetched_at')
+      .in('external_order_id', externalIds)
+      .not('buyer_billing_fetched_at', 'is', null)
+
+    for (const row of existing ?? []) {
+      out.set(row.external_order_id as string, {
+        doc_type:   (row.buyer_doc_type   as string | null) ?? null,
+        doc_number: (row.buyer_doc_number as string | null) ?? null,
+        email:      (row.buyer_email      as string | null) ?? null,
+        phone:      (row.buyer_phone      as string | null) ?? null,
+        name:       (row.buyer_name       as string | null) ?? null,
+        fetched_at: (row.buyer_billing_fetched_at as string | null) ?? null,
+      })
+    }
+
+    // 2. For the rest, fetch billing serially at ~1 req/sec
+    const toFetch = externalIds.filter(id => !out.has(id))
+    if (toFetch.length === 0) return out
+
+    let withCpf = 0, miss = 0
+    for (const id of toFetch) {
+      const billing = await this.mlClient.fetchBillingInfo(token, Number(id))
+      stats.apiCalls++
+      out.set(id, {
+        doc_type:   billing?.doc_type   ?? null,
+        doc_number: billing?.doc_number ?? null,
+        email:      billing?.email      ?? null,
+        phone:      billing?.phone      ?? null,
+        name:       billing?.name       ?? null,
+        fetched_at: new Date().toISOString(),
+      })
+      if (billing?.doc_number) withCpf++
+      else miss++
+      // 1.1s budget for ML's billing endpoint (1 req/sec)
+      await new Promise(r => setTimeout(r, 1100))
+    }
+
+    this.logger.log(`[aggregator.billing] fetched=${toFetch.length} cpf=${withCpf} no_data=${miss}`)
+    return out
+  }
+
   private buildOrderRows(
     orgId: string,
     orders: MlOrder[],
     costMap: Map<number, number>,
     listingMap: Map<string, ProductInfo>,
     sellerId: number,
+    buyerMap: Map<string, BuyerSnapshot> = new Map(),
   ): Record<string, unknown>[] {
     const rows: Record<string, unknown>[] = []
     const now = new Date().toISOString()
@@ -120,6 +190,13 @@ export class OrdersIngestionService {
     for (const order of orders) {
       const orderShippingCost = order.shipping?.id ? (costMap.get(order.shipping.id) ?? 0) : 0
       const orderTotal = order.total_amount ?? 1
+      const buyer = buyerMap.get(String(order.id))
+      // Buyer name fallback: billing name → first+last → nickname
+      const buyerNameFallback =
+        buyer?.name ??
+        ([order.buyer?.first_name, order.buyer?.last_name].filter(Boolean).join(' ').trim() || null) ??
+        order.buyer?.nickname ??
+        null
 
       for (const item of order.order_items ?? []) {
         const listingId = item.item?.id ?? ''
@@ -165,8 +242,13 @@ export class OrdersIngestionService {
           contribution_margin:     cm != null ? Math.round(cm * 100) / 100 : null,
           contribution_margin_pct: cmPct != null ? Math.round(cmPct * 100) / 100 : null,
           status:                  order.status,
-          buyer_name:              order.buyer?.nickname ?? null,
+          buyer_name:              buyerNameFallback,
           buyer_username:          order.buyer?.nickname ?? null,
+          buyer_doc_type:          buyer?.doc_type   ?? null,
+          buyer_doc_number:        buyer?.doc_number ?? null,
+          buyer_email:             buyer?.email      ?? order.buyer?.email ?? null,
+          buyer_phone:             buyer?.phone      ?? null,
+          buyer_billing_fetched_at: buyer?.fetched_at ?? null,
           sold_at:                 soldAt,
           raw_data: {
             order_id:     order.id,
@@ -183,8 +265,10 @@ export class OrdersIngestionService {
               sale_fee:   item.sale_fee,
             },
             buyer: {
-              id:       order.buyer?.id,
-              nickname: order.buyer?.nickname,
+              id:         order.buyer?.id,
+              nickname:   order.buyer?.nickname,
+              first_name: order.buyer?.first_name ?? null,
+              last_name:  order.buyer?.last_name  ?? null,
             },
             shipping_id: order.shipping?.id ?? null,
           },

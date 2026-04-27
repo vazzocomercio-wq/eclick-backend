@@ -33,9 +33,18 @@ export interface MlOrder {
     nickname: string
     first_name?: string
     last_name?: string
+    email?: string
   }
   shipping: { id: number } | null
   payments: Array<{ payment_method_id: string; payment_type: string }>
+}
+
+export interface MlBuyerBilling {
+  doc_type:   string | null
+  doc_number: string | null
+  email:      string | null
+  phone:      string | null
+  name:       string | null
 }
 
 @Injectable()
@@ -118,6 +127,39 @@ export class MercadoLivreClient {
       return (data?.senders?.[0]?.cost as number) ?? 0
     } catch {
       return 0
+    }
+  }
+
+  /** Pull billing info for one order. Caller is responsible for the 1 req/sec
+   * pacing — this method does NOT go through the shared rate-limiter so it
+   * doesn't compete with order-search and shipment bursts. Never throws:
+   * 401/403/404 (token expired or order out of CPF visibility window) and
+   * timeouts all return null. */
+  async fetchBillingInfo(token: string, externalOrderId: number): Promise<MlBuyerBilling | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await axios.get<any>(`${ML_BASE}/orders/${externalOrderId}/billing_info`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 8_000,
+      })
+      const buyer    = (data?.buyer ?? {}) as Record<string, unknown>
+      const billing  = (buyer.billing_info ?? {}) as Record<string, unknown>
+      const phoneObj = (buyer.phone ?? {}) as Record<string, unknown>
+      const phoneStr = phoneObj.area_code && phoneObj.number
+        ? `${phoneObj.area_code}${phoneObj.number}`
+        : ((phoneObj.number as string) ?? null)
+      const fullName = [buyer.first_name, buyer.last_name].filter(Boolean).join(' ').trim() || null
+      return {
+        doc_type:   (billing.doc_type as string)   ?? null,
+        doc_number: ((billing.doc_number as string) ?? '').replace(/\D/g, '') || null,
+        email:      (buyer.email as string)        ?? null,
+        phone:      phoneStr ? phoneStr.replace(/\D/g, '') : null,
+        name:       fullName,
+      }
+    } catch {
+      // 401/403/404/timeout/network — any failure: return null and let the
+      // caller stamp buyer_billing_fetched_at anyway so we don't retry forever.
+      return null
     }
   }
 }
