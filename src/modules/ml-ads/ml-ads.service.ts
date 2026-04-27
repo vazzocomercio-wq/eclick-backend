@@ -195,11 +195,10 @@ export class MlAdsService {
     throw lastErr
   }
 
-  /** TEMP DEBUG — Q (GET /campaigns/search?include_metrics=true) returned
-   * a 400 with "The [metrics] field is required if you request aggregation".
-   * That's the sentinel: this endpoint accepts metrics, we just need the
-   * full metrics= list. Probes both aggregation= and aggregation_type=
-   * variants in parallel so we know which key name the v2 endpoint wants. */
+  /** TEMP DEBUG — the bulk metrics= list got rejected wholesale ("Metrics
+   * clicks,prints,... is not valid"), so the API doesn't tell us which
+   * names are wrong. Probe one metric at a time in parallel so any 200s
+   * pinpoint the names that actually work. */
   async probeV2Endpoints(
     advertiserId: string,
     _sampleCampaignId: string | null,
@@ -215,35 +214,23 @@ export class MlAdsService {
     const SITE = 'MLB'
     const url  = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads/campaigns/search`
 
-    const METRICS = [
-      'clicks','prints','ctr','cost','direct_amount','indirect_amount',
-      'cpc','acos','roas','direct_units_quantity','indirect_units_quantity',
-      'total_amount','units_quantity','direct_items_quantity',
-      'indirect_items_quantity','organic_units_quantity',
-      'organic_items_quantity','organic_amount',
-    ].join(',')
-
-    const candidates: Array<{ tag: string; params: Record<string, string> }> = [
-      {
-        tag: 'agg=daily',
-        params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily', metrics: METRICS },
-      },
-      {
-        tag: 'agg_type=daily',
-        params: { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', metrics: METRICS },
-      },
+    const candidateMetrics = [
+      'clicks', 'prints', 'impressions',
+      'cost', 'spend', 'consumed_budget',
     ]
 
-    await Promise.all(candidates.map(async ({ tag, params }) => {
-      const log = (status: number | string, body: unknown) =>
-        this.logger.log(`[ml-ads.v2e.probe] ${tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
+    await Promise.all(candidateMetrics.map(async (m) => {
+      const params = {
+        date_from: dateFrom, date_to: dateTo,
+        aggregation: 'daily', metrics: m,
+      }
       try {
         const res = await axios.get(url, { headers, params })
-        log(res.status, res.data)
+        this.logger.log(`[ml-ads.metrics.probe] ${m} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 400) ?? ''}`)
       } catch (e: any) {
         const status = e?.response?.status ?? '?'
         const body   = e?.response?.data ?? e?.message
-        log(status, body)
+        this.logger.log(`[ml-ads.metrics.probe] ${m} → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
       }
     }))
   }
