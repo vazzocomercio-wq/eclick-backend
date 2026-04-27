@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards, Logger } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards, Logger, HttpCode, HttpStatus } from '@nestjs/common'
 import { AdsAiService, AdsAiSettings } from './ads-ai.service'
+import { InsightDetectorService } from './services/insight-detector.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -10,7 +11,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 export class AdsAiController {
   private readonly logger = new Logger(AdsAiController.name)
 
-  constructor(private readonly svc: AdsAiService) {}
+  constructor(
+    private readonly svc: AdsAiService,
+    private readonly detector: InsightDetectorService,
+  ) {}
 
   private async safe<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
     try { return await fn() } catch (e: unknown) {
@@ -44,6 +48,14 @@ export class AdsAiController {
   ) {
     return this.safe('insights.list',
       () => this.svc.listInsights(u.orgId ?? '', { status, severity, type }), [])
+  }
+
+  @Post('insights/detect')
+  @HttpCode(HttpStatus.OK)
+  detect(@ReqUser() u: ReqUserPayload) {
+    return this.safe('insights.detect',
+      async () => ({ found: await this.detector.detect(u.orgId ?? '') }),
+      { found: 0 })
   }
 
   @Patch('insights/:id/dismiss')
