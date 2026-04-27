@@ -269,24 +269,6 @@ export class MercadoLivreClient {
     return { billing: null, billingInfoId, log }
   }
 
-  /** @deprecated Substitua por `fetchCompleteBillingForOrder`. Mantido para
-   * compatibilidade até C2 atualizar todos os consumidores. */
-  async fetchBillingInfo(token: string, externalOrderId: number): Promise<MlBuyerBilling | null> {
-    const result = await this.fetchCompleteBillingForOrder(token, externalOrderId)
-    if (!result.billing) return null
-    const b = result.billing
-    const docNumber = b.identification?.number ?? b.doc_number ?? null
-    const docType   = b.identification?.type   ?? b.doc_type   ?? null
-    const fullName  = [b.name, b.last_name].filter(Boolean).join(' ').trim() || null
-    return {
-      doc_type:   docType,
-      doc_number: docNumber ? docNumber.replace(/\D/g, '') || null : null,
-      email:      null, // ML não fornece (LGPD)
-      phone:      null, // vem via fetchBuyerUser quando necessário
-      name:       fullName,
-    }
-  }
-
   /** Pull buyer profile via /users/{id}. Usado APENAS quando billing veio
    * vazio — para preencher phone/first_name/last_name. NÃO usar pra email
    * (LGPD; email só vem do enrichment cascade). Nunca lança. */
@@ -294,8 +276,6 @@ export class MercadoLivreClient {
     first_name: string | null
     last_name:  string | null
     phone:      string | null
-    /** @deprecated sempre null — ML não fornece email via /users (LGPD). */
-    email?:     string | null
   } | null> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

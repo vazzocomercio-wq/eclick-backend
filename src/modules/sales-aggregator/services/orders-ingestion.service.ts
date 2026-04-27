@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
-import { MercadoLivreClient, MlOrder, MlBuyerBilling } from '../clients/mercado-livre-client'
+import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
 
 interface ProductInfo {
   product_id: string
@@ -17,7 +17,18 @@ interface IngestionStats {
   errors: Array<{ date: string; error: string }>
 }
 
-type BuyerSnapshot = MlBuyerBilling & { fetched_at: string | null }
+type BuyerSnapshot = {
+  doc_type:        string | null
+  doc_number:      string | null
+  email:           string | null
+  phone:           string | null
+  name:            string | null
+  last_name:       string | null
+  billing_info_id: string | null
+  billing_address: Record<string, unknown> | null
+  billing_country: string | null
+  fetched_at:      string | null
+}
 
 @Injectable()
 export class OrdersIngestionService {
@@ -135,59 +146,81 @@ export class OrdersIngestionService {
     // 1. What's already cached in DB (prevents re-fetching across re-syncs)
     const { data: existing } = await supabaseAdmin
       .from('orders')
-      .select('external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_billing_fetched_at')
+      .select(
+        'external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_last_name, buyer_billing_info_id, billing_address, billing_country, buyer_billing_fetched_at',
+      )
       .in('external_order_id', externalIds)
       .not('buyer_billing_fetched_at', 'is', null)
 
     for (const row of existing ?? []) {
       out.set(row.external_order_id as string, {
-        doc_type:   (row.buyer_doc_type   as string | null) ?? null,
-        doc_number: (row.buyer_doc_number as string | null) ?? null,
-        email:      (row.buyer_email      as string | null) ?? null,
-        phone:      (row.buyer_phone      as string | null) ?? null,
-        name:       (row.buyer_name       as string | null) ?? null,
-        fetched_at: (row.buyer_billing_fetched_at as string | null) ?? null,
+        doc_type:        (row.buyer_doc_type       as string | null) ?? null,
+        doc_number:      (row.buyer_doc_number     as string | null) ?? null,
+        email:           (row.buyer_email          as string | null) ?? null,
+        phone:           (row.buyer_phone          as string | null) ?? null,
+        name:            (row.buyer_name           as string | null) ?? null,
+        last_name:       (row.buyer_last_name      as string | null) ?? null,
+        billing_info_id: (row.buyer_billing_info_id as string | null) ?? null,
+        billing_address: (row.billing_address      as Record<string, unknown> | null) ?? null,
+        billing_country: (row.billing_country      as string | null) ?? null,
+        fetched_at:      (row.buyer_billing_fetched_at as string | null) ?? null,
       })
     }
 
-    // 2. For the rest, fetch billing serially at ~1 req/sec
+    // 2. For the rest, run the 2-step ML billing cascade
     const toFetch = externalIds.filter(id => !out.has(id))
     if (toFetch.length === 0) return out
 
-    // Index buyer.id by external order id so we can fall back to /users/{id}
-    // for phone/email when billing_info returns blank (most B2C sales — LGPD).
     const buyerIdByOrder = new Map<string, number | null>()
     for (const o of orders) buyerIdByOrder.set(String(o.id), o.buyer?.id ?? null)
 
     let withCpf = 0, withPhone = 0, miss = 0
     for (const id of toFetch) {
-      const billing = await this.mlClient.fetchBillingInfo(token, Number(id))
-      stats.apiCalls++
+      const result = await this.mlClient.fetchCompleteBillingForOrder(token, id)
+      stats.apiCalls += 2 // 1 GET /orders + 1 GET billing-info (média; legado adiciona +1)
 
-      // /users/{buyer_id} only when we still need phone or email after billing
+      const billing = result.billing
+      const docNumber = billing?.identification?.number
+        ?? billing?.doc_number
+        ?? null
+      const docType = billing?.identification?.type
+        ?? billing?.doc_type
+        ?? null
+      const cleanDoc = docNumber ? docNumber.replace(/\D/g, '') || null : null
+
+      // /users/{buyer_id} APENAS quando billing veio sem CPF, p/ tentar pegar
+      // phone + first/last (NUNCA email — LGPD; só vem do enrichment cascade)
       const buyerId = buyerIdByOrder.get(id) ?? null
       let userInfo: Awaited<ReturnType<typeof this.mlClient.fetchBuyerUser>> = null
-      if (buyerId && (!billing?.phone || !billing?.email)) {
+      if (buyerId && !cleanDoc) {
         userInfo = await this.mlClient.fetchBuyerUser(token, buyerId)
         stats.apiCalls++
       }
 
-      const phone = billing?.phone ?? userInfo?.phone ?? null
-      const email = billing?.email ?? userInfo?.email ?? null
-      const composedFromUser = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
-      const name  = billing?.name ?? composedFromUser ?? null
+      const composedFromBilling = [billing?.name, billing?.last_name].filter(Boolean).join(' ').trim() || null
+      const composedFromUser    = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
+      const name  = composedFromBilling ?? composedFromUser ?? null
+      const phone = userInfo?.phone ?? null
 
       out.set(id, {
-        doc_type:   billing?.doc_type   ?? null,
-        doc_number: billing?.doc_number ?? null,
-        email,
+        doc_type:        docType,
+        doc_number:      cleanDoc,
+        email:           null, // ML não fornece (LGPD)
         phone,
         name,
-        fetched_at: new Date().toISOString(),
+        last_name:       billing?.last_name ?? userInfo?.last_name ?? null,
+        billing_info_id: result.billingInfoId,
+        billing_address: (billing?.address ?? null) as Record<string, unknown> | null,
+        billing_country: billing?.address?.country_id ?? 'BR',
+        fetched_at:      new Date().toISOString(),
       })
-      if (billing?.doc_number) withCpf++
+      if (cleanDoc) withCpf++
       else miss++
       if (phone) withPhone++
+
+      this.logger.log(
+        `[ml-sync.billing] order=${id} cpf=${cleanDoc ? 'yes' : 'no'} log=${result.log.join('|')}`,
+      )
 
       // 1.1s budget for ML's billing endpoint (1 req/sec)
       await new Promise(r => setTimeout(r, 1100))
@@ -267,11 +300,15 @@ export class OrdersIngestionService {
           status:                  order.status,
           buyer_name:              buyerNameFallback,
           buyer_username:          order.buyer?.nickname ?? null,
-          buyer_doc_type:          buyer?.doc_type   ?? null,
-          buyer_doc_number:        buyer?.doc_number ?? null,
-          buyer_email:             buyer?.email      ?? order.buyer?.email ?? null,
-          buyer_phone:             buyer?.phone      ?? null,
-          buyer_billing_fetched_at: buyer?.fetched_at ?? null,
+          buyer_doc_type:          buyer?.doc_type        ?? null,
+          buyer_doc_number:        buyer?.doc_number      ?? null,
+          buyer_last_name:         buyer?.last_name       ?? null,
+          buyer_billing_info_id:   buyer?.billing_info_id ?? null,
+          buyer_email:             buyer?.email           ?? null, // never from ML — only enrichment fills this
+          buyer_phone:             buyer?.phone           ?? null,
+          billing_address:         buyer?.billing_address ?? null,
+          billing_country:         buyer?.billing_country ?? 'BR',
+          buyer_billing_fetched_at: buyer?.fetched_at     ?? null,
           sold_at:                 soldAt,
           raw_data: {
             order_id:     order.id,
