@@ -164,10 +164,10 @@ export class MlAdsService {
     }
   }
 
-  /** TEMP DEBUG — sequential probes (parallel runs were dropping log
-   * lines) of 6 PADS daily-series candidate endpoints. Each iteration
-   * has its own try/catch so EVERY probe definitely emits one log line.
-   * Remove once the daily shape is identified. */
+  /** TEMP DEBUG — sequential probes of 5 /items + per-campaign-detail
+   * candidates. Uses console.log directly (bypassing the Nest logger) so
+   * we're sure no log filter swallows lines. Each probe has its own
+   * try/catch and emits a line in BOTH the success and error paths. */
   private async probeDailyVariants(
     advertiserId: string,
     sampleCampaignId: string | null,
@@ -183,43 +183,62 @@ export class MlAdsService {
     const SITE    = 'MLB'
     const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
 
-    // Use a known traffic-having campaign as fallback if the freshly fetched
-    // first_id isn't useful for items endpoints.
-    const cid = sampleCampaignId ?? '352259862'
+    // Hardcode 352259862 (Torneiras) as the traffic-having campaign per the
+    // user's spec — overrides whatever the summary sweep returned first.
+    const cid = '352259862'
     const dates = { date_from: dateFrom, date_to: dateTo }
-    const fullMetrics = this.PADS_METRIC_FIELDS
     const itemMetrics = 'clicks,prints,cost,total_amount,units_quantity'
 
-    const candidates: Array<{ tag: string; url: string; params: Record<string, string> }> = [
-      { tag: `W1: /items/search?campaign_id=${cid} + metrics`,
+    type Probe = {
+      name:   string
+      method: 'get' | 'post'
+      url:    string
+      params?: Record<string, string>
+      data?:  unknown
+    }
+
+    const probes: Probe[] = [
+      { name: 'X1: GET /items/search + campaign_id + metrics',
+        method: 'get',
         url: `${baseUrl}/items/search`,
         params: { ...dates, campaign_id: cid, metrics: itemMetrics } },
-      { tag: `W2: /items?campaign_id=${cid} + agg=daily`,
-        url: `${baseUrl}/items`,
-        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: itemMetrics } },
-      { tag: `W3: /dashboard + campaign_id=${cid} + agg=daily`,
-        url: `${baseUrl}/dashboard`,
+      { name: 'X2: GET /items/search + campaign_id + aggregation=daily',
+        method: 'get',
+        url: `${baseUrl}/items/search`,
         params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
-      { tag: `W4: /campaigns/${cid}/days`,
-        url: `${baseUrl}/campaigns/${cid}/days`,
-        params: { ...dates, metrics: 'clicks,prints,cost,total_amount' } },
-      { tag: 'W5: /campaigns/search + include_metrics_daily=true',
-        url: `${baseUrl}/campaigns/search`,
-        params: { ...dates, aggregation: 'daily', metrics: fullMetrics, include_metrics_daily: 'true' } },
-      { tag: 'W6: /campaigns/search + metrics_daily=true',
-        url: `${baseUrl}/campaigns/search`,
-        params: { ...dates, aggregation: 'daily', metrics: fullMetrics, metrics_daily: 'true' } },
+      { name: 'X3: POST /items/search + json body + aggregation:daily',
+        method: 'post',
+        url: `${baseUrl}/items/search`,
+        data: {
+          campaign_id: cid,
+          date_from:   dateFrom,
+          date_to:     dateTo,
+          aggregation: 'daily',
+          metrics:     ['clicks', 'prints', 'cost', 'total_amount'],
+        } },
+      { name: `X4: GET /campaigns/${cid} + aggregation=daily`,
+        method: 'get',
+        url: `${baseUrl}/campaigns/${cid}`,
+        params: { ...dates, aggregation: 'daily', metrics: 'clicks,prints,cost' } },
+      { name: `X5: GET /campaigns/${cid}/metrics + aggregation=daily`,
+        method: 'get',
+        url: `${baseUrl}/campaigns/${cid}/metrics`,
+        params: { ...dates, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
     ]
 
-    // Sequential — guarantees every line appears even if one hangs/throws.
-    for (const c of candidates) {
+    // Sequential, individual try/catch, console.log direct so no logger
+    // filter or buffer can swallow lines.
+    for (const p of probes) {
       try {
-        const res = await axios.get(c.url, { headers, params: c.params })
-        this.logger.log(`[ml-ads.daily.probe2] ${c.tag} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 800) ?? ''}`)
+        const res = p.method === 'get'
+          ? await axios.get(p.url, { headers, params: p.params })
+          : await axios.post(p.url, p.data ?? {}, { headers, params: p.params })
+        const body = JSON.stringify(res.data ?? '').slice(0, 500)
+        console.log(`[ml-ads.daily.probe3] ${p.name} → ${res.status} ${body}`)
       } catch (e: any) {
-        const status = e?.response?.status ?? 'ERROR'
-        const body   = e?.response?.data ?? e?.message ?? 'no body'
-        this.logger.log(`[ml-ads.daily.probe2] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
+        const status = e?.response?.status ?? 'ERR'
+        const body   = JSON.stringify(e?.response?.data ?? e?.message ?? 'no body').slice(0, 500)
+        console.log(`[ml-ads.daily.probe3] ${p.name} → ${status} ${body}`)
       }
     }
   }
