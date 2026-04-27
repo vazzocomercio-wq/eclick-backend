@@ -128,10 +128,19 @@ export class MlAdsService {
     return all
   }
 
+  // PADS metrics live on the /campaigns endpoint with explicit `metrics=`
+  // and `aggregation=daily` params. BADS still uses /campaigns/metrics
+  // returning the dashboard shape, also with `aggregation=daily`.
+  private readonly PADS_METRIC_FIELDS = [
+    'prints', 'clicks', 'ctr', 'cvr', 'acos', 'roas',
+    'attribution_order_conversions', 'attribution_order_amount',
+    'consumed_budget', 'cost_per_clicks',
+  ].join(',')
+
   /**
    * Bulk-metrics call: ALL campaigns for one advertiser/product, daily.
-   * Some accounts return nothing here and require a per-campaign call —
-   * the caller falls back to getCampaignMetricsRaw when this is empty.
+   * Endpoint and params differ per product. Caller falls back to
+   * getCampaignMetricsRaw when this returns empty.
    */
   async getMetricsRaw(
     advertiserId: string,
@@ -141,58 +150,29 @@ export class MlAdsService {
   ): Promise<DailyMetricRow[]> {
     const headers = await this.authHeaders()
     const segment = this.productPath(product)
-    const { data } = await axios.get(
-      `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`,
-      {
-        headers,
-        params: {
-          date_from:        dateFrom,
-          date_to:          dateTo,
-          aggregation_type: 'daily',
-        },
-      },
-    )
+
+    let url: string
+    let params: Record<string, string>
+    if (product === 'PADS') {
+      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns`
+      params = {
+        date_from:   dateFrom,
+        date_to:     dateTo,
+        aggregation: 'daily',
+        metrics:     this.PADS_METRIC_FIELDS,
+      }
+    } else {
+      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
+      params = {
+        date_from:   dateFrom,
+        date_to:     dateTo,
+        aggregation: 'daily',
+      }
+    }
+
+    const { data } = await axios.get(url, { headers, params })
     this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId} bulk: ${JSON.stringify(data).slice(0, 800)}`)
     return this.extractMetricRows(data)
-  }
-
-  /** TEMP DEBUG — fires 4 candidate PADS metric endpoints in parallel and
-   * logs whether each is 200 (with first 600c of body) or 4xx/5xx. Used
-   * to discover which path Mercado Libre actually exposes for this account.
-   * Remove after the real endpoint is identified. */
-  async probePadsEndpoints(advertiserId: string, dateFrom: string, dateTo: string): Promise<void> {
-    const headers = await this.authHeaders()
-    const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily', aggregation: 'daily' }
-
-    const candidates: Array<{ label: string; url: string }> = [
-      {
-        label: 'A: /product_ads/campaigns?date_from=...',
-        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/campaigns`,
-      },
-      {
-        label: 'B: /product_ads/report',
-        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/report`,
-      },
-      {
-        label: 'C: /product_ads/advertisers/{id}/campaigns/metrics',
-        url:   `${ML_BASE}/advertising/product_ads/advertisers/${advertiserId}/campaigns/metrics`,
-      },
-      {
-        label: 'D: /product_ads/metrics (no /campaigns/)',
-        url:   `${ML_BASE}/advertising/advertisers/${advertiserId}/product_ads/metrics`,
-      },
-    ]
-
-    await Promise.all(candidates.map(async ({ label, url }) => {
-      try {
-        const { status, data } = await axios.get(url, { headers, params })
-        this.logger.log(`[ml-ads.pads.probe] ${label} → ${status} shape: ${JSON.stringify(data).slice(0, 600)}`)
-      } catch (e: any) {
-        const status = e?.response?.status ?? '?'
-        const msg    = e?.response?.data?.message ?? e?.message ?? ''
-        this.logger.log(`[ml-ads.pads.probe] ${label} → ${status} ${msg}`)
-      }
-    }))
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
@@ -206,18 +186,27 @@ export class MlAdsService {
   ): Promise<DailyMetricRow[]> {
     const headers = await this.authHeaders()
     const segment = this.productPath(product)
-    const { data } = await axios.get(
-      `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/${campaignId}/metrics`,
-      {
-        headers,
-        params: {
-          date_from:        dateFrom,
-          date_to:          dateTo,
-          aggregation_type: 'daily',
-        },
-      },
-    )
-    this.logger.log(`[ml-ads.metrics.raw] ${product}/${advertiserId}/${campaignId} per-camp: ${JSON.stringify(data).slice(0, 600)}`)
+
+    let url: string
+    let params: Record<string, string>
+    if (product === 'PADS') {
+      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/${campaignId}`
+      params = {
+        date_from:   dateFrom,
+        date_to:     dateTo,
+        aggregation: 'daily',
+        metrics:     this.PADS_METRIC_FIELDS,
+      }
+    } else {
+      url = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/${campaignId}/metrics`
+      params = {
+        date_from:   dateFrom,
+        date_to:     dateTo,
+        aggregation: 'daily',
+      }
+    }
+
+    const { data } = await axios.get(url, { headers, params })
     const rows = this.extractMetricRows(data)
     return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
   }
@@ -335,11 +324,6 @@ export class MlAdsService {
         continue
       }
       totalCampaigns += campaignRows.length
-
-      // TEMP probe: discover which PADS metrics URL this account exposes.
-      if (adv.product === 'PADS') {
-        await this.probePadsEndpoints(adv.advertiser_id, dateFrom, dateTo)
-      }
 
       // Metrics — first try the bulk endpoint, then fall back to per-campaign
       // calls if bulk returns nothing (some accounts only expose the latter).
