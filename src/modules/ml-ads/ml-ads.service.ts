@@ -126,123 +126,114 @@ export class MlAdsService {
     return all
   }
 
-  // PADS metrics live on the /campaigns endpoint with explicit `metrics=`
-  // and `aggregation=daily` params. BADS still uses /campaigns/metrics
-  // returning the dashboard shape, also with `aggregation=daily`.
+  // PADS metrics: v2 /campaigns/search endpoint with Api-Version: 2.
+  // BADS still uses the legacy /campaigns/metrics dashboard.
   private readonly PADS_METRIC_FIELDS = [
-    'prints', 'clicks', 'ctr', 'cvr', 'acos', 'roas',
-    'attribution_order_conversions', 'attribution_order_amount',
-    'consumed_budget', 'cost_per_clicks',
+    'clicks', 'prints', 'ctr', 'cost', 'cpc',
+    'acos', 'roas', 'units_quantity', 'total_amount',
   ].join(',')
 
   /**
    * Bulk-metrics call: ALL campaigns for one advertiser/product, daily.
-   * BADS uses /campaigns/metrics with aggregation_type=daily and returns
-   * the dashboard shape. PADS gets two attempts at the same endpoint:
-   *   1) without campaign_ids (sometimes works)
-   *   2) with campaign_ids=<csv> from the freshly-upserted campaigns
-   * Caller falls back to getCampaignMetricsRaw when both return empty.
+   * BADS uses /campaigns/metrics (legacy v1 dashboard, aggregation_type=daily).
+   * PADS uses /MLB/advertisers/{id}/product_ads/campaigns/search (v2) with
+   * the metrics= csv. Returns DailyMetricRow[] either way.
    */
   async getMetricsRaw(
     advertiserId: string,
     dateFrom:     string,
     dateTo:       string,
     product = 'PADS',
-    campaignIds: string[] = [],
+    _campaignIds: string[] = [],
   ): Promise<DailyMetricRow[]> {
+    if (product === 'PADS') return this.getPadsMetrics(advertiserId, dateFrom, dateTo)
+
+    // BADS / DISPLAY — legacy v1 dashboard endpoint.
     const headers = await this.authHeaders()
     const segment = this.productPath(product)
     const url     = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
-
-    if (product !== 'PADS') {
-      // BADS / DISPLAY — single attempt, legacy aggregation_type param.
-      const params = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
-      try {
-        const { data } = await axios.get(url, { headers, params })
-        return this.extractMetricRows(data)
-      } catch (e: any) {
-        const status = e?.response?.status ?? '?'
-        const msg    = e?.response?.data?.message ?? e?.message ?? ''
-        this.logger.warn(`[ml-ads.bulk.${status}] ${product}/${advertiserId}: ${msg}`)
-        throw e
-      }
+    const params  = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
+    try {
+      const { data } = await axios.get(url, { headers, params })
+      return this.extractMetricRows(data)
+    } catch (e: any) {
+      const status = e?.response?.status ?? '?'
+      const msg    = e?.response?.data?.message ?? e?.message ?? ''
+      this.logger.warn(`[ml-ads.bulk.${status}] ${product}/${advertiserId}: ${msg}`)
+      throw e
     }
-
-    // PADS — try attempt 1 (no campaign_ids), then attempt 2 with the csv list.
-    const baseParams = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
-    const attempts: Array<{ tag: string; params: Record<string, string> }> = [
-      { tag: 'no-ids', params: baseParams },
-    ]
-    if (campaignIds.length > 0) {
-      attempts.push({
-        tag: 'with-ids',
-        params: { ...baseParams, campaign_ids: campaignIds.join(',') },
-      })
-    }
-
-    let lastErr: unknown = null
-    for (const a of attempts) {
-      try {
-        const { data } = await axios.get(url, { headers, params: a.params })
-        return this.extractMetricRows(data)
-      } catch (e: any) {
-        const status = e?.response?.status ?? '?'
-        const body   = e?.response?.data
-        this.logger.warn(`[ml-ads.pads.bulk.attempt] ${a.tag} ${status} url=${url} body=${JSON.stringify(body)?.slice(0, 400)}`)
-        lastErr = e
-      }
-    }
-    throw lastErr
   }
 
-  /** TEMP DEBUG — sweep 10 metric name variants SEQUENTIALLY (parallel
-   * runs were dropping log lines), each wrapped in try/catch so every
-   * probe definitely emits one line. Plus a bare /search call to see
-   * what fields show up without any aggregation. */
-  async probeV2Endpoints(
+  /** PADS metrics live on the v2 /campaigns/search endpoint. Returns one
+   * row per (campaign_id, date) using metrics_daily when ML provides it,
+   * else a single summary row dated to dateTo. Paginates 50 at a time. */
+  private async getPadsMetrics(
     advertiserId: string,
-    _sampleCampaignId: string | null,
-    dateFrom: string,
-    dateTo:   string,
-  ): Promise<void> {
+    dateFrom:     string,
+    dateTo:       string,
+  ): Promise<DailyMetricRow[]> {
     const { token } = await this.ml.getValidToken()
     const headers = {
       Authorization: `Bearer ${token}`,
       'Api-Version': '2',
       Accept: 'application/json',
     }
-    const SITE = 'MLB'
-    const url  = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads/campaigns/search`
+    const url = `${ML_BASE}/advertising/MLB/advertisers/${advertiserId}/product_ads/campaigns/search`
 
-    const candidates = [
-      'clicks', 'prints', 'cost',
-      'cliques', 'impressoes', 'investimento',
-      'ad_cost', 'campaign_spend', 'advertising_spend', 'total_spend',
-    ]
-
-    for (const m of candidates) {
-      try {
-        const res = await axios.get(url, {
-          headers,
-          params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily', metrics: m },
-        })
-        this.logger.log(`[ml-ads.metrics.probe2] ${m} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 200) ?? ''}`)
-      } catch (e: any) {
-        const status = e?.response?.status ?? '?'
-        const body   = e?.response?.data ?? e?.message
-        this.logger.log(`[ml-ads.metrics.probe2] ${m} → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
-      }
+    const all: Array<Record<string, unknown>> = []
+    const limit = 50
+    let offset  = 0
+    while (true) {
+      const { data } = await axios.get(url, {
+        headers,
+        params: {
+          limit, offset,
+          date_from:        dateFrom,
+          date_to:          dateTo,
+          metrics:          this.PADS_METRIC_FIELDS,
+          metrics_summary:  'true',
+        },
+      })
+      const results = Array.isArray(data?.results) ? data.results : []
+      all.push(...results)
+      if (results.length < limit) break
+      offset += limit
+      if (offset > 5000) break
     }
 
-    // U: bare /search — confirms basic shape and may surface metric field
-    // names in the campaign rows themselves.
-    try {
-      const res = await axios.get(url, { headers })
-      this.logger.log(`[ml-ads.metrics.probe2] U-bare → ${res.status} ${JSON.stringify(res.data)?.slice(0, 600) ?? ''}`)
-    } catch (e: any) {
-      const status = e?.response?.status ?? '?'
-      const body   = e?.response?.data ?? e?.message
-      this.logger.log(`[ml-ads.metrics.probe2] U-bare → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
+    this.logger.log(`[ml-ads.pads.search] ${advertiserId}: ${all.length} campanhas com métricas`)
+
+    const out: DailyMetricRow[] = []
+    for (const c of all) {
+      const rawId = (c.id ?? (c as Record<string, unknown>).campaign_id) as string | number | undefined
+      if (rawId == null) continue
+      const cid = String(rawId)
+
+      const daily = Array.isArray(c.metrics_daily) ? c.metrics_daily as Array<Record<string, unknown>> : null
+      if (daily && daily.length > 0) {
+        for (const d of daily) {
+          out.push(this.toRow(cid, d, (d.date as string) ?? dateTo))
+        }
+      } else {
+        const summary = (c.metrics ?? {}) as Record<string, unknown>
+        out.push(this.toRow(cid, summary, dateTo))
+      }
+    }
+    return out
+  }
+
+  private toRow(campaignId: string, m: Record<string, unknown>, date: string): DailyMetricRow {
+    return {
+      campaign_id:                    campaignId,
+      date,
+      clicks:                         Number(m.clicks ?? 0),
+      impressions:                    Number(m.prints ?? 0),
+      ctr:                            Number(m.ctr ?? 0),
+      cost:                           Number(m.cost ?? 0),
+      conversions:                    Number(m.units_quantity ?? 0),
+      total_revenue:                  Number(m.total_amount ?? 0),
+      roas:                           Number(m.roas ?? 0),
+      acos:                           Number(m.acos ?? 0),
     }
   }
 
@@ -397,30 +388,19 @@ export class MlAdsService {
       }
       totalCampaigns += campaignRows.length
 
-      // TEMP — probe the new /advertising/MLB/... v2 endpoints (legacy
-      // PADS paths were deprecated 2026-02-26). Result-only, doesn't change
-      // the main flow below.
-      if (adv.product === 'PADS') {
-        await this.probeV2Endpoints(
-          adv.advertiser_id,
-          campaignRows[0]?.id ?? null,
-          dateFrom, dateTo,
-        )
-      }
-
-      // Metrics — first try the bulk endpoint, then fall back to per-campaign
-      // calls if bulk returns nothing (some accounts only expose the latter).
+      // Metrics. PADS uses the v2 /campaigns/search endpoint which returns
+      // both totals and metrics_daily in one call — no per-campaign fallback
+      // needed. BADS still uses the legacy v1 dashboard; if it returns
+      // empty, fall back to per-campaign calls (some BADS accounts only
+      // expose the latter).
       let metrics: DailyMetricRow[] = []
       try {
-        metrics = await this.getMetricsRaw(
-          adv.advertiser_id, dateFrom, dateTo, adv.product,
-          campaignRows.map(c => c.id),
-        )
+        metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
       } catch (e: any) {
         this.logger.warn(`[ml-ads.sync] bulk metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
       }
 
-      if (metrics.length === 0) {
+      if (metrics.length === 0 && adv.product !== 'PADS') {
         for (const c of campaignRows) {
           try {
             const rows = await this.getCampaignMetricsRaw(adv.advertiser_id, c.id, dateFrom, dateTo, adv.product)
