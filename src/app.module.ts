@@ -21,6 +21,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module'
 import { WidgetsModule } from './modules/widgets/widgets.module'
 import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
 import { LeadBridgeModule } from './modules/lead-bridge/lead-bridge.module'
+import { AdsAiModule } from './modules/ads-ai/ads-ai.module'
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { LeadBridgeModule } from './modules/lead-bridge/lead-bridge.module'
     WebhooksModule,
     MlAdsModule,
     LeadBridgeModule,
+    AdsAiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
