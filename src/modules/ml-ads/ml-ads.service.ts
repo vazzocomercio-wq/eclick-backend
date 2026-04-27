@@ -195,10 +195,10 @@ export class MlAdsService {
     throw lastErr
   }
 
-  /** TEMP DEBUG — the bulk metrics= list got rejected wholesale ("Metrics
-   * clicks,prints,... is not valid"), so the API doesn't tell us which
-   * names are wrong. Probe one metric at a time in parallel so any 200s
-   * pinpoint the names that actually work. */
+  /** TEMP DEBUG — sweep 10 metric name variants SEQUENTIALLY (parallel
+   * runs were dropping log lines), each wrapped in try/catch so every
+   * probe definitely emits one line. Plus a bare /search call to see
+   * what fields show up without any aggregation. */
   async probeV2Endpoints(
     advertiserId: string,
     _sampleCampaignId: string | null,
@@ -214,25 +214,36 @@ export class MlAdsService {
     const SITE = 'MLB'
     const url  = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads/campaigns/search`
 
-    const candidateMetrics = [
-      'clicks', 'prints', 'impressions',
-      'cost', 'spend', 'consumed_budget',
+    const candidates = [
+      'clicks', 'prints', 'cost',
+      'cliques', 'impressoes', 'investimento',
+      'ad_cost', 'campaign_spend', 'advertising_spend', 'total_spend',
     ]
 
-    await Promise.all(candidateMetrics.map(async (m) => {
-      const params = {
-        date_from: dateFrom, date_to: dateTo,
-        aggregation: 'daily', metrics: m,
-      }
+    for (const m of candidates) {
       try {
-        const res = await axios.get(url, { headers, params })
-        this.logger.log(`[ml-ads.metrics.probe] ${m} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 400) ?? ''}`)
+        const res = await axios.get(url, {
+          headers,
+          params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily', metrics: m },
+        })
+        this.logger.log(`[ml-ads.metrics.probe2] ${m} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 200) ?? ''}`)
       } catch (e: any) {
         const status = e?.response?.status ?? '?'
         const body   = e?.response?.data ?? e?.message
-        this.logger.log(`[ml-ads.metrics.probe] ${m} → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
+        this.logger.log(`[ml-ads.metrics.probe2] ${m} → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
       }
-    }))
+    }
+
+    // U: bare /search — confirms basic shape and may surface metric field
+    // names in the campaign rows themselves.
+    try {
+      const res = await axios.get(url, { headers })
+      this.logger.log(`[ml-ads.metrics.probe2] U-bare → ${res.status} ${JSON.stringify(res.data)?.slice(0, 600) ?? ''}`)
+    } catch (e: any) {
+      const status = e?.response?.status ?? '?'
+      const body   = e?.response?.data ?? e?.message
+      this.logger.log(`[ml-ads.metrics.probe2] U-bare → ${status} ${JSON.stringify(body)?.slice(0, 200) ?? ''}`)
+    }
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
