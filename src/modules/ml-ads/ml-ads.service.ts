@@ -164,13 +164,11 @@ export class MlAdsService {
     }
   }
 
-  /** TEMP DEBUG — three GET /items/search variants. For each, logs 3
-   * SEPARATE lines so we never get cut at 500c:
-   *   a) status + body byte size
-   *   b) Object.keys(results[0])      — what fields the item has
-   *   c) JSON.stringify(results[0].metrics) — actual metric payload
-   * Plus a 'firstItem.metrics_daily' dump when present, since that's
-   * the field we're hunting for. */
+  /** TEMP DEBUG — final round: try expand/include flags, hit a single
+   * item directly, hit /items/{id}/metrics with daily aggregation, and
+   * (Z6) fetch each of the last 3 days separately to see if per-day
+   * aggregates differ. Everything via console.log so no logger filter
+   * can hide lines. */
   private async probeDailyVariants(
     advertiserId: string,
     _sampleCampaignId: string | null,
@@ -185,40 +183,113 @@ export class MlAdsService {
     }
     const SITE    = 'MLB'
     const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
-    const cid     = '352259862' // Torneiras — confirmed traffic
-    const dates   = { date_from: dateFrom, date_to: dateTo }
+    const cid     = '352259862'
 
-    const probes: Array<{ name: string; params: Record<string, string> }> = [
-      { name: 'Y1: + aggregation=daily',
-        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
-      { name: 'Y2: NO aggregation (default)',
-        params: { ...dates, campaign_id: cid, metrics: 'clicks,prints,cost,total_amount' } },
-      { name: 'Y3: agg=daily + metrics_summary=false',
-        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics_summary: 'false', metrics: 'clicks,prints,cost' } },
+    type ItemMin = {
+      item_id?: unknown; id?: unknown
+      metrics?: { clicks?: number; prints?: number; cost?: number }
+    }
+
+    // Pull the freshest items list with metrics so we can pick an item with
+    // real activity (metrics.prints > 0) for the per-item probes.
+    let itemId: string | null = null
+    try {
+      const res = await axios.get(`${baseUrl}/items/search`, {
+        headers,
+        params: {
+          date_from: dateFrom, date_to: dateTo,
+          campaign_id: cid,
+          metrics:    'clicks,prints,cost,total_amount',
+        },
+      })
+      const list = (Array.isArray(res.data?.results) ? res.data.results : []) as ItemMin[]
+      const withTraffic = list.find(i => (i.metrics?.prints ?? 0) > 0) ?? list[0] ?? null
+      itemId = withTraffic ? String(withTraffic.item_id ?? withTraffic.id ?? '') : null
+      console.log(`[ml-ads.daily.probe5] picked itemId=${itemId} from ${list.length} items`)
+    } catch (e: any) {
+      console.log(`[ml-ads.daily.probe5] item lookup failed: ${e?.response?.status ?? 'ERR'} ${e?.message ?? ''}`)
+    }
+
+    const dump = (label: string, status: number | string, body: unknown) => {
+      const json = body && typeof body === 'object' ? body as Record<string, unknown> : {}
+      const size = JSON.stringify(json).length
+      const results = Array.isArray((json as { results?: unknown }).results)
+        ? (json as { results: unknown[] }).results : null
+      console.log(`[ml-ads.daily.probe5] ${label} status=${status} size=${size}b results=${results?.length ?? 'n/a'}`)
+      const first = results?.[0] as Record<string, unknown> | undefined
+      if (first) {
+        console.log(`[ml-ads.daily.probe5] ${label} firstItem keys: ${JSON.stringify(Object.keys(first))}`)
+        const interesting = ['metrics', 'metrics_daily', 'daily', 'time_series', 'history', 'breakdown']
+          .filter(k => first[k] !== undefined)
+        console.log(`[ml-ads.daily.probe5] ${label} interesting fields: ${JSON.stringify(interesting)}`)
+        for (const k of interesting) {
+          console.log(`[ml-ads.daily.probe5] ${label} firstItem.${k}: ${JSON.stringify(first[k]).slice(0, 800)}`)
+        }
+      }
+      console.log(`[ml-ads.daily.probe5] ${label} body[0..1500]: ${JSON.stringify(json).slice(0, 1500)}`)
+    }
+
+    type Probe = { name: string; method: 'get'; url: string; params: Record<string, string> }
+    const probes: Probe[] = [
+      { name: 'Z1: /items/search ?expand=metrics_daily', method: 'get',
+        url: `${baseUrl}/items/search`,
+        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
+          metrics: 'clicks,prints,cost', expand: 'metrics_daily' } },
+      { name: 'Z2: /items/search ?expand=daily', method: 'get',
+        url: `${baseUrl}/items/search`,
+        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
+          metrics: 'clicks,prints,cost', expand: 'daily' } },
+      { name: 'Z3: /items/search ?include=metrics_daily', method: 'get',
+        url: `${baseUrl}/items/search`,
+        params: { date_from: dateFrom, date_to: dateTo, campaign_id: cid,
+          metrics: 'clicks,prints,cost', include: 'metrics_daily' } },
     ]
+    if (itemId) {
+      probes.push({
+        name: `Z4: GET /items/${itemId} (single item)`,
+        method: 'get', url: `${baseUrl}/items/${itemId}`,
+        params: { date_from: dateFrom, date_to: dateTo, metrics: 'clicks,prints,cost' },
+      })
+      probes.push({
+        name: `Z5: GET /items/${itemId}/metrics + aggregation=daily`,
+        method: 'get', url: `${baseUrl}/items/${itemId}/metrics`,
+        params: { date_from: dateFrom, date_to: dateTo, aggregation: 'daily',
+          metrics: 'clicks,prints,cost,total_amount' },
+      })
+    }
 
     for (const p of probes) {
       try {
-        const res = await axios.get(`${baseUrl}/items/search`, { headers, params: p.params })
-        const body = res.data ?? {}
-        const results = Array.isArray(body?.results) ? body.results : []
-        const first = results[0] ?? null
-        const size = JSON.stringify(body).length
-
-        console.log(`[ml-ads.daily.probe4] ${p.name} status=${res.status} size=${size}b results=${results.length}`)
-        if (first) {
-          console.log(`[ml-ads.daily.probe4] ${p.name} firstItem keys: ${JSON.stringify(Object.keys(first))}`)
-          console.log(`[ml-ads.daily.probe4] ${p.name} firstItem.metrics: ${JSON.stringify(first.metrics)}`)
-          if (first.metrics_daily !== undefined) {
-            console.log(`[ml-ads.daily.probe4] ${p.name} firstItem.metrics_daily: ${JSON.stringify(first.metrics_daily).slice(0, 1000)}`)
-          }
-        } else {
-          console.log(`[ml-ads.daily.probe4] ${p.name} (sem results) body=${JSON.stringify(body).slice(0, 500)}`)
-        }
+        const res = await axios.get(p.url, { headers, params: p.params })
+        dump(p.name, res.status, res.data)
       } catch (e: any) {
         const status = e?.response?.status ?? 'ERR'
         const body   = JSON.stringify(e?.response?.data ?? e?.message ?? 'no body').slice(0, 500)
-        console.log(`[ml-ads.daily.probe4] ${p.name} → ${status} ${body}`)
+        console.log(`[ml-ads.daily.probe5] ${p.name} → ${status} ${body}`)
+      }
+    }
+
+    // Z6: 3 separate calls, one per day for the last 3 days, see if the
+    // per-day aggregates actually differ — proves we can build the series
+    // by calling once per day if no native daily breakdown exists.
+    const today = new Date()
+    for (let i = 1; i <= 3; i++) {
+      const d = new Date(today.getTime() - i * 86_400_000).toISOString().slice(0, 10)
+      try {
+        const res = await axios.get(`${baseUrl}/items/search`, {
+          headers,
+          params: { date_from: d, date_to: d, campaign_id: cid, metrics: 'clicks,prints,cost' },
+        })
+        const list = (Array.isArray(res.data?.results) ? res.data.results : []) as ItemMin[]
+        const totals = list.reduce((acc, it) => ({
+          clicks: acc.clicks + Number(it.metrics?.clicks ?? 0),
+          prints: acc.prints + Number(it.metrics?.prints ?? 0),
+          cost:   acc.cost   + Number(it.metrics?.cost ?? 0),
+        }), { clicks: 0, prints: 0, cost: 0 })
+        console.log(`[ml-ads.daily.probe5] Z6 day=${d} status=${res.status} items=${list.length} clicks=${totals.clicks} prints=${totals.prints} cost=${totals.cost.toFixed(2)}`)
+      } catch (e: any) {
+        const status = e?.response?.status ?? 'ERR'
+        console.log(`[ml-ads.daily.probe5] Z6 day=${d} → ${status} ${e?.message ?? ''}`)
       }
     }
   }
