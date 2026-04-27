@@ -1,6 +1,8 @@
-import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards, Logger, HttpCode, HttpStatus } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Body, Param, Query, Res, UseGuards, Logger, HttpCode, HttpStatus } from '@nestjs/common'
+import type { Response } from 'express'
 import { AdsAiService, AdsAiSettings } from './ads-ai.service'
 import { InsightDetectorService } from './services/insight-detector.service'
+import { AiChatService } from './services/ai-chat.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -14,6 +16,7 @@ export class AdsAiController {
   constructor(
     private readonly svc: AdsAiService,
     private readonly detector: InsightDetectorService,
+    private readonly chat: AiChatService,
   ) {}
 
   private async safe<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
@@ -83,5 +86,47 @@ export class AdsAiController {
   @Get('conversations/:id/messages')
   messages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('conversations.messages', () => this.svc.listMessages(u.orgId ?? '', id), [])
+  }
+
+  /** Send a user message + stream the assistant reply via SSE.
+   * Frontend should consume with EventSource or fetch+ReadableStream and
+   * parse `event: delta` / `event: done` / `event: error` lines. */
+  @Post('conversations/:id/messages')
+  async sendMessage(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { message: string },
+    @Res() res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders?.()
+
+    const send = (event: string, data: unknown) =>
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+
+    try {
+      const text = (body?.message ?? '').toString().trim()
+      if (!text) {
+        send('error', { message: 'Mensagem vazia' })
+        res.end()
+        return
+      }
+      const result = await this.chat.runTurn(u.orgId ?? '', id, text)
+      // Single coherent chunk — server resolved tool calls before emitting.
+      send('delta', { text: result.text })
+      send('done', {
+        tool_calls: result.tool_calls,
+        tokens_in:  result.tokens_in,
+        tokens_out: result.tokens_out,
+      })
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      this.logger.error(`[ads-ai.chat] ${err?.message}`)
+      send('error', { message: err?.message ?? 'Erro durante o turno' })
+    } finally {
+      res.end()
+    }
   }
 }
