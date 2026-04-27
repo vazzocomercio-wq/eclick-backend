@@ -179,18 +179,32 @@ export class CustomerIdentityService {
     return data ?? []
   }
 
-  async list(filters: { search?: string; channel?: string; limit?: number } = {}) {
+  async list(filters: {
+    search?:            string
+    channel?:           string
+    limit?:             number
+    enrichment_status?: string                  // 'pending' | 'partial' | 'full' | 'failed'
+    has_cpf?:           boolean
+    has_phone?:         boolean
+    has_whatsapp?:      boolean
+    has_email?:         boolean
+  } = {}) {
     let q = supabaseAdmin
       .from('unified_customers')
       .select('*')
       .order('last_contact_at', { ascending: false })
-      .limit(filters.limit ?? 100)
+      .limit(filters.limit ?? 200)
 
     if (filters.search) {
       const s = filters.search.replace(/%/g, '')
-      q = q.or(`display_name.ilike.%${s}%,phone.ilike.%${s}%,email.ilike.%${s}%`)
+      q = q.or(`display_name.ilike.%${s}%,phone.ilike.%${s}%,email.ilike.%${s}%,cpf.ilike.%${s}%`)
     }
-    if (filters.channel) q = q.eq('last_channel', filters.channel)
+    if (filters.channel)            q = q.eq('last_channel', filters.channel)
+    if (filters.enrichment_status)  q = q.eq('enrichment_status', filters.enrichment_status)
+    if (filters.has_cpf)            q = q.not('cpf', 'is', null)
+    if (filters.has_phone)          q = q.not('phone', 'is', null)
+    if (filters.has_whatsapp)       q = q.not('whatsapp_id', 'is', null)
+    if (filters.has_email)          q = q.not('email', 'is', null)
 
     const { data, error } = await q
     if (error) throw new HttpException(error.message, 500)

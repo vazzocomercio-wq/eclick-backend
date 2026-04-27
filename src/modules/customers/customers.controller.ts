@@ -9,11 +9,25 @@ export class CustomersController {
 
   @Get()
   list(
-    @Query('search')  search?: string,
-    @Query('channel') channel?: string,
-    @Query('limit')   limit?: string,
+    @Query('search')            search?:           string,
+    @Query('channel')           channel?:          string,
+    @Query('limit')             limit?:            string,
+    @Query('enrichment_status') enrichmentStatus?: string,
+    @Query('has_cpf')           hasCpf?:           string,
+    @Query('has_phone')         hasPhone?:         string,
+    @Query('has_whatsapp')      hasWa?:            string,
+    @Query('has_email')         hasEmail?:         string,
   ) {
-    return this.svc.list({ search, channel, limit: limit ? Number(limit) : 100 })
+    const flag = (v?: string) => v === '1' || v === 'true'
+    return this.svc.list({
+      search, channel,
+      limit: limit ? Number(limit) : 200,
+      enrichment_status: enrichmentStatus,
+      has_cpf:      flag(hasCpf),
+      has_phone:    flag(hasPhone),
+      has_whatsapp: flag(hasWa),
+      has_email:    flag(hasEmail),
+    })
   }
 
   @Get(':id')
