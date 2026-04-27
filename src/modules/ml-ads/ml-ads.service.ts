@@ -164,13 +164,10 @@ export class MlAdsService {
     }
   }
 
-  /** TEMP DEBUG — fires 6 candidate "give me daily series" param shapes
-   * against the working /campaigns/search endpoint and a couple of items
-   * variants in parallel. Logs status + first 800c of body so we can
-   * spot which shape returns a per-day array.
-   *
-   * Currently called once per PADS advertiser at the top of getPadsMetrics
-   * for one sync — remove after the daily shape is identified. */
+  /** TEMP DEBUG — sequential probes (parallel runs were dropping log
+   * lines) of 6 PADS daily-series candidate endpoints. Each iteration
+   * has its own try/catch so EVERY probe definitely emits one log line.
+   * Remove once the daily shape is identified. */
   private async probeDailyVariants(
     advertiserId: string,
     sampleCampaignId: string | null,
@@ -183,52 +180,48 @@ export class MlAdsService {
       'Api-Version': '2',
       Accept: 'application/json',
     }
-    const SITE = 'MLB'
+    const SITE    = 'MLB'
     const baseUrl = `${ML_BASE}/advertising/${SITE}/advertisers/${advertiserId}/product_ads`
-    const baseParams = {
-      date_from: dateFrom, date_to: dateTo,
-      metrics:   this.PADS_METRIC_FIELDS,
-    }
 
-    const candidates: Array<{
-      tag: string; method: 'get'; url: string; params: Record<string, string>;
-    }> = [
-      { tag: 'V1: aggregation=daily',
-        method: 'get', url: `${baseUrl}/campaigns/search`,
-        params: { ...baseParams, aggregation: 'daily' } },
-      { tag: 'V2: aggregation=daily + breakdown=date',
-        method: 'get', url: `${baseUrl}/campaigns/search`,
-        params: { ...baseParams, aggregation: 'daily', breakdown: 'date' } },
-      { tag: 'V3: aggregation_type=daily',
-        method: 'get', url: `${baseUrl}/campaigns/search`,
-        params: { ...baseParams, aggregation_type: 'daily' } },
-      { tag: 'V4: group_by=date',
-        method: 'get', url: `${baseUrl}/campaigns/search`,
-        params: { ...baseParams, group_by: 'date' } },
-      ...(sampleCampaignId ? [
-        { tag: `V5: /campaigns/${sampleCampaignId}/items/search + agg=daily`,
-          method: 'get' as const,
-          url: `${baseUrl}/campaigns/${sampleCampaignId}/items/search`,
-          params: { ...baseParams, aggregation: 'daily' } },
-        { tag: `V6: /items/search?campaign_ids=${sampleCampaignId} + agg=daily`,
-          method: 'get' as const,
-          url: `${baseUrl}/items/search`,
-          params: { ...baseParams, aggregation: 'daily', campaign_ids: sampleCampaignId } },
-      ] : []),
+    // Use a known traffic-having campaign as fallback if the freshly fetched
+    // first_id isn't useful for items endpoints.
+    const cid = sampleCampaignId ?? '352259862'
+    const dates = { date_from: dateFrom, date_to: dateTo }
+    const fullMetrics = this.PADS_METRIC_FIELDS
+    const itemMetrics = 'clicks,prints,cost,total_amount,units_quantity'
+
+    const candidates: Array<{ tag: string; url: string; params: Record<string, string> }> = [
+      { tag: `W1: /items/search?campaign_id=${cid} + metrics`,
+        url: `${baseUrl}/items/search`,
+        params: { ...dates, campaign_id: cid, metrics: itemMetrics } },
+      { tag: `W2: /items?campaign_id=${cid} + agg=daily`,
+        url: `${baseUrl}/items`,
+        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: itemMetrics } },
+      { tag: `W3: /dashboard + campaign_id=${cid} + agg=daily`,
+        url: `${baseUrl}/dashboard`,
+        params: { ...dates, campaign_id: cid, aggregation: 'daily', metrics: 'clicks,prints,cost,total_amount' } },
+      { tag: `W4: /campaigns/${cid}/days`,
+        url: `${baseUrl}/campaigns/${cid}/days`,
+        params: { ...dates, metrics: 'clicks,prints,cost,total_amount' } },
+      { tag: 'W5: /campaigns/search + include_metrics_daily=true',
+        url: `${baseUrl}/campaigns/search`,
+        params: { ...dates, aggregation: 'daily', metrics: fullMetrics, include_metrics_daily: 'true' } },
+      { tag: 'W6: /campaigns/search + metrics_daily=true',
+        url: `${baseUrl}/campaigns/search`,
+        params: { ...dates, aggregation: 'daily', metrics: fullMetrics, metrics_daily: 'true' } },
     ]
 
-    await Promise.all(candidates.map(async (c) => {
-      const log = (status: number | string, body: unknown) =>
-        this.logger.log(`[ml-ads.daily.probe] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
+    // Sequential — guarantees every line appears even if one hangs/throws.
+    for (const c of candidates) {
       try {
         const res = await axios.get(c.url, { headers, params: c.params })
-        log(res.status, res.data)
+        this.logger.log(`[ml-ads.daily.probe2] ${c.tag} → ${res.status} ${JSON.stringify(res.data)?.slice(0, 800) ?? ''}`)
       } catch (e: any) {
-        const status = e?.response?.status ?? '?'
-        const body   = e?.response?.data ?? e?.message
-        log(status, body)
+        const status = e?.response?.status ?? 'ERROR'
+        const body   = e?.response?.data ?? e?.message ?? 'no body'
+        this.logger.log(`[ml-ads.daily.probe2] ${c.tag} → ${status} ${JSON.stringify(body)?.slice(0, 800) ?? ''}`)
       }
-    }))
+    }
   }
 
   /** PADS metrics live on the v2 /campaigns/search endpoint. Returns one
