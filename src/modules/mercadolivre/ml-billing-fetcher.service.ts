@@ -548,4 +548,57 @@ export class MlBillingFetcherService {
       this.logger.error(`[ml.billing.cron] ${err?.message}`)
     }
   }
+
+  /** Weekly drain — Monday at 06:00. Resets stale orphans (rows that
+   * tried but ended with no CPF) then loops fetchBatch(200) until the
+   * backlog hits 0 (or the safety cap of 50 iterations = 10k orders).
+   * Logs a single summary line with the totals; warns if backlog > 100
+   * after the drain so we know there's a structural issue. */
+  @Cron('0 6 * * 1', { name: 'weeklyBillingDrain' })
+  async weeklyDrain(): Promise<{ reset: number; new_cpfs: number; failed: number; backlog: number; iterations: number }> {
+    const t0 = Date.now()
+    let resetCount = 0
+    let newCpfs   = 0
+    let failed    = 0
+    let iterations = 0
+
+    try {
+      const r = await this.resetBillingFetched({ forceAll: false })
+      resetCount = r.reset
+    } catch (e: unknown) {
+      this.logger.error(`[ml.billing.weekly] reset failed: ${(e as { message?: string })?.message}`)
+    }
+
+    // Drain loop — up to 50 iterations × 200 orders = 10k per weekly run
+    for (let i = 0; i < 50; i++) {
+      iterations = i + 1
+      let result: Awaited<ReturnType<typeof this.fetchBatch>>
+      try {
+        result = await this.fetchBatch(200)
+      } catch (e: unknown) {
+        this.logger.error(`[ml.billing.weekly] iter=${i} failed: ${(e as { message?: string })?.message}`)
+        break
+      }
+      if (result.processed === 0) break
+      newCpfs += result.with_cpf
+      failed  += result.errors + result.no_data
+      if (result.errors > result.processed / 2) {
+        this.logger.warn(`[ml.billing.weekly] iter=${i} too many errors (${result.errors}/${result.processed}) — aborting`)
+        break
+      }
+    }
+
+    const backlog = await this.countPending().catch(() => -1)
+    const elapsedSec = Math.round((Date.now() - t0) / 1000)
+    const summary = { reset: resetCount, new_cpfs: newCpfs, failed, backlog, iterations }
+
+    this.logger.log(
+      `[ml.billing.weekly] ${JSON.stringify(summary)} elapsed=${elapsedSec}s`,
+    )
+    if (backlog > 100) {
+      this.logger.warn(`[ml.billing.weekly] backlog=${backlog} > 100 — investigar conexão ML / token`)
+    }
+
+    return summary
+  }
 }
