@@ -198,7 +198,11 @@ export class JourneyProcessorService {
         const phone0  = d.phones?.[0]
         const email0  = d.emails?.find(e => e.is_valid !== false)
         const update: Record<string, unknown> = {
-          enrichment_status:  'success',
+          // Alinhado com STATUS_META do frontend (full/partial/failed/pending) —
+          // antes gravava 'success' literal e o badge ficava cinza "Pendente".
+          enrichment_status:  enrichResult.quality === 'full'
+                            ? 'full'
+                            : enrichResult.quality === 'partial' ? 'partial' : 'failed',
           enrichment_quality: enrichResult.quality,
           enriched_at:        new Date().toISOString(),
           enrichment_data:    d,
@@ -210,8 +214,16 @@ export class JourneyProcessorService {
           // da base cadastral — números fixos costumam vir marcados como WA.
           const wa = await this.waValidation.validateNumber(phone0.number, orgId)
           update.validated_whatsapp = wa.isWhatsApp
+          // Popula coluna whatsapp_id SÓ quando DataStone confirmou ativo —
+          // UI usa essa coluna pra acender ícone verde "WA". Mais conservador
+          // que o enrichment manual (que confia em flag da base cadastral).
+          if (wa.isWhatsApp) update.whatsapp_id = phone0.number
         }
-        if (email0?.address)        update.email      = email0.address
+        if (phone0?.is_active)      update.validated_phone = true
+        if (email0?.address) {
+          update.email           = email0.address
+          update.validated_email = true
+        }
         if (d.address?.city)        update.city       = d.address.city
         if (d.address?.state)       update.state      = d.address.state
         if (d.birth_date)           update.birth_date = d.birth_date
