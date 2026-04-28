@@ -202,12 +202,25 @@ export class MercadolivreService {
     return conns
   }
 
+  /** Window pra renovar o token ANTES de expirar. Cron diário roda às
+   * 05:00 UTC e o token às vezes expira 04:51 — com threshold curto (5 min)
+   * a janela passa entre o último refresh e o cron. 30 min cobre folga
+   * pra qualquer cron de hora-em-hora também. */
+  private static readonly REFRESH_THRESHOLD_MS = 30 * 60 * 1000
+
   private async refreshIfNeeded(
     conn: Pick<MlConnection, 'seller_id' | 'access_token' | 'refresh_token' | 'expires_at'>,
   ): Promise<string> {
-    const isExpired = new Date(conn.expires_at).getTime() - Date.now() < 5 * 60 * 1000
+    const expiresAt = new Date(conn.expires_at).getTime()
+    const msUntil   = expiresAt - Date.now()
+    const isExpired = msUntil < MercadolivreService.REFRESH_THRESHOLD_MS
 
     if (!isExpired) return conn.access_token
+
+    console.log(
+      `[ml-token.refresh] seller=${conn.seller_id} expires_at=${conn.expires_at} ` +
+      `(${Math.round(msUntil / 60000)}min restantes) — disparando refresh…`,
+    )
 
     try {
       const params = new URLSearchParams({
@@ -223,6 +236,7 @@ export class MercadolivreService {
       )
       const { access_token, refresh_token, expires_in } = response.data
       const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
+      console.log(`[ml-token.refresh] seller=${conn.seller_id} OK — novo expires_at=${newExpiresAt}`)
 
       // Update wherever the token lives: ml_connections (legacy), api_credentials,
       // or both. Both updates are idempotent so running both is safe.

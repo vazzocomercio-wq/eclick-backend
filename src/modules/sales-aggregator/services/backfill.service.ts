@@ -135,21 +135,28 @@ export class BackfillService implements OnApplicationBootstrap {
 
   @Cron('0 5 * * *', { name: 'dailyAggregation' }) // 02:00 BRT — full 3-day window
   async dailyAggregation(): Promise<void> {
-    console.log(`[ml-sync.cron] iniciando ciclo diário (3 dias)…`)
+    const t0 = Date.now()
+    console.log(`[ml-sync.cron] iniciando ciclo diário (3 dias) at ${new Date().toISOString()}`)
     const { data: connections } = await supabaseAdmin
       .from('ml_connections')
       .select('organization_id')
     const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
+    console.log(`[ml-sync.cron] orgs encontradas: ${orgIds.length} → ${orgIds.join(', ')}`)
 
+    let ok = 0, fail = 0
     for (const orgId of orgIds) {
+      console.log(`[ml-sync.cron] → daily org=${orgId}`)
       try {
-        await this.runDaily(orgId, null)
+        const { runId } = await this.runDaily(orgId, null)
+        console.log(`[ml-sync.cron] ✓ daily org=${orgId} runId=${runId}`)
+        ok++
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[ml-sync.cron] daily falhou para org ${orgId}:`, msg)
+        console.error(`[ml-sync.cron] ✗ daily org=${orgId}: ${msg}`)
+        fail++
       }
     }
-    if (orgIds.length > 0) console.log(`[ml-sync.cron] daily completo: ${orgIds.length} orgs`)
+    console.log(`[ml-sync.cron] daily concluído: ${ok}/${orgIds.length} ok, ${fail} falhas em ${Math.round((Date.now()-t0)/1000)}s`)
   }
 
   /** Hourly incremental sync — pega orders das últimas 24h por org.
@@ -157,24 +164,28 @@ export class BackfillService implements OnApplicationBootstrap {
    * roda dentro de ingestDateRange) sem precisar esperar o cron das 02h. */
   @Cron('17 * * * *', { name: 'hourlySync' })
   async hourlySync(): Promise<void> {
-    console.log(`[ml-sync.cron] iniciando ciclo horário (1 dia)…`)
+    const t0 = Date.now()
+    console.log(`[ml-sync.cron] iniciando ciclo horário (1 dia) at ${new Date().toISOString()}`)
     const { data: connections } = await supabaseAdmin
       .from('ml_connections')
       .select('organization_id')
     const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
+    console.log(`[ml-sync.cron] orgs encontradas: ${orgIds.length} → ${orgIds.join(', ')}`)
 
     let okOrgs = 0
     for (const orgId of orgIds) {
+      console.log(`[ml-sync.cron] → hourly org=${orgId}`)
       try {
-        await this.startRun(orgId, 'manual', 1, null)
+        const { runId } = await this.startRun(orgId, 'manual', 1, null)
+        console.log(`[ml-sync.cron] ✓ hourly org=${orgId} runId=${runId}`)
         okOrgs++
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[ml-sync.cron] hourly falhou para org ${orgId}:`, msg)
+        console.error(`[ml-sync.cron] ✗ hourly org=${orgId}: ${msg}`)
       }
     }
     if (orgIds.length > 0) {
-      console.log(`[ml-sync.cron] hourly completo: ${okOrgs}/${orgIds.length} orgs — próxima execução em 60min`)
+      console.log(`[ml-sync.cron] hourly completo: ${okOrgs}/${orgIds.length} orgs em ${Math.round((Date.now()-t0)/1000)}s — próxima execução em 60min`)
     }
   }
 
