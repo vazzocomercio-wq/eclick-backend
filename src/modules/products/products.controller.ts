@@ -1,4 +1,4 @@
-import { Controller, Get, Put, Patch, Delete, Post, Param, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -11,9 +11,35 @@ export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
   // GET /products
+  // Quando query params de paginação são passados (page, per_page, search, etc),
+  // retorna envelope { data, total, page, per_page }. Sem params, retorna
+  // array (back-compat com callers antigos como list/grid view).
   @Get()
-  getAll(@ReqUser() user: ReqUserPayload) {
-    return this.products.getAll(user.orgId)
+  getAll(
+    @ReqUser() user: ReqUserPayload,
+    @Query('page')         page?:        string,
+    @Query('per_page')     perPage?:     string,
+    @Query('search')       search?:      string,
+    @Query('quick_filter') quickFilter?: string,
+    @Query('sort_by')      sortBy?:      string,
+    @Query('sort_dir')     sortDir?:     string,
+  ) {
+    const paginated = page || perPage || search || quickFilter || sortBy
+    if (!paginated) return this.products.getAll(user.orgId)
+    return this.products.listPaginated(user.orgId, {
+      page:         page ? Number(page) : undefined,
+      per_page:     perPage ? Number(perPage) : undefined,
+      search,
+      quick_filter: quickFilter,
+      sort_by:      sortBy,
+      sort_dir:     sortDir === 'asc' ? 'asc' : sortDir === 'desc' ? 'desc' : undefined,
+    })
+  }
+
+  // GET /products/kpis — totais usados pelo painel "Catálogo" em /produtos
+  @Get('kpis')
+  getKpis(@ReqUser() user: ReqUserPayload) {
+    return this.products.getKpis(user.orgId)
   }
 
   // GET /products/linked-listings  — must be before :id to avoid param capture

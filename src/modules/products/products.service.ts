@@ -58,6 +58,103 @@ export class ProductsService {
     return data ?? []
   }
 
+  /** Server-side pagination + filtering pra DataTable view do /produtos.
+   * quick_filter: 'all'|'active'|'paused'|'no_stock'|'critical'|'in_ads'|'no_ads' */
+  async listPaginated(orgId: string | null, opts: {
+    page?:        number
+    per_page?:    number
+    search?:      string
+    quick_filter?: string
+    sort_by?:     string
+    sort_dir?:    'asc' | 'desc'
+  }): Promise<{ data: unknown[]; total: number; page: number; per_page: number }> {
+    const page    = Math.max(opts.page ?? 1, 1)
+    const perPage = Math.min(Math.max(opts.per_page ?? 25, 1), 200)
+    const offset  = (page - 1) * perPage
+    const sortBy  = opts.sort_by ?? 'created_at'
+    const ascending = opts.sort_dir === 'asc'
+
+    // Set de listings em campanha ativa pra os filtros in_ads / no_ads
+    let adsListingIds: Set<string> | null = null
+    if (opts.quick_filter === 'in_ads' || opts.quick_filter === 'no_ads') {
+      adsListingIds = await this.getActiveAdsListingIds()
+    }
+
+    let q = supabaseAdmin
+      .from('products')
+      .select(PRODUCT_FIELDS, { count: 'exact' })
+      .order(sortBy, { ascending })
+      .range(offset, offset + perPage - 1)
+    if (orgId) q = q.eq('organization_id', orgId)
+
+    if (opts.search?.trim()) {
+      const s = opts.search.trim().replace(/%/g, '')
+      q = q.or(`name.ilike.%${s}%,sku.ilike.%${s}%,brand.ilike.%${s}%`)
+    }
+    switch (opts.quick_filter) {
+      case 'active':   q = q.eq('status', 'active'); break
+      case 'paused':   q = q.eq('status', 'paused'); break
+      case 'no_stock': q = q.or('stock.eq.0,stock.is.null'); break
+      case 'critical': q = q.gt('stock', 0).lte('stock', 5); break
+      case 'in_ads':
+        if (adsListingIds && adsListingIds.size > 0) q = q.in('ml_listing_id', [...adsListingIds])
+        else                                          q = q.eq('id', '00000000-0000-0000-0000-000000000000') // forces empty
+        break
+      case 'no_ads':
+        if (adsListingIds && adsListingIds.size > 0) q = q.or(`ml_listing_id.is.null,ml_listing_id.not.in.(${[...adsListingIds].join(',')})`)
+        // se sem campanhas ativas, todos sem ads → sem filtro adicional
+        break
+    }
+
+    const { data, count, error } = await q
+    if (error) throw new Error(error.message)
+    return { data: data ?? [], total: count ?? 0, page, per_page: perPage }
+  }
+
+  /** KPIs do catálogo — alimenta o painel "Catálogo" em /produtos. */
+  async getKpis(orgId: string | null): Promise<{ active: number; no_stock: number; critical: number; no_ads: number }> {
+    const buildBase = () => {
+      const q = supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+      return orgId ? q.eq('organization_id', orgId) : q
+    }
+
+    const [activeRes, noStockRes, criticalRes, allListingsRes, adsIds] = await Promise.all([
+      buildBase().eq('status', 'active'),
+      buildBase().or('stock.eq.0,stock.is.null'),
+      buildBase().gt('stock', 0).lte('stock', 5),
+      (orgId
+        ? supabaseAdmin.from('products').select('ml_listing_id').eq('organization_id', orgId).not('ml_listing_id', 'is', null)
+        : supabaseAdmin.from('products').select('ml_listing_id').not('ml_listing_id', 'is', null)
+      ),
+      this.getActiveAdsListingIds(),
+    ])
+
+    const allListings = ((allListingsRes.data ?? []) as Array<{ ml_listing_id: string | null }>)
+      .map(r => r.ml_listing_id)
+      .filter((id): id is string => !!id)
+    const noAds = allListings.filter(id => !adsIds.has(id)).length
+
+    return {
+      active:   activeRes.count   ?? 0,
+      no_stock: noStockRes.count  ?? 0,
+      critical: criticalRes.count ?? 0,
+      no_ads:   noAds,
+    }
+  }
+
+  /** Set de ml_listing_id que estão em ml_ads_campaigns ativas. */
+  private async getActiveAdsListingIds(): Promise<Set<string>> {
+    const { data } = await supabaseAdmin
+      .from('ml_ads_campaigns')
+      .select('items')
+      .eq('status', 'active')
+    const out = new Set<string>()
+    for (const c of (data ?? []) as Array<{ items?: string[] | null }>) {
+      for (const id of (c.items ?? [])) if (typeof id === 'string') out.add(id)
+    }
+    return out
+  }
+
   async getLinkedListingIds(): Promise<string[]> {
     const { data } = await supabaseAdmin
       .from('products')
