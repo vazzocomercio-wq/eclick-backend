@@ -1213,6 +1213,29 @@ export class MercadolivreService {
     }
   }
 
+  /** Marca um lote de pedidos como tendo problema. Match via external_order_id
+   * (frontend manda os ML order_ids). has_problem=true, problem_note +
+   * problem_severity em colunas separadas (CHECK constraint no DB).
+   * Idempotente — re-marcar sobrescreve. */
+  async bulkMarkProblem(
+    orderIds: string[],
+    note:     string,
+    severity: 'low' | 'medium' | 'high' | 'critical',
+  ): Promise<{ marked: number }> {
+    const { data, error } = await supabaseAdmin
+      .from('orders')
+      .update({
+        has_problem:      true,
+        problem_note:     note,
+        problem_severity: severity,
+        updated_at:       new Date().toISOString(),
+      })
+      .in('external_order_id', orderIds)
+      .select('id')
+    if (error) throw new HttpException(error.message, 500)
+    return { marked: data?.length ?? 0 }
+  }
+
   async getOrdersEnriched(orgId: string, offset = 0, limit = 20, q?: string) {
     const { token, sellerId } = await this.getValidToken()
 

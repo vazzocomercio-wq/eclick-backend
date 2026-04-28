@@ -75,6 +75,30 @@ export class MercadolivreController {
     }
   }
 
+  // POST /ml/orders/bulk-mark-problem
+  //   { order_ids: (string|number)[], note: string,
+  //     severity: 'low'|'medium'|'high'|'critical' }
+  // Marca um lote de pedidos como tendo problema. has_problem=true,
+  // problem_note + problem_severity em colunas separadas (CHECK
+  // constraint no DB). Match por external_order_id.
+  @Post('orders/bulk-mark-problem')
+  @HttpCode(HttpStatus.OK)
+  async bulkMarkProblem(@Body() body: {
+    order_ids: Array<string | number>
+    note:      string
+    severity?: 'low' | 'medium' | 'high' | 'critical'
+  }) {
+    const ids  = (body?.order_ids ?? []).map(x => String(x)).filter(Boolean)
+    const note = (body?.note ?? '').trim()
+    const allowed = ['low', 'medium', 'high', 'critical'] as const
+    const sev = (allowed as readonly string[]).includes(body?.severity ?? '')
+      ? body!.severity!
+      : 'medium'
+    if (ids.length === 0)  throw new BadRequestException('order_ids vazio')
+    if (!note)             throw new BadRequestException('note obrigatório')
+    return this.ml.bulkMarkProblem(ids, note, sev)
+  }
+
   // POST /ml/orders/:order_id/refetch-billing — single-order re-fetch from
   // ML for the order detail card. Calls /orders/{id}/billing_info plus
   // /users/{buyer_id} for phone/email fallback. Returns the resolved buyer.
