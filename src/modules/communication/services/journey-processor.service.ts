@@ -33,9 +33,14 @@ interface JourneyStep {
 
 interface PickChannelResult {
   channel:            'whatsapp' | 'email' | 'none'
-  recipient?:         string
   reason?:            string
+  recipient_phone?:   string
+  recipient_email?:   string
   phone_is_whatsapp?: boolean
+  has_wa_consent?:    boolean
+  has_email_consent?: boolean
+  customer_id?:       string
+  template_kind?:     string
 }
 
 export interface ProcessResult {
@@ -256,6 +261,10 @@ export class JourneyProcessorService {
       channel:            pick.channel,
       reason:             pick.reason,
       phone_is_whatsapp:  pick.phone_is_whatsapp,
+      has_wa_consent:     pick.has_wa_consent,
+      has_email_consent:  pick.has_email_consent,
+      recipient_phone:    pick.recipient_phone ? `${pick.recipient_phone.slice(0,4)}***` : null,
+      recipient_email:    pick.recipient_email ? `${pick.recipient_email.slice(0,3)}***` : null,
     })}`)
 
     // ─── (i) Channel === 'none' → bloqueia ───────────────────────────────
@@ -284,21 +293,30 @@ export class JourneyProcessorService {
       throw new Error(`template '${step.template_name}' (channel=${pick.channel}) não encontrado pra org ${orgId}`)
     }
 
+    // Recipient depende do canal escolhido — função SQL retorna phone+email
+    // separados, escolhemos pelo channel pra coluna phone (legacy) e
+    // preservamos AMBOS no context pra debug futuro.
+    const recipient = pick.channel === 'whatsapp'
+      ? (pick.recipient_phone ?? null)
+      : (pick.recipient_email ?? null)
+
     const runRow = {
       organization_id: orgId,
       journey_id:      ocj.journey_id,
       order_id:        snapshot.external_order_id ?? null,
       customer_id:     customerId,
-      phone:           pick.recipient ?? null,
+      phone:           recipient,
       current_step:    1,
       status:          'pending',
       next_step_at:    new Date().toISOString(),
       context: {
-        ocj_id:        ocj.id,
-        channel:       pick.channel,
-        recipient:     pick.recipient ?? null,
-        template_id:   template.id,
-        template_name: step.template_name,
+        ocj_id:          ocj.id,
+        channel:         pick.channel,
+        recipient,
+        recipient_phone: pick.recipient_phone ?? null,
+        recipient_email: pick.recipient_email ?? null,
+        template_id:     template.id,
+        template_name:   step.template_name,
       },
     }
     const { error: runErr } = await supabaseAdmin
