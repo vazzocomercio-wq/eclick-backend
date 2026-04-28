@@ -243,6 +243,19 @@ export class MlBillingFetcherService {
     return { reset }
   }
 
+  /** Count orphans — orders that were marked tried (buyer_billing_fetched_at
+   * IS NOT NULL) but ended up with no CPF. Drives the counter on the
+   * "Resetar pedidos sem CPF" button in /clientes. */
+  async countOrphans(): Promise<number> {
+    const { count } = await supabaseAdmin
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .not('buyer_billing_fetched_at', 'is', null)
+      .is('buyer_doc_number', null)
+      .not('external_order_id', 'is', null)
+    return count ?? 0
+  }
+
   /** Count orders still missing billing info — drives the counter on the
    * "Buscar CPFs no ML" button in /clientes. */
   async countPending(): Promise<number> {

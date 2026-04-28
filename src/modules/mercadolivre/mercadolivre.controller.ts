@@ -62,6 +62,19 @@ export class MercadolivreController {
     }
   }
 
+  // GET /ml/orders/orphans-count — # of orders that were marked tried but
+  // ended up with NULL doc_number (e.g. parsed by an older shape).
+  // Drives the "Resetar pedidos sem CPF" counter in /clientes.
+  @Get('orders/orphans-count')
+  async fetchOrphansCount() {
+    try {
+      const count = await this.billingFetcher.countOrphans()
+      return { count }
+    } catch {
+      return { count: 0 }
+    }
+  }
+
   // POST /ml/orders/:order_id/refetch-billing — single-order re-fetch from
   // ML for the order detail card. Calls /orders/{id}/billing_info plus
   // /users/{buyer_id} for phone/email fallback. Returns the resolved buyer.
