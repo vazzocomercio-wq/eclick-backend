@@ -43,10 +43,18 @@ export class ZapiProvider {
     }
   }
 
-  /** Strip everything that's not a digit. Z-API quer só dígitos
-   * (ex: "+55 (71) 99999-8050" → "5571999998050"). */
+  /** Strip não-dígitos e garante country code BR. Z-API aceita só
+   * dígitos com country code (ex: "5571999998050"). Lógica:
+   *   10 dígitos (DD+8 telefone fixo) → prefixa 55 → 12 dígitos
+   *   11 dígitos (DD+9 celular)        → prefixa 55 → 13 dígitos
+   *   12-13 dígitos                    → assume já com country code
+   *   demais                            → retorna raw (Z-API rejeita)
+   * Testado: "+55 (71) 99999-8050" → "5571999998050",
+   *           "71993167000"          → "5571993167000". */
   static normalizePhone(input: string): string {
-    return (input ?? '').replace(/\D/g, '')
+    const digits = (input ?? '').replace(/\D/g, '')
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`
+    return digits
   }
 
   /** Mascara pra log: mantém só os 4 últimos dígitos. */
