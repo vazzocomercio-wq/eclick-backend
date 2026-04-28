@@ -1,5 +1,5 @@
-import { Injectable, HttpException } from '@nestjs/common'
-import { Cron } from '@nestjs/schedule'
+import { Injectable, HttpException, Logger, OnApplicationBootstrap } from '@nestjs/common'
+import { Cron, SchedulerRegistry } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { OrdersIngestionService } from './orders-ingestion.service'
 import { SnapshotsAggregationService } from './snapshots-aggregation.service'
@@ -29,11 +29,40 @@ export interface AggregatorRun {
 }
 
 @Injectable()
-export class BackfillService {
+export class BackfillService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(BackfillService.name)
+
   constructor(
     private readonly ordersIngestion: OrdersIngestionService,
     private readonly snapshotsAggregation: SnapshotsAggregationService,
-  ) {}
+    private readonly schedulerRegistry: SchedulerRegistry,
+  ) {
+    this.logger.log('[BackfillService] inicializado, crons serão registrados pelo @Cron')
+  }
+
+  /** Healthcheck no startup — confirma que os @Cron decorators do
+   * BackfillService chegaram a registrar no SchedulerRegistry. Se algum
+   * estiver ausente, loga ERROR (visível no Railway). */
+  onApplicationBootstrap() {
+    try {
+      const jobs = this.schedulerRegistry.getCronJobs()
+      const all  = Array.from(jobs.keys())
+      this.logger.log(`[health.cron] crons globais registrados: ${all.length} → ${all.join(' | ')}`)
+
+      const expected = ['dailyAggregation', 'hourlySync']
+      for (const name of expected) {
+        const job = jobs.get(name)
+        if (job) {
+          const next = job.nextDate()
+          this.logger.log(`[health.cron] ✓ ${name} próxima execução: ${next.toString()}`)
+        } else {
+          this.logger.error(`[health.cron] ✗ ${name} NÃO encontrado — @Cron não registrou. Verifique ScheduleModule.forRoot() em app.module.ts`)
+        }
+      }
+    } catch (e: unknown) {
+      this.logger.error(`[health.cron] erro ao validar crons: ${(e as Error)?.message}`)
+    }
+  }
 
   async startBackfill(orgId: string | null, days: number, userId: string | null): Promise<{ runId: string }> {
     return this.startRun(await this.resolveOrgId(orgId), 'backfill', days, userId)
@@ -104,7 +133,7 @@ export class BackfillService {
     throw new HttpException('Nenhuma organização encontrada. Configure uma organização primeiro.', 400)
   }
 
-  @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC — full 3-day window
+  @Cron('0 5 * * *', { name: 'dailyAggregation' }) // 02:00 BRT — full 3-day window
   async dailyAggregation(): Promise<void> {
     console.log(`[ml-sync.cron] iniciando ciclo diário (3 dias)…`)
     const { data: connections } = await supabaseAdmin
@@ -126,7 +155,7 @@ export class BackfillService {
   /** Hourly incremental sync — pega orders das últimas 24h por org.
    * Garante que pedidos novos do dia entram no banco com CPF (auto-billing
    * roda dentro de ingestDateRange) sem precisar esperar o cron das 02h. */
-  @Cron('17 * * * *') // off-minute (não :00) pra evitar fila com outros crons
+  @Cron('17 * * * *', { name: 'hourlySync' })
   async hourlySync(): Promise<void> {
     console.log(`[ml-sync.cron] iniciando ciclo horário (1 dia)…`)
     const { data: connections } = await supabaseAdmin

@@ -539,7 +539,7 @@ export class MlBillingFetcherService {
   }
 
   /** Hourly cron — drains ~50/hour of unfetched orders. */
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_HOUR, { name: 'billingDrainHourly' })
   async cron() {
     try {
       await this.fetchBatch(50)
