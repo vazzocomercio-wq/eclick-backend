@@ -12,6 +12,8 @@ export interface UnifiedCustomer {
   shopee_buyer_id: string | null
   avatar_url: string | null
   tags: string[]
+  city: string | null
+  state: string | null
   total_conversations: number
   total_purchases: number
   first_contact_at: string
