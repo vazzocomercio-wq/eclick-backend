@@ -25,6 +25,7 @@ import { AdsAiModule } from './modules/ads-ai/ads-ai.module'
 import { EnrichmentModule } from './modules/enrichment/enrichment.module'
 import { UserPreferencesModule } from './modules/user-preferences/user-preferences.module'
 import { AdminModule } from './modules/admin/admin.module'
+import { MarketplaceModule } from './modules/marketplace/marketplace.module'
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { AdminModule } from './modules/admin/admin.module'
     EnrichmentModule,
     UserPreferencesModule,
     AdminModule,
+    MarketplaceModule,
   ],
   controllers: [AppController],
   providers: [AppService],
