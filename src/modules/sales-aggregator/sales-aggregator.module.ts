@@ -10,6 +10,6 @@ import { SalesAggregatorController } from './sales-aggregator.controller'
   imports:     [MercadolivreModule],
   controllers: [SalesAggregatorController],
   providers:   [MercadoLivreClient, OrdersIngestionService, SnapshotsAggregationService, BackfillService],
-  exports:     [BackfillService],
+  exports:     [BackfillService, OrdersIngestionService],
 })
 export class SalesAggregatorModule {}

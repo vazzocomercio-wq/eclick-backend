@@ -4,6 +4,7 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { BackfillService } from './services/backfill.service'
+import { OrdersIngestionService } from './services/orders-ingestion.service'
 
 interface AuthUser {
   id: string
@@ -17,7 +18,19 @@ interface BackfillBody {
 @Controller('sales-aggregator')
 @UseGuards(SupabaseAuthGuard)
 export class SalesAggregatorController {
-  constructor(private readonly backfill: BackfillService) {}
+  constructor(
+    private readonly backfill: BackfillService,
+    private readonly ingestion: OrdersIngestionService,
+  ) {}
+
+  // GET /sales-aggregator/sync-stats — last sync metrics for dashboards.
+  @Get('sync-stats')
+  async syncStats() {
+    return {
+      last_sync: this.ingestion.getLastStats(),
+      cron_interval_minutes: 60, // ml-billing-fetcher cron is hourly
+    }
+  }
 
   @Post('backfill')
   @HttpCode(202)

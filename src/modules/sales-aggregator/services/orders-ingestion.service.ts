@@ -30,11 +30,28 @@ type BuyerSnapshot = {
   fetched_at:      string | null
 }
 
+/** In-memory snapshot of the last sync — surfaced by GET /sales-aggregator/sync-stats. */
+export type LastSyncStats = {
+  at:                string
+  orders_processed:  number
+  with_cpf:          number
+  failed:            number
+  duplicates:        number
+  duration_ms:       number
+} | null
+
+const BILLING_BATCH      = 3      // 3 paralelos por batch
+const BILLING_BATCH_GAP  = 1000   // 1s entre batches → ~3 req/s sustentado
+
 @Injectable()
 export class OrdersIngestionService {
   private readonly logger = new Logger(OrdersIngestionService.name)
+  private lastStats: LastSyncStats = null
 
   constructor(private readonly mlClient: MercadoLivreClient) {}
+
+  /** Public — surfaces the last sync result for /sync-stats. */
+  getLastStats(): LastSyncStats { return this.lastStats }
 
   async ingestDateRange(
     orgId: string,
@@ -42,6 +59,7 @@ export class OrdersIngestionService {
     dateTo: string,   // YYYY-MM-DD
     runId: string,
   ): Promise<IngestionStats> {
+    const t0 = Date.now()
     const { token, sellerId } = await this.mlClient.getTokenForOrg(orgId)
 
     // Build listing→product lookup map for this org (once, upfront)
@@ -125,7 +143,33 @@ export class OrdersIngestionService {
       }
     }
 
+    // Consolidated final summary + persist for /sync-stats endpoint
+    const withCpf = await this.countCpfFromBatch(stats).catch(() => 0)
+    const duration = Date.now() - t0
+    this.lastStats = {
+      at:               new Date().toISOString(),
+      orders_processed: stats.ordersFound,
+      with_cpf:         withCpf,
+      failed:           stats.errors.length,
+      duplicates:       Math.max(0, stats.ordersFound - stats.rowsUpserted),
+      duration_ms:      duration,
+    }
+    this.logger.log(
+      `[ml-sync] ${stats.ordersFound} novos orders processados, ${withCpf} com CPF, ${stats.errors.length} sem CPF (billing falhou), ${this.lastStats.duplicates} duplicados (skip) — ${Math.round(duration/1000)}s`,
+    )
+
     return stats
+  }
+
+  /** Counts how many orders ingested in this run ended up with CPF —
+   * derived from the DB after upsert finishes. */
+  private async countCpfFromBatch(_stats: IngestionStats): Promise<number> {
+    const { count } = await supabaseAdmin
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .not('buyer_doc_number', 'is', null)
+      .gte('updated_at', new Date(Date.now() - 10 * 60_000).toISOString()) // últimos 10 min
+    return count ?? 0
   }
 
   /** For every order in this batch, return the buyer info we'll attach to
@@ -174,75 +218,99 @@ export class OrdersIngestionService {
     const buyerIdByOrder = new Map<string, number | null>()
     for (const o of orders) buyerIdByOrder.set(String(o.id), o.buyer?.id ?? null)
 
-    let withCpf = 0, withPhone = 0, miss = 0
-    for (const id of toFetch) {
-      const result = await this.mlClient.fetchCompleteBillingForOrder(token, id)
-      stats.apiCalls += 2 // 1 GET /orders + 1 GET billing-info (média; legado adiciona +1)
+    let withCpf = 0, withPhone = 0, miss = 0, failed = 0
 
-      const billing = result.billing
-      const docNumber = billing?.identification?.number
-        ?? billing?.doc_number
-        ?? null
-      const docType = billing?.identification?.type
-        ?? billing?.doc_type
-        ?? null
-      const cleanDoc = docNumber ? docNumber.replace(/\D/g, '') || null : null
+    // Process billing in parallel batches — 3 paralelos × ~3 req/s sustentado.
+    // ML aceita ~10 req/s; manter em 3 deixa margem segura sem 429s.
+    for (let i = 0; i < toFetch.length; i += BILLING_BATCH) {
+      const batch = toFetch.slice(i, i + BILLING_BATCH)
+      const settled = await Promise.allSettled(batch.map(async (id) => {
+        const buyerId = buyerIdByOrder.get(id) ?? null
+        return await this.resolveOneBuyer(id, buyerId, token, stats)
+      }))
 
-      // /users/{buyer_id} APENAS quando billing veio sem CPF, p/ tentar pegar
-      // phone + first/last (NUNCA email — LGPD; só vem do enrichment cascade)
-      const buyerId = buyerIdByOrder.get(id) ?? null
-      let userInfo: Awaited<ReturnType<typeof this.mlClient.fetchBuyerUser>> = null
-      if (buyerId && !cleanDoc) {
-        userInfo = await this.mlClient.fetchBuyerUser(token, buyerId)
-        stats.apiCalls++
+      for (let j = 0; j < settled.length; j++) {
+        const id = batch[j]
+        const r  = settled[j]
+        if (r.status === 'fulfilled') {
+          const { snapshot, hasCpf, hasPhone } = r.value
+          out.set(id, snapshot)
+          if (hasCpf)   withCpf++
+          else          miss++
+          if (hasPhone) withPhone++
+        } else {
+          // Falha total — fetched_at = null pra cron horário tentar de novo
+          failed++
+          this.logger.warn(`[ml-sync.billing.failed] order=${id} ${(r.reason as Error)?.message ?? 'erro'}`)
+          out.set(id, {
+            doc_type: null, doc_number: null, email: null, phone: null,
+            name: null, last_name: null, billing_info_id: null,
+            billing_address: null, billing_country: null,
+            fetched_at: null,
+          })
+        }
       }
 
-      const composedFromBilling = [billing?.name, billing?.last_name].filter(Boolean).join(' ').trim() || null
-      const composedFromUser    = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
-      const name  = composedFromBilling ?? composedFromUser ?? null
-      const phone = userInfo?.phone ?? null
-
-      const snapshot = {
-        doc_type:        docType,
-        doc_number:      cleanDoc,
-        email:           null, // ML não fornece (LGPD)
-        phone,
-        name,
-        last_name:       billing?.last_name ?? userInfo?.last_name ?? null,
-        billing_info_id: result.billingInfoId,
-        billing_address: (billing?.address ?? null) as Record<string, unknown> | null,
-        billing_country: billing?.address?.country_id ?? 'BR',
-        fetched_at:      new Date().toISOString(),
+      // 1s entre batches → mantém 3 req/s sustentado sem 429
+      if (i + BILLING_BATCH < toFetch.length) {
+        await new Promise(r => setTimeout(r, BILLING_BATCH_GAP))
       }
-      out.set(id, snapshot)
-      if (cleanDoc) withCpf++
-      else miss++
-      if (phone) withPhone++
-
-      this.logger.log(
-        `[ml-sync.billing] order=${id} cpf=${cleanDoc ? 'yes' : 'no'} log=${result.log.join('|')}`,
-      )
-      this.logger.log(
-        `[ml-sync.billing.parsed] order=${id} ${JSON.stringify({
-          billing_info_id: result.billingInfoId,
-          doc_type:        docType,
-          doc_number:      cleanDoc,
-          name:            billing?.name      ?? null,
-          last_name:       billing?.last_name ?? null,
-          composed_name:   name,
-          has_address:     !!billing?.address,
-        })}`,
-      )
-      this.logger.log(`[ml-sync.billing.upsert] order=${id} ${JSON.stringify(snapshot)}`)
-
-      // 1.1s budget for ML's billing endpoint (1 req/sec)
-      await new Promise(r => setTimeout(r, 1100))
     }
 
     this.logger.log(
-      `[aggregator.billing] fetched=${toFetch.length} cpf=${withCpf} phone=${withPhone} no_data=${miss}`,
+      `[aggregator.billing] fetched=${toFetch.length} cpf=${withCpf} phone=${withPhone} no_data=${miss} failed=${failed}`,
     )
     return out
+  }
+
+  /** Single-order billing resolution. Throws on hard failure so the
+   * caller's Promise.allSettled tracks it as `failed` — fetched_at stays
+   * null so the hourly cron can retry. */
+  private async resolveOneBuyer(
+    id: string,
+    buyerId: number | null,
+    token: string,
+    stats: IngestionStats,
+  ): Promise<{ snapshot: BuyerSnapshot; hasCpf: boolean; hasPhone: boolean }> {
+    const result = await this.mlClient.fetchCompleteBillingForOrder(token, id)
+    stats.apiCalls += 2 // 1 GET /orders + 1 billing-info (média; legado +1)
+
+    const billing = result.billing
+    const docNumber = billing?.identification?.number ?? billing?.doc_number ?? null
+    const docType   = billing?.identification?.type   ?? billing?.doc_type   ?? null
+    const cleanDoc  = docNumber ? docNumber.replace(/\D/g, '') || null : null
+
+    let userInfo: Awaited<ReturnType<typeof this.mlClient.fetchBuyerUser>> = null
+    if (buyerId && !cleanDoc) {
+      userInfo = await this.mlClient.fetchBuyerUser(token, buyerId)
+      stats.apiCalls++
+    }
+
+    const composedFromBilling = [billing?.name, billing?.last_name].filter(Boolean).join(' ').trim() || null
+    const composedFromUser    = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
+    const name  = composedFromBilling ?? composedFromUser ?? null
+    const phone = userInfo?.phone ?? null
+
+    const snapshot: BuyerSnapshot = {
+      doc_type:        docType,
+      doc_number:      cleanDoc,
+      email:           null, // ML não fornece (LGPD)
+      phone,
+      name,
+      last_name:       billing?.last_name ?? userInfo?.last_name ?? null,
+      billing_info_id: result.billingInfoId,
+      billing_address: (billing?.address ?? null) as Record<string, unknown> | null,
+      billing_country: billing?.address?.country_id ?? 'BR',
+      fetched_at:      new Date().toISOString(),
+    }
+
+    if (cleanDoc) {
+      this.logger.log(`[ml-sync.billing.ok] order=${id} cpf=yes log=${result.log.join('|')}`)
+    } else {
+      this.logger.log(`[ml-sync.billing.no_cpf] order=${id} log=${result.log.join('|')}`)
+    }
+
+    return { snapshot, hasCpf: !!cleanDoc, hasPhone: !!phone }
   }
 
   private buildOrderRows(
