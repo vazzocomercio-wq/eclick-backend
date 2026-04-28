@@ -6,6 +6,7 @@ import { DataStoneProvider } from './datastone.provider'
 import { AssertivaProvider } from './assertiva.provider'
 import { HubDevProvider } from './hubdev.provider'
 import { ViaCepProvider } from './viacep.provider'
+import { PH3AProvider } from './ph3a.provider'
 
 export * from './base-provider'
 
@@ -16,6 +17,7 @@ export const ALL_PROVIDERS: Provider[] = [
   AssertivaProvider,
   HubDevProvider,
   ViaCepProvider,
+  PH3AProvider,
 ]
 
 /** Token used by the orchestrator to inject the full registry as a Map. */
@@ -30,10 +32,11 @@ export const enrichmentRegistryProvider: Provider = {
     ass: AssertivaProvider,
     hub: HubDevProvider,
     via: ViaCepProvider,
+    ph3a: PH3AProvider,
   ): Map<string, BaseEnrichmentProvider> => {
     const m = new Map<string, BaseEnrichmentProvider>()
-    for (const p of [big, dd, ds, ass, hub, via]) m.set(p.code, p)
+    for (const p of [big, dd, ds, ass, hub, via, ph3a]) m.set(p.code, p)
     return m
   },
-  inject: [BigDataCorpProvider, DirectDataProvider, DataStoneProvider, AssertivaProvider, HubDevProvider, ViaCepProvider],
+  inject: [BigDataCorpProvider, DirectDataProvider, DataStoneProvider, AssertivaProvider, HubDevProvider, ViaCepProvider, PH3AProvider],
 }
