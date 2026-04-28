@@ -23,6 +23,7 @@ import { MlAdsModule } from './modules/ml-ads/ml-ads.module'
 import { LeadBridgeModule } from './modules/lead-bridge/lead-bridge.module'
 import { AdsAiModule } from './modules/ads-ai/ads-ai.module'
 import { EnrichmentModule } from './modules/enrichment/enrichment.module'
+import { UserPreferencesModule } from './modules/user-preferences/user-preferences.module'
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { EnrichmentModule } from './modules/enrichment/enrichment.module'
     LeadBridgeModule,
     AdsAiModule,
     EnrichmentModule,
+    UserPreferencesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
