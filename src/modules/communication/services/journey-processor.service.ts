@@ -320,22 +320,29 @@ export class JourneyProcessorService {
     const fullName  = (customerRow?.display_name as string | null | undefined) ?? snapshot.buyer_name ?? null
     const firstName = fullName ? fullName.split(/\s+/)[0] ?? null : null
 
-    let productName: string | null = null
-    let totalAmount: string | null = null
+    let productName:  string | null = null
+    let totalAmount:  string | null = null
+    let trackingCode: string | null = null
     if (snapshot.external_order_id) {
       const { data: orderRow } = await supabaseAdmin
         .from('orders')
-        .select('raw_data')
+        .select('product_title, shipping_id, raw_data')
         .eq('external_order_id', snapshot.external_order_id)
         .maybeSingle()
-      // ML salva 1 item por order em raw_data.item (objeto), NÃO array
-      // order_items. Path correto verificado no payload da Carol.
+      // Preferência: coluna SQL direta (orders.product_title) > raw_data.item.title.
+      // Coluna direta funciona pra ML + manual orders; raw_data só pra ML.
       const raw = (orderRow?.raw_data ?? {}) as {
         total_amount?: number | string
         item?:         { title?: string }
       }
-      productName = raw.item?.title ?? null
-      totalAmount = raw.total_amount != null ? String(raw.total_amount) : null
+      productName  = (orderRow?.product_title as string | null | undefined)
+                  ?? raw.item?.title
+                  ?? null
+      totalAmount  = raw.total_amount != null ? String(raw.total_amount) : null
+      // shipping_id já existe no INSERT do pedido — vira tracking_code do
+      // template. Hooks de status (CC-3) podem atualizar quando o ML
+      // sobrescrever esse campo com novo código.
+      trackingCode = (orderRow?.shipping_id as string | null | undefined) ?? null
     }
 
     const runRow = {
@@ -358,15 +365,17 @@ export class JourneyProcessorService {
         template_id:       template.id,
         template_name:     step.template_name,
         // Vars do template renderer — nomes batem com {{var}} dos templates
-        // (brand_name, product_title, external_order_id) em vez dos nomes
-        // genéricos antigos (store_name, product_name, order_id).
+        // (brand_name, product_title, external_order_id). Retrocompat:
+        // gravamos product_name como alias de product_title pra templates
+        // legados que usavam o nome antigo.
         first_name:        firstName,
         full_name:         fullName,
         external_order_id: snapshot.external_order_id ?? null,
         product_title:     productName,
+        product_name:      productName,
         total_amount:      totalAmount,
         brand_name:        'Vazzo Comercio',
-        tracking_code:     null,
+        tracking_code:     trackingCode,
         delivery_date:     null,
       },
     }
