@@ -59,6 +59,20 @@ export class SalesAggregatorController {
     return { runId, message: `Sincronização de ${days} dias iniciada` }
   }
 
+  // POST /sales-aggregator/sync-now — alias semântico de run-now com
+  // default de 1 dia. Usado por ops/scripts pra disparar sync imediato
+  // sem esperar o cron das 02h ou o horário do :17min.
+  @Post('sync-now')
+  @HttpCode(202)
+  async syncNow(
+    @ReqUser() user: AuthUser,
+    @Body() body: BackfillBody,
+  ) {
+    const days = Math.min(Math.max(body.days ?? 1, 1), 7)
+    const { runId } = await this.backfill.syncNow(user.orgId, days)
+    return { runId, message: `Sync imediato de ${days} dia(s) iniciado` }
+  }
+
   @Post('cancel/:runId')
   @HttpCode(200)
   async cancelRun(

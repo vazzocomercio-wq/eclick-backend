@@ -104,8 +104,9 @@ export class BackfillService {
     throw new HttpException('Nenhuma organização encontrada. Configure uma organização primeiro.', 400)
   }
 
-  @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC
+  @Cron('0 5 * * *') // 02:00 BRT = 05:00 UTC — full 3-day window
   async dailyAggregation(): Promise<void> {
+    console.log(`[ml-sync.cron] iniciando ciclo diário (3 dias)…`)
     const { data: connections } = await supabaseAdmin
       .from('ml_connections')
       .select('organization_id')
@@ -116,10 +117,41 @@ export class BackfillService {
         await this.runDaily(orgId, null)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[aggregator] cron daily falhou para org ${orgId}:`, msg)
+        console.error(`[ml-sync.cron] daily falhou para org ${orgId}:`, msg)
       }
     }
-    if (orgIds.length > 0) console.log(`[aggregator] daily cron completo: ${orgIds.length} orgs`)
+    if (orgIds.length > 0) console.log(`[ml-sync.cron] daily completo: ${orgIds.length} orgs`)
+  }
+
+  /** Hourly incremental sync — pega orders das últimas 24h por org.
+   * Garante que pedidos novos do dia entram no banco com CPF (auto-billing
+   * roda dentro de ingestDateRange) sem precisar esperar o cron das 02h. */
+  @Cron('17 * * * *') // off-minute (não :00) pra evitar fila com outros crons
+  async hourlySync(): Promise<void> {
+    console.log(`[ml-sync.cron] iniciando ciclo horário (1 dia)…`)
+    const { data: connections } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id')
+    const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
+
+    let okOrgs = 0
+    for (const orgId of orgIds) {
+      try {
+        await this.startRun(orgId, 'manual', 1, null)
+        okOrgs++
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[ml-sync.cron] hourly falhou para org ${orgId}:`, msg)
+      }
+    }
+    if (orgIds.length > 0) {
+      console.log(`[ml-sync.cron] hourly completo: ${okOrgs}/${orgIds.length} orgs — próxima execução em 60min`)
+    }
+  }
+
+  /** Manual instant trigger — POST /sales-aggregator/sync-now */
+  async syncNow(orgId: string | null, days = 1): Promise<{ runId: string }> {
+    return this.startRun(await this.resolveOrgId(orgId), 'manual', Math.min(Math.max(days, 1), 7), null)
   }
 
   private async startRun(
