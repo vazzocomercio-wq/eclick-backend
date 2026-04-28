@@ -1,0 +1,277 @@
+import { Injectable, Logger } from '@nestjs/common'
+import { supabaseAdmin } from '../../../common/supabase'
+import { PricingConfigService } from '../pricing-config.service'
+import { ProductSnapshot } from './types'
+
+/** Agrega dados do produto em paralelo (sales/stock/ads/concorrentes/
+ * compras/histórico/sazonal) + config da org. Cada bloco é best-effort:
+ * falha de leitura não derruba snapshot — vira null e penaliza confiança.
+ *
+ * Para Sprint P2 v1, alguns sinais (ads/competitors) podem retornar
+ * vazios se as tabelas não estão populadas. Isso é OK — gera signals
+ * tipo 'low_confidence' em vez de decisões de preço. */
+@Injectable()
+export class ProductSnapshotService {
+  private readonly logger = new Logger(ProductSnapshotService.name)
+
+  constructor(private readonly cfg: PricingConfigService) {}
+
+  async getSnapshot(orgId: string, productId: string): Promise<ProductSnapshot | null> {
+    const config = await this.cfg.getOrCreate(orgId)
+
+    // Promise.all paralelo — cada query é defensiva (try/catch interno)
+    const [
+      productRow, stockData, salesData, adsData,
+      competitorsData, incomingData, historyData, seasonalData,
+    ] = await Promise.all([
+      this.fetchProduct(orgId, productId),
+      this.fetchStock(orgId, productId),
+      this.fetchSales(orgId, productId),
+      this.fetchAds(orgId, productId),
+      this.fetchCompetitors(orgId, productId),
+      this.fetchIncoming(orgId, productId),
+      this.fetchPriceHistory(orgId, productId),
+      this.fetchSeasonal(orgId),
+    ])
+
+    if (!productRow) return null
+
+    const isNewProduct = productRow.created_at
+      ? (Date.now() - new Date(productRow.created_at).getTime()) < 30 * 86_400_000
+      : false
+
+    // Confidence breakdown — penaliza pela ausência de cada fonte
+    const penalties = config.confidence_rules?.penalties ?? {}
+    const breakdown: Record<string, number> = {}
+    if (!productRow.cost_price)           breakdown.no_cost_data          = penalties.no_cost_data ?? 30
+    if (salesData.d90 === 0)              breakdown.no_sales_history      = penalties.no_sales_history ?? 20
+    if (competitorsData.prices.length === 0) breakdown.no_competitor_data = penalties.no_competitor_data ?? 25
+    if (isNewProduct)                     breakdown.new_product_under_30d = penalties.new_product_under_30d ?? 15
+
+    const dataAgeHours = (Date.now() - new Date(productRow.updated_at ?? productRow.created_at ?? Date.now()).getTime()) / 3_600_000
+    if (dataAgeHours > 48)                breakdown.stale_data_over_48h   = penalties.stale_data_over_48h ?? 10
+
+    const confidence_score = Math.max(0, 100 - Object.values(breakdown).reduce((s, v) => s + v, 0))
+
+    // Coverage = quantity / velocity
+    const coverage_days = stockData.quantity && stockData.velocity && stockData.velocity > 0
+      ? Math.floor(stockData.quantity / stockData.velocity)
+      : null
+
+    // Seasonal adjustment ativo agora (start_date <= now <= end_date)
+    const now = new Date()
+    const activeSeasonal = (seasonalData ?? []).find(p => {
+      const start = new Date(p.start_date + 'T00:00:00')
+      const end   = new Date(p.end_date   + 'T23:59:59')
+      return p.is_active && start <= now && now <= end
+    }) ?? null
+
+    return {
+      product: {
+        id:            productRow.id,
+        name:          productRow.name ?? null,
+        sku:           productRow.sku ?? null,
+        listing_id:    productRow.ml_listing_id ?? productRow.listing_id ?? null,
+        current_price: productRow.current_price ?? productRow.sale_price ?? null,
+        cost_price:    productRow.cost_price ?? null,
+      },
+      abc_curve:  productRow.abc_curve ?? null,
+      segment:    productRow.segment   ?? null,
+      stock: {
+        quantity:       stockData.quantity,
+        velocity:       stockData.velocity,
+        coverage_days,
+      },
+      sales: salesData,
+      ads:        adsData,
+      competitors: competitorsData,
+      incoming:   incomingData,
+      history:    historyData,
+      seasonal: {
+        period:         activeSeasonal,
+        adjustment_pct: activeSeasonal?.pricing_adjustment_pct ?? null,
+      },
+      config_for_org: config,
+      data_sources: {
+        has_cost:          !!productRow.cost_price,
+        has_sales_history: salesData.d90 > 0,
+        has_competitor:    competitorsData.prices.length > 0,
+        has_ads:           adsData.ctr_7d != null || adsData.in_active_campaign,
+        has_stock:         stockData.quantity != null,
+      },
+      is_new_product:       isNewProduct,
+      data_age_hours:       Math.round(dataAgeHours * 10) / 10,
+      confidence_score,
+      confidence_breakdown: breakdown,
+    }
+  }
+
+  // ── helpers ─────────────────────────────────────────────────────────────
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async fetchProduct(orgId: string, productId: string): Promise<any> {
+    try {
+      const { data } = await supabaseAdmin
+        .from('products').select('*')
+        .eq('id', productId).eq('organization_id', orgId).maybeSingle()
+      return data
+    } catch (e) { this.logger.warn(`[snapshot.product] ${(e as Error).message}`); return null }
+  }
+
+  private async fetchStock(orgId: string, productId: string): Promise<{ quantity: number | null; velocity: number | null }> {
+    try {
+      const { data: prod } = await supabaseAdmin
+        .from('products').select('stock_quantity')
+        .eq('id', productId).maybeSingle()
+      const quantity = (prod?.stock_quantity as number | null) ?? null
+
+      // Velocity = sales 30d / 30
+      const cutoff30 = new Date(Date.now() - 30 * 86_400_000).toISOString()
+      const { count } = await supabaseAdmin
+        .from('orders').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId)
+        .eq('product_id', productId)
+        .gte('sold_at', cutoff30)
+        .not('status', 'in', '(cancelled,refunded)')
+      const velocity = count != null && count > 0 ? Math.round((count / 30) * 100) / 100 : null
+      return { quantity, velocity }
+    } catch (e) { this.logger.warn(`[snapshot.stock] ${(e as Error).message}`); return { quantity: null, velocity: null } }
+  }
+
+  private async fetchSales(orgId: string, productId: string): Promise<ProductSnapshot['sales']> {
+    try {
+      const cutoff7  = new Date(Date.now() -  7 * 86_400_000).toISOString()
+      const cutoff30 = new Date(Date.now() - 30 * 86_400_000).toISOString()
+      const cutoff90 = new Date(Date.now() - 90 * 86_400_000).toISOString()
+
+      const [ord7, ord30, ord90, last] = await Promise.all([
+        supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
+          .eq('organization_id', orgId).eq('product_id', productId)
+          .gte('sold_at', cutoff7).not('status', 'in', '(cancelled,refunded)'),
+        supabaseAdmin.from('orders').select('sale_price', { count: 'exact' })
+          .eq('organization_id', orgId).eq('product_id', productId)
+          .gte('sold_at', cutoff30).not('status', 'in', '(cancelled,refunded)'),
+        supabaseAdmin.from('orders').select('id', { count: 'exact', head: true })
+          .eq('organization_id', orgId).eq('product_id', productId)
+          .gte('sold_at', cutoff90).not('status', 'in', '(cancelled,refunded)'),
+        supabaseAdmin.from('orders').select('sold_at')
+          .eq('organization_id', orgId).eq('product_id', productId)
+          .not('status', 'in', '(cancelled,refunded)')
+          .order('sold_at', { ascending: false }).limit(1).maybeSingle(),
+      ])
+
+      const d7  = ord7.count  ?? 0
+      const d30 = ord30.count ?? 0
+      const d90 = ord90.count ?? 0
+      const revenue_30d = (ord30.data ?? []).reduce((s, r) => s + Number((r as { sale_price?: number }).sale_price ?? 0), 0)
+
+      // Trend: vendas dos últimos 7d × 4.28 (semana) vs média mensal
+      const weeklyAvg = d30 / 4.28
+      const trend = weeklyAvg > 0 ? ((d7 - weeklyAvg) / weeklyAvg) * 100 : null
+
+      const lastSaleAt = (last.data as { sold_at?: string } | null)?.sold_at ?? null
+      const daysSince = lastSaleAt
+        ? Math.floor((Date.now() - new Date(lastSaleAt).getTime()) / 86_400_000)
+        : null
+
+      return { d7, d30, d90, revenue_30d, trend_7d_vs_30d_pct: trend, last_sale_at: lastSaleAt, days_since_last_sale: daysSince }
+    } catch (e) {
+      this.logger.warn(`[snapshot.sales] ${(e as Error).message}`)
+      return { d7: 0, d30: 0, d90: 0, revenue_30d: 0, trend_7d_vs_30d_pct: null, last_sale_at: null, days_since_last_sale: null }
+    }
+  }
+
+  private async fetchAds(orgId: string, productId: string): Promise<ProductSnapshot['ads']> {
+    try {
+      // Best-effort: ml_ads_campaigns ou similar. Se não existir, retorna nulls.
+      const { data } = await supabaseAdmin
+        .from('ml_ads_campaigns').select('id, items, is_active')
+        .eq('organization_id', orgId).eq('is_active', true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const campaigns = (data ?? []) as any[]
+      const inActiveCampaign = campaigns.some(c =>
+        Array.isArray(c.items) && c.items.some((it: { product_id?: string }) => it.product_id === productId),
+      )
+      return {
+        ctr_7d: null, roas_7d: null, acos_7d: null,
+        in_active_campaign: inActiveCampaign,
+      }
+    } catch {
+      return { ctr_7d: null, roas_7d: null, acos_7d: null, in_active_campaign: false }
+    }
+  }
+
+  private async fetchCompetitors(orgId: string, productId: string): Promise<ProductSnapshot['competitors']> {
+    try {
+      // Tabela competitors (módulo já existente). product_id pode ser null
+      // (concorrentes globais ou via SKU). Best-effort.
+      const { data } = await supabaseAdmin
+        .from('competitors').select('current_price, position, status')
+        .eq('organization_id', orgId).eq('product_id', productId)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows = (data ?? []) as any[]
+      const prices = rows.map(r => Number(r.current_price)).filter(p => Number.isFinite(p) && p > 0)
+      const minPrice = prices.length > 0 ? Math.min(...prices) : null
+      const position = rows.find(r => r.position != null)?.position ?? null
+      const mainOos  = rows.some(r => r.status === 'out_of_stock')
+      return { prices, min_price: minPrice, position_in_channel: position, main_competitor_oos: mainOos }
+    } catch {
+      return { prices: [], min_price: null, position_in_channel: null, main_competitor_oos: false }
+    }
+  }
+
+  private async fetchIncoming(orgId: string, productId: string): Promise<ProductSnapshot['incoming']> {
+    try {
+      const { data } = await supabaseAdmin
+        .from('purchase_orders').select('expected_arrival_date, items, status')
+        .eq('organization_id', orgId).in('status', ['placed','in_transit'])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows = (data ?? []) as any[]
+      let units = 0, soonestArrival: Date | null = null
+      for (const po of rows) {
+        const items = Array.isArray(po.items) ? po.items : []
+        for (const it of items) {
+          if (it.product_id === productId) {
+            units += Number(it.quantity ?? 0)
+            if (po.expected_arrival_date) {
+              const d = new Date(po.expected_arrival_date)
+              if (!soonestArrival || d < soonestArrival) soonestArrival = d
+            }
+          }
+        }
+      }
+      const arrival_days = soonestArrival
+        ? Math.max(0, Math.floor((soonestArrival.getTime() - Date.now()) / 86_400_000))
+        : null
+      return { units, arrival_days, has_incoming: units > 0 }
+    } catch {
+      return { units: 0, arrival_days: null, has_incoming: false }
+    }
+  }
+
+  private async fetchPriceHistory(_orgId: string, productId: string): Promise<ProductSnapshot['history']> {
+    try {
+      // Best-effort: tenta price_history; se não existir, usa products.updated_at
+      const { data } = await supabaseAdmin
+        .from('price_history').select('created_at')
+        .eq('product_id', productId).order('created_at', { ascending: false }).limit(1).maybeSingle()
+      const lastChangeAt = (data as { created_at?: string } | null)?.created_at ?? null
+      const days = lastChangeAt
+        ? Math.floor((Date.now() - new Date(lastChangeAt).getTime()) / 86_400_000)
+        : null
+      return { last_change_at: lastChangeAt, days_since_last_change: days }
+    } catch {
+      return { last_change_at: null, days_since_last_change: null }
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async fetchSeasonal(orgId: string): Promise<any[]> {
+    try {
+      const { data } = await supabaseAdmin
+        .from('pricing_seasonal_periods').select('*')
+        .eq('organization_id', orgId).eq('is_active', true)
+      return data ?? []
+    } catch { return [] }
+  }
+}
