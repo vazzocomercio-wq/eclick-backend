@@ -28,7 +28,10 @@ export class DataStoneProvider extends BaseEnrichmentProvider {
   private readonly BASE = 'https://api.datastone.com.br/v1'
 
   private headers(creds: ProviderCreds): Record<string, string> {
-    return { Authorization: `Token ${creds.api_key}`, 'Content-Type': 'application/json' }
+    // Strip prefixo "Token " se vier copiado do painel da DataStone — evita
+    // ficar com "Authorization: Token Token ds_..." (401 garantido).
+    const k = (creds.api_key ?? '').replace(/^Token\s+/i, '')
+    return { Authorization: `Token ${k}`, 'Content-Type': 'application/json' }
   }
 
   private async get(path: string, params: Record<string, string>, creds: ProviderCreds): Promise<Record<string, unknown> | null> {
