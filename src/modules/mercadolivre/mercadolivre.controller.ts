@@ -76,6 +76,22 @@ export class MercadolivreController {
     }
   }
 
+  // POST /ml/orders/:order_id/debug-billing — diagnostic. Runs the 3 ML
+  // calls (GET /orders/{id}, NEW billing-info/MLB/{id}, LEGACY
+  // /orders/{id}/billing_info) plus /users/{buyer_id} and returns the full
+  // structured log so we can see WHY billing_info.id isn't being captured.
+  // Read-only — does NOT touch the orders table.
+  @Post('orders/:order_id/debug-billing')
+  @HttpCode(HttpStatus.OK)
+  async debugOrderBilling(@Param('order_id') orderId: string) {
+    try {
+      return await this.billingFetcher.debugBilling(orderId)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      return { order_id: orderId, log: [{ step: 'unhandled', message: err?.message ?? 'erro' }] }
+    }
+  }
+
   // GET /ml/competitors/preview?url=...
   @Get('competitors/preview')
   async previewCompetitor(@Query('url') url: string) {

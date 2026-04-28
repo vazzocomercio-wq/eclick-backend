@@ -336,6 +336,145 @@ export class MlBillingFetcherService {
     }
   }
 
+  /** Debug helper — runs all 3 ML calls (GET /orders/{id}, the NEW
+   * billing-info endpoint when an id is present, and the LEGACY
+   * /orders/{id}/billing_info) and returns full responses + headers so we
+   * can inspect why CPF isn't being captured. Never throws. Reads ZERO
+   * from the DB and writes nothing — safe to call from a UI button. */
+  async debugBilling(externalOrderId: string): Promise<{
+    order_id: string
+    log: Array<Record<string, unknown>>
+  }> {
+    const log: Array<Record<string, unknown>> = []
+
+    let token: string
+    try {
+      ;({ token } = await this.ml.getValidToken())
+    } catch (e: unknown) {
+      log.push({ step: 'getValidToken', error: (e as { message?: string })?.message ?? 'erro' })
+      return { order_id: externalOrderId, log }
+    }
+
+    // PASSO 1 — GET /orders/{id}
+    let billingInfoId: string | null = null
+    let buyerId: number | null = null
+    try {
+      const res = await axios.get(`${ML_BASE}/orders/${externalOrderId}`, {
+        headers: { Authorization: `Bearer ${token}`, 'x-version': '2' },
+        timeout: 10_000,
+      })
+      const data: any = res.data
+      const buyer = data?.buyer ?? {}
+      billingInfoId = buyer?.billing_info?.id ?? null
+      buyerId = buyer?.id ?? null
+      log.push({
+        step: 'GET /orders/{id}',
+        status: res.status,
+        keys: Object.keys(data ?? {}),
+        buyer_keys: Object.keys(buyer ?? {}),
+        buyer_id: buyer?.id ?? null,
+        buyer_nickname: buyer?.nickname ?? null,
+        buyer_billing_info: buyer?.billing_info ?? null,
+        buyer_billing_info_id: billingInfoId,
+        buyer_full: buyer,
+      })
+    } catch (e: unknown) {
+      const err = e as { response?: { status?: number; data?: unknown }; message?: string }
+      log.push({
+        step: 'GET /orders/{id}',
+        status: err?.response?.status ?? null,
+        error:  err?.response?.data ?? null,
+        message: err?.message ?? null,
+      })
+    }
+
+    // PASSO 2 — NOVO endpoint, só se temos billing_info_id
+    if (billingInfoId) {
+      try {
+        const res2 = await axios.get(
+          `${ML_BASE}/orders/billing-info/MLB/${billingInfoId}`,
+          { headers: { Authorization: `Bearer ${token}`, 'x-version': '2' }, timeout: 10_000 },
+        )
+        const data: any = res2.data
+        log.push({
+          step: 'GET /orders/billing-info/MLB/{id}',
+          status: res2.status,
+          keys: Object.keys(data ?? {}),
+          billing_info: data?.buyer?.billing_info ?? data?.billing_info ?? null,
+          full_response: data,
+        })
+      } catch (e: unknown) {
+        const err = e as { response?: { status?: number; data?: unknown }; message?: string }
+        log.push({
+          step: 'GET /orders/billing-info/MLB/{id}',
+          billing_info_id: billingInfoId,
+          status: err?.response?.status ?? null,
+          error:  err?.response?.data ?? null,
+          message: err?.message ?? null,
+        })
+      }
+    } else {
+      log.push({ step: 'skip:NEW endpoint', reason: 'sem buyer.billing_info.id na resposta de /orders/{id}' })
+    }
+
+    // PASSO 2B — endpoint LEGADO (sempre roda em debug, pra comparar)
+    try {
+      const resLegacy = await axios.get(
+        `${ML_BASE}/orders/${externalOrderId}/billing_info`,
+        { headers: { Authorization: `Bearer ${token}`, 'x-version': '2' }, timeout: 10_000 },
+      )
+      const data: any = resLegacy.data
+      log.push({
+        step: 'GET /orders/{id}/billing_info (legacy)',
+        status: resLegacy.status,
+        keys: Object.keys(data ?? {}),
+        billing_info: data?.buyer?.billing_info ?? null,
+        full_response: data,
+      })
+    } catch (e: unknown) {
+      const err = e as { response?: { status?: number; data?: unknown }; message?: string }
+      log.push({
+        step: 'GET /orders/{id}/billing_info (legacy)',
+        status: err?.response?.status ?? null,
+        error:  err?.response?.data ?? null,
+        message: err?.message ?? null,
+      })
+    }
+
+    // PASSO 3 — /users/{buyer_id} pra checar se tem phone disponível
+    if (buyerId) {
+      try {
+        const resUser = await axios.get(`${ML_BASE}/users/${buyerId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 5_000,
+        })
+        const data: any = resUser.data
+        log.push({
+          step: 'GET /users/{buyer_id}',
+          status: resUser.status,
+          first_name: data?.first_name ?? null,
+          last_name:  data?.last_name  ?? null,
+          phone:      data?.phone ?? null,
+          alternative_phone: data?.alternative_phone ?? null,
+          // intencionalmente NÃO logamos email — LGPD e ML quase nunca retorna
+        })
+      } catch (e: unknown) {
+        const err = e as { response?: { status?: number; data?: unknown }; message?: string }
+        log.push({
+          step: 'GET /users/{buyer_id}',
+          buyer_id: buyerId,
+          status: err?.response?.status ?? null,
+          error:  err?.response?.data ?? null,
+          message: err?.message ?? null,
+        })
+      }
+    } else {
+      log.push({ step: 'skip:GET /users', reason: 'sem buyer.id' })
+    }
+
+    return { order_id: externalOrderId, log }
+  }
+
   /** Hourly cron — drains ~50/hour of unfetched orders. */
   @Cron(CronExpression.EVERY_HOUR)
   async cron() {
