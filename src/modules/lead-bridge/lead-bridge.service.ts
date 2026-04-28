@@ -53,13 +53,23 @@ export class LeadBridgeService {
   // ── Config ────────────────────────────────────────────────────────────────
 
   async getConfig(orgId: string): Promise<LeadBridgeConfig> {
-    const { data } = await supabaseAdmin
+    const { data: existing } = await supabaseAdmin
       .from('lead_bridge_configs')
       .select('*')
       .eq('organization_id', orgId)
       .maybeSingle()
-    if (data) return data as LeadBridgeConfig
-    return { organization_id: orgId, ...DEFAULT_CONFIG }
+    if (existing) return existing as LeadBridgeConfig
+
+    // Auto-create: garante que toda org tem row persistida com defaults
+    // (antes retornávamos só o objeto em memória — updateConfig dependia
+    // do upsert pra criar; agora getConfig é canônico).
+    const { data: created, error } = await supabaseAdmin
+      .from('lead_bridge_configs')
+      .insert({ organization_id: orgId, ...DEFAULT_CONFIG })
+      .select()
+      .single()
+    if (error) throw new HttpException(`Falha ao criar config: ${error.message}`, 500)
+    return created as LeadBridgeConfig
   }
 
   async updateConfig(orgId: string, patch: Partial<LeadBridgeConfig>): Promise<LeadBridgeConfig> {
