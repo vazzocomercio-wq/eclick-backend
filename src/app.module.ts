@@ -29,6 +29,7 @@ import { MarketplaceModule } from './modules/marketplace/marketplace.module'
 import { MessagingModule } from './modules/messaging/messaging.module'
 import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
 import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricing-intelligence.module'
+import { CommunicationModule } from './modules/communication/communication.module'
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricin
     MessagingModule,
     CustomerHubModule,
     PricingIntelligenceModule,
+    CommunicationModule,
   ],
   controllers: [AppController],
   providers: [AppService],
