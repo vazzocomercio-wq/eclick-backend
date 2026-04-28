@@ -8,11 +8,25 @@ import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckRes
  *
  * Auth: TOKEN as a query-string param (NOT a header).
  * apiKey format: single TOKEN string.
- * Cost: ~R$0.40/query.
+ *
+ * TOKEN source (probe-validated 2026-04-28):
+ *   1. creds.api_key (DB — lead_bridge_configs.cpf_api_key OR
+ *      enrichment_credentials.api_key)
+ *   2. process.env.DIRECTDATA_TOKEN (fallback)
+ *
+ * Probe-validated 2026-04-28:
+ *   - Base URL: apiv3.directd.com.br ✅ (api-directdata.com NÃO existe)
+ *   - /CadastroPessoaFisica retorna 401 com mensagem completa
+ *     "IP ou Token inválido. Verifique." → API checa IP+Token.
+ *     Se 401 em produção apesar do token correto, é IP whitelist
+ *     no DirectData (egress Railway precisa entrar no allowlist).
+ *
+ * TODO: cost_per_query = 0 (plano TESTE atual). Atualizar quando
+ * plano definitivo for contratado (Vazzo confirmará valor).
  *
  * Real response shape (confirmed via live API call):
  *   {
- *     metaDados: { resultadoId: 1, resultado: "Sucesso", ... },
+ *     metaDados: { resultadoId: 1, resultado: "Sucesso", mensagem, ... },
  *     retorno: {
  *       cpf: "814.398.065-00",
  *       nome, sexo: "Feminino"|"Masculino",
@@ -28,8 +42,17 @@ import { BaseEnrichmentProvider, EnrichmentResult, ProviderCreds, HealthCheckRes
 @Injectable()
 export class DirectDataProvider extends BaseEnrichmentProvider {
   readonly code = 'directdata'
-  private readonly DEFAULT_COST_CENTS = 40
+  private readonly DEFAULT_COST_CENTS = 0 // TODO: ajustar quando plano contratado (era 40)
   private readonly BASE = 'https://apiv3.directd.com.br/api'
+
+  /** Token resolution: DB creds primeiro (per-org via lead_bridge_configs
+   * ou enrichment_credentials), fallback pra env do Railway. Permite
+   * configurar via UI OU env-only sem mudança de código. */
+  private resolveToken(creds: ProviderCreds): string | null {
+    const dbToken  = creds.api_key?.trim()
+    const envToken = process.env.DIRECTDATA_TOKEN?.trim()
+    return dbToken || envToken || null
+  }
 
   /** Parse "dd/MM/yyyy HH:mm:ss" → "yyyy-MM-dd". */
   private parseBR(date?: string): string | undefined {
@@ -52,11 +75,12 @@ export class DirectDataProvider extends BaseEnrichmentProvider {
   }
 
   /** Hit a Direct Data endpoint. Token + payload all live in the query
-   * string; no body, no headers needed. */
+   * string; no body, no headers needed. Token via resolveToken (DB→env). */
   private async get(path: string, params: Record<string, string>, creds: ProviderCreds): Promise<Record<string, unknown> | null> {
-    if (!creds.api_key) return null
+    const token = this.resolveToken(creds)
+    if (!token) return null
     const { data } = await axios.get(`${creds.base_url ?? this.BASE}${path}`, {
-      params: { ...params, TOKEN: creds.api_key },
+      params: { ...params, TOKEN: token },
       timeout: 15_000,
     })
     return (data ?? null) as Record<string, unknown> | null
@@ -71,22 +95,28 @@ export class DirectDataProvider extends BaseEnrichmentProvider {
     return (body.retorno ?? null) as Record<string, unknown> | null
   }
 
-  /** Direct Data exposes /api/Saldo for credit lookup. Free.
-   * If unavailable, fall back to a shape-only check. */
+  /** Direct Data /Saldo retorna 404 hoje (probe 2026-04-28). Mantemos
+   * fallback de shape: se 404, aceita; se 401/403, rejeita; senão tenta
+   * ler saldo. Token resolvido via resolveToken (DB→env). */
   async healthCheck(creds: ProviderCreds): Promise<HealthCheckResult> {
-    if (!creds.api_key) return { ok: false, message: 'Sem api_key configurada' }
+    const token = this.resolveToken(creds)
+    if (!token) return { ok: false, message: 'Sem token (configure DIRECTDATA_TOKEN no env ou api_key no DB)' }
     try {
       const { data } = await axios.get(`${creds.base_url ?? this.BASE}/Saldo`, {
-        params: { TOKEN: creds.api_key }, timeout: 8_000,
+        params: { TOKEN: token }, timeout: 8_000,
       })
       const saldo = (data?.retorno?.saldo ?? data?.saldo ?? null) as number | null
       if (saldo != null) return { ok: true, message: `Conectado · saldo R$ ${Number(saldo).toFixed(2)}`, metadata: { saldo } }
       return { ok: true, message: 'Conectado · resposta sem campo saldo' }
     } catch (e: any) {
       const status = e?.response?.status
-      // 404 means /Saldo doesn't exist on this account — accept the token shape silently
-      if (status === 404) return { ok: true, message: 'Token aceito · /Saldo não disponível' }
-      if (status === 401 || status === 403) return { ok: false, message: 'TOKEN inválido' }
+      // 404 = /Saldo não disponível neste plano; aceita token shape
+      if (status === 404) return { ok: true, message: 'Token configurado · /Saldo não disponível neste plano' }
+      // 401/403 = token ou IP rejeitado; mensagem completa do API
+      if (status === 401 || status === 403) {
+        const apiMsg = e?.response?.data?.metaDados?.mensagem ?? 'TOKEN inválido'
+        return { ok: false, message: `${apiMsg} (verifique IP whitelist do Railway no painel DirectData)` }
+      }
       return { ok: false, message: e?.message ?? 'Falha na conexão' }
     }
   }
