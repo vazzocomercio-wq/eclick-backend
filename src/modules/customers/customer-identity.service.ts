@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 export interface UnifiedCustomer {
   id: string
   display_name: string | null
+  ml_nickname: string | null
   phone: string | null
   email: string | null
   whatsapp_id: string | null
