@@ -1,0 +1,79 @@
+# ml-sync-redundant — backup hora-cheia do @Cron('17 * * * *') interno.
+# Lê /admin/sync-stats; se last_sync > 90min, dispara /admin/sync-now.
+# Persistência REAL (não morre quando sessão Claude fecha).
+#
+# Secrets necessários no GitHub:
+#   ECLICK_BACKEND_URL  — ex: https://api.eclick.com.br
+#   ADMIN_SECRET        — mesma string do env do Railway
+#
+# Para disparo manual: Actions tab → "ml-sync-redundant" → "Run workflow".
+
+name: ml-sync-redundant
+on:
+  schedule:
+    # ":07" off-minute pra evitar fila de cron na hora cheia. Toda hora.
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ml-sync-redundant
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read sync stats
+        id: stats
+        env:
+          BACKEND: ${{ secrets.ECLICK_BACKEND_URL }}
+          SECRET:  ${{ secrets.ADMIN_SECRET }}
+        run: |
+          set -e
+          if [ -z "$BACKEND" ] || [ -z "$SECRET" ]; then
+            echo "::error::ECLICK_BACKEND_URL ou ADMIN_SECRET não configurados nos secrets do repo"
+            exit 1
+          fi
+          STATS=$(curl -sf -H "x-admin-secret: $SECRET" "$BACKEND/admin/sync-stats" || echo '{}')
+          echo "stats=$STATS"
+          echo "stats=$STATS" >> "$GITHUB_OUTPUT"
+          # Extrai last_sync.at (ISO) — vazio se nunca rodou
+          LAST_AT=$(echo "$STATS" | jq -r '.last_sync.at // empty')
+          echo "last_at=$LAST_AT" >> "$GITHUB_OUTPUT"
+
+      - name: Decide if drain is needed
+        id: decide
+        env:
+          LAST_AT: ${{ steps.stats.outputs.last_at }}
+        run: |
+          if [ -z "$LAST_AT" ]; then
+            echo "trigger=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::last_sync ausente — disparando sync"
+            exit 0
+          fi
+          # Idade em minutos
+          NOW_TS=$(date -u +%s)
+          LAST_TS=$(date -u -d "$LAST_AT" +%s)
+          AGE_MIN=$(( (NOW_TS - LAST_TS) / 60 ))
+          echo "Sync mais recente: ${AGE_MIN}min atrás"
+          if [ "$AGE_MIN" -gt 90 ]; then
+            echo "trigger=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Cron interno parado há ${AGE_MIN}min (>90min) — disparando /admin/sync-now"
+          else
+            echo "trigger=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger sync-now (only if needed)
+        if: steps.decide.outputs.trigger == 'true'
+        env:
+          BACKEND: ${{ secrets.ECLICK_BACKEND_URL }}
+          SECRET:  ${{ secrets.ADMIN_SECRET }}
+        run: |
+          RESP=$(curl -sf -X POST \
+            -H "x-admin-secret: $SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"days":1}' \
+            "$BACKEND/admin/sync-now") \
+            || (echo "::error::POST /admin/sync-now falhou" && exit 1)
+          echo "Resposta: $RESP"
