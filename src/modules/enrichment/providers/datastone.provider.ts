@@ -196,8 +196,12 @@ export class DataStoneProvider extends BaseEnrichmentProvider {
       const num = clean.slice(2)
       const data = await this.get('/whatsapp/search/', { ddd, phone: num }, creds)
       if (!data) return { ...EMPTY_RESULT, quality: 'error', error: 'sem creds', duration_ms: elapsed(t0) }
+      // DataStone responde { status: "ATIVO" } (PT uppercase). Normaliza
+      // pra aceitar PT/EN, lowercase/uppercase, e variantes is_active/has_whatsapp
+      // que possam aparecer em outras versões da API.
+      const statusStr = String((data as Record<string, unknown>).status ?? '').toLowerCase()
       const isActive = (data as Record<string, unknown>).is_active === true
-                    || (data as Record<string, unknown>).status === 'active'
+                    || statusStr === 'active' || statusStr === 'ativo'
                     || (data as Record<string, unknown>).has_whatsapp === true
       return {
         success: true,

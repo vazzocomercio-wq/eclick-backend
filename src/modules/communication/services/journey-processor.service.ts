@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { EnrichmentService } from '../../enrichment/enrichment.service'
+import { WhatsAppValidationService } from '../../enrichment/services/whatsapp-validation.service'
 import { CustomerResolverService, OrderTriggerSnapshot } from './customer-resolver.service'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,8 +67,9 @@ export class JourneyProcessorService {
   private isRunning = false
 
   constructor(
-    private readonly resolver:   CustomerResolverService,
-    private readonly enrichment: EnrichmentService,
+    private readonly resolver:     CustomerResolverService,
+    private readonly enrichment:   EnrichmentService,
+    private readonly waValidation: WhatsAppValidationService,
   ) {}
 
   @Cron('*/30 * * * * *', { name: 'processCommunicationJourneysTick' })
@@ -202,8 +204,12 @@ export class JourneyProcessorService {
           enrichment_data:    d,
         }
         if (phone0?.number) {
-          update.phone               = phone0.number
-          update.validated_whatsapp  = !!phone0.is_whatsapp
+          update.phone = phone0.number
+          // Validação real WA via DataStone /whatsapp/search/ (independente
+          // do provider que retornou o phone). Não confia no flag is_whatsapp
+          // da base cadastral — números fixos costumam vir marcados como WA.
+          const wa = await this.waValidation.validateNumber(phone0.number, orgId)
+          update.validated_whatsapp = wa.isWhatsApp
         }
         if (email0?.address)        update.email      = email0.address
         if (d.address?.city)        update.city       = d.address.city
