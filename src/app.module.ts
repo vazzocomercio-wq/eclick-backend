@@ -26,6 +26,7 @@ import { EnrichmentModule } from './modules/enrichment/enrichment.module'
 import { UserPreferencesModule } from './modules/user-preferences/user-preferences.module'
 import { AdminModule } from './modules/admin/admin.module'
 import { MarketplaceModule } from './modules/marketplace/marketplace.module'
+import { MessagingModule } from './modules/messaging/messaging.module'
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { MarketplaceModule } from './modules/marketplace/marketplace.module'
     UserPreferencesModule,
     AdminModule,
     MarketplaceModule,
+    MessagingModule,
   ],
   controllers: [AppController],
   providers: [AppService],
