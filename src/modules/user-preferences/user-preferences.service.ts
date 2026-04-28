@@ -48,4 +48,42 @@ export class UserPreferencesService {
     if (error) this.logger.error(`[user-prefs.upsert] ${error.message}`)
     return { ok: true }
   }
+
+  /** Append-only LGPD audit. Disparado pelo <MaskedField> toda vez que
+   * o usuário clica no eye pra revelar um CPF/phone/email. Nunca lança
+   * — falha silenciosa pra não quebrar a UI. */
+  async logReveal(input: {
+    userId:      string
+    field:       'cpf' | 'cnpj' | 'phone' | 'email'
+    customerId?: string | null
+    ip?:         string | null
+    userAgent?:  string | null
+  }): Promise<{ ok: true }> {
+    try {
+      await supabaseAdmin.from('pii_reveal_log').insert({
+        user_id:     input.userId,
+        customer_id: input.customerId ?? null,
+        field:       input.field,
+        ip:          input.ip ?? null,
+        user_agent:  input.userAgent ?? null,
+      })
+    } catch (e: unknown) {
+      this.logger.warn(`[pii-reveal] ${(e as Error)?.message}`)
+    }
+    return { ok: true }
+  }
+
+  /** Últimos N reveals do usuário — usado pelo card "Auditoria" em
+   * /configuracoes/preferencias. */
+  async listRecentReveals(userId: string, limit = 50): Promise<Array<{
+    field: string; customer_id: string | null; revealed_at: string
+  }>> {
+    const { data } = await supabaseAdmin
+      .from('pii_reveal_log')
+      .select('field, customer_id, revealed_at')
+      .eq('user_id', userId)
+      .order('revealed_at', { ascending: false })
+      .limit(Math.min(Math.max(limit, 1), 200))
+    return (data ?? []) as Array<{ field: string; customer_id: string | null; revealed_at: string }>
+  }
 }
