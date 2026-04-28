@@ -27,6 +27,7 @@ import { UserPreferencesModule } from './modules/user-preferences/user-preferenc
 import { AdminModule } from './modules/admin/admin.module'
 import { MarketplaceModule } from './modules/marketplace/marketplace.module'
 import { MessagingModule } from './modules/messaging/messaging.module'
+import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { MessagingModule } from './modules/messaging/messaging.module'
     AdminModule,
     MarketplaceModule,
     MessagingModule,
+    CustomerHubModule,
   ],
   controllers: [AppController],
   providers: [AppService],
