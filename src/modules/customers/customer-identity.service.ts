@@ -249,6 +249,73 @@ export class CustomerIdentityService {
     return { ...data, history }
   }
 
+  /** Stats agregados — counts e somas sobre TODA a base da org, não só
+   * a página atual. Sem PostgREST aggregate (não suporta COUNT FILTER em
+   * 1 call), usa N COUNT(head=true) em paralelo. Mais lento que SQL puro
+   * mas evita criar function/view custom. */
+  async getStats(orgId: string): Promise<{
+    total:         number
+    with_cpf:      number
+    with_phone:    number
+    with_whatsapp: number
+    with_email:    number
+    with_address:  number
+    vip:           number
+    blocked:       number
+    pending:       number
+    gmv_total:     number
+    ltv_average:   number
+  }> {
+    const base = () => supabaseAdmin
+      .from('unified_customers')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+
+    const [
+      total, withCpf, withPhone, withWa, withEmail, withAddress,
+      vip, blocked, pending,
+    ] = await Promise.all([
+      base(),
+      base().not('cpf', 'is', null),
+      base().not('phone', 'is', null),
+      base().eq('validated_whatsapp', true),
+      base().not('email', 'is', null),
+      base().not('city', 'is', null),
+      base().contains('tags', ['vip']),
+      base().contains('tags', ['blocked']),
+      base().eq('enrichment_status', 'pending'),
+    ])
+
+    // Soma de total_purchases — separado porque PostgREST não suporta SUM
+    // direto. Pega a coluna numérica e soma no Node. Limit 50k pra org de
+    // 8k clientes basta; se ultrapassar, depois migra pra view materializada.
+    const { data: rev } = await supabaseAdmin
+      .from('unified_customers')
+      .select('total_purchases')
+      .eq('organization_id', orgId)
+      .limit(50_000)
+    const gmvTotal = (rev ?? []).reduce(
+      (s, r) => s + Number((r as { total_purchases?: number | null }).total_purchases ?? 0),
+      0,
+    )
+    const totalCount = total.count ?? 0
+    const ltvAverage = totalCount > 0 ? gmvTotal / totalCount : 0
+
+    return {
+      total:         totalCount,
+      with_cpf:      withCpf.count   ?? 0,
+      with_phone:    withPhone.count ?? 0,
+      with_whatsapp: withWa.count    ?? 0,
+      with_email:    withEmail.count ?? 0,
+      with_address:  withAddress.count ?? 0,
+      vip:           vip.count       ?? 0,
+      blocked:       blocked.count   ?? 0,
+      pending:       pending.count   ?? 0,
+      gmv_total:     Math.round(gmvTotal * 100) / 100,
+      ltv_average:   Math.round(ltvAverage * 100) / 100,
+    }
+  }
+
   async update(id: string, body: Partial<Pick<UnifiedCustomer, 'display_name' | 'tags' | 'notes' | 'email' | 'phone'>>) {
     const { data, error } = await supabaseAdmin
       .from('unified_customers')

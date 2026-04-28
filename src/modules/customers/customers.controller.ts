@@ -1,5 +1,6 @@
 import { Controller, Get, Patch, Post, Delete, Body, Param, Query, UseGuards } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { ReqUser } from '../../common/decorators/user.decorator'
 import { CustomerIdentityService } from './customer-identity.service'
 
 @Controller('customers')
@@ -40,6 +41,14 @@ export class CustomersController {
       is_vip:       flag(isVip),
       is_blocked:   flag(isBlocked),
     })
+  }
+
+  /** GET /customers/stats — agregados COUNT FILTER do banco inteiro pra
+   * a org. NÃO é filtrado por paginação. Frontend chama no carregamento
+   * da página de clientes pra alimentar contadores do painel lateral. */
+  @Get('stats')
+  stats(@ReqUser() user: { id: string; orgId: string | null }) {
+    return this.svc.getStats(user.orgId ?? '')
   }
 
   @Get(':id')
