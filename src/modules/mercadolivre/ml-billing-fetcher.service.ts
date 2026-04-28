@@ -154,7 +154,12 @@ export class MlBillingFetcherService {
 
   /** Resolves the patch object that should be merged into `orders` after a
    * billing fetch. Always carries buyer_billing_fetched_at so the row is
-   * marked "tried" even when both endpoints failed (no infinite retry). */
+   * marked "tried" even when both endpoints failed (no infinite retry).
+   *
+   * IMPORTANT — ML billing shape:
+   *   { identification: { type, number }, name, last_name, address: { ... } }
+   * NOT { doc_type, doc_number }. The legacy fallback parity is kept just
+   * in case but the canonical path is `identification.{type,number}`. */
   private async resolveBuyer(
     externalOrderId: string,
     buyerId: number | null,
@@ -175,23 +180,68 @@ export class MlBillingFetcherService {
     const composedFromUser    = [userInfo?.first_name, userInfo?.last_name].filter(Boolean).join(' ').trim() || null
     const fullName = composedFromBilling ?? composedFromUser ?? null
     const phone    = userInfo?.phone ?? null
+    const lastName = billing?.last_name ?? userInfo?.last_name ?? null
+
+    // Step 1 — log what we PARSED out of the ML response so we can verify
+    // the field paths are right when the row ends up empty in the DB.
+    this.logger.log(
+      `[ml-sync.billing.parsed] order=${externalOrderId} ${JSON.stringify({
+        billing_info_id: result.billingInfoId,
+        doc_type:        docType,
+        doc_number:      cleanDoc,
+        name:            billing?.name        ?? null,
+        last_name:       billing?.last_name   ?? null,
+        composed_name:   fullName,
+        has_address:     !!billing?.address,
+      })}`,
+    )
 
     const patch: Record<string, unknown> = {
       buyer_billing_fetched_at: new Date().toISOString(),
     }
-    if (cleanDoc)                    patch.buyer_doc_number      = cleanDoc
-    if (docType)                     patch.buyer_doc_type         = docType
-    if (fullName)                    patch.buyer_name             = fullName
-    if (billing?.last_name ?? userInfo?.last_name) patch.buyer_last_name = billing?.last_name ?? userInfo?.last_name ?? null
-    if (result.billingInfoId)        patch.buyer_billing_info_id  = result.billingInfoId
-    if (phone)                       patch.buyer_phone            = phone
-    if (billing?.address)            patch.billing_address        = billing.address
+    if (cleanDoc)              patch.buyer_doc_number      = cleanDoc
+    if (docType)               patch.buyer_doc_type        = docType
+    if (fullName)              patch.buyer_name            = fullName
+    if (lastName)              patch.buyer_last_name       = lastName
+    if (result.billingInfoId)  patch.buyer_billing_info_id = result.billingInfoId
+    if (phone)                 patch.buyer_phone           = phone
+    if (billing?.address)      patch.billing_address       = billing.address
     patch.billing_country = billing?.address?.country_id ?? 'BR'
+
+    // Step 2 — log the EXACT payload we're about to UPSERT (no surprises).
+    this.logger.log(`[ml-sync.billing.upsert] order=${externalOrderId} ${JSON.stringify(patch)}`)
 
     return { patch, cpfFound: !!cleanDoc, phoneFound: !!phone, log: result.log }
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
+
+  /** Resets buyer_billing_fetched_at = NULL on rows that were marked tried
+   * but ended up with NULL doc_number — typically because they were
+   * processed by an older parser that read billing.doc_number instead of
+   * billing.identification.number. Re-runs the cron pipeline next tick.
+   *
+   * Defaults to safe mode: only resets rows that have NO doc_number, so
+   * successful refetches are never undone. Pass forceAll=true to reset
+   * every billed row (use with care — burns ML quota). */
+  async resetBillingFetched(opts: { forceAll?: boolean } = {}): Promise<{ reset: number }> {
+    const onlyMissingCpf = !opts.forceAll
+
+    let q = supabaseAdmin
+      .from('orders')
+      .update({ buyer_billing_fetched_at: null })
+      .not('buyer_billing_fetched_at', 'is', null)
+    if (onlyMissingCpf) q = q.is('buyer_doc_number', null)
+
+    const { data, error } = await q.select('id')
+    if (error) {
+      this.logger.error(`[ml.billing.reset] ${error.message}`)
+      throw new Error(error.message)
+    }
+    const reset = data?.length ?? 0
+    this.logger.log(`[ml.billing.reset] ${reset} pedidos zerados (forceAll=${!!opts.forceAll})`)
+    return { reset }
+  }
 
   /** Count orders still missing billing info — drives the counter on the
    * "Buscar CPFs no ML" button in /clientes. */

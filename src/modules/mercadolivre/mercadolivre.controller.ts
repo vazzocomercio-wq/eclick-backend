@@ -92,6 +92,22 @@ export class MercadolivreController {
     }
   }
 
+  // POST /ml/orders/reset-billing-fetched — zeros buyer_billing_fetched_at
+  // on rows that were marked tried but ended up with NULL doc_number, so
+  // the next cron tick re-processes them with the current parser.
+  // Body: { force_all?: boolean } — default false (only resets rows
+  // missing CPF; never undoes successful refetches).
+  @Post('orders/reset-billing-fetched')
+  @HttpCode(HttpStatus.OK)
+  async resetBillingFetched(@Body() body: { force_all?: boolean } = {}) {
+    try {
+      return await this.billingFetcher.resetBillingFetched({ forceAll: body?.force_all === true })
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      return { reset: 0, message: err?.message ?? 'erro' }
+    }
+  }
+
   // GET /ml/competitors/preview?url=...
   @Get('competitors/preview')
   async previewCompetitor(@Query('url') url: string) {

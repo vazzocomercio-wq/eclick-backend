@@ -202,7 +202,7 @@ export class OrdersIngestionService {
       const name  = composedFromBilling ?? composedFromUser ?? null
       const phone = userInfo?.phone ?? null
 
-      out.set(id, {
+      const snapshot = {
         doc_type:        docType,
         doc_number:      cleanDoc,
         email:           null, // ML não fornece (LGPD)
@@ -213,7 +213,8 @@ export class OrdersIngestionService {
         billing_address: (billing?.address ?? null) as Record<string, unknown> | null,
         billing_country: billing?.address?.country_id ?? 'BR',
         fetched_at:      new Date().toISOString(),
-      })
+      }
+      out.set(id, snapshot)
       if (cleanDoc) withCpf++
       else miss++
       if (phone) withPhone++
@@ -221,6 +222,18 @@ export class OrdersIngestionService {
       this.logger.log(
         `[ml-sync.billing] order=${id} cpf=${cleanDoc ? 'yes' : 'no'} log=${result.log.join('|')}`,
       )
+      this.logger.log(
+        `[ml-sync.billing.parsed] order=${id} ${JSON.stringify({
+          billing_info_id: result.billingInfoId,
+          doc_type:        docType,
+          doc_number:      cleanDoc,
+          name:            billing?.name      ?? null,
+          last_name:       billing?.last_name ?? null,
+          composed_name:   name,
+          has_address:     !!billing?.address,
+        })}`,
+      )
+      this.logger.log(`[ml-sync.billing.upsert] order=${id} ${JSON.stringify(snapshot)}`)
 
       // 1.1s budget for ML's billing endpoint (1 req/sec)
       await new Promise(r => setTimeout(r, 1100))
