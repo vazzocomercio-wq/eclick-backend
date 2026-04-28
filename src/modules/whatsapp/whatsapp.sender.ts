@@ -1,25 +1,38 @@
 import { Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import type { WhatsAppConfig } from './whatsapp-config.service'
+import { ZapiProvider } from './zapi.provider'
 
 const META_API = 'https://graph.facebook.com/v20.0'
 
+/** Fachada de envio de WhatsApp. Roteia entre Z-API (default quando env
+ * vars setadas) e Meta Cloud API legado (waConfig do banco). Callers não
+ * precisam saber qual provider está ativo — basta passar phone+message
+ * e opcionalmente waConfig pra fallback Meta. */
 @Injectable()
 export class WhatsAppSender {
   private readonly logger = new Logger(WhatsAppSender.name)
 
-  /**
-   * Send a plain text message via WhatsApp Business Cloud API.
-   * Returns success boolean + the wamid if Meta accepted it.
-   * Never throws — failures are logged and surfaced via the return value
-   * so the webhook caller can decide what to do (queue for retry, etc).
-   */
+  constructor(private readonly zapi: ZapiProvider) {}
+
+  /** Envia texto. Z-API tem prioridade quando configurado por env;
+   * caso contrário cai pro Meta Cloud usando waConfig do banco. Nunca
+   * lança — o caller decide o que fazer com {success:false}. */
   async sendTextMessage(input: {
     phone:     string
     message:   string
-    waConfig:  WhatsAppConfig
+    waConfig?: WhatsAppConfig
   }): Promise<{ success: boolean; message_id?: string; error?: string }> {
     const { phone, message, waConfig } = input
+
+    if (this.zapi.isConfigured()) {
+      const r = await this.zapi.sendText(phone, message)
+      return { success: r.success, message_id: r.zapiMessageId, error: r.error }
+    }
+
+    if (!waConfig?.access_token) {
+      return { success: false, error: 'WhatsApp não configurado (sem ZAPI env nem Meta cfg)' }
+    }
 
     try {
       const { data } = await axios.post(
@@ -42,7 +55,7 @@ export class WhatsAppSender {
     } catch (e: any) {
       const status = e?.response?.status ?? 0
       const errMsg = e?.response?.data?.error?.message ?? e?.message ?? 'erro desconhecido'
-      this.logger.error(`[wa.sender] FALHOU status=${status} pra ${phone}: ${errMsg}`)
+      this.logger.error(`[wa.sender] meta FALHOU status=${status} pra ${phone}: ${errMsg}`)
       return { success: false, error: errMsg }
     }
   }

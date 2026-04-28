@@ -19,9 +19,34 @@ export interface WhatsAppConfig {
   updated_at: string
 }
 
+/** Synthetic config retornado quando Z-API está ativo via env. Permite
+ * que callers que checam `findActive() != null` antes de mandar continuem
+ * funcionando sem precisar saber do provider. WhatsAppSender ignora os
+ * campos Meta e usa env vars Z-API. */
+const ZAPI_SYNTHETIC_CONFIG: WhatsAppConfig = {
+  id:                  'zapi',
+  user_id:             null,
+  phone_number_id:     'zapi',
+  business_account_id: 'zapi',
+  access_token:        'zapi',
+  verify_token:        '',
+  display_phone:       null,
+  display_name:        null,
+  webhook_url:         null,
+  is_active:           true,
+  is_verified:         true,
+  last_verified_at:    null,
+  created_at:          '',
+  updated_at:          '',
+}
+
 @Injectable()
 export class WhatsAppConfigService {
   async findActive(): Promise<WhatsAppConfig | null> {
+    // Z-API tem prioridade — callers só precisam saber que está "ativo"
+    if (process.env.ZAPI_INSTANCE_ID && process.env.ZAPI_TOKEN && process.env.ZAPI_CLIENT_TOKEN) {
+      return ZAPI_SYNTHETIC_CONFIG
+    }
     const { data } = await supabaseAdmin
       .from('whatsapp_config')
       .select('*')
