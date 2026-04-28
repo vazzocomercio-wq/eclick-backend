@@ -88,11 +88,49 @@ export class JourneyEngineService {
     return { processed, sent, failed, completed, duration_ms }
   }
 
-  /** API pública pra futura integração com order status hook (CC-3). Por
-   * agora apenas loga — o ML real-time fetch atual não persiste status
-   * em orders, então não há onde plugar listener nativo ainda. */
-  async triggerOrderEvent(orderId: string, event: 'ready_to_ship' | 'shipped' | 'delivered'): Promise<void> {
-    this.logger.log(`[messaging.event] order=${orderId} event=${event} (CC-3: implementar avanço de step correspondente)`)
+  /** Porta de saída pra eventos imediatos de status de pedido (webhook ML,
+   * UPDATE manual, etc). Funciona como CC-3 inline: busca runs paused
+   * (next_step_at=null) com order_id matching, valida step.trigger=
+   * 'status_change_ml' + step.condition.shipping_status === event, e
+   * desbloqueia (next_step_at=now()). Idempotente: chamada repetida só
+   * desbloqueia rows que ainda estão paused matching. CC-3 cron faz a
+   * mesma coisa em loop @5min — esse método é o caminho rápido. */
+  async triggerOrderEvent(
+    orderId: string,
+    event:   'ready_to_ship' | 'shipped' | 'delivered',
+  ): Promise<{ unblocked: number; checked: number }> {
+    const { data: runs } = await supabaseAdmin
+      .from('messaging_journey_runs')
+      .select('id, journey_id, current_step')
+      .eq('status', 'pending')
+      .is('next_step_at', null)
+      .eq('order_id', orderId)
+    if (!runs?.length) {
+      this.logger.log(`[messaging.event] order=${orderId} event=${event} unblocked=0/0 (sem runs paused)`)
+      return { unblocked: 0, checked: 0 }
+    }
+
+    let unblocked = 0
+    for (const run of runs) {
+      const { data: journey } = await supabaseAdmin
+        .from('messaging_journeys').select('steps, is_active')
+        .eq('id', run.journey_id as string).maybeSingle()
+      if (!journey?.is_active) continue
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const steps = (journey.steps ?? []) as any[]
+      const step  = steps[run.current_step as number]
+      if (!step || step.trigger !== 'status_change_ml') continue
+      const expected = String(step.condition?.shipping_status ?? '').toLowerCase()
+      if (expected !== event.toLowerCase()) continue
+
+      await supabaseAdmin
+        .from('messaging_journey_runs')
+        .update({ next_step_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', run.id as string)
+      unblocked++
+    }
+    this.logger.log(`[messaging.event] order=${orderId} event=${event} unblocked=${unblocked}/${runs.length}`)
+    return { unblocked, checked: runs.length }
   }
 
   private async processRun(run: Row): Promise<{ sent: boolean; failed: boolean; completed: boolean }> {
