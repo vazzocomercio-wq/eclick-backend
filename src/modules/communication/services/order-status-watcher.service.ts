@@ -115,9 +115,19 @@ export class OrderStatusWatcherService {
     )
     if (!matches) return false
 
+    // Marca __triggered_step_${idx}=timestamp pra engine CC-2 saber na
+    // 2ª passada que pode enviar (em vez de re-pausar). Simétrico ao
+    // __armed_step_${idx} pra time_offset.
+    const ctx    = (run.context ?? {}) as Record<string, unknown>
+    const newCtx = { ...ctx, [`__triggered_step_${run.current_step}`]: new Date().toISOString() }
+
     await supabaseAdmin
       .from('messaging_journey_runs')
-      .update({ next_step_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({
+        next_step_at: new Date().toISOString(),
+        context:      newCtx,
+        updated_at:   new Date().toISOString(),
+      })
       .eq('id', run.id as string)
     return true
   }

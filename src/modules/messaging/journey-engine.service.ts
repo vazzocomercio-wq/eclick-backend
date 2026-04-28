@@ -123,9 +123,22 @@ export class JourneyEngineService {
       const expected = String(step.condition?.shipping_status ?? '').toLowerCase()
       if (expected !== event.toLowerCase()) continue
 
+      // Re-fetch run pra preservar context existente. Marca
+      // __triggered_step_${current_step} pra engine saber na 2ª passada
+      // que pode enviar (em vez de re-pausar).
+      const { data: full } = await supabaseAdmin
+        .from('messaging_journey_runs').select('context')
+        .eq('id', run.id as string).maybeSingle()
+      const ctx = (full?.context ?? {}) as Record<string, unknown>
+      const newCtx = { ...ctx, [`__triggered_step_${run.current_step}`]: new Date().toISOString() }
+
       await supabaseAdmin
         .from('messaging_journey_runs')
-        .update({ next_step_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .update({
+          next_step_at: new Date().toISOString(),
+          context:      newCtx,
+          updated_at:   new Date().toISOString(),
+        })
         .eq('id', run.id as string)
       unblocked++
     }
@@ -216,8 +229,21 @@ export class JourneyEngineService {
     }
 
     if (trig === 'status_change_ml') {
-      // Pausa esperando hook (CC-3 implementa). next_step_at=null garante
-      // que cron não vai mais pegar essa run até alguém empurrar.
+      // 2 passadas: 1ª pausa esperando CC-3; 2ª (após CC-3 setar
+      // __triggered_step_${idx}) envia template + avança. Simétrico ao
+      // __armed_step pra time_offset.
+      const ctx = (run.context ?? {}) as Record<string, unknown>
+      const triggeredKey = `__triggered_step_${idx}`
+      if (ctx[triggeredKey]) {
+        // CC-3 confirmou evento → envia template do step + advance
+        const result = await this.executeSend(run, {
+          template_name:    step.template_name as string | undefined,
+          channel_priority: step.channel_priority as string | undefined,
+        }, orgId)
+        const advanced = await this.advance(run.id, idx, total)
+        return { sent: result.success, failed: !result.success, completed: advanced.completed }
+      }
+      // 1ª passada — pausa esperando CC-3 detectar mudança de status
       await supabaseAdmin
         .from('messaging_journey_runs')
         .update({ status: 'pending', next_step_at: null, updated_at: new Date().toISOString() })
