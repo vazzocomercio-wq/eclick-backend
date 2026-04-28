@@ -8,13 +8,17 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import {
   MessagingService, MessagingTemplate, MessagingJourney,
 } from './messaging.service'
+import { JourneyEngineService } from './journey-engine.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('messaging')
 @UseGuards(SupabaseAuthGuard)
 export class MessagingController {
-  constructor(private readonly svc: MessagingService) {}
+  constructor(
+    private readonly svc:    MessagingService,
+    private readonly engine: JourneyEngineService,
+  ) {}
 
   // ── Templates ───────────────────────────────────────────────────────────
 
@@ -179,5 +183,63 @@ export class MessagingController {
       limit:  limit  ? Number(limit)  : undefined,
       offset: offset ? Number(offset) : undefined,
     })
+  }
+
+  // ── Runs (CC-2) ─────────────────────────────────────────────────────────
+
+  /** GET /messaging/runs?status=&journey_id=&customer_id=&from=&to=
+   *                      &limit=&offset= */
+  @Get('runs')
+  listRuns(
+    @ReqUser() user: ReqUserPayload,
+    @Query('status')      status?:     string,
+    @Query('journey_id')  journeyId?:  string,
+    @Query('customer_id') customerId?: string,
+    @Query('from')        from?:       string,
+    @Query('to')          to?:         string,
+    @Query('limit')       limit?:      string,
+    @Query('offset')      offset?:     string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listRuns(user.orgId, {
+      status, from, to,
+      journey_id:  journeyId,
+      customer_id: customerId,
+      limit:  limit  ? Number(limit)  : undefined,
+      offset: offset ? Number(offset) : undefined,
+    })
+  }
+
+  /** POST /messaging/runs/process-now — força tick do JourneyEngine sem
+   * esperar cron. Útil pra testes manuais e debug. */
+  @Post('runs/process-now')
+  @HttpCode(HttpStatus.OK)
+  processNow(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.engine.runOnce()
+  }
+
+  @Get('runs/:id')
+  getRun(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getRun(user.orgId, id)
+  }
+
+  @Post('runs/:id/skip-step')
+  @HttpCode(HttpStatus.OK)
+  skipStep(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.skipStep(user.orgId, id)
+  }
+
+  @Post('runs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelRun(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body?: { reason?: string },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.cancelRun(user.orgId, id, body?.reason)
   }
 }

@@ -563,4 +563,125 @@ export class MessagingService {
     if (error) throw new BadRequestException(error.message)
     return { items: data ?? [], total: count ?? 0, limit, offset }
   }
+
+  // ── Runs (jornadas em execução) ─────────────────────────────────────────
+
+  /** GET /messaging/runs — paginado, com filtros. */
+  async listRuns(
+    orgId: string,
+    filters: {
+      status?:      string
+      journey_id?:  string
+      customer_id?: string
+      from?:        string
+      to?:          string
+      limit?:       number
+      offset?:      number
+    },
+  ) {
+    let q = supabaseAdmin
+      .from('messaging_journey_runs')
+      .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+    if (filters.status)      q = q.eq('status', filters.status)
+    if (filters.journey_id)  q = q.eq('journey_id', filters.journey_id)
+    if (filters.customer_id) q = q.eq('customer_id', filters.customer_id)
+    if (filters.from)        q = q.gte('created_at', filters.from)
+    if (filters.to)          q = q.lte('created_at', filters.to)
+
+    const limit  = Math.min(Math.max(filters.limit  ?? 50, 1), 200)
+    const offset = Math.max(filters.offset ?? 0, 0)
+    q = q.range(offset, offset + limit - 1)
+
+    const { data, error, count } = await q
+    if (error) throw new BadRequestException(error.message)
+    return { items: data ?? [], total: count ?? 0, limit, offset }
+  }
+
+  /** GET /messaging/runs/:id — run + journey steps + sends. */
+  async getRun(orgId: string, id: string) {
+    const { data: run, error } = await supabaseAdmin
+      .from('messaging_journey_runs').select('*')
+      .eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (error) throw new BadRequestException(error.message)
+    if (!run)  throw new NotFoundException('run não encontrada')
+
+    const { data: journey } = await supabaseAdmin
+      .from('messaging_journeys')
+      .select('id, name, trigger_event, steps')
+      .eq('id', run.journey_id as string).maybeSingle()
+
+    const { data: sends } = await supabaseAdmin
+      .from('messaging_sends')
+      .select('*')
+      .eq('journey_run_id', id)
+      .order('created_at', { ascending: true })
+
+    return { run, journey: journey ?? null, sends: sends ?? [] }
+  }
+
+  /** POST /messaging/runs/:id/skip-step — pula step atual. Reagenda
+   * imediato (next_step_at=now()) pra cron pegar logo. Se não tiver
+   * próximo step → completed. */
+  async skipStep(orgId: string, id: string): Promise<{ ok: true; current_step: number; status: string }> {
+    const { data: run } = await supabaseAdmin
+      .from('messaging_journey_runs').select('id, current_step, status, journey_id, organization_id')
+      .eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (!run) throw new NotFoundException('run não encontrada')
+    if (run.status === 'completed' || run.status === 'failed' || run.status === 'paused') {
+      throw new BadRequestException(`run em status ${run.status} — não dá pra pular step`)
+    }
+
+    const { data: journey } = await supabaseAdmin
+      .from('messaging_journeys').select('steps')
+      .eq('id', run.journey_id as string).maybeSingle()
+    const total = Array.isArray(journey?.steps) ? (journey!.steps as JourneyStep[]).length : 0
+    const next  = (run.current_step as number ?? 0) + 1
+
+    if (next >= total) {
+      await supabaseAdmin
+        .from('messaging_journey_runs')
+        .update({ status: 'completed', next_step_at: null, updated_at: new Date().toISOString() })
+        .eq('id', id)
+      return { ok: true, current_step: next, status: 'completed' }
+    }
+    await supabaseAdmin
+      .from('messaging_journey_runs')
+      .update({
+        current_step: next,
+        next_step_at: new Date().toISOString(),
+        status:       'pending',
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', id)
+    return { ok: true, current_step: next, status: 'pending' }
+  }
+
+  /** POST /messaging/runs/:id/cancel — pausa permanente. Constraint
+   * permite paused; o motivo vai em context.cancel_reason (sempre preserva
+   * keys existentes). Não desativa cron — só cron skipa rows paused. */
+  async cancelRun(orgId: string, id: string, reason?: string): Promise<{ ok: true }> {
+    const { data: run } = await supabaseAdmin
+      .from('messaging_journey_runs').select('id, status, context')
+      .eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (!run) throw new NotFoundException('run não encontrada')
+    if (run.status === 'completed' || run.status === 'paused' || run.status === 'failed') {
+      throw new BadRequestException(`run já em status terminal: ${run.status}`)
+    }
+    const ctx = (run.context ?? {}) as Record<string, unknown>
+    const newCtx = { ...ctx, cancel_reason: reason ?? 'cancelled', cancelled_at: new Date().toISOString() }
+    const { error } = await supabaseAdmin
+      .from('messaging_journey_runs')
+      .update({
+        status:       'paused',
+        next_step_at: null,
+        context:      newCtx,
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('id', id)
+    if (error) throw new BadRequestException(error.message)
+    this.logger.log(`[messaging.cancel] run=${id} reason=${reason ?? 'cancelled'}`)
+    return { ok: true }
+  }
 }
