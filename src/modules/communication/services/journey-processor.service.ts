@@ -301,10 +301,11 @@ export class JourneyProcessorService {
       : (pick.recipient_email ?? null)
 
     // Context completo pro template renderer (CC-2). Faz JOIN com
-    // unified_customers + orders pra popular vars conhecidas:
-    // first_name, full_name, order_id, product_name, total_amount,
-    // store_name, seller_nickname. tracking_code/delivery_date só ficam
-    // disponíveis após hook de status (CC-3) — null por agora.
+    // unified_customers + orders pra popular vars conhecidas: first_name,
+    // full_name, order_id, product_name, total_amount, store_name.
+    // tracking_code/delivery_date só ficam disponíveis após hook de
+    // status (CC-3) — null por agora. seller_nickname descontinuado:
+    // templates devem usar {{store_name}} (hardcode) em vez disso.
     const { data: customerRow } = await supabaseAdmin
       .from('unified_customers')
       .select('display_name')
@@ -313,23 +314,22 @@ export class JourneyProcessorService {
     const fullName  = (customerRow?.display_name as string | null | undefined) ?? snapshot.buyer_name ?? null
     const firstName = fullName ? fullName.split(/\s+/)[0] ?? null : null
 
-    let productName:    string | null = null
-    let totalAmount:    string | null = null
-    let sellerNickname: string | null = null
+    let productName: string | null = null
+    let totalAmount: string | null = null
     if (snapshot.external_order_id) {
       const { data: orderRow } = await supabaseAdmin
         .from('orders')
         .select('raw_data')
         .eq('external_order_id', snapshot.external_order_id)
         .maybeSingle()
+      // ML salva 1 item por order em raw_data.item (objeto), NÃO array
+      // order_items. Path correto verificado no payload da Carol.
       const raw = (orderRow?.raw_data ?? {}) as {
-        total_amount?:   number | string
-        order_items?:   Array<{ item?: { title?: string } }>
-        seller?:        { nickname?: string }
+        total_amount?: number | string
+        item?:         { title?: string }
       }
-      productName    = raw.order_items?.[0]?.item?.title ?? null
-      totalAmount    = raw.total_amount != null ? String(raw.total_amount) : null
-      sellerNickname = raw.seller?.nickname ?? null
+      productName = raw.item?.title ?? null
+      totalAmount = raw.total_amount != null ? String(raw.total_amount) : null
     }
 
     const runRow = {
@@ -338,7 +338,8 @@ export class JourneyProcessorService {
       order_id:        snapshot.external_order_id ?? null,
       customer_id:     customerId,
       phone:           recipient,
-      current_step:    1,
+      // current_step=0 (array 0-indexed): primeiro tick processa steps[0]
+      current_step:    0,
       status:          'pending',
       next_step_at:    new Date().toISOString(),
       context: {
@@ -357,7 +358,6 @@ export class JourneyProcessorService {
         product_name:    productName,
         total_amount:    totalAmount,
         store_name:      'Vazzo Comercio',
-        seller_nickname: sellerNickname,
         tracking_code:   null,
         delivery_date:   null,
       },

@@ -10,13 +10,27 @@ import { JourneyStep } from './messaging.service'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = any
 
+interface TemplateRow {
+  id:            string
+  channel:       'whatsapp' | 'email' | string
+  name:          string
+  message_body:  string
+}
+
+type SendChannel = 'whatsapp' | 'email'
+
 /** Cron @5min processa runs em status pending OU active (CC-1 grava pending,
  * legacy triggerJourney/fireForOrderEvents gravam active — engine aceita
- * ambos). send_message renderiza+envia via WA ou email (stub); wait reagenda
- * next_step_at; condition avalia context[field] vs value e completa se não
- * bater. Rate limit 100ms entre runs (~10/s WA cap). Falhas em send_message
- * marcam messaging_sends.status=failed mas o run avança (não trava jornadas
- * inteiras por 1 send falho). */
+ * ambos). Suporta DUAS shapes de step:
+ *
+ *   A) Legacy: { type: 'send_message'|'wait'|'condition', template_id, ... }
+ *   B) CC-1:   { step, trigger, template_name, channel_priority, delay_minutes? }
+ *
+ * Em CC-1, trigger='immediate' envia agora; 'time_offset' arma com delay e
+ * envia no tick seguinte; 'status_change_ml' pausa (next_step_at=null) e
+ * fica esperando hook em CC-3. channel_priority='whatsapp_then_email' tenta
+ * WA, faz fallback pra email se falhar; cada tentativa vira UM row em
+ * messaging_sends pra auditoria. Rate limit 100ms entre runs. */
 @Injectable()
 export class JourneyEngineService {
   private readonly logger = new Logger(JourneyEngineService.name)
@@ -91,17 +105,33 @@ export class JourneyEngineService {
       await this.markRun(run.id, 'failed')
       return { sent: false, failed: true, completed: false }
     }
-    const steps = (journey.steps ?? []) as JourneyStep[]
+    // Steps podem vir em duas shapes — cast genérico, cada branch decide
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const steps = (journey.steps ?? []) as any[]
     const idx   = run.current_step ?? 0
     if (idx >= steps.length) {
       await this.markRun(run.id, 'completed')
       return { sent: false, failed: false, completed: true }
     }
-    const step = steps[idx]
+    const step    = steps[idx]
+    const orgId   = journey.organization_id as string
+    const isLegacy = step.type === 'send_message' || step.type === 'wait' || step.type === 'condition'
 
+    if (isLegacy) {
+      return await this.processLegacyStep(run, step as JourneyStep, idx, steps.length, orgId)
+    }
+    // CC-1 shape — { step, trigger, template_name, channel_priority, ... }
+    return await this.processCC1Step(run, step, idx, steps.length, orgId)
+  }
+
+  // ── Branch legacy (type=send_message|wait|condition) ───────────────────
+
+  private async processLegacyStep(
+    run: Row, step: JourneyStep, idx: number, total: number, orgId: string,
+  ): Promise<{ sent: boolean; failed: boolean; completed: boolean }> {
     if (step.type === 'send_message') {
-      const result = await this.executeSend(run, step, journey.organization_id as string)
-      const advanced = await this.advance(run.id, idx, steps.length)
+      const result = await this.executeSend(run, { template_id: step.template_id }, orgId)
+      const advanced = await this.advance(run.id, idx, total)
       return { sent: result.success, failed: !result.success, completed: advanced.completed }
     }
     if (step.type === 'wait') {
@@ -117,91 +147,178 @@ export class JourneyEngineService {
         .eq('id', run.id)
       return { sent: false, failed: false, completed: false }
     }
-    if (step.type === 'condition') {
-      const ctx = (run.context ?? {}) as Record<string, unknown>
-      const matches = step.condition_field
-        ? String(ctx[step.condition_field] ?? '') === String(step.condition_value ?? '')
-        : true
-      if (matches) {
-        const advanced = await this.advance(run.id, idx, steps.length)
-        return { sent: false, failed: false, completed: advanced.completed }
-      }
-      await this.markRun(run.id, 'completed')
-      return { sent: false, failed: false, completed: true }
+    // condition
+    const ctx = (run.context ?? {}) as Record<string, unknown>
+    const matches = step.condition_field
+      ? String(ctx[step.condition_field] ?? '') === String(step.condition_value ?? '')
+      : true
+    if (matches) {
+      const advanced = await this.advance(run.id, idx, total)
+      return { sent: false, failed: false, completed: advanced.completed }
     }
-    // Tipo desconhecido — pula
-    const advanced = await this.advance(run.id, idx, steps.length)
+    await this.markRun(run.id, 'completed')
+    return { sent: false, failed: false, completed: true }
+  }
+
+  // ── Branch CC-1 (trigger + template_name + channel_priority) ───────────
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async processCC1Step(
+    run: Row, step: any, idx: number, total: number, orgId: string,
+  ): Promise<{ sent: boolean; failed: boolean; completed: boolean }> {
+    const trig = (step.trigger as string | undefined) ?? 'immediate'
+
+    if (trig === 'immediate') {
+      const result = await this.executeSend(run, {
+        template_name:    step.template_name as string | undefined,
+        channel_priority: step.channel_priority as string | undefined,
+      }, orgId)
+      const advanced = await this.advance(run.id, idx, total)
+      return { sent: result.success, failed: !result.success, completed: advanced.completed }
+    }
+
+    if (trig === 'status_change_ml') {
+      // Pausa esperando hook (CC-3 implementa). next_step_at=null garante
+      // que cron não vai mais pegar essa run até alguém empurrar.
+      await supabaseAdmin
+        .from('messaging_journey_runs')
+        .update({ status: 'pending', next_step_at: null, updated_at: new Date().toISOString() })
+        .eq('id', run.id)
+      this.logger.log(`[messaging.cron] run=${run.id} step=${idx} aguardando status_change_ml (CC-3)`)
+      return { sent: false, failed: false, completed: false }
+    }
+
+    if (trig === 'time_offset') {
+      // Arma+envia: 1ª passada bumpa next_step_at e marca em context.
+      // 2ª passada (após delay) envia e avança.
+      const delayMs = (Number(step.delay_minutes) || 0) * 60_000
+      const ctx     = (run.context ?? {}) as Record<string, unknown>
+      const armedKey = `__armed_step_${idx}`
+      if (!ctx[armedKey]) {
+        await supabaseAdmin
+          .from('messaging_journey_runs')
+          .update({
+            next_step_at: new Date(Date.now() + delayMs).toISOString(),
+            context:      { ...ctx, [armedKey]: new Date().toISOString() },
+            updated_at:   new Date().toISOString(),
+          })
+          .eq('id', run.id)
+        return { sent: false, failed: false, completed: false }
+      }
+      const result = await this.executeSend(run, {
+        template_name:    step.template_name as string | undefined,
+        channel_priority: step.channel_priority as string | undefined,
+      }, orgId)
+      const advanced = await this.advance(run.id, idx, total)
+      return { sent: result.success, failed: !result.success, completed: advanced.completed }
+    }
+
+    this.logger.warn(`[messaging.cron] run=${run.id} step=${idx} trigger='${trig}' desconhecido — pulando`)
+    const advanced = await this.advance(run.id, idx, total)
     return { sent: false, failed: false, completed: advanced.completed }
   }
 
+  // ── Send pipeline ──────────────────────────────────────────────────────
+
+  /** Resolve template (por id OU name+org) e envia conforme channel_priority.
+   * 'whatsapp_then_email' tenta WA primeiro e só vai pra email se WA falhar.
+   * Cada tentativa vira 1 row em messaging_sends pra auditoria. */
   private async executeSend(
     run:   Row,
-    step:  JourneyStep,
+    spec:  { template_id?: string; template_name?: string; channel_priority?: string },
     orgId: string,
   ): Promise<{ success: boolean }> {
-    if (!step.template_id) return { success: false }
-    const { data: tpl } = await supabaseAdmin
-      .from('messaging_templates')
-      .select('id, channel, name, message_body')
-      .eq('id', step.template_id)
-      .maybeSingle()
-    if (!tpl) return { success: false }
-
-    const ctx = (run.context ?? {}) as Record<string, unknown>
-    const rendered = this.renderer.render(tpl.message_body as string, ctx)
-
-    let success = false
-    let err: string | null = null
-
-    if (tpl.channel === 'whatsapp') {
-      const cfg = await this.waConfig.findActive()
-      if (!cfg) {
-        err = 'WhatsApp não configurado'
-      } else if (!run.phone) {
-        err = 'phone vazio no run'
-      } else {
-        const r = await this.waSender.sendTextMessage({
-          phone:    run.phone,
-          message:  rendered,
-          waConfig: cfg,
-        })
-        success = r.success
-        err = r.error ?? null
-      }
-    } else if (tpl.channel === 'email') {
-      const to = (ctx.recipient_email as string | undefined) ?? null
-      if (!to) {
-        err = 'recipient_email ausente no context'
-      } else {
-        // Sem coluna subject em messaging_templates — usa o name como assunto
-        // até CC-3 adicionar suporte. Stub do EmailSender só loga.
-        const subject = (tpl.name as string | null) ?? '(sem assunto)'
-        const r = await this.emailSender.sendEmail({ to, subject, body: rendered })
-        success = r.success
-        err = r.error ?? null
-      }
-    } else {
-      err = `Canal ${tpl.channel} não suportado`
+    const tpl = await this.resolveTemplate(spec, orgId)
+    if (!tpl) {
+      this.logger.warn(`[messaging.send] run=${run.id} template não encontrado (${spec.template_id ?? spec.template_name ?? '?'})`)
+      return { success: false }
     }
 
-    this.logger.log(
-      `[messaging.send] run=${run.id} step=${run.current_step} channel=${tpl.channel} status=${success ? 'sent' : 'failed'}${err ? ` err=${err}` : ''}`,
-    )
+    const ctx      = (run.context ?? {}) as Record<string, unknown>
+    const rendered = this.renderer.render(tpl.message_body, ctx)
+    const plan     = this.buildChannelPlan(spec.channel_priority, tpl.channel)
 
-    await supabaseAdmin.from('messaging_sends').insert({
-      organization_id: orgId,
-      journey_run_id:  run.id,
-      template_id:     step.template_id,
-      channel:         tpl.channel,
-      phone:           run.phone,
-      customer_id:     run.customer_id ?? null,
-      order_id:        run.order_id    ?? null,
-      message_body:    rendered,
-      status:          success ? 'sent' : 'failed',
-      sent_at:         success ? new Date().toISOString() : null,
-      error:           err,
-    })
+    if (plan.length === 0) {
+      this.logger.warn(`[messaging.send] run=${run.id} sem canal viável (priority=${spec.channel_priority ?? 'null'} tpl.channel=${tpl.channel})`)
+      return { success: false }
+    }
+
+    let success = false
+    for (const ch of plan) {
+      const r = await this.attemptSend(ch, run, ctx, tpl, rendered)
+      this.logger.log(
+        `[messaging.send] run=${run.id} step=${run.current_step} channel=${ch} status=${r.success ? 'sent' : 'failed'}${r.error ? ` err=${r.error}` : ''}`,
+      )
+      await supabaseAdmin.from('messaging_sends').insert({
+        organization_id: orgId,
+        journey_run_id:  run.id,
+        template_id:     tpl.id,
+        channel:         ch,
+        phone:           run.phone,
+        customer_id:     run.customer_id ?? null,
+        order_id:        run.order_id    ?? null,
+        message_body:    rendered,
+        status:          r.success ? 'sent' : 'failed',
+        sent_at:         r.success ? new Date().toISOString() : null,
+        error:           r.success ? null : (r.error ?? null),
+      })
+      if (r.success) { success = true; break }
+    }
     return { success }
+  }
+
+  private async resolveTemplate(
+    spec: { template_id?: string; template_name?: string },
+    orgId: string,
+  ): Promise<TemplateRow | null> {
+    if (spec.template_id) {
+      const { data } = await supabaseAdmin
+        .from('messaging_templates')
+        .select('id, channel, name, message_body')
+        .eq('id', spec.template_id)
+        .maybeSingle()
+      return (data as TemplateRow | null) ?? null
+    }
+    if (spec.template_name) {
+      const { data } = await supabaseAdmin
+        .from('messaging_templates')
+        .select('id, channel, name, message_body')
+        .eq('organization_id', orgId)
+        .eq('name', spec.template_name)
+        .eq('is_active', true)
+        .limit(1)
+      return (data?.[0] as TemplateRow | null) ?? null
+    }
+    return null
+  }
+
+  private buildChannelPlan(priority: string | undefined, tplChannel: string): SendChannel[] {
+    switch (priority) {
+      case 'whatsapp_then_email': return ['whatsapp', 'email']
+      case 'email_then_whatsapp': return ['email', 'whatsapp']
+      case 'whatsapp':            return ['whatsapp']
+      case 'email':               return ['email']
+    }
+    if (tplChannel === 'whatsapp' || tplChannel === 'email') return [tplChannel]
+    return []
+  }
+
+  private async attemptSend(
+    channel: SendChannel, run: Row, ctx: Record<string, unknown>, tpl: TemplateRow, rendered: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    if (channel === 'whatsapp') {
+      const cfg = await this.waConfig.findActive()
+      if (!cfg) return { success: false, error: 'WhatsApp não configurado' }
+      const phone = (run.phone as string | null) ?? (ctx.recipient_phone as string | null) ?? null
+      if (!phone) return { success: false, error: 'phone ausente no run/context' }
+      const r = await this.waSender.sendTextMessage({ phone, message: rendered, waConfig: cfg })
+      return { success: r.success, error: r.error ?? undefined }
+    }
+    // email
+    const to = (ctx.recipient_email as string | undefined) ?? null
+    if (!to) return { success: false, error: 'recipient_email ausente no context' }
+    const subject = tpl.name ?? '(sem assunto)'
+    return await this.emailSender.sendEmail({ to, subject, body: rendered })
   }
 
   /** @returns completed=true quando esse advance encerrou a jornada. */
