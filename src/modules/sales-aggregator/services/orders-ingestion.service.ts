@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
 import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
+import { MessagingService } from '../../messaging/messaging.service'
 
 interface ProductInfo {
   product_id: string
@@ -48,7 +49,10 @@ export class OrdersIngestionService {
   private readonly logger = new Logger(OrdersIngestionService.name)
   private lastStats: LastSyncStats = null
 
-  constructor(private readonly mlClient: MercadoLivreClient) {}
+  constructor(
+    private readonly mlClient:  MercadoLivreClient,
+    private readonly messaging: MessagingService,
+  ) {}
 
   /** Public — surfaces the last sync result for /sync-stats. */
   getLastStats(): LastSyncStats { return this.lastStats }
@@ -123,6 +127,27 @@ export class OrdersIngestionService {
               stats.rowsUpserted += batch.length
             }
           }
+        }
+
+        // Auto-trigger de jornadas (Messaging Studio) — best-effort.
+        // Falha aqui não derruba a ingestion; engine de retry depende dos
+        // próprios runs. 1 evento por order (não por row); status mapeado
+        // pra trigger_event no MessagingService.statusToTrigger().
+        try {
+          const events = orders.map(o => {
+            const buyer = buyerMap.get(String(o.id))
+            const first = o.order_items?.[0]
+            return {
+              external_order_id: String(o.id),
+              status:            o.status ?? null,
+              buyer_phone:       buyer?.phone ?? null,
+              buyer_name:        buyer?.name  ?? null,
+              product_title:     first?.item?.title ?? null,
+            }
+          })
+          await this.messaging.fireForOrderEvents(orgId, events)
+        } catch (err: unknown) {
+          this.logger.warn(`[messaging.trigger] hook falhou: ${(err as Error)?.message}`)
         }
 
         // Update run stats

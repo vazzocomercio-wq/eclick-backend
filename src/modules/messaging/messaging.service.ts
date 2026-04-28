@@ -269,6 +269,267 @@ export class MessagingService {
     return { run_id: run!.id as string }
   }
 
+  // ── Auto-trigger from orders ingestion ──────────────────────────────────
+
+  /** Mapeia status do order → trigger event correspondente. Retorna null
+   * pra status que não disparam jornada. */
+  private statusToTrigger(status: string | null | undefined): TriggerEvent | null {
+    switch ((status ?? '').toLowerCase()) {
+      case 'paid':      return 'order_paid'
+      case 'shipped':   return 'order_shipped'
+      case 'delivered': return 'order_delivered'
+      case 'cancelled': return 'order_cancelled'
+    }
+    return null
+  }
+
+  /** Chamado pelo OrdersIngestionService após upsert. Cria journey_runs
+   * pra cada (event × journey ativo) que ainda não foi disparado pra esse
+   * order_id+journey_id. Skipa orders sem buyer_phone (sem como mandar WA).
+   * Retorna {fired, skipped} pra log. */
+  async fireForOrderEvents(
+    orgId: string,
+    events: Array<{
+      external_order_id: string
+      status:            string | null
+      buyer_phone:       string | null
+      buyer_name:        string | null
+      product_title:     string | null
+    }>,
+  ): Promise<{ fired: number; skipped: number }> {
+    let fired = 0, skipped = 0
+    if (events.length === 0) return { fired, skipped }
+
+    // Agrupa eventos por trigger_event
+    const byEvent = new Map<TriggerEvent, typeof events>()
+    for (const e of events) {
+      const trig = this.statusToTrigger(e.status)
+      if (!trig)             { skipped++; continue }
+      if (!e.buyer_phone)    { skipped++; continue }
+      const list = byEvent.get(trig) ?? []
+      list.push(e)
+      byEvent.set(trig, list)
+    }
+    if (byEvent.size === 0) return { fired, skipped }
+
+    // Journeys ativos pra esses triggers
+    const { data: journeys, error: jErr } = await supabaseAdmin
+      .from('messaging_journeys')
+      .select('id, trigger_event')
+      .eq('organization_id', orgId)
+      .eq('is_active', true)
+      .in('trigger_event', [...byEvent.keys()])
+    if (jErr) {
+      this.logger.warn(`[messaging.trigger] fetch journeys falhou: ${jErr.message}`)
+      return { fired, skipped: skipped + events.length }
+    }
+    if (!journeys?.length) return { fired, skipped: skipped + events.length }
+
+    // Dedup: lê runs existentes pra (journey_id, order_id)
+    const orderIds = events.map(e => e.external_order_id)
+    const { data: existing } = await supabaseAdmin
+      .from('messaging_journey_runs')
+      .select('journey_id, order_id')
+      .eq('organization_id', orgId)
+      .in('order_id', orderIds)
+    const dupKeys = new Set((existing ?? []).map(r => `${r.journey_id}|${r.order_id}`))
+
+    const inserts: Record<string, unknown>[] = []
+    for (const [trig, evList] of byEvent) {
+      const matchingJ = journeys.filter(j => j.trigger_event === trig)
+      for (const j of matchingJ) {
+        for (const e of evList) {
+          if (dupKeys.has(`${j.id}|${e.external_order_id}`)) { skipped++; continue }
+          inserts.push({
+            organization_id: orgId,
+            journey_id:      j.id,
+            order_id:        e.external_order_id,
+            customer_id:     null,
+            phone:           e.buyer_phone,
+            current_step:    0,
+            status:          'active',
+            next_step_at:    new Date().toISOString(),
+            context: {
+              nome:    e.buyer_name ?? '',
+              pedido:  e.external_order_id,
+              produto: e.product_title ?? '',
+              loja:    'Vazzo',
+              phone:   e.buyer_phone,
+            },
+          })
+          fired++
+        }
+      }
+    }
+    if (inserts.length > 0) {
+      const { error: iErr } = await supabaseAdmin.from('messaging_journey_runs').insert(inserts)
+      if (iErr) this.logger.warn(`[messaging.trigger] insert runs falhou: ${iErr.message}`)
+    }
+    if (fired > 0) {
+      this.logger.log(`[messaging.trigger] org=${orgId} fired=${fired} skipped=${skipped}`)
+    }
+    return { fired, skipped }
+  }
+
+  // ── Campaigns ───────────────────────────────────────────────────────────
+
+  /** Disparo em massa via segment. Cap 500 destinatários por call (50s
+   * @ 100ms/send). Persiste cada envio em messaging_sends. Retorna
+   * {total, sent, failed}. message_override permite editar mensagem do
+   * template no momento da campanha. */
+  async sendCampaign(
+    orgId: string,
+    input: {
+      template_id:       string
+      segment:           'all' | 'with_cpf' | 'vip' | 'custom'
+      customer_ids?:     string[]
+      message_override?: string
+    },
+  ): Promise<{ total: number; sent: number; failed: number }> {
+    if (!input?.template_id) throw new BadRequestException('template_id obrigatório')
+
+    const { data: tpl } = await supabaseAdmin
+      .from('messaging_templates').select('*')
+      .eq('id', input.template_id).eq('organization_id', orgId).maybeSingle()
+    if (!tpl)                       throw new NotFoundException('template não encontrado')
+    if (tpl.channel !== 'whatsapp') throw new BadRequestException(`Canal ${tpl.channel} não implementado`)
+
+    const cfg = await this.waConfig.findActive()
+    if (!cfg) throw new BadRequestException('WhatsApp Business não configurado')
+
+    let q = supabaseAdmin
+      .from('unified_customers')
+      .select('id, display_name, phone, cpf, tags')
+      .eq('organization_id', orgId)
+      .not('phone', 'is', null)
+
+    if (input.segment === 'with_cpf') q = q.not('cpf', 'is', null)
+    if (input.segment === 'vip')      q = q.contains('tags', ['vip'])
+    if (input.segment === 'custom') {
+      if (!input.customer_ids?.length) throw new BadRequestException('customer_ids obrigatório para segment=custom')
+      q = q.in('id', input.customer_ids)
+    }
+    q = q.limit(500) // cap pra não estourar HTTP timeout
+
+    const { data: customers, error } = await q
+    if (error) throw new BadRequestException(error.message)
+    if (!customers?.length) return { total: 0, sent: 0, failed: 0 }
+
+    const baseMessage = input.message_override ?? tpl.message_body
+    let sent = 0, failed = 0
+
+    for (const c of customers) {
+      const rendered = this.renderer.render(baseMessage, {
+        nome: c.display_name ?? '',
+        loja: 'Vazzo',
+      })
+      const result = await this.waSender.sendTextMessage({
+        phone:    c.phone as string,
+        message:  rendered,
+        waConfig: cfg,
+      })
+      await supabaseAdmin.from('messaging_sends').insert({
+        organization_id: orgId,
+        template_id:     input.template_id,
+        channel:         'whatsapp',
+        phone:           c.phone,
+        customer_id:     c.id,
+        message_body:    rendered,
+        status:          result.success ? 'sent' : 'failed',
+        sent_at:         result.success ? new Date().toISOString() : null,
+        error:           result.error ?? null,
+      })
+      if (result.success) sent++
+      else                failed++
+      await new Promise(r => setTimeout(r, 100)) // rate limit 10/s WA
+    }
+
+    this.logger.log(`[messaging.campaign] org=${orgId} tpl=${input.template_id} segment=${input.segment} total=${customers.length} sent=${sent} failed=${failed}`)
+    return { total: customers.length, sent, failed }
+  }
+
+  // ── Analytics ───────────────────────────────────────────────────────────
+
+  /** Sumário de envios no período. Default: últimos 30 dias. */
+  async getAnalytics(
+    orgId: string,
+    fromIso?: string,
+    toIso?: string,
+  ): Promise<{
+    total_sent:     number
+    delivered_rate: number
+    read_rate:      number
+    failed_rate:    number
+    by_template:    Array<{ template_id: string; name: string; sent: number; delivered: number; read: number; failed: number }>
+    by_day:         Array<{ date: string; sent: number; delivered: number }>
+  }> {
+    const from = fromIso ?? new Date(Date.now() - 30 * 86_400_000).toISOString()
+    const to   = toIso   ?? new Date().toISOString()
+
+    const { data: sends, error } = await supabaseAdmin
+      .from('messaging_sends')
+      .select('id, template_id, status, sent_at, delivered_at, read_at, created_at')
+      .eq('organization_id', orgId)
+      .gte('created_at', from)
+      .lte('created_at', to)
+    if (error) throw new BadRequestException(error.message)
+
+    const all = (sends ?? []) as Array<{
+      template_id: string | null; status: string
+      sent_at: string | null; delivered_at: string | null; read_at: string | null
+      created_at: string
+    }>
+
+    const totalSent = all.filter(s => s.status !== 'pending').length
+    const delivered = all.filter(s => !!s.delivered_at).length
+    const read      = all.filter(s => !!s.read_at).length
+    const failed    = all.filter(s => s.status === 'failed').length
+
+    // by_template
+    const tplIds = [...new Set(all.map(s => s.template_id).filter(Boolean) as string[])]
+    let tplMap = new Map<string, string>()
+    if (tplIds.length > 0) {
+      const { data: tpls } = await supabaseAdmin
+        .from('messaging_templates').select('id, name').in('id', tplIds)
+      tplMap = new Map((tpls ?? []).map(t => [t.id as string, t.name as string]))
+    }
+    const byTplMap = new Map<string, { sent: number; delivered: number; read: number; failed: number }>()
+    for (const s of all) {
+      if (!s.template_id) continue
+      const cur = byTplMap.get(s.template_id) ?? { sent: 0, delivered: 0, read: 0, failed: 0 }
+      if (s.status !== 'pending')  cur.sent++
+      if (s.delivered_at)           cur.delivered++
+      if (s.read_at)                cur.read++
+      if (s.status === 'failed')    cur.failed++
+      byTplMap.set(s.template_id, cur)
+    }
+    const by_template = [...byTplMap.entries()].map(([template_id, v]) => ({
+      template_id, name: tplMap.get(template_id) ?? '?', ...v,
+    }))
+
+    // by_day (usa sent_at se houver, senão created_at)
+    const byDayMap = new Map<string, { sent: number; delivered: number }>()
+    for (const s of all) {
+      const day = (s.sent_at ?? s.created_at).slice(0, 10)
+      const cur = byDayMap.get(day) ?? { sent: 0, delivered: 0 }
+      if (s.status !== 'pending') cur.sent++
+      if (s.delivered_at)         cur.delivered++
+      byDayMap.set(day, cur)
+    }
+    const by_day = [...byDayMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, v]) => ({ date, ...v }))
+
+    return {
+      total_sent:     totalSent,
+      delivered_rate: totalSent > 0 ? delivered / totalSent : 0,
+      read_rate:      totalSent > 0 ? read      / totalSent : 0,
+      failed_rate:    totalSent > 0 ? failed    / totalSent : 0,
+      by_template,
+      by_day,
+    }
+  }
+
   // ── Sends ───────────────────────────────────────────────────────────────
 
   async listSends(

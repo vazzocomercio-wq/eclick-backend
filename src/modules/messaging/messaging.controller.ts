@@ -123,6 +123,39 @@ export class MessagingController {
     return this.svc.triggerJourney(user.orgId, id, body)
   }
 
+  // ── Campaigns ───────────────────────────────────────────────────────────
+
+  /** POST /messaging/campaigns/send
+   *   { template_id, segment, customer_ids?, message_override? }
+   * Dispara em massa; cap 500/call (50s @ 100ms/send). */
+  @Post('campaigns/send')
+  @HttpCode(HttpStatus.OK)
+  sendCampaign(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: {
+      template_id:       string
+      segment:           'all' | 'with_cpf' | 'vip' | 'custom'
+      customer_ids?:     string[]
+      message_override?: string
+    },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.sendCampaign(user.orgId, body)
+  }
+
+  // ── Analytics ───────────────────────────────────────────────────────────
+
+  /** GET /messaging/analytics?from=&to= */
+  @Get('analytics')
+  getAnalytics(
+    @ReqUser() user: ReqUserPayload,
+    @Query('from') from?: string,
+    @Query('to')   to?:   string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getAnalytics(user.orgId, from, to)
+  }
+
   // ── Sends ───────────────────────────────────────────────────────────────
 
   /** GET /messaging/sends?status=&from=&to=&customer_id=&journey_id=
