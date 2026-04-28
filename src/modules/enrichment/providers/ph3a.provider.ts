@@ -36,6 +36,39 @@ export class PH3AProvider extends BaseEnrichmentProvider {
   private tokenCache: { token: string; expires_at: number } | null = null
   private readonly TOKEN_TTL_MS = 50 * 60_000 // 50min — conservador (assume TTL real ~1h)
 
+  // VERBOSE_LOGS — controlado por env. Default true até estabilizar (TODO: remover quando estável).
+  private readonly VERBOSE = (process.env.PH3A_VERBOSE_LOGS ?? 'true') !== 'false'
+
+  constructor() {
+    super()
+    if (this.VERBOSE) {
+      this.logger.log(`[ph3a.boot] PH3A_USER setado: ${process.env.PH3A_USER ? 'sim (' + this.maskEmail(process.env.PH3A_USER) + ')' : 'NAO'}`)
+      this.logger.log(`[ph3a.boot] PH3A_PASSWORD setado: ${process.env.PH3A_PASSWORD ? 'sim (len=' + process.env.PH3A_PASSWORD.length + ')' : 'NAO'}`)
+      this.logger.log(`[ph3a.boot] PH3A_API_KEY setado: ${process.env.PH3A_API_KEY ? 'sim' : 'NAO'} (não usada na auth atual)`)
+      this.logger.log(`[ph3a.boot] BASE=${this.BASE} TTL=${this.TOKEN_TTL_MS}ms`)
+    }
+  }
+
+  private maskEmail(e: string): string {
+    const at = e.indexOf('@')
+    if (at < 2) return '***'
+    return e.slice(0, 2) + '***' + e.slice(at)
+  }
+  private maskDoc(d: string): string {
+    const c = d.replace(/\D/g, '')
+    if (c.length < 4) return '***'
+    return c.slice(0, 3) + '***' + c.slice(-2)
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private redactBody(body: any): any {
+    if (!body || typeof body !== 'object') return body
+    const out = JSON.parse(JSON.stringify(body))
+    for (const k of ['Token', 'token', 'AccessToken', 'access_token', 'Password', 'password']) {
+      if (out[k] != null) out[k] = '<redacted>'
+    }
+    return out
+  }
+
   // ── Auth helpers ────────────────────────────────────────────────────────
 
   /** Lê email e senha — DB creds primeiro, fallback pra env. PH3A precisa
@@ -50,26 +83,40 @@ export class PH3AProvider extends BaseEnrichmentProvider {
   /** Faz login e cacheia token. Re-usa cache enquanto válido. */
   private async getToken(creds: ProviderCreds, forceRefresh = false): Promise<string | null> {
     if (!forceRefresh && this.tokenCache && Date.now() < this.tokenCache.expires_at) {
+      if (this.VERBOSE) this.logger.log(`[ph3a.login] cache HIT (expires in ${Math.round((this.tokenCache.expires_at - Date.now()) / 1000)}s)`)
       return this.tokenCache.token
     }
     const ep = this.getEmailPassword(creds)
-    if (!ep) return null
+    if (!ep) {
+      this.logger.warn(`[ph3a.login] sem creds (creds.api_secret=${creds.api_secret ? 'set' : 'null'} creds.api_key=${creds.api_key ? 'set' : 'null'} env PH3A_USER=${process.env.PH3A_USER ? 'set' : 'null'} PH3A_PASSWORD=${process.env.PH3A_PASSWORD ? 'set' : 'null'})`)
+      return null
+    }
+    if (this.VERBOSE) this.logger.log(`[ph3a.login] tentando login com email=${this.maskEmail(ep.email)} forceRefresh=${forceRefresh}`)
+
+    let status = 0
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let bodyData: any = null
     try {
-      const { data } = await axios.post<{ Token?: string; token?: string; AccessToken?: string }>(
+      const res = await axios.post<{ Token?: string; token?: string; AccessToken?: string; success?: boolean; message?: string }>(
         `${this.BASE}/DataBusca/api/Account/Login`,
         { Email: ep.email, Password: ep.password },
-        { timeout: 10_000, headers: { 'Content-Type': 'application/json' } },
+        { timeout: 10_000, headers: { 'Content-Type': 'application/json' }, validateStatus: () => true },
       )
-      const token = data?.Token ?? data?.token ?? data?.AccessToken ?? null
-      if (!token) {
-        this.logger.warn('[ph3a.login] response sem token')
+      status = res.status
+      bodyData = res.data
+      const token = bodyData?.Token ?? bodyData?.token ?? bodyData?.AccessToken ?? null
+      if (this.VERBOSE) {
+        this.logger.log(`[ph3a.login] status=${status} has_token=${!!token} success=${bodyData?.success ?? '?'} message="${bodyData?.message ?? ''}"`)
+      }
+      if (status >= 400 || !token) {
+        this.logger.warn(`[ph3a.login.error] status=${status} body=${JSON.stringify(this.redactBody(bodyData)).slice(0, 500)}`)
         return null
       }
       this.tokenCache = { token, expires_at: Date.now() + this.TOKEN_TTL_MS }
       return token
     } catch (e: unknown) {
       const err = e as AxiosError<{ message?: string }>
-      this.logger.warn(`[ph3a.login] falhou status=${err.response?.status} ${err.response?.data?.message ?? err.message}`)
+      this.logger.error(`[ph3a.login.exception] status=${err.response?.status ?? '?'} message=${err.message} body=${JSON.stringify(this.redactBody(err.response?.data ?? null)).slice(0, 500)}`)
       return null
     }
   }
@@ -80,26 +127,40 @@ export class PH3AProvider extends BaseEnrichmentProvider {
     let token = await this.getToken(creds)
     if (!token) throw new Error('PH3A sem credenciais (PH3A_USER + PH3A_PASSWORD)')
 
+    if (this.VERBOSE) {
+      const doc = (body as { Document?: string }).Document
+      this.logger.log(`[ph3a.data] consultando path=${path} doc=${doc ? this.maskDoc(doc) : '?'}`)
+    }
+
     const doRequest = async (tk: string) => axios.post(`${this.BASE}${path}`, body, {
       timeout: 30_000,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tk}` },
+      validateStatus: () => true, // tratamos manualmente
     })
 
-    try {
-      const { data } = await doRequest(token)
-      return data
-    } catch (e: unknown) {
-      const err = e as AxiosError
-      if (err.response?.status === 401) {
-        // Token expirou → renova e tenta de novo
-        this.tokenCache = null
-        token = await this.getToken(creds, true)
-        if (!token) throw new Error('PH3A re-login falhou')
-        const { data } = await doRequest(token)
-        return data
-      }
-      throw e
+    let res = await doRequest(token)
+    if (this.VERBOSE) {
+      this.logger.log(`[ph3a.data] status=${res.status} success=${res.data?.success ?? '?'} message="${res.data?.message ?? ''}"`)
     }
+
+    if (res.status === 401) {
+      // Token expirou → renova e retenta
+      if (this.VERBOSE) this.logger.log('[ph3a.data] 401 — renovando token')
+      this.tokenCache = null
+      token = await this.getToken(creds, true)
+      if (!token) throw new Error('PH3A re-login falhou')
+      res = await doRequest(token)
+      if (this.VERBOSE) {
+        this.logger.log(`[ph3a.data.retry] status=${res.status} success=${res.data?.success ?? '?'} message="${res.data?.message ?? ''}"`)
+      }
+    }
+
+    if (res.status >= 400) {
+      this.logger.error(`[ph3a.error] path=${path} status=${res.status} body=${JSON.stringify(this.redactBody(res.data)).slice(0, 800)}`)
+      throw new Error(`PH3A ${res.status}: ${res.data?.message ?? 'erro'}`)
+    }
+
+    return res.data
   }
 
   // ── Health check (free — só faz login) ──────────────────────────────────
@@ -146,7 +207,12 @@ export class PH3AProvider extends BaseEnrichmentProvider {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const d: any = data?.Data ?? data?.data ?? data ?? {}
+      if (this.VERBOSE) {
+        const topKeys = d && typeof d === 'object' ? Object.keys(d).slice(0, 10).join(',') : 'none'
+        this.logger.log(`[ph3a.parse] doc=${this.maskDoc(cleaned)} top_keys=${topKeys} phones_count=${Array.isArray(d?.Phones) ? d.Phones.length : 0} emails_count=${Array.isArray(d?.Emails) ? d.Emails.length : 0} addrs_count=${Array.isArray(d?.Addresses) ? d.Addresses.length : 0}`)
+      }
       if (!d || (Object.keys(d).length === 0)) {
+        if (this.VERBOSE) this.logger.warn(`[ph3a.parse] response sem Data — body raw keys=${Object.keys(data ?? {}).join(',')}`)
         return { ...EMPTY_RESULT, quality: 'empty', cost_cents: this.DEFAULT_COST_CENTS, duration_ms: elapsed(t0), raw_response: data }
       }
 
