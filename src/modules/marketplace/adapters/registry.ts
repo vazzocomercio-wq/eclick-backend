@@ -2,19 +2,21 @@ import { Injectable, NotImplementedException } from '@nestjs/common'
 import { MarketplaceAdapter, MarketplacePlatform } from './base'
 import { MercadoLivreAdapter } from './ml.adapter'
 import { MagaluAdapter } from './magalu.adapter'
+import { ShopeeAdapter } from './shopee.adapter'
 
-/** DI registry — keya adapters por platform. Sprint C2.3 vai registrar
- * ShopeeAdapter aqui. Lookup é estático (constructor injection dos adapters
- * → Map). Throw NotImplementedException pra plataformas ainda não codificadas
- * → frontend mostra "Em breve" sem crashar. */
+/** DI registry — keya adapters por platform. Lookup é estático (constructor
+ * injection dos adapters → Map). Throw NotImplementedException pra plataformas
+ * ainda não codificadas (ex: Amazon SP-API) → frontend mostra "Em breve" sem
+ * crashar. */
 @Injectable()
 export class MarketplaceAdapterRegistry {
   private readonly adapters: Map<MarketplacePlatform, MarketplaceAdapter>
 
-  constructor(ml: MercadoLivreAdapter, magalu: MagaluAdapter) {
+  constructor(ml: MercadoLivreAdapter, magalu: MagaluAdapter, shopee: ShopeeAdapter) {
     this.adapters = new Map<MarketplacePlatform, MarketplaceAdapter>([
       ['mercadolivre', ml],
       ['magalu',       magalu],
+      ['shopee',       shopee],
     ])
   }
 
