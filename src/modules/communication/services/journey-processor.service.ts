@@ -344,22 +344,24 @@ export class JourneyProcessorService {
       next_step_at:    new Date().toISOString(),
       context: {
         // Identificação interna
-        ocj_id:          ocj.id,
-        channel:         pick.channel,
+        ocj_id:            ocj.id,
+        channel:           pick.channel,
         recipient,
-        recipient_phone: pick.recipient_phone ?? null,
-        recipient_email: pick.recipient_email ?? null,
-        template_id:     template.id,
-        template_name:   step.template_name,
-        // Vars do template renderer
-        first_name:      firstName,
-        full_name:       fullName,
-        order_id:        snapshot.external_order_id ?? null,
-        product_name:    productName,
-        total_amount:    totalAmount,
-        store_name:      'Vazzo Comercio',
-        tracking_code:   null,
-        delivery_date:   null,
+        recipient_phone:   pick.recipient_phone ?? null,
+        recipient_email:   pick.recipient_email ?? null,
+        template_id:       template.id,
+        template_name:     step.template_name,
+        // Vars do template renderer — nomes batem com {{var}} dos templates
+        // (brand_name, product_title, external_order_id) em vez dos nomes
+        // genéricos antigos (store_name, product_name, order_id).
+        first_name:        firstName,
+        full_name:         fullName,
+        external_order_id: snapshot.external_order_id ?? null,
+        product_title:     productName,
+        total_amount:      totalAmount,
+        brand_name:        'Vazzo Comercio',
+        tracking_code:     null,
+        delivery_date:     null,
       },
     }
     const { error: runErr } = await supabaseAdmin
