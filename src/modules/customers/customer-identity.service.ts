@@ -339,6 +339,76 @@ export class CustomerIdentityService {
     return this.update(id, { tags: [...tags] })
   }
 
+  /** Bulk update VIP/Bloqueado em N clientes via tags. Aceita
+   * { is_vip?, is_blocked? } e aplica add/remove com SET deduplicado.
+   * Retorna { updated: N }. Usado pela barra de bulk actions. */
+  async bulkUpdateFlags(
+    orgId: string,
+    customerIds: string[],
+    flags: { is_vip?: boolean; is_blocked?: boolean },
+  ): Promise<{ updated: number }> {
+    if (!customerIds?.length) return { updated: 0 }
+    if (flags.is_vip === undefined && flags.is_blocked === undefined) {
+      return { updated: 0 }
+    }
+
+    const { data: rows } = await supabaseAdmin
+      .from('unified_customers')
+      .select('id, tags')
+      .eq('organization_id', orgId)
+      .in('id', customerIds)
+    if (!rows?.length) return { updated: 0 }
+
+    let updated = 0
+    for (const r of rows) {
+      const set = new Set<string>((r.tags as string[] | null) ?? [])
+      if (flags.is_vip     === true)  set.add('vip')
+      if (flags.is_vip     === false) set.delete('vip')
+      if (flags.is_blocked === true)  set.add('blocked')
+      if (flags.is_blocked === false) set.delete('blocked')
+      const { error } = await supabaseAdmin
+        .from('unified_customers')
+        .update({ tags: [...set], updated_at: new Date().toISOString() })
+        .eq('id', r.id)
+      if (!error) updated++
+    }
+    return { updated }
+  }
+
+  /** Exporta CSV com nome,cpf,telefone,email,cidade,uf,status,compras.
+   * Quando ids é não-vazio, filtra por esses IDs; caso contrário, exporta
+   * a org inteira (cap 50k pra proteger memória). Aspas duplas escapadas
+   * via "" (RFC 4180). */
+  async exportCsv(orgId: string, ids?: string[]): Promise<string> {
+    let q = supabaseAdmin
+      .from('unified_customers')
+      .select('display_name, cpf, phone, email, city, state, enrichment_status, total_purchases')
+      .eq('organization_id', orgId)
+      .order('display_name', { ascending: true })
+      .limit(50_000)
+    if (ids?.length) q = q.in('id', ids)
+
+    const { data, error } = await q
+    if (error) throw new HttpException(error.message, 500)
+
+    const header = ['nome', 'cpf', 'telefone', 'email', 'cidade', 'uf', 'status', 'compras']
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const lines: string[] = [header.join(',')]
+    for (const r of data ?? []) {
+      lines.push([
+        esc((r as { display_name?: string }).display_name),
+        esc((r as { cpf?: string }).cpf),
+        esc((r as { phone?: string }).phone),
+        esc((r as { email?: string }).email),
+        esc((r as { city?: string }).city),
+        esc((r as { state?: string }).state),
+        esc((r as { enrichment_status?: string }).enrichment_status),
+        esc((r as { total_purchases?: number }).total_purchases ?? 0),
+      ].join(','))
+    }
+    return lines.join('\n')
+  }
+
   /** Hard delete — used by /clientes row "Excluir" action. */
   async remove(id: string) {
     const { error } = await supabaseAdmin

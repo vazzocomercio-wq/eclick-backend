@@ -250,18 +250,34 @@ export class EnrichmentService {
    * least one queryable identifier and enrich them serially. Returns
    * counters for the UI. Sleeps 600ms between calls to spread provider
    * load. */
-  async enrichBatch(orgId: string, limit: number, userId?: string | null): Promise<{
+  async enrichBatch(
+    orgId:        string,
+    limit:        number,
+    userId?:      string | null,
+    customerIds?: string[],
+  ): Promise<{
     processed: number; full: number; partial: number; failed: number; skipped: number
     results: Array<{ customer_id: string; status: string; provider: string | null; fields_filled: number }>
   }> {
     const cap = Math.min(Math.max(limit, 1), 100)
-    const { data: pending } = await supabaseAdmin
+
+    // Quando customer_ids vem do bulk action, prioriza esses IDs em vez
+    // da fila de pendentes. Mantém o cap pra proteger contra payload
+    // gigante. Ignora o filtro enrichment_status.
+    const haveIds = Array.isArray(customerIds) && customerIds.length > 0
+    const idsCapped = haveIds ? customerIds!.slice(0, cap) : []
+
+    const baseQ = supabaseAdmin
       .from('unified_customers')
       .select('id, cpf, phone, whatsapp_id')
       .eq('organization_id', orgId)
-      .or('enrichment_status.is.null,enrichment_status.eq.pending')
-      .or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
-      .limit(cap)
+
+    const { data: pending } = haveIds
+      ? await baseQ.in('id', idsCapped).limit(cap)
+      : await baseQ
+          .or('enrichment_status.is.null,enrichment_status.eq.pending')
+          .or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
+          .limit(cap)
 
     const rows = pending ?? []
     let full = 0, partial = 0, failed = 0, skipped = 0

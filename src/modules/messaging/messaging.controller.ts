@@ -242,4 +242,25 @@ export class MessagingController {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.cancelRun(user.orgId, id, body?.reason)
   }
+
+  // ── Bulk endpoints (stubs — chamados pela barra de /clientes) ──────────
+
+  /** POST /messaging/send-bulk — STUB. Quando implementado, dispara um
+   * texto livre pra N customer_ids. Hoje retorna { success: true, message }. */
+  @Post('send-bulk')
+  @HttpCode(HttpStatus.OK)
+  sendBulk(@Body() body: { customer_ids?: string[]; message?: string }) {
+    const n = Array.isArray(body?.customer_ids) ? body.customer_ids.length : 0
+    return { success: true, message: 'Em breve', total: n }
+  }
+
+  /** POST /messaging/journeys/start-bulk — STUB. Quando implementado,
+   * insere N rows em order_communication_journeys (CC-1) ou messaging_journey_runs
+   * conforme o journey_type. Hoje só ecoa { success, total }. */
+  @Post('journeys/start-bulk')
+  @HttpCode(HttpStatus.OK)
+  journeysStartBulk(@Body() body: { customer_ids?: string[]; journey_type?: string }) {
+    const n = Array.isArray(body?.customer_ids) ? body.customer_ids.length : 0
+    return { success: true, message: 'Em breve', total: n, journey_type: body?.journey_type ?? null }
+  }
 }
