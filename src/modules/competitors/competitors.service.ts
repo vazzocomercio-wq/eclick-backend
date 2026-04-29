@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule'
 import axios, { AxiosError } from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { ScraperService } from '../scraper/scraper.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -74,7 +75,10 @@ export interface CreateCompetitorDto {
 export class CompetitorsService implements OnModuleInit {
   private readonly logger = new Logger(CompetitorsService.name)
 
-  constructor(private readonly mlService: MercadolivreService) {}
+  constructor(
+    private readonly mlService: MercadolivreService,
+    private readonly scraper:   ScraperService,
+  ) {}
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -304,12 +308,42 @@ export class CompetitorsService implements OnModuleInit {
       item = await this.enrichFromML(listingId, token)
     } catch (e: unknown) {
       const status = (e as HttpException).getStatus?.() ?? 0
-      if (status === 403 || status === 404) {
+      if (status === 403) {
+        // ML API bloqueia /items/ de listings de OUTROS sellers desde política
+        // PolicyAgent (2024+). Fallback: scraping HTML via ScraperService
+        // (User-Agent browser) — perde visits_30d/rating/reviews_total mas
+        // mantém price/title/seller/qty/thumbnail/free_shipping.
+        this.logger.warn(`[enrichCompetitor] 403 ML API listing=${listingId} — fallback HTML scraper`)
+        try {
+          const cleanUrl = `https://produto.mercadolivre.com.br/MLB-${listingId.replace(/^MLB/i, '')}`
+          const scraped = await this.scraper.scrapeMercadoLivre(cleanUrl)
+          if (!scraped || !scraped.price) {
+            this.logger.warn(`[enrichCompetitor] scraper também falhou listing=${listingId}`)
+            return null
+          }
+          // Monta item compatível com o shape do enrichFromML — campos
+          // ausentes no scraper (rating, visits_30d, reviews_total) viram
+          // undefined e o UPDATE abaixo não os toca via .eq existente.
+          item = {
+            price:              scraped.price,
+            title:              scraped.title ?? undefined,
+            thumbnail:          scraped.thumbnail ?? undefined,
+            available_quantity: scraped.available_quantity ?? undefined,
+            sold_quantity:      scraped.sold_quantity ?? undefined,
+            seller:             { nickname: scraped.seller ?? undefined },
+            shipping:           { free_shipping: scraped.free_shipping ?? undefined },
+          }
+        } catch (scrapeErr: unknown) {
+          this.logger.error(`[enrichCompetitor] scraper exception listing=${listingId}: ${(scrapeErr as Error).message}`)
+          return null
+        }
+      } else if (status === 404) {
         await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
+        return null
       } else {
         this.logger.error(`[enrichCompetitor] ML fetch falhou ${status} listing_id=${listingId}: ${(e as Error).message}`)
+        return null
       }
-      return null
     }
 
     const price    = (item.price as number) ?? 0
