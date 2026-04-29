@@ -4,6 +4,7 @@ import { EnrichmentRoutingService, QueryType, RoutingRow } from './services/rout
 import { EnrichmentCostTrackerService, ProviderRow } from './services/cost-tracker.service'
 import { EnrichmentConsentService } from './services/consent.service'
 import { EnrichmentAuditService } from './services/audit.service'
+import { EnrichmentHubService } from './services/hub.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -20,6 +21,7 @@ export class EnrichmentController {
     private readonly cost:    EnrichmentCostTrackerService,
     private readonly consent: EnrichmentConsentService,
     private readonly audit:   EnrichmentAuditService,
+    private readonly hub:     EnrichmentHubService,
   ) {}
 
   /** Wraps a handler so any throw becomes a typed empty fallback. */
@@ -78,19 +80,30 @@ export class EnrichmentController {
       { success: false, quality: 'error' as const, data: {}, error: 'fallback', cost_cents: 0, duration_ms: 0, provider: null, cache_hit: false, attempts: [] })
   }
 
-  /** Enrich N customers in this org. Body: { limit?: number, customer_ids?: string[] }.
-   * Quando customer_ids vem (bulk action de /clientes), processa esses IDs
-   * direto — sem o filtro enrichment_status=pending. Caso contrário, drena
-   * fila de pendentes (default 25, max 100). Sequential to spread provider load. */
+  /** Enrich N customers in this org. Body: { limit?, customer_ids?,
+   * status_filter?, segment? }. Hierarquia de filtros:
+   *   1) customer_ids[] (bulk action de /clientes) — usa exatamente esses
+   *   2) status_filter ∈ {pending, failed, all} + segment (vip|recent_30d)
+   *      — drena fila com filtro
+   *   3) default — drena pendentes (legacy behavior)
+   * Cap 100, serial com sleep 600ms. */
   @Post('batch')
   batch(
     @ReqUser() u: ReqUserPayload,
-    @Body() body: { limit?: number; customer_ids?: string[] },
+    @Body() body: {
+      limit?:         number
+      customer_ids?:  string[]
+      status_filter?: 'pending' | 'failed' | 'all'
+      segment?:       'vip' | 'recent_30d'
+    },
   ) {
     const ids = Array.isArray(body?.customer_ids) ? body!.customer_ids : undefined
     const cap = Number(body?.limit ?? (ids ? ids.length : 25))
     return this.safe('batch',
-      () => this.svc.enrichBatch(u.orgId ?? '', cap, u.id, ids),
+      () => this.svc.enrichBatch(u.orgId ?? '', cap, u.id, ids, {
+        status_filter: body?.status_filter,
+        segment:       body?.segment,
+      }),
       { processed: 0, full: 0, partial: 0, failed: 0, skipped: 0, results: [] })
   }
 
@@ -100,6 +113,81 @@ export class EnrichmentController {
     return this.safe('customer.enrich',
       () => this.svc.enrichCustomer(u.orgId ?? '', id, u.id),
       { customer_id: id, status: 'failed' as const, provider: null, fields_filled: 0 })
+  }
+
+  /** Re-dispara enrichment forçando refresh de cache. Usado pelo botão
+   * "Tentar novamente" inline na lista de Failures recentes. */
+  @Post('retry/:customerId')
+  retry(@ReqUser() u: ReqUserPayload, @Param('customerId') id: string) {
+    return this.safe('retry',
+      () => this.svc.enrichCustomer(u.orgId ?? '', id, u.id, { force_refresh: true }),
+      { customer_id: id, status: 'failed' as const, provider: null, fields_filled: 0 })
+  }
+
+  // ── Dashboard (ENRICH-HUB-1) ────────────────────────────────────────────
+
+  @Get('dashboard/kpis')
+  kpis(@ReqUser() u: ReqUserPayload) {
+    return this.safe('dashboard.kpis',
+      () => this.hub.getKpis(u.orgId ?? ''),
+      { enriched_full: 0, enriched_partial: 0, total: 0, success_rate_30d: 0, cost_mtd_brl: 0, budget_total_brl: 0, pending_count: 0 })
+  }
+
+  @Get('dashboard/timeseries')
+  timeseries(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
+    const n = Math.max(1, Math.min(90, Number(days ?? 30)))
+    return this.safe('dashboard.timeseries',
+      () => this.hub.getTimeseries(u.orgId ?? '', n),
+      [])
+  }
+
+  @Get('recent-failures')
+  recentFailures(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
+    const n = Math.max(1, Math.min(50, Number(limit ?? 20)))
+    return this.safe('recent-failures',
+      () => this.hub.getRecentFailures(u.orgId ?? '', n),
+      [])
+  }
+
+  @Get('queue-stats')
+  queueStats(@ReqUser() u: ReqUserPayload) {
+    return this.safe('queue-stats',
+      () => this.hub.getQueueStats(u.orgId ?? ''),
+      { pending: 0, failed: 0, total_eligible: 0, estimated_cost: 0 })
+  }
+
+  @Get('auto-enabled')
+  getAutoEnabled(@ReqUser() u: ReqUserPayload) {
+    return this.safe('auto-enabled.get',
+      () => this.hub.getSettings(u.orgId ?? ''),
+      { auto_enrichment_enabled: true, post_enrich_delay_minutes: 5 })
+  }
+
+  @Patch('auto-enabled')
+  patchAutoEnabled(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { auto_enrichment_enabled?: boolean; post_enrich_delay_minutes?: number },
+  ) {
+    return this.safe('auto-enabled.patch',
+      () => this.hub.patchSettings(u.orgId ?? '', body),
+      { auto_enrichment_enabled: true, post_enrich_delay_minutes: 5 })
+  }
+
+  @Get('post-enrich-template')
+  getPostEnrichTemplate(@ReqUser() u: ReqUserPayload) {
+    return this.safe('post-enrich-template.get',
+      () => this.hub.getPostEnrichTemplate(u.orgId ?? ''),
+      { id: null, name: '', message_body: '', is_active: false, delay_minutes: 5 })
+  }
+
+  @Post('post-enrich-template')
+  upsertPostEnrichTemplate(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { message_body?: string; is_active?: boolean; delay_minutes?: number },
+  ) {
+    return this.safe('post-enrich-template.upsert',
+      () => this.hub.upsertPostEnrichTemplate(u.orgId ?? '', body),
+      { id: '', name: '', message_body: '', is_active: false, delay_minutes: 5 })
   }
 
   // ── Stats / Log ──

@@ -7,6 +7,7 @@ import { EnrichmentConsentService } from './services/consent.service'
 import { EnrichmentAuditService } from './services/audit.service'
 import { EnrichmentCostTrackerService } from './services/cost-tracker.service'
 import { WhatsAppValidationService } from './services/whatsapp-validation.service'
+import { EnrichmentHubService } from './services/hub.service'
 import { ALL_PROVIDERS, enrichmentRegistryProvider, ENRICHMENT_PROVIDERS } from './providers'
 
 @Module({
@@ -19,6 +20,7 @@ import { ALL_PROVIDERS, enrichmentRegistryProvider, ENRICHMENT_PROVIDERS } from 
     EnrichmentAuditService,
     EnrichmentCostTrackerService,
     WhatsAppValidationService,
+    EnrichmentHubService,
     ...ALL_PROVIDERS,
     enrichmentRegistryProvider,
   ],
@@ -30,6 +32,7 @@ import { ALL_PROVIDERS, enrichmentRegistryProvider, ENRICHMENT_PROVIDERS } from 
     EnrichmentAuditService,
     EnrichmentCostTrackerService,
     WhatsAppValidationService,
+    EnrichmentHubService,
     ENRICHMENT_PROVIDERS,
   ],
 })

@@ -180,8 +180,14 @@ export class EnrichmentService {
   }
 
   /** Enrich one unified_customer: pick the best query vector (cpf > phone >
-   * whatsapp), call enrich(), then merge the result back into the row. */
-  async enrichCustomer(orgId: string, customerId: string, userId?: string | null): Promise<{
+   * whatsapp), call enrich(), then merge the result back into the row.
+   * `opts.force_refresh` ignora cache (usado pelo botão "Tentar novamente"). */
+  async enrichCustomer(
+    orgId: string,
+    customerId: string,
+    userId?: string | null,
+    opts: { force_refresh?: boolean } = {},
+  ): Promise<{
     customer_id: string
     status: 'full' | 'partial' | 'failed' | 'skipped'
     provider: string | null
@@ -211,6 +217,7 @@ export class EnrichmentService {
       organization_id: orgId, user_id: userId ?? null,
       query_type: qt, query_value: qv,
       customer_id: customerId, trigger_source: 'batch',
+      force_refresh: opts.force_refresh ?? false,
     })
 
     const patch: Record<string, unknown> = {
@@ -256,6 +263,10 @@ export class EnrichmentService {
     limit:        number,
     userId?:      string | null,
     customerIds?: string[],
+    filters: {
+      status_filter?: 'pending' | 'failed' | 'all'
+      segment?:       'vip' | 'recent_30d'
+    } = {},
   ): Promise<{
     processed: number; full: number; partial: number; failed: number; skipped: number
     results: Array<{ customer_id: string; status: string; provider: string | null; fields_filled: number }>
@@ -268,23 +279,45 @@ export class EnrichmentService {
     const haveIds = Array.isArray(customerIds) && customerIds.length > 0
     const idsCapped = haveIds ? customerIds!.slice(0, cap) : []
 
-    const baseQ = supabaseAdmin
+    let q = supabaseAdmin
       .from('unified_customers')
       .select('id, cpf, phone, whatsapp_id')
       .eq('organization_id', orgId)
       .eq('is_deleted', false)
 
-    const { data: pending } = haveIds
-      ? await baseQ.in('id', idsCapped).limit(cap)
-      : await baseQ
-          .or('enrichment_status.is.null,enrichment_status.eq.pending')
-          .or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
-          // Prioridade: quem comprou mais (mais ativo, mais relevante pra WA),
-          // empate → mais antigo primeiro (FIFO determinístico evita overlap
-          // entre batches concorrentes).
-          .order('total_purchases', { ascending: false, nullsFirst: false })
-          .order('updated_at',      { ascending: true,  nullsFirst: true })
-          .limit(cap)
+    if (haveIds) {
+      q = q.in('id', idsCapped).limit(cap)
+    } else {
+      // Filtro de status: pending (default) | failed | all
+      const sf = filters.status_filter ?? 'pending'
+      if (sf === 'pending') {
+        q = q.or('enrichment_status.is.null,enrichment_status.eq.pending')
+      } else if (sf === 'failed') {
+        q = q.eq('enrichment_status', 'failed')
+      }
+      // 'all' não aplica filtro de status
+
+      // Tem que ter ao menos um identifier — caso contrário enrichCustomer
+      // retorna 'skipped' e gasta o slot do batch sem efeito.
+      q = q.or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
+
+      // Filtro de segment opcional
+      if (filters.segment === 'vip') {
+        q = q.contains('tags', ['vip'])
+      } else if (filters.segment === 'recent_30d') {
+        const since = new Date(Date.now() - 30 * 86_400_000).toISOString()
+        q = q.gte('last_purchase_at', since)
+      }
+
+      // Prioridade: quem comprou mais (mais ativo, mais relevante pra WA),
+      // empate → mais antigo primeiro (FIFO determinístico evita overlap
+      // entre batches concorrentes).
+      q = q.order('total_purchases', { ascending: false, nullsFirst: false })
+           .order('updated_at',      { ascending: true,  nullsFirst: true })
+           .limit(cap)
+    }
+
+    const { data: pending } = await q
 
     const rows = pending ?? []
     let full = 0, partial = 0, failed = 0, skipped = 0

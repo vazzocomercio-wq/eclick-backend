@@ -161,6 +161,19 @@ export class JourneyProcessorService {
     // ─── (e) Enrichment opcional ─────────────────────────────────────────
     let enrichmentSucceededAt: string | null = null
     if (!cur.phone && snapshot.buyer_doc_number) {
+      // ENRICH-HUB-1: respeita toggle global da org. Quando desligado,
+      // não tenta enrich e marca o journey como blocked_no_contact pra
+      // não ficar reprocessando indefinidamente.
+      const { data: org } = await supabaseAdmin
+        .from('organizations')
+        .select('auto_enrichment_enabled')
+        .eq('id', orgId)
+        .maybeSingle()
+      if ((org as { auto_enrichment_enabled?: boolean } | null)?.auto_enrichment_enabled === false) {
+        this.logger.log(`[CC-1.enrich] auto_enrichment desabilitado para org=${orgId} — skip ocj=${ocj.id}`)
+        return await this.markBlocked(ocj.id, 'blocked_no_contact', 'auto_enrichment_disabled')
+      }
+
       await supabaseAdmin
         .from('order_communication_journeys')
         .update({ enrichment_attempted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
