@@ -474,7 +474,43 @@ export class CompetitorsService implements OnModuleInit {
     } catch { /* fallback to public */ }
 
     let enriched: Record<string, unknown> = {}
-    if (listingId) enriched = await this.enrichFromML(listingId, token)
+    if (listingId) {
+      try {
+        enriched = await this.enrichFromML(listingId, token)
+      } catch (e: unknown) {
+        const status = (e as HttpException).getStatus?.() ?? 0
+        if (status === 403) {
+          // Mesmo fallback do enrichCompetitor: ML PolicyAgent bloqueia listings
+          // de outros sellers via API → cai pra HTML scraper. Mantém o flow
+          // de UPDATE + saveSnapshot funcionando.
+          this.logger.warn(`[refresh] 403 ML API listing=${listingId} — fallback HTML scraper`)
+          try {
+            const cleanUrl = `https://produto.mercadolivre.com.br/MLB-${listingId.replace(/^MLB/i, '')}`
+            const scraped = await this.scraper.scrapeMercadoLivre(cleanUrl)
+            if (!scraped || !scraped.price) {
+              throw new HttpException(`Item ${listingId} não acessível via API nem HTML scraper`, 502)
+            }
+            enriched = {
+              price:              scraped.price,
+              title:              scraped.title ?? undefined,
+              thumbnail:          scraped.thumbnail ?? undefined,
+              available_quantity: scraped.available_quantity ?? undefined,
+              sold_quantity:      scraped.sold_quantity ?? undefined,
+              seller:             { nickname: scraped.seller ?? undefined },
+              shipping:           { free_shipping: scraped.free_shipping ?? undefined },
+            }
+          } catch (scrapeErr: unknown) {
+            if (scrapeErr instanceof HttpException) throw scrapeErr
+            throw new HttpException(`Scraper exception: ${(scrapeErr as Error).message}`, 502)
+          }
+        } else if (status === 404) {
+          await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', id)
+          throw e  // re-emite o 404 pro client com a mensagem original
+        } else {
+          throw e  // 5xx, timeout, etc — relança comportamento original
+        }
+      }
+    }
 
     const price  = (enriched.price as number) ?? 0
     const qty    = (enriched.available_quantity as number) ?? 0
