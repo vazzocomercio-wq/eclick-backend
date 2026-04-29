@@ -212,13 +212,26 @@ export class CommunicationCenterService {
 
   async createTemplate(orgId: string, body: Partial<MessagingTemplate>): Promise<MessagingTemplate> {
     if (!body?.name) throw new BadRequestException('name obrigatório')
-    await this.assertNameUnique(orgId, body.name)
+    // Engine CC-2 resolve template por (name + channel) — então a unicidade
+    // é POR canal. 'boas_vindas' whatsapp e 'boas_vindas' email coexistem.
+    // messagingService aplica default 'whatsapp' se body.channel ausente.
+    const channel = body.channel ?? 'whatsapp'
+    await this.assertNameUnique(orgId, body.name, channel)
     return this.messaging.createTemplate(orgId, body)
   }
 
   async updateTemplate(orgId: string, id: string, patch: Partial<MessagingTemplate>): Promise<MessagingTemplate> {
-    // Se renomeou, valida unicidade do novo nome (excluindo o próprio id)
-    if (patch?.name) await this.assertNameUnique(orgId, patch.name, id)
+    // Se renomeou ou trocou canal, valida unicidade do par (name + channel)
+    // — excluindo o próprio id. Quando só um dos 2 vem no patch, lê o
+    // outro do registro atual pra montar o par correto.
+    if (patch?.name !== undefined || patch?.channel !== undefined) {
+      const { data: cur } = await supabaseAdmin
+        .from('messaging_templates').select('name, channel')
+        .eq('id', id).eq('organization_id', orgId).maybeSingle()
+      const finalName    = patch?.name    ?? (cur?.name    as string | undefined) ?? ''
+      const finalChannel = patch?.channel ?? (cur?.channel as string | undefined) ?? 'whatsapp'
+      if (finalName) await this.assertNameUnique(orgId, finalName, finalChannel, id)
+    }
     return this.messaging.updateTemplate(orgId, id, patch)
   }
 
@@ -236,14 +249,15 @@ export class CommunicationCenterService {
     return { ok: true }
   }
 
-  private async assertNameUnique(orgId: string, name: string, excludeId?: string): Promise<void> {
+  private async assertNameUnique(orgId: string, name: string, channel: string, excludeId?: string): Promise<void> {
     let q = supabaseAdmin
       .from('messaging_templates').select('id')
       .eq('organization_id', orgId)
       .eq('name', name)
+      .eq('channel', channel)
     if (excludeId) q = q.neq('id', excludeId)
     const { data } = await q.limit(1).maybeSingle()
-    if (data) throw new ConflictException(`Já existe template com nome "${name}"`)
+    if (data) throw new ConflictException(`Já existe template "${name}" no canal ${channel}`)
   }
 
   // ── Journey Templates (modelos de jornada) ───────────────────────────────
