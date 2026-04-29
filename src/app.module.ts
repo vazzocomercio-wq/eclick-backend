@@ -27,6 +27,7 @@ import { UserPreferencesModule } from './modules/user-preferences/user-preferenc
 import { AdminModule } from './modules/admin/admin.module'
 import { MarketplaceModule } from './modules/marketplace/marketplace.module'
 import { MessagingModule } from './modules/messaging/messaging.module'
+import { EmailSettingsModule } from './modules/email-settings/email-settings.module'
 import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
 import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricing-intelligence.module'
 import { CommunicationModule } from './modules/communication/communication.module'
@@ -59,6 +60,7 @@ import { CommunicationModule } from './modules/communication/communication.modul
     AdminModule,
     MarketplaceModule,
     MessagingModule,
+    EmailSettingsModule,
     CustomerHubModule,
     PricingIntelligenceModule,
     CommunicationModule,

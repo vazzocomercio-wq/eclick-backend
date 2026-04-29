@@ -309,7 +309,7 @@ export class JourneyEngineService {
 
     let success = false
     for (const ch of plan) {
-      const r = await this.attemptSend(ch, run, ctx, tpl, rendered)
+      const r = await this.attemptSend(ch, orgId, run, ctx, tpl, rendered)
       this.logger.log(
         `[messaging.send] run=${run.id} step=${run.current_step} channel=${ch} status=${r.success ? 'sent' : 'failed'}${r.error ? ` err=${r.error}` : ''}`,
       )
@@ -368,7 +368,7 @@ export class JourneyEngineService {
   }
 
   private async attemptSend(
-    channel: SendChannel, run: Row, ctx: Record<string, unknown>, tpl: TemplateRow, rendered: string,
+    channel: SendChannel, orgId: string, run: Row, ctx: Record<string, unknown>, tpl: TemplateRow, rendered: string,
   ): Promise<{ success: boolean; error?: string }> {
     if (channel === 'whatsapp') {
       const cfg = await this.waConfig.findActive()
@@ -378,11 +378,13 @@ export class JourneyEngineService {
       const r = await this.waSender.sendTextMessage({ phone, message: rendered, waConfig: cfg })
       return { success: r.success, error: r.error ?? undefined }
     }
-    // email
+    // email — EM-1 multi-tenant: passa orgId pro dispatcher buscar config
+    // criptografada em email_settings. subject usa tpl.subject (coluna nova)
+    // com fallback pra tpl.name pra compat com templates legados.
     const to = (ctx.recipient_email as string | undefined) ?? null
     if (!to) return { success: false, error: 'recipient_email ausente no context' }
-    const subject = tpl.name ?? '(sem assunto)'
-    return await this.emailSender.sendEmail({ to, subject, body: rendered })
+    const subject = (tpl as { subject?: string | null }).subject ?? tpl.name ?? '(sem assunto)'
+    return await this.emailSender.sendEmail({ orgId, to, subject, body: rendered })
   }
 
   /** @returns completed=true quando esse advance encerrou a jornada. */
