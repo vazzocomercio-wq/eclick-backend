@@ -31,6 +31,7 @@ import { EmailSettingsModule } from './modules/email-settings/email-settings.mod
 import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
 import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricing-intelligence.module'
 import { CommunicationModule } from './modules/communication/communication.module'
+import { RoadmapModule } from './modules/roadmap/roadmap.module'
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { CommunicationModule } from './modules/communication/communication.modul
     CustomerHubModule,
     PricingIntelligenceModule,
     CommunicationModule,
+    RoadmapModule,
   ],
   controllers: [AppController],
   providers: [AppService],
