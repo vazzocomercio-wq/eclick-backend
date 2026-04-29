@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common'
 import { MercadolivreService } from './mercadolivre.service'
 import { MlBillingFetcherService } from './ml-billing-fetcher.service'
+import { OrderDetailService } from './order-detail.service'
 import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -29,7 +30,20 @@ export class MercadolivreController {
     private readonly ml: MercadolivreService,
     private readonly scraper: ScraperService,
     private readonly billingFetcher: MlBillingFetcherService,
+    private readonly orderDetail: OrderDetailService,
   ) {}
+
+  /** GET /ml/orders/:external_order_id/full-detail — agregador read-only
+   * pra widget de detalhe em /dashboard/pedidos. Retorna order + customer
+   * unificado (por CPF) + comunicação (OCJ + sends). 404 só se order não
+   * existe; customer/communication podem vir null. Org-scoped. */
+  @Get('orders/:external_order_id/full-detail')
+  fullDetail(
+    @ReqUser() user: ReqUserPayload,
+    @Param('external_order_id') externalOrderId: string,
+  ) {
+    return this.orderDetail.getFullDetail(user.orgId ?? '', externalOrderId)
+  }
 
   // POST /ml/orders/fetch-billing — manual trigger of the buyer-billing
   // batch. Body: { limit?: number }. Caps at 200 per request to keep
