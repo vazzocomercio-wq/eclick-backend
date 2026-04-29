@@ -22,17 +22,29 @@ export function normalizeMercadoLivreUrl(inputUrl: string | null | undefined): {
   let itemId: string | null = null
   let catalogId: string | null = null
 
-  // 1. item_id via query (catálogo/PDP)
+  // 1. item_id via query (catálogo/PDP — pdp_filters=item_id:MLB...)
   const queryMatch = decoded.match(/item_id[=:]?(MLB\d+)/i)
   if (queryMatch) itemId = queryMatch[1].toUpperCase()
 
-  // 2. MLB direto na URL (com ou sem hífen) — não captura MLBU/MLBA/etc
+  // 2. wid=MLB... (catalog URL apontando pra listing específico do vendedor).
+  // Tem prioridade sobre directMatch porque /p/MLBxxx no path é o catalog
+  // product ID, não o listing — só wid identifica o vendedor concreto.
   if (!itemId) {
-    const directMatch = decoded.match(/MLB-?(\d+)/)
+    const widMatch = decoded.match(/[?&]wid=(MLB\d+)/i)
+    if (widMatch) itemId = widMatch[1].toUpperCase()
+  }
+
+  // 3. MLB direto na URL (com ou sem hífen) — não captura MLBU/MLBA/etc.
+  // Strip /p/MLBxxx antes do match: catalog product ID não é listing válido
+  // pra ML API /items/ (sempre devolve 404). Sem wid + sem item_id +
+  // apenas /p/MLB → URL é só catálogo, sem listing específico → null.
+  if (!itemId) {
+    const stripped = decoded.replace(/\/p\/MLB-?\d+/gi, '')
+    const directMatch = stripped.match(/MLB-?(\d+)/)
     if (directMatch) itemId = `MLB${directMatch[1]}`
   }
 
-  // 3. catalog_id (URLs /up/MLBU…)
+  // 4. catalog_id (URLs /up/MLBU…)
   const catalogMatch = decoded.match(/\/up\/(MLBU\d+)/i)
   if (catalogMatch) catalogId = catalogMatch[1].toUpperCase()
 
