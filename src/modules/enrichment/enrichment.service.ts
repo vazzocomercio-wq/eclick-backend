@@ -279,6 +279,11 @@ export class EnrichmentService {
       : await baseQ
           .or('enrichment_status.is.null,enrichment_status.eq.pending')
           .or('cpf.not.is.null,phone.not.is.null,whatsapp_id.not.is.null')
+          // Prioridade: quem comprou mais (mais ativo, mais relevante pra WA),
+          // empate → mais antigo primeiro (FIFO determinístico evita overlap
+          // entre batches concorrentes).
+          .order('total_purchases', { ascending: false, nullsFirst: false })
+          .order('updated_at',      { ascending: true,  nullsFirst: true })
           .limit(cap)
 
     const rows = pending ?? []
