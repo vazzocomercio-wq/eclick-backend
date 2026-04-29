@@ -47,7 +47,7 @@ export interface OrderFullDetail {
     cpf:                 string | null
     phone:               string | null
     email:               string | null
-    validated_whatsapp:  boolean
+    validated_whatsapp:  boolean | null
     city:                string | null
     state:               string | null
     enrichment_status:   string | null
@@ -160,7 +160,7 @@ export class OrderDetailService {
           cpf:                 c.cpf,
           phone:               c.phone,
           email:               c.email,
-          validated_whatsapp:  c.validated_whatsapp === true,
+          validated_whatsapp:  c.validated_whatsapp ?? null,
           city:                c.city,
           state:               c.state,
           enrichment_status:   c.enrichment_status,
