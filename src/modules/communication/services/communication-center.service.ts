@@ -14,6 +14,9 @@ export interface JourneyListItem {
   total_steps:           number | null
   last_message_sent_at:  string | null
   created_at:            string
+  journey_name:          string | null
+  stopped_reason:        string | null
+  last_error:            string | null
 }
 
 export interface CommunicationSettings {
@@ -81,7 +84,7 @@ export class CommunicationCenterService {
 
     let q = supabaseAdmin
       .from('order_communication_journeys')
-      .select('id, state, journey_id, customer_id, order_id, created_at')
+      .select('id, state, journey_id, customer_id, order_id, created_at, stopped_reason, last_error')
       .eq('organization_id', orgId)
       .order('created_at', { ascending: false })
       .limit(limit)
@@ -90,25 +93,30 @@ export class CommunicationCenterService {
     const { data: ocjsRaw, error } = await q
     if (error) throw new BadRequestException(error.message)
     const ocjs = (ocjsRaw ?? []) as unknown as Array<{
-      id:           string
-      state:        string
-      journey_id:   string
-      customer_id:  string | null
-      order_id:     string | null
-      created_at:   string
+      id:              string
+      state:           string
+      journey_id:      string
+      customer_id:     string | null
+      order_id:        string | null
+      created_at:      string
+      stopped_reason:  string | null
+      last_error:      string | null
     }>
     if (ocjs.length === 0) return []
 
-    // Batch lookup: journeys (pra total_steps)
+    // Batch lookup: journeys (pra journey_name + total_steps)
     const journeyIds = [...new Set(ocjs.map(o => o.journey_id))]
     const { data: journeysRaw } = await supabaseAdmin
       .from('messaging_journeys')
-      .select('id, steps')
+      .select('id, name, steps')
       .eq('organization_id', orgId)
       .in('id', journeyIds)
-    const journeyMap = new Map<string, number>()
-    for (const j of (journeysRaw ?? []) as unknown as Array<{ id: string; steps: unknown }>) {
-      journeyMap.set(j.id, Array.isArray(j.steps) ? j.steps.length : 0)
+    const journeyMap = new Map<string, { name: string | null; totalSteps: number }>()
+    for (const j of (journeysRaw ?? []) as unknown as Array<{ id: string; name: string | null; steps: unknown }>) {
+      journeyMap.set(j.id, {
+        name:       j.name,
+        totalSteps: Array.isArray(j.steps) ? j.steps.length : 0,
+      })
     }
 
     // Batch lookup: customers
@@ -177,7 +185,8 @@ export class CommunicationCenterService {
 
     return ocjs.map<JourneyListItem>(o => {
       const run         = o.id ? runsByOcj.get(o.id) : undefined
-      const totalSteps  = journeyMap.get(o.journey_id) ?? null
+      const journeyInfo = journeyMap.get(o.journey_id)
+      const totalSteps  = journeyInfo?.totalSteps ?? 0
       const lastSentAt  = run ? lastSentByRun.get(run.runId) ?? null : null
       return {
         ocj_id:               o.id,
@@ -185,9 +194,12 @@ export class CommunicationCenterService {
         customer_name:        o.customer_id ? customerMap.get(o.customer_id) ?? null : null,
         product_title:        o.order_id    ? orderMap.get(o.order_id)       ?? null : null,
         current_step:         run?.currentStep ?? null,
-        total_steps:          totalSteps && totalSteps > 0 ? totalSteps : null,
+        total_steps:          totalSteps > 0 ? totalSteps : null,
         last_message_sent_at: lastSentAt,
         created_at:           o.created_at,
+        journey_name:         journeyInfo?.name ?? null,
+        stopped_reason:       o.stopped_reason,
+        last_error:           o.last_error,
       }
     })
   }
