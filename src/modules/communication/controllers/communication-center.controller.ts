@@ -5,7 +5,7 @@ import {
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { CommunicationCenterService, CommunicationSettings } from '../services/communication-center.service'
-import { MessagingTemplate } from '../../messaging/messaging.service'
+import { MessagingTemplate, MessagingJourney } from '../../messaging/messaging.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -70,6 +70,46 @@ export class CommunicationCenterController {
   ) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.softDeleteTemplate(user.orgId, id)
+  }
+
+  // ── Journey Templates (modelos de jornada) ──────────────────────────────
+
+  @Get('journeys-templates')
+  listJourneyTemplates(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listJourneyTemplates(user.orgId)
+  }
+
+  @Post('journeys-templates')
+  @HttpCode(HttpStatus.CREATED)
+  createJourneyTemplate(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: Partial<MessagingJourney>,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.createJourneyTemplate(user.orgId, body)
+  }
+
+  @Patch('journeys-templates/:id')
+  updateJourneyTemplate(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: Partial<MessagingJourney>,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.updateJourneyTemplate(user.orgId, id, body)
+  }
+
+  /** Soft delete — UPDATE is_active=false. Preserva runs históricas;
+   * engine CC-2 skipa journeys inativas. */
+  @Delete('journeys-templates/:id')
+  @HttpCode(HttpStatus.OK)
+  deleteJourneyTemplate(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.softDeleteJourneyTemplate(user.orgId, id)
   }
 
   // ── Settings ────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ConflictException } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
-import { MessagingService, MessagingTemplate } from '../../messaging/messaging.service'
+import { MessagingService, MessagingTemplate, MessagingJourney } from '../../messaging/messaging.service'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any
@@ -244,6 +244,50 @@ export class CommunicationCenterService {
     if (excludeId) q = q.neq('id', excludeId)
     const { data } = await q.limit(1).maybeSingle()
     if (data) throw new ConflictException(`Já existe template com nome "${name}"`)
+  }
+
+  // ── Journey Templates (modelos de jornada) ───────────────────────────────
+
+  async listJourneyTemplates(orgId: string): Promise<MessagingJourney[]> {
+    return this.messaging.listJourneys(orgId)
+  }
+
+  async createJourneyTemplate(orgId: string, body: Partial<MessagingJourney>): Promise<MessagingJourney> {
+    if (!body?.name) throw new BadRequestException('name obrigatório')
+    await this.assertJourneyNameUnique(orgId, body.name)
+    return this.messaging.createJourney(orgId, body)
+  }
+
+  async updateJourneyTemplate(orgId: string, id: string, patch: Partial<MessagingJourney>): Promise<MessagingJourney> {
+    if (patch?.name) await this.assertJourneyNameUnique(orgId, patch.name, id)
+    return this.messaging.updateJourney(orgId, id, patch)
+  }
+
+  /** Soft delete — preserva runs históricas que referenciam essa journey.
+   * UPDATE is_active=false (não toca o hard delete legado em
+   * messagingService.deleteJourney). Engine CC-2 já skipa journeys com
+   * is_active=false (linha 71 do journey-engine.service.ts). */
+  async softDeleteJourneyTemplate(orgId: string, id: string): Promise<{ ok: true }> {
+    const { data: existing } = await supabaseAdmin
+      .from('messaging_journeys').select('id, is_active')
+      .eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (!existing) throw new NotFoundException('modelo de jornada não encontrado')
+    const { error } = await supabaseAdmin
+      .from('messaging_journeys')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('id', id).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(error.message)
+    return { ok: true }
+  }
+
+  private async assertJourneyNameUnique(orgId: string, name: string, excludeId?: string): Promise<void> {
+    let q = supabaseAdmin
+      .from('messaging_journeys').select('id')
+      .eq('organization_id', orgId)
+      .eq('name', name)
+    if (excludeId) q = q.neq('id', excludeId)
+    const { data } = await q.limit(1).maybeSingle()
+    if (data) throw new ConflictException(`Já existe modelo de jornada com nome "${name}"`)
   }
 
   // ── Settings ────────────────────────────────────────────────────────────
