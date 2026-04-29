@@ -32,6 +32,7 @@ import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
 import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricing-intelligence.module'
 import { CommunicationModule } from './modules/communication/communication.module'
 import { RoadmapModule } from './modules/roadmap/roadmap.module'
+import { HealthModule } from './modules/health/health.module'
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { RoadmapModule } from './modules/roadmap/roadmap.module'
     PricingIntelligenceModule,
     CommunicationModule,
     RoadmapModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [AppService],
