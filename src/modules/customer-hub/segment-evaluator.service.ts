@@ -26,6 +26,7 @@ export class SegmentEvaluatorService {
       .from('unified_customers')
       .select('id')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
 
     for (const rule of rules) {
       q = this.applyRule(q, rule)
@@ -42,6 +43,7 @@ export class SegmentEvaluatorService {
       .from('unified_customers')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
 
     for (const rule of rules) {
       q = this.applyRule(q, rule)

@@ -191,6 +191,7 @@ export class EnrichmentService {
       .from('unified_customers')
       .select('id, cpf, phone, whatsapp_id, email, organization_id')
       .eq('id', customerId)
+      .eq('is_deleted', false)
       .maybeSingle()
     if (!c) return { customer_id: customerId, status: 'skipped', provider: null, fields_filled: 0 }
 
@@ -271,6 +272,7 @@ export class EnrichmentService {
       .from('unified_customers')
       .select('id, cpf, phone, whatsapp_id')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
 
     const { data: pending } = haveIds
       ? await baseQ.in('id', idsCapped).limit(cap)

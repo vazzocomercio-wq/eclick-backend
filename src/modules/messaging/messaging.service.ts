@@ -401,6 +401,7 @@ export class MessagingService {
       .from('unified_customers')
       .select('id, display_name, phone, cpf, tags')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not('phone', 'is', null)
 
     if (input.segment === 'with_cpf') q = q.not('cpf', 'is', null)

@@ -36,6 +36,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not('rfm_score', 'is', null)
     return { updated: count ?? 0, duration_ms: Date.now() - t0 }
   }
@@ -47,6 +48,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('abc_curve, churn_risk, ltv_score, avg_ticket, segment, last_purchase_at, total_purchases')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
     const all = rows ?? []
     const abc = { A: 0, B: 0, C: 0 }
     const churn = { low: 0, medium: 0, high: 0, critical: 0 }
@@ -82,6 +84,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('abc_curve, total_purchases, avg_ticket')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not('abc_curve', 'is', null)
     const buckets = {
       A: { count: 0, revenue: 0, avg_ticket: 0 },
@@ -117,6 +120,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('rfm_score, rfm_frequency, rfm_recency_days, rfm_monetary, ltv_score, abc_curve, display_name, id')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not('rfm_score', 'is', null)
     const buckets = Array.from({ length: 10 }, (_, i) => ({ bucket: i, label: `${i}-${i+1}`, count: 0 }))
     const scatter: Array<{ id: string; name: string | null; frequency: number; recency: number; monetary: number; score: number }> = []
@@ -143,6 +147,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('churn_risk')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not('churn_risk', 'is', null)
     const out = { low: 0, medium: 0, high: 0, critical: 0 }
     for (const r of rows ?? []) {
@@ -158,6 +163,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('id, display_name, phone, last_purchase_at, rfm_recency_days, ltv_score, avg_ticket, churn_risk')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .in('churn_risk', ['high', 'critical'])
       .order('ltv_score', { ascending: false })
       .limit(Math.min(Math.max(limit, 1), 500))
@@ -175,6 +181,7 @@ export class CustomerHubService {
       .from('unified_customers')
       .select('id, display_name, phone, cpf, abc_curve, ltv_score, rfm_score, rfm_monetary, rfm_frequency, rfm_recency_days, segment, last_purchase_at, avg_ticket')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .not(sortCol, 'is', null)
       .order(sortCol, { ascending: false })
       .limit(limit)
@@ -278,6 +285,7 @@ export class CustomerHubService {
     const { data: customers } = await supabaseAdmin
       .from('unified_customers')
       .select('id, display_name, phone, cpf, abc_curve, ltv_score, segment, last_purchase_at')
+      .eq('is_deleted', false)
       .in('id', customerIds)
     return { items: customers ?? [], total: count ?? 0, limit, offset }
   }
@@ -288,6 +296,7 @@ export class CustomerHubService {
     const { data } = await supabaseAdmin
       .from('unified_customers')
       .select('organization_id')
+      .eq('is_deleted', false)
       .not('organization_id', 'is', null)
       .limit(10_000)
     const set = new Set<string>()

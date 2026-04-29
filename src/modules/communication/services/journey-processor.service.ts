@@ -154,6 +154,7 @@ export class JourneyProcessorService {
       .from('unified_customers')
       .select('phone, validated_whatsapp, email')
       .eq('id', customerId)
+      .eq('is_deleted', false)
       .maybeSingle()
     const cur = (customer ?? {}) as { phone?: string | null; validated_whatsapp?: boolean | null; email?: string | null }
 
@@ -328,6 +329,7 @@ export class JourneyProcessorService {
       .from('unified_customers')
       .select('display_name')
       .eq('id', customerId)
+      .eq('is_deleted', false)
       .maybeSingle()
     const fullName  = (customerRow?.display_name as string | null | undefined) ?? snapshot.buyer_name ?? null
     const firstName = fullName ? fullName.split(/\s+/)[0] ?? null : null

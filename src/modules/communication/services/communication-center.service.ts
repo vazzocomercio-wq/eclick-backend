@@ -127,6 +127,7 @@ export class CommunicationCenterService {
         .from('unified_customers')
         .select('id, display_name')
         .eq('organization_id', orgId)
+        .eq('is_deleted', false)
         .in('id', customerIds)
       for (const c of (cs ?? []) as unknown as Array<{ id: string; display_name: string | null }>) {
         if (c.display_name) customerMap.set(c.id, c.display_name)
@@ -363,6 +364,7 @@ export class CommunicationCenterService {
         .from('unified_customers')
         .select('id', { count: 'exact', head: true })
         .eq('organization_id', orgId)
+        .eq('is_deleted', false)
         .gte('enriched_at', since)
         .in('enrichment_status', ['full', 'partial']),
       ocjBase().eq('state', 'active'),

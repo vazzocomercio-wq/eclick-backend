@@ -46,6 +46,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('*')
       .eq('phone', norm)
+      .eq('is_deleted', false)
       .maybeSingle()
 
     if (existing) {
@@ -72,6 +73,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('*')
       .eq('whatsapp_id', norm)
+      .eq('is_deleted', false)
       .maybeSingle()
     if (byWa) {
       await this.touch(byWa.id, 'whatsapp')
@@ -83,6 +85,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('*')
       .eq('phone', norm)
+      .eq('is_deleted', false)
       .maybeSingle()
     if (byPhone) {
       await supabaseAdmin
@@ -114,6 +117,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('*')
       .eq('ml_buyer_id', mlId)
+      .eq('is_deleted', false)
       .maybeSingle()
     if (existing) {
       await this.touch(existing.id, 'mercadolivre')
@@ -133,38 +137,35 @@ export class CustomerIdentityService {
   }
 
   /**
-   * Merge two profiles when the same person has separate rows. Keeps the
-   * older one (target) and copies any non-null fields from the newer one.
-   * Re-points ai_conversations.unified_customer_id from old → target.
+   * Merge two profiles via RPC `merge_customers` (Postgres function transacional
+   * com soft delete + audit trail + migração de FK em 5 tabelas). Substitui o
+   * antigo hard-delete + 1 UPDATE em ai_conversations que deixava 4 outras
+   * tabelas com customer_id apontando pra UUID inexistente.
+   * Ver migration: src/migrations/2026_04_29_merge_customers_soft_delete.sql
    */
-  async mergeProfiles(targetId: string, sourceId: string): Promise<UnifiedCustomer | null> {
-    if (targetId === sourceId) return null
+  async mergeProfiles(orgId: string, keepId: string, discardId: string): Promise<UnifiedCustomer | null> {
+    if (!orgId)            throw new HttpException('orgId obrigatório', 400)
+    if (!keepId)           throw new HttpException('keep_id obrigatório', 400)
+    if (!discardId)        throw new HttpException('discard_id obrigatório', 400)
+    if (keepId === discardId) return null
 
-    const { data: target } = await supabaseAdmin.from('unified_customers').select('*').eq('id', targetId).maybeSingle()
-    const { data: source } = await supabaseAdmin.from('unified_customers').select('*').eq('id', sourceId).maybeSingle()
-    if (!target || !source) throw new HttpException('Profile not found for merge', 404)
-
-    const fillIfNull = (a: unknown, b: unknown) => (a == null || a === '' ? b : a)
-    const merged: Partial<UnifiedCustomer> = {
-      display_name:    fillIfNull(target.display_name,    source.display_name)    as string | null,
-      phone:           fillIfNull(target.phone,           source.phone)           as string | null,
-      email:           fillIfNull(target.email,           source.email)           as string | null,
-      whatsapp_id:     fillIfNull(target.whatsapp_id,     source.whatsapp_id)     as string | null,
-      ml_buyer_id:     fillIfNull(target.ml_buyer_id,     source.ml_buyer_id)     as string | null,
-      shopee_buyer_id: fillIfNull(target.shopee_buyer_id, source.shopee_buyer_id) as string | null,
-      avatar_url:      fillIfNull(target.avatar_url,      source.avatar_url)      as string | null,
-      tags:            Array.from(new Set([...(target.tags ?? []), ...(source.tags ?? [])])),
-      notes:           [target.notes, source.notes].filter(Boolean).join('\n---\n') || null,
-      total_conversations: (target.total_conversations ?? 0) + (source.total_conversations ?? 0),
-      total_purchases:     Number(target.total_purchases ?? 0) + Number(source.total_purchases ?? 0),
+    const { error } = await supabaseAdmin.rpc('merge_customers', {
+      p_org_id:     orgId,
+      p_keep_id:    keepId,
+      p_discard_id: discardId,
+    })
+    if (error) {
+      this.logger.warn(`[merge] falhou: ${error.message}`)
+      throw new HttpException(error.message, 400)
     }
 
-    await supabaseAdmin.from('ai_conversations').update({ unified_customer_id: targetId }).eq('unified_customer_id', sourceId)
-    await supabaseAdmin.from('unified_customers').update(merged).eq('id', targetId)
-    await supabaseAdmin.from('unified_customers').delete().eq('id', sourceId)
-
-    const { data: result } = await supabaseAdmin.from('unified_customers').select('*').eq('id', targetId).single()
-    return result as UnifiedCustomer
+    const { data } = await supabaseAdmin
+      .from('unified_customers')
+      .select('*')
+      .eq('id', keepId)
+      .eq('is_deleted', false)
+      .single()
+    return data as UnifiedCustomer
   }
 
   /** Last 10 conversations across channels for a customer. */
@@ -214,6 +215,7 @@ export class CustomerIdentityService {
     let q = supabaseAdmin
       .from('unified_customers')
       .select('*', { count: isLegacy ? undefined : 'exact' })
+      .eq('is_deleted', false)
       .order(sortBy, { ascending: sortDir })
       .range(offset, offset + perPage - 1)
 
@@ -242,6 +244,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('*')
       .eq('id', id)
+      .eq('is_deleted', false)
       .maybeSingle()
     if (error) throw new HttpException(error.message, 500)
     if (!data) throw new HttpException('Cliente não encontrado', 404)
@@ -270,6 +273,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
 
     const [
       total, withCpf, withPhone, withWa, withEmail, withAddress,
@@ -293,6 +297,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('total_purchases')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .limit(50_000)
     const gmvTotal = (rev ?? []).reduce(
       (s, r) => s + Number((r as { total_purchases?: number | null }).total_purchases ?? 0),
@@ -333,6 +338,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('tags')
       .eq('id', id)
+      .eq('is_deleted', false)
       .maybeSingle()
     const tags = new Set<string>((cur?.tags as string[] | null) ?? [])
     if (on) tags.add(tag); else tags.delete(tag)
@@ -356,6 +362,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('id, tags')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .in('id', customerIds)
     if (!rows?.length) return { updated: 0 }
 
@@ -384,6 +391,7 @@ export class CustomerIdentityService {
       .from('unified_customers')
       .select('display_name, cpf, phone, email, city, state, enrichment_status, total_purchases')
       .eq('organization_id', orgId)
+      .eq('is_deleted', false)
       .order('display_name', { ascending: true })
       .limit(50_000)
     if (ids?.length) q = q.in('id', ids)

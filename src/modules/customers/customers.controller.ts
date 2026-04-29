@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Post, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common'
+import { BadRequestException, Controller, Get, Patch, Post, Delete, Body, Param, Query, Res, UseGuards } from '@nestjs/common'
 import type { Response } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -88,12 +88,16 @@ export class CustomersController {
   }
 
   @Post('merge')
-  merge(@Body() body: { target_id?: string; source_id?: string; keep_id?: string; discard_id?: string }) {
+  merge(
+    @ReqUser() user: { id: string; orgId: string | null },
+    @Body() body: { target_id?: string; source_id?: string; keep_id?: string; discard_id?: string },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
     // Aceita keep_id/discard_id (do bulk action de /clientes) e o legado
     // target_id/source_id. keep == target (fica), discard == source (some).
-    const target = body.target_id ?? body.keep_id ?? ''
-    const source = body.source_id ?? body.discard_id ?? ''
-    return this.svc.mergeProfiles(target, source)
+    const keep    = body.target_id  ?? body.keep_id    ?? ''
+    const discard = body.source_id  ?? body.discard_id ?? ''
+    return this.svc.mergeProfiles(user.orgId, keep, discard)
   }
 
   /** POST /customers/segments/bulk-add — STUB. Implementação real em

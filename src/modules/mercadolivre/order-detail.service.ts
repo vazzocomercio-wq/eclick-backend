@@ -125,6 +125,7 @@ export class OrderDetailService {
         )
         .eq('organization_id', orgId)
         .eq('cpf', cpfClean)
+        .eq('is_deleted', false)
         .maybeSingle()
       const c = cRaw as unknown as {
         id:                  string

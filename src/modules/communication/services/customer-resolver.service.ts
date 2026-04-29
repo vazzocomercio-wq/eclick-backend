@@ -22,12 +22,14 @@ export class CustomerResolverService {
     const cleaned = (cpf ?? '').replace(/\D/g, '')
     if (!cleaned) throw new Error('CPF vazio — não dá pra resolver customer')
 
-    // 1. Busca rápida por org+cpf
+    // 1. Busca rápida por org+cpf (ignora soft-deleted/merged — se retornar
+    // hit aí, seria uma row morta da merge_customers)
     const { data: existing } = await supabaseAdmin
       .from('unified_customers')
       .select('id')
       .eq('organization_id', orgId)
       .eq('cpf', cleaned)
+      .eq('is_deleted', false)
       .limit(1)
       .maybeSingle()
     if (existing?.id) return existing.id as string
@@ -58,6 +60,7 @@ export class CustomerResolverService {
         .select('id')
         .eq('organization_id', orgId)
         .eq('cpf', cleaned)
+        .eq('is_deleted', false)
         .limit(1)
         .maybeSingle()
       if (retry?.id) return retry.id as string
