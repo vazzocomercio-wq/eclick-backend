@@ -33,6 +33,8 @@ import { PricingIntelligenceModule } from './modules/pricing-intelligence/pricin
 import { CommunicationModule } from './modules/communication/communication.module'
 import { RoadmapModule } from './modules/roadmap/roadmap.module'
 import { HealthModule } from './modules/health/health.module'
+import { CampaignsModule } from './modules/campaigns/campaigns.module'
+import { AiModule } from './modules/ai/ai.module'
 
 @Module({
   imports: [
@@ -68,6 +70,8 @@ import { HealthModule } from './modules/health/health.module'
     CommunicationModule,
     RoadmapModule,
     HealthModule,
+    CampaignsModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],

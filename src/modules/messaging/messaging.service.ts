@@ -449,6 +449,70 @@ export class MessagingService {
     return { total: customers.length, sent, failed }
   }
 
+  /** Envio individual usado pelo CampaignsService.processCampaignTargets.
+   * Renderiza template (ou usa customMessage), envia WA, persiste em
+   * messaging_sends e devolve {success, messaging_send_id, error?}. Não dorme
+   * — quem chama é responsável por rate-limit. */
+  async sendOne(
+    orgId:        string,
+    customerId:   string,
+    templateId:   string | null,
+    customMessage?: string,
+  ): Promise<{ success: boolean; messaging_send_id?: string; error?: string }> {
+    const { data: customer } = await supabaseAdmin
+      .from('unified_customers')
+      .select('id, display_name, phone')
+      .eq('id', customerId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!customer)        return { success: false, error: 'customer não encontrado' }
+    if (!customer.phone)  return { success: false, error: 'customer sem phone' }
+
+    let body = customMessage ?? ''
+    if (!body && templateId) {
+      const { data: tpl } = await supabaseAdmin
+        .from('messaging_templates').select('message_body, channel')
+        .eq('id', templateId).eq('organization_id', orgId).maybeSingle()
+      if (!tpl) return { success: false, error: 'template não encontrado' }
+      body = tpl.message_body as string
+    }
+    if (!body) return { success: false, error: 'sem corpo de mensagem' }
+
+    const rendered = this.renderer.render(body, {
+      nome: customer.display_name ?? '',
+      loja: 'Vazzo',
+    })
+
+    const cfg = await this.waConfig.findActive()
+    if (!cfg) return { success: false, error: 'WhatsApp Business não configurado' }
+
+    const result = await this.waSender.sendTextMessage({
+      phone:    customer.phone as string,
+      message:  rendered,
+      waConfig: cfg,
+    })
+
+    const { data: sendRow } = await supabaseAdmin
+      .from('messaging_sends').insert({
+        organization_id: orgId,
+        template_id:     templateId,
+        channel:         'whatsapp',
+        phone:           customer.phone,
+        customer_id:     customer.id,
+        message_body:    rendered,
+        status:          result.success ? 'sent' : 'failed',
+        sent_at:         result.success ? new Date().toISOString() : null,
+        error:           result.error ?? null,
+      })
+      .select('id').single()
+
+    return {
+      success:           result.success,
+      messaging_send_id: sendRow?.id as string | undefined,
+      error:             result.error,
+    }
+  }
+
   // ── Analytics ───────────────────────────────────────────────────────────
 
   /** Sumário de envios no período. Default: últimos 30 dias. */
