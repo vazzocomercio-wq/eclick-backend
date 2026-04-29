@@ -299,7 +299,7 @@ export class CompetitorsService implements OnModuleInit {
       const { token: t } = await this.mlService.getValidToken()
       token = t
     } catch (e: unknown) {
-      this.logger.error(`[enrichCompetitor] sem token ML válido: ${(e as Error).message} — skip`)
+      this.logger.error(`[enrichCompetitor] sem token ML válido competitor=${competitorId} — skip`)
       return null
     }
 
@@ -334,14 +334,14 @@ export class CompetitorsService implements OnModuleInit {
             shipping:           { free_shipping: scraped.free_shipping ?? undefined },
           }
         } catch (scrapeErr: unknown) {
-          this.logger.error(`[enrichCompetitor] scraper exception listing=${listingId}: ${(scrapeErr as Error).message}`)
+          this.logger.error(`[enrichCompetitor] scraper exception listing=${listingId}`)
           return null
         }
       } else if (status === 404) {
         await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', competitorId)
         return null
       } else {
-        this.logger.error(`[enrichCompetitor] ML fetch falhou ${status} listing_id=${listingId}: ${(e as Error).message}`)
+        this.logger.error(`[enrichCompetitor] ML fetch falhou ${status} listing=${listingId}`)
         return null
       }
     }
@@ -501,7 +501,7 @@ export class CompetitorsService implements OnModuleInit {
             }
           } catch (scrapeErr: unknown) {
             if (scrapeErr instanceof HttpException) throw scrapeErr
-            throw new HttpException(`Scraper exception: ${(scrapeErr as Error).message}`, 502)
+            throw new HttpException(`Scraper exception em listing ${listingId}`, 502)
           }
         } else if (status === 404) {
           await supabaseAdmin.from('competitors').update({ status: 'inaccessible' }).eq('id', id)
