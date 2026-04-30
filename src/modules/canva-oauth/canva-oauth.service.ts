@@ -1,7 +1,6 @@
 import { Injectable, Logger, HttpException, HttpStatus, UnauthorizedException, BadRequestException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import axios from 'axios'
-import * as FormData from 'form-data'
 import * as crypto from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { CredentialsService } from '../credentials/credentials.service'
@@ -329,50 +328,70 @@ export class CanvaOauthService {
     }
 
     // 2. Upload pra Canva /asset-uploads
-    let assetId: string | undefined
-    let jobId: string | undefined
+    //    Spec oficial: body = bytes RAW (octet-stream), header
+    //    Asset-Upload-Metadata: { name_base64: ... }. Multipart NÃO aceito
+    //    (retorna 415 Unsupported Media Type). Doc:
+    //    https://www.canva.dev/docs/connect/api-reference/assets/create-asset-upload-job/
+    const rawName  = (params.imageName ?? 'campaign-asset.png').slice(0, 50)
+    const nameB64  = Buffer.from(rawName, 'utf8').toString('base64')
+    const metadata = JSON.stringify({ name_base64: nameB64 })
+
+    let uploadJobId: string | undefined
+    let assetId:     string | undefined
     try {
-      const form = new FormData()
-      form.append('file', imgBuf, {
-        filename:    params.imageName ?? 'campaign-asset.png',
-        contentType: 'image/png',
-      })
       const uploadRes = await axios.post<{ job: { id: string; status: string; asset?: { id: string } } }>(
         `${CANVA_API_BASE}/asset-uploads`,
-        form,
+        imgBuf,
         {
-          headers: { 'Authorization': `Bearer ${token}`, ...form.getHeaders() },
-          timeout: 60_000,
+          headers: {
+            'Authorization':         `Bearer ${token}`,
+            'Content-Type':          'application/octet-stream',
+            'Asset-Upload-Metadata': metadata,
+          },
+          timeout:          60_000,
+          maxBodyLength:    Infinity,
+          maxContentLength: Infinity,
         },
       )
-      assetId = uploadRes.data.job.asset?.id
-      jobId   = uploadRes.data.job.id
+      uploadJobId = uploadRes.data?.job?.id
+      assetId     = uploadRes.data?.job?.asset?.id  // pode vir direto se rápido
+      if (!uploadJobId && !assetId) {
+        this.logger.error(`[canva.asset-uploads] resposta sem job.id nem asset.id: ${JSON.stringify(uploadRes.data ?? {}).slice(0, 300)}`)
+        throw new BadRequestException('Canva upload sem job.id retornado')
+      }
     } catch (e) {
       this.logCanvaError('asset-uploads', e)
       throw this.canvaErrorToHttp('asset-uploads', e)
     }
 
-    // 3. Poll job se asset não veio direto (até 10s)
-    if (!assetId && jobId) {
-      for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 1000))
+    // 3. Poll job se asset não veio direto. Backoff 2,3,4,5,6,7s = 27s total max.
+    if (!assetId && uploadJobId) {
+      for (let i = 0; i < 6; i++) {
+        await new Promise(r => setTimeout(r, 2000 + i * 1000))
         try {
-          const job = await axios.get<{ job: { status: string; asset?: { id: string } } }>(
-            `${CANVA_API_BASE}/asset-uploads/${jobId}`,
+          const jobRes = await axios.get<{ job: { id: string; status: string; asset?: { id: string }; error?: { message?: string } } }>(
+            `${CANVA_API_BASE}/asset-uploads/${uploadJobId}`,
             { headers: { 'Authorization': `Bearer ${token}` }, timeout: 10_000 },
           )
-          if (job.data.job.asset?.id) { assetId = job.data.job.asset.id; break }
-          if (job.data.job.status === 'failed') {
-            this.logger.warn(`[canva.upload.poll] job ${jobId} marcado failed`)
+          const jobStatus = jobRes.data?.job?.status
+          if (jobStatus === 'success') {
+            assetId = jobRes.data?.job?.asset?.id
             break
           }
+          if (jobStatus === 'failed') {
+            const errMsg = jobRes.data?.job?.error?.message ?? 'desconhecido'
+            this.logger.warn(`[canva.upload.poll] job ${uploadJobId} failed: ${errMsg}`)
+            throw new BadRequestException(`Canva upload job falhou: ${errMsg}`)
+          }
+          // jobStatus === 'in_progress' → continua loop
         } catch (e) {
-          this.logCanvaError(`asset-uploads/${jobId} (poll #${i})`, e)
-          // Continua tentando — falha transient pode resolver
+          if (e instanceof BadRequestException) throw e
+          this.logCanvaError(`asset-uploads/${uploadJobId} (poll #${i})`, e)
+          // Erro transient na consulta — segue tentando
         }
       }
     }
-    if (!assetId) throw new HttpException('Canva upload falhou ou demorou >10s', HttpStatus.BAD_GATEWAY)
+    if (!assetId) throw new BadRequestException('Canva upload demorou mais que 30s, tente novamente')
 
     // 4. Criar design vazio com asset
     const designType = params.designType ?? 'InstagramPost'
