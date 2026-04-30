@@ -646,6 +646,18 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
     }
     const n = Math.max(1, Math.min(6, body.n ?? 1))
 
+    // Mapas pra prompt rico — descrição do ratio + canal apropriado
+    const FORMAT_DESC: Record<string, string> = {
+      square: 'quadrado 1080×1080 (1:1, feed Instagram)',
+      story:  'vertical 1080×1920 (9:16, Story Instagram/WhatsApp)',
+      wide:   'horizontal 1920×1080 (16:9, banner web/email/YouTube)',
+    }
+    const FORMAT_CHANNEL: Record<string, string> = {
+      square: 'feed do Instagram ou WhatsApp',
+      story:  'Story do Instagram ou WhatsApp',
+      wide:   'banner web, email marketing ou YouTube',
+    }
+
     // Componentes do prompt (independem do formato)
     const discountPct = body.product.sale_price && body.product.price && body.product.price > body.product.sale_price
       ? Math.round((1 - body.product.sale_price / body.product.price) * 100)
@@ -655,17 +667,27 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
       : body.product.price
         ? `Preço R$${body.product.price.toFixed(2)}`
         : ''
-    const userExtra = body.prompt?.trim() ? `\nAjustes do usuário: ${body.prompt.trim()}` : ''
+    const userExtra = body.prompt?.trim() ?? ''
 
     // Loop por formato — cada um vira uma chamada N-paralela ao LlmService
     const savedAssets: SavedAsset[] = []
     const errors: string[] = []
     for (const fmt of body.formats) {
-      const fullPrompt = `Crie um card promocional para WhatsApp/Instagram do produto:
+      const channel = FORMAT_CHANNEL[fmt] ?? 'redes sociais'
+      const desc    = FORMAT_DESC[fmt]    ?? fmt
+
+      // Se o user mandou prompt, prioriza ele e relega o canned style a
+      // complemento. Se não mandou, usa o canned default Vazzo.
+      const styleBlock = userExtra
+        ? `Direção do usuário (siga acima de tudo): ${userExtra}
+Complemente com: produto bem visível, texto legível, marca Vazzo discreta.`
+        : `Estilo: clean, moderno, fundo gradient claro, foto do produto em destaque${discountPct ? ', badge de desconto vermelho top-right' : ''}, preço grande embaixo, CTA "Saiba mais" bottom. Cores: cyan #00E5FF + branco.`
+
+      const fullPrompt = `Crie um card promocional para ${channel} do produto:
 Nome: ${body.product.title}
 ${priceLine}
-Estilo: clean, moderno, fundo gradient claro, foto do produto em destaque, ${discountPct ? 'badge de desconto vermelho top-right, ' : ''}preço grande embaixo, CTA "Saiba mais" bottom. Cores: cyan #00E5FF + branco.
-Formato: ${fmt}.${userExtra}`
+${styleBlock}
+Formato: ${desc}.`
 
       let result
       try {
