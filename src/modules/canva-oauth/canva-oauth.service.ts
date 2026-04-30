@@ -1,4 +1,4 @@
-import { Injectable, Logger, HttpException, HttpStatus, UnauthorizedException } from '@nestjs/common'
+import { Injectable, Logger, HttpException, HttpStatus, UnauthorizedException, BadRequestException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import axios from 'axios'
 import * as FormData from 'form-data'
@@ -316,61 +316,109 @@ export class CanvaOauthService {
       )
     }
 
-    // 1. Download da imagem
-    const imgRes = await axios.get<ArrayBuffer>(params.imageUrl, {
-      responseType: 'arraybuffer', timeout: 30_000,
-    })
+    // 1. Download da imagem (Storage do Supabase, sem auth — bucket público)
+    let imgBuf: Buffer
+    try {
+      const imgRes = await axios.get<ArrayBuffer>(params.imageUrl, {
+        responseType: 'arraybuffer', timeout: 30_000,
+      })
+      imgBuf = Buffer.from(imgRes.data)
+    } catch (e) {
+      this.logger.error(`[canva.download] falhou orgId=${orgId} url=${params.imageUrl.slice(0, 80)}`)
+      throw new BadRequestException(`Não foi possível baixar a imagem: ${(e as Error).message}`)
+    }
 
     // 2. Upload pra Canva /asset-uploads
-    const form = new FormData()
-    form.append('file', Buffer.from(imgRes.data), {
-      filename:    params.imageName ?? 'campaign-asset.png',
-      contentType: 'image/png',
-    })
-    const uploadRes = await axios.post<{ job: { id: string; status: string; asset?: { id: string } } }>(
-      `${CANVA_API_BASE}/asset-uploads`,
-      form,
-      {
-        headers: { 'Authorization': `Bearer ${token}`, ...form.getHeaders() },
-        timeout: 60_000,
-      },
-    )
-    let assetId = uploadRes.data.job.asset?.id
-    const jobId = uploadRes.data.job.id
+    let assetId: string | undefined
+    let jobId: string | undefined
+    try {
+      const form = new FormData()
+      form.append('file', imgBuf, {
+        filename:    params.imageName ?? 'campaign-asset.png',
+        contentType: 'image/png',
+      })
+      const uploadRes = await axios.post<{ job: { id: string; status: string; asset?: { id: string } } }>(
+        `${CANVA_API_BASE}/asset-uploads`,
+        form,
+        {
+          headers: { 'Authorization': `Bearer ${token}`, ...form.getHeaders() },
+          timeout: 60_000,
+        },
+      )
+      assetId = uploadRes.data.job.asset?.id
+      jobId   = uploadRes.data.job.id
+    } catch (e) {
+      this.logCanvaError('asset-uploads', e)
+      throw this.canvaErrorToHttp('asset-uploads', e)
+    }
 
     // 3. Poll job se asset não veio direto (até 10s)
     if (!assetId && jobId) {
       for (let i = 0; i < 10; i++) {
         await new Promise(r => setTimeout(r, 1000))
-        const job = await axios.get<{ job: { status: string; asset?: { id: string } } }>(
-          `${CANVA_API_BASE}/asset-uploads/${jobId}`,
-          { headers: { 'Authorization': `Bearer ${token}` }, timeout: 10_000 },
-        )
-        if (job.data.job.asset?.id) { assetId = job.data.job.asset.id; break }
-        if (job.data.job.status === 'failed') break
+        try {
+          const job = await axios.get<{ job: { status: string; asset?: { id: string } } }>(
+            `${CANVA_API_BASE}/asset-uploads/${jobId}`,
+            { headers: { 'Authorization': `Bearer ${token}` }, timeout: 10_000 },
+          )
+          if (job.data.job.asset?.id) { assetId = job.data.job.asset.id; break }
+          if (job.data.job.status === 'failed') {
+            this.logger.warn(`[canva.upload.poll] job ${jobId} marcado failed`)
+            break
+          }
+        } catch (e) {
+          this.logCanvaError(`asset-uploads/${jobId} (poll #${i})`, e)
+          // Continua tentando — falha transient pode resolver
+        }
       }
     }
     if (!assetId) throw new HttpException('Canva upload falhou ou demorou >10s', HttpStatus.BAD_GATEWAY)
 
     // 4. Criar design vazio com asset
     const designType = params.designType ?? 'InstagramPost'
-    const designRes = await axios.post<{ design: { id: string; urls: { edit_url: string } } }>(
-      `${CANVA_API_BASE}/designs`,
-      {
-        design_type: { type: 'preset', name: designType },
-        asset_id:    assetId,
-      },
-      {
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        timeout: 30_000,
-      },
-    )
-
-    return {
-      edit_url:  designRes.data.design.urls.edit_url,
-      design_id: designRes.data.design.id,
-      asset_id:  assetId,
+    try {
+      const designRes = await axios.post<{ design: { id: string; urls: { edit_url: string } } }>(
+        `${CANVA_API_BASE}/designs`,
+        {
+          design_type: { type: 'preset', name: designType },
+          asset_id:    assetId,
+        },
+        {
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          timeout: 30_000,
+        },
+      )
+      return {
+        edit_url:  designRes.data.design.urls.edit_url,
+        design_id: designRes.data.design.id,
+        asset_id:  assetId,
+      }
+    } catch (e) {
+      this.logCanvaError('designs', e)
+      throw this.canvaErrorToHttp('designs', e)
     }
+  }
+
+  /** Loga erro Canva sem expor token. body trunca em 500 chars. */
+  private logCanvaError(endpoint: string, e: unknown): void {
+    if (axios.isAxiosError(e)) {
+      const status = e.response?.status ?? 'no-status'
+      const body   = JSON.stringify(e.response?.data ?? {}).slice(0, 500)
+      this.logger.error(`[canva.${endpoint}] status=${status} body=${body}`)
+    } else {
+      this.logger.error(`[canva.${endpoint}] erro non-axios: ${(e as Error).message}`)
+    }
+  }
+
+  /** Converte erro Canva em HttpException com mensagem útil. */
+  private canvaErrorToHttp(endpoint: string, e: unknown): HttpException {
+    if (axios.isAxiosError(e)) {
+      const status = e.response?.status
+      const data   = e.response?.data as { message?: string; error?: string; code?: string } | undefined
+      const msg    = data?.message || data?.error || data?.code || 'erro desconhecido'
+      return new BadRequestException(`Canva ${endpoint} ${status}: ${msg}`)
+    }
+    return new BadRequestException(`Canva ${endpoint}: ${(e as Error).message}`)
   }
 
   // ── Cron cleanup de oauth_state ─────────────────────────────────────────
