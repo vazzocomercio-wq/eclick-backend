@@ -39,7 +39,11 @@ export interface FeatureSettingRow {
 
 // ── Image generation (F5-2) ─────────────────────────────────────────────
 
-export type ImageFormat = 'square_1080' | 'story_1080x1920' | 'feed_1080x1350' | 'custom'
+// Batch 1.13 — chaves limpas: square (1:1 1080x1080), story (9:16 1080x1920),
+// wide (16:9 1920x1080). Formats antigos (square_1080/story_1080x1920/
+// feed_1080x1350) ainda podem aparecer em rows existentes do DB; consumers
+// que dependem do tipo lidam só com novos.
+export type ImageFormat = 'square' | 'story' | 'wide' | 'custom'
 
 export interface GenerateImageInput {
   orgId:           string

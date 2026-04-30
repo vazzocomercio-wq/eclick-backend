@@ -468,6 +468,100 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // Batch 1.13 — Texto de mensagem com DOR/SOLUÇÃO/BENEFÍCIO (3 variações)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** POST /campaigns/generate-message-text — gera 3 variações de copy
+   * usando estrutura DOR → SOLUÇÃO → BENEFÍCIO. Diferente de generateContent
+   * (que faz 1-2 variantes pra A/B test), aqui o user escolhe entre 3
+   * opções. */
+  async generateMessageText(
+    orgId: string,
+    body: {
+      product:  { title: string; price?: number; sale_price?: number; description?: string }
+      tone?:    string
+      goal?:    string
+      platform?: 'whatsapp' | 'instagram' | 'email'
+    },
+  ): Promise<{ variations: string[] }> {
+    if (!body?.product?.title) throw new BadRequestException('product.title obrigatório')
+
+    const tone     = body.tone     ?? 'amigável'
+    const platform = body.platform ?? 'whatsapp'
+    const goal     = body.goal?.trim() ?? 'engajar e converter'
+
+    const platformHints: Record<string, string> = {
+      whatsapp:  'WhatsApp — usa emojis pontuais (1-2), tom direto e conversacional, NÃO use hashtags',
+      instagram: 'Instagram — visual e descritivo, pode usar 1-2 emojis e até 2 hashtags relevantes no fim',
+      email:     'Email — tom mais formal, sem emojis, parágrafos curtos',
+    }
+
+    const systemPrompt = `Você é especialista em copywriting para e-commerce brasileiro.
+Crie textos curtos e persuasivos usando a estrutura DOR → SOLUÇÃO → BENEFÍCIO.
+Regras:
+- Máximo 5 linhas por variação
+- Tom: ${tone}
+- Plataforma: ${platformHints[platform] ?? platformHints.whatsapp}
+- Termine com CTA claro
+- Português brasileiro, linguagem natural
+- Use {{nome}} como placeholder do nome do cliente quando fizer sentido
+
+FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
+{"variations":["texto da variação 1","texto da variação 2","texto da variação 3"]}`
+
+    const priceLine = body.product.sale_price && body.product.price
+      ? `De R$ ${body.product.price.toFixed(2)} por R$ ${body.product.sale_price.toFixed(2)}`
+      : body.product.sale_price
+        ? `Preço R$ ${body.product.sale_price.toFixed(2)}`
+        : body.product.price
+          ? `Preço R$ ${body.product.price.toFixed(2)}`
+          : ''
+
+    const userPrompt = [
+      `Produto: ${body.product.title}`,
+      priceLine,
+      body.product.description ? `Descrição: ${body.product.description.slice(0, 400)}` : null,
+      `Objetivo da campanha: ${goal}`,
+      '',
+      'Gere 3 variações de texto usando DOR → SOLUÇÃO → BENEFÍCIO. Cada variação deve ser autônoma e diferente das outras (abordagens distintas: emocional, racional, urgência, etc).',
+    ].filter(Boolean).join('\n')
+
+    let result
+    try {
+      result = await this.llm.generateText({
+        orgId,
+        feature:      'campaign_copy',
+        systemPrompt,
+        userPrompt,
+        maxTokens:    1200,
+        jsonMode:     true,
+      })
+    } catch (e) {
+      this.logger.warn(`[generateMessageText] org=${orgId} llm falhou: ${(e as Error).message}`)
+      throw new BadRequestException(`Falha ao chamar IA: ${(e as Error).message}`)
+    }
+
+    let parsed: { variations?: unknown } = {}
+    try {
+      const cleaned = result.text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+      parsed = JSON.parse(cleaned)
+    } catch {
+      this.logger.warn(`[generateMessageText] parse falhou: ${result.text.slice(0, 200)}`)
+      throw new BadRequestException('Resposta da IA não veio em JSON válido')
+    }
+
+    const variations = Array.isArray(parsed.variations)
+      ? parsed.variations.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map(v => v.trim())
+      : []
+    if (variations.length === 0) {
+      throw new BadRequestException('IA não retornou variações')
+    }
+
+    this.logger.log(`[generateMessageText] org=${orgId} provider=${result.provider} model=${result.model} n=${variations.length} dur=${result.latencyMs}ms`)
+    return { variations }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // F5-2 — Step 1 do wizard: produto / URL / galeria / capa IA
   // ════════════════════════════════════════════════════════════════════════
 

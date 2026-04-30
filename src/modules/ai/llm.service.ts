@@ -17,9 +17,9 @@ const IMAGE_PRICING: Record<string, number> = {
 }
 
 const FORMAT_SIZE: Record<Exclude<ImageFormat, 'custom'>, string> = {
-  square_1080:     '1024x1024',
-  story_1080x1920: '1024x1536',  // OpenAI suporta 1024x1536 vertical
-  feed_1080x1350:  '1024x1536',  // 4:5 também usa vertical (aproxima)
+  square: '1024x1024',  // 1:1  — 1080×1080 lógico
+  story:  '1024x1536',  // 9:16 — 1080×1920 lógico (OpenAI vertical)
+  wide:   '1536x1024',  // 16:9 — 1920×1080 lógico (OpenAI horizontal)
 }
 
 /** Pricing in USD per 1M tokens. Aligned com src/constants/ai-models.ts —

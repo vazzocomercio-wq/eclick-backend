@@ -7,9 +7,9 @@ import type { ImageFormat } from '../ai/types'
 
 const BUCKET = 'campaign-assets'
 const FORMAT_DIMS: Record<Exclude<ImageFormat, 'custom'>, { width: number; height: number }> = {
-  square_1080:     { width: 1080, height: 1080 },
-  story_1080x1920: { width: 1080, height: 1920 },
-  feed_1080x1350:  { width: 1080, height: 1350 },
+  square: { width: 1080, height: 1080 },
+  story:  { width: 1080, height: 1920 },
+  wide:   { width: 1920, height: 1080 },
 }
 
 export interface SavedAsset {

@@ -56,6 +56,20 @@ export class CampaignsController {
     return this.svc.getListingImages(user.orgId, listingId ?? '')
   }
 
+  @Post('generate-message-text')
+  generateMessageText(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: {
+      product:   { title: string; price?: number; sale_price?: number; description?: string }
+      tone?:     string
+      goal?:     string
+      platform?: 'whatsapp' | 'instagram' | 'email'
+    },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.generateMessageText(user.orgId, body)
+  }
+
   @Post('generate-card')
   generateCard(
     @ReqUser() user: ReqUserPayload,
