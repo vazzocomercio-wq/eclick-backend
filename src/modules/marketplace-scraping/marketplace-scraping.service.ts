@@ -123,9 +123,21 @@ export class MarketplaceScrapingService {
     }
   }
 
+  /** Extrai ID canonical do anúncio ML a partir de URL ou raw ID.
+   *
+   * Casos cobertos:
+   *   MLB-4422969927       → MLB4422969927    ✓ (URL canonical com hífen)
+   *   MLB4422969927        → MLB4422969927    ✓ (formato API)
+   *   MLBU-3274907         → MLBU3274907      ✓ (catalog product)
+   *   mlb1234567           → MLB1234567       ✓ (case-insensitive)
+   *   /algo-aleatorio      → null             ✓ (não match)
+   *
+   * Não cobre (deliberado nesta sprint):
+   *   MLA-9999 (Argentina), MLM (México), etc — Vazzo opera só BR. */
   private extractMlbId(url: string): string | null {
-    const m = url.match(/MLB[UBub]?(\d+)/i)
-    return m ? `MLB${m[1]}` : null
+    const m = url.match(/(MLB[UAB]?)-?(\d{6,})/i)
+    if (!m) return null
+    return (m[1] + m[2]).toUpperCase()
   }
 
   // ── Shopee ──────────────────────────────────────────────────────────────
