@@ -666,15 +666,11 @@ Formato: ${body.format}.${userExtra}`
     const asset = await this.assets.getOne(orgId, body.asset_id)
     if (!asset.storage_url) throw new BadRequestException('Asset sem storage_url')
 
-    // Mapa format → designType Canva
-    const designType = asset.format === 'story_1080x1920' ? 'InstagramStory'
-                     : asset.format === 'square_1080'     ? 'InstagramPost'
-                     : 'InstagramPost'
-
     const result = await this.canva.uploadAndOpenDesign(orgId, {
-      imageUrl:   asset.storage_url as string,
-      imageName:  `campaign-${asset.id}.png`,
-      designType,
+      imageUrl:  asset.storage_url as string,
+      imageName: `eclick-${asset.id.slice(0, 8)}.png`,
+      width:     asset.width,
+      height:    asset.height,
     })
     return { edit_url: result.edit_url }
   }

@@ -302,9 +302,11 @@ export class CanvaOauthService {
   // ── Asset upload + design creation (usa getValidAccessToken) ────────────
 
   async uploadAndOpenDesign(orgId: string, params: {
-    imageUrl: string
+    imageUrl:   string
     imageName?: string
-    designType?: 'WhatsAppStatus' | 'InstagramPost' | 'InstagramStory'
+    width:      number   // Canva limita 40-8000 px
+    height:     number
+    title?:     string   // título do design no editor (opcional)
   }): Promise<{ edit_url: string; design_id: string; asset_id: string }> {
     this.getEnv()  // 503 se admin não configurou
     const token = await this.getValidAccessToken(orgId)
@@ -312,6 +314,14 @@ export class CanvaOauthService {
       throw new HttpException(
         'Conecte sua conta Canva nas Integrações antes de usar o editor',
         HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    // Valida dimensões dentro dos limites Canva (40-8000 px) ANTES do upload
+    if (params.width  < 40 || params.width  > 8000 ||
+        params.height < 40 || params.height > 8000) {
+      throw new BadRequestException(
+        `Canva exige 40-8000 px. Recebido ${params.width}x${params.height}`,
       )
     }
 
@@ -393,14 +403,21 @@ export class CanvaOauthService {
     }
     if (!assetId) throw new BadRequestException('Canva upload demorou mais que 30s, tente novamente')
 
-    // 4. Criar design vazio com asset
-    const designType = params.designType ?? 'InstagramPost'
+    // 4. Criar design com asset + dimensões custom
+    //    Spec: presets aceitos (doc/email/presentation/whiteboard) não cobrem
+    //    Instagram/WhatsApp; usamos design_type=custom com width/height da
+    //    imagem gerada. Top-level `type: 'type_and_asset'` é exigido quando
+    //    asset_id é passado junto. Doc:
+    //    https://www.canva.dev/docs/connect/api-reference/designs/create-design/
+    const title = params.title ?? `e-Click — ${params.imageName ?? 'asset'}`
     try {
       const designRes = await axios.post<{ design: { id: string; urls: { edit_url: string } } }>(
         `${CANVA_API_BASE}/designs`,
         {
-          design_type: { type: 'preset', name: designType },
+          type:        'type_and_asset',
+          design_type: { type: 'custom', width: params.width, height: params.height },
           asset_id:    assetId,
+          title,
         },
         {
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
