@@ -39,7 +39,11 @@ export class LlmService {
   /** Generate text using the configured provider/model for this feature.
    * Resolves config (override > org settings > registry default), tries
    * primary, falls back on 5xx/network errors, logs cost + tokens to
-   * ai_usage_log. Throws on auth/4xx errors (caller decides how to handle). */
+   * ai_usage_log. Throws on auth/4xx errors (caller decides how to handle).
+   *
+   * AI-ABS-2: try/finally garante que TODA chamada loga em ai_usage_log,
+   * mesmo se primary + fallback falharem. Falhas levam error_message
+   * preenchido + tokens_*=0 + cost_usd=0. */
   async generateText(input: GenerateTextInput): Promise<GenerateTextOutput> {
     const t0 = Date.now()
 
@@ -48,45 +52,79 @@ export class LlmService {
     }
 
     const config = await this.resolveConfig(input)
+    let out:           GenerateTextOutput | null = null
+    let lastConfig:    { provider: Provider; model: string } = config.primary
+    let fallbackUsed = false
+    let errorMessage:  string | null = null
+    let toThrow:       unknown        = null
 
-    // Try primary
     try {
-      const result = await this.callProvider({
-        provider:    config.primary.provider,
-        model:       config.primary.model,
-        orgId:       input.orgId,
-        systemPrompt: input.systemPrompt,
-        userPrompt:  input.userPrompt,
-        maxTokens:   input.maxTokens   ?? 800,
-        temperature: input.temperature,
-        jsonMode:    input.jsonMode    ?? false,
-      })
-      const out = this.finalize(config.primary, result, t0, false)
-      await this.logUsage(out, input.feature, input.orgId)
-      return out
-    } catch (e) {
-      const isRetryable = this.isRetryableError(e)
-      if (!isRetryable || !config.fallback) {
-        // Auth/4xx errors or no fallback — propagate
+      // Try primary
+      try {
+        const result = await this.callProvider({
+          provider:    config.primary.provider,
+          model:       config.primary.model,
+          orgId:       input.orgId,
+          systemPrompt: input.systemPrompt,
+          userPrompt:  input.userPrompt,
+          maxTokens:   input.maxTokens   ?? 800,
+          temperature: input.temperature,
+          jsonMode:    input.jsonMode    ?? false,
+        })
+        out = this.finalize(config.primary, result, t0, false)
+        return out
+      } catch (e) {
+        const isRetryable = this.isRetryableError(e)
+        if (!isRetryable || !config.fallback) {
+          errorMessage = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
+          toThrow = e
+          throw e
+        }
+        this.logger.warn(`[llm] primary ${config.primary.provider}/${config.primary.model} falhou (${this.errorStatus(e)}) — tentando fallback`)
+      }
+
+      // Try fallback (only reached when primary threw a retryable error AND fallback exists)
+      lastConfig   = config.fallback!
+      fallbackUsed = true
+      try {
+        const result = await this.callProvider({
+          provider:    config.fallback!.provider,
+          model:       config.fallback!.model,
+          orgId:       input.orgId,
+          systemPrompt: input.systemPrompt,
+          userPrompt:  input.userPrompt,
+          maxTokens:   input.maxTokens   ?? 800,
+          temperature: input.temperature,
+          jsonMode:    input.jsonMode    ?? false,
+        })
+        out = this.finalize(config.fallback!, result, t0, true)
+        return out
+      } catch (e) {
+        errorMessage = `${config.fallback!.provider}/${config.fallback!.model} (fallback): ${this.errorStatus(e)}`
+        toThrow = e
         throw e
       }
-      this.logger.warn(`[llm] primary ${config.primary.provider}/${config.primary.model} falhou (${this.errorStatus(e)}) — tentando fallback`)
+    } finally {
+      // SEMPRE loga, sucesso ou falha (AI-ABS-2 Bug 4)
+      if (out) {
+        await this.logUsage(out, input.feature, input.orgId, null)
+      } else {
+        // Failure path — sintetiza output zero pra logar
+        const failOut: GenerateTextOutput = {
+          text:         '',
+          provider:     lastConfig.provider,
+          model:        lastConfig.model,
+          inputTokens:  0,
+          outputTokens: 0,
+          costUsd:      0,
+          latencyMs:    Date.now() - t0,
+          fallbackUsed,
+        }
+        await this.logUsage(failOut, input.feature, input.orgId, errorMessage)
+      }
+      // void toThrow — o throw original já está no path do try
+      void toThrow
     }
-
-    // Try fallback (only reached when primary threw a retryable error AND fallback exists)
-    const result = await this.callProvider({
-      provider:    config.fallback!.provider,
-      model:       config.fallback!.model,
-      orgId:       input.orgId,
-      systemPrompt: input.systemPrompt,
-      userPrompt:  input.userPrompt,
-      maxTokens:   input.maxTokens   ?? 800,
-      temperature: input.temperature,
-      jsonMode:    input.jsonMode    ?? false,
-    })
-    const out = this.finalize(config.fallback!, result, t0, true)
-    await this.logUsage(out, input.feature, input.orgId)
-    return out
   }
 
   // ── Config resolution ────────────────────────────────────────────────────
@@ -248,7 +286,12 @@ export class LlmService {
     }
   }
 
-  private async logUsage(out: GenerateTextOutput, feature: FeatureKey, orgId: string): Promise<void> {
+  private async logUsage(
+    out:           GenerateTextOutput,
+    feature:       FeatureKey,
+    orgId:         string,
+    errorMessage:  string | null,
+  ): Promise<void> {
     try {
       await supabaseAdmin.from('ai_usage_log').insert({
         organization_id: orgId,
@@ -261,15 +304,21 @@ export class LlmService {
         cost_usd:        out.costUsd,
         latency_ms:      out.latencyMs,
         fallback_used:   out.fallbackUsed,
+        error_message:   errorMessage,         // AI-ABS-2 Bug 4: NULL em sucesso, mensagem em falha
       })
     } catch (e) {
       this.logger.warn(`[llm.logUsage] insert falhou: ${(e as Error).message}`)
     }
   }
 
-  /** 5xx / network errors qualificam pra fallback. 4xx (auth/quota) não. */
+  /** 5xx / network errors qualificam pra fallback. 4xx (auth/quota) e erros
+   * non-axios (validation, programmer errors) propagam direto sem fallback.
+   *
+   * AI-ABS-2 Bug 3: antes retornava `true` pra non-axios errors — isso fazia
+   * BadRequestException do próprio LlmService disparar fallback path,
+   * mascarando erros reais. Agora `false` por default. */
   private isRetryableError(e: unknown): boolean {
-    if (!axios.isAxiosError(e)) return true            // network / unknown → retry
+    if (!axios.isAxiosError(e)) return false           // validation / programmer → propagate
     const ax = e as AxiosError
     if (!ax.response) return true                       // timeout / no response → retry
     const status = ax.response.status

@@ -101,7 +101,14 @@ export class CredentialsService {
     if (!data) return null
     try {
       return this.decrypt(data.key_value)
-    } catch {
+    } catch (e) {
+      // AI-ABS-2: log com contexto pra debug. Causas comuns: ENCRYPTION_KEY
+      // mudou no env (chave antiga não descriptar mais), iv/ciphertext
+      // corrompidos. NÃO loga key_value nem encryptionKey — só erro.
+      this.logger.warn(
+        `[getDecryptedKey] decrypt falhou orgId=${orgId ?? 'global'} ` +
+        `provider=${provider} keyName=${keyName ?? '(any)'}: ${(e as Error).message}`
+      )
       return null
     }
   }

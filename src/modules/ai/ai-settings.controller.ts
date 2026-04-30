@@ -8,18 +8,26 @@ import { AiSettingsService, UpsertFeatureSettingDto } from './ai-settings.servic
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-@Controller('ai')
+/** AI-ABS-2: prefix mudou de 'ai' pra 'ai/feature-settings' pra evitar
+ * collision com o controller legacy do atendente-ia que também é
+ * @Controller('ai') @Get('settings'). Frontend foi atualizado pra bater
+ * nos novos paths. Routes finais:
+ *   GET    /ai/feature-settings              → list
+ *   PUT    /ai/feature-settings/:featureKey  → upsert
+ *   DELETE /ai/feature-settings/:featureKey  → reset
+ *   GET    /ai/feature-settings/usage        → usage  */
+@Controller('ai/feature-settings')
 @UseGuards(SupabaseAuthGuard)
 export class AiSettingsController {
   constructor(private readonly svc: AiSettingsService) {}
 
-  @Get('settings')
+  @Get()
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listForOrg(u.orgId)
   }
 
-  @Put('settings/:featureKey')
+  @Put(':featureKey')
   upsert(
     @ReqUser() u: ReqUserPayload,
     @Param('featureKey') featureKey: string,
@@ -29,7 +37,7 @@ export class AiSettingsController {
     return this.svc.upsert(u.orgId, featureKey, body)
   }
 
-  @Delete('settings/:featureKey')
+  @Delete(':featureKey')
   reset(@ReqUser() u: ReqUserPayload, @Param('featureKey') featureKey: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.reset(u.orgId, featureKey)
