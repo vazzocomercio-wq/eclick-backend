@@ -503,11 +503,11 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
   }
 
   /** POST /campaigns/import-from-url — detecta marketplace, scrapa retorna shape ProductSearchHit. */
-  async importFromUrl(_orgId: string, url: string): Promise<ProductSearchHit> {
+  async importFromUrl(orgId: string, url: string): Promise<ProductSearchHit> {
     if (!url || !/^https?:\/\//i.test(url)) {
       throw new BadRequestException('URL válida obrigatória')
     }
-    const summary = await this.scraping.scrapeFromUrl(url)
+    const summary = await this.scraping.scrapeFromUrl(url, orgId)
     return {
       id:            '',  // não persistido; frontend pode salvar como produto manual depois
       sku:           null,

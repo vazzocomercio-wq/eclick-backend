@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { ScraperService } from '../scraper/scraper.service'
+import { CredentialsService } from '../credentials/credentials.service'
 
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -31,7 +32,10 @@ export interface ListingSummary {
 export class MarketplaceScrapingService {
   private readonly logger = new Logger(MarketplaceScrapingService.name)
 
-  constructor(private readonly scraper: ScraperService) {}
+  constructor(
+    private readonly scraper:     ScraperService,
+    private readonly credentials: CredentialsService,
+  ) {}
 
   // ── ML ──────────────────────────────────────────────────────────────────
 
@@ -77,8 +81,14 @@ export class MarketplaceScrapingService {
       const salePrice = original && price && original > price ? price : null
       const basePrice = original ?? price
 
+      const title = (data.title as string) ?? null
+      // Shape vazia (PolicyAgent): title null E price null. Falha cedo
+      // pra não acabar populando "(sem título) R$ 0" no frontend.
+      if (!title && !basePrice) {
+        throw new Error('shape vazia ML API')
+      }
       return {
-        title:      (data.title as string) ?? null,
+        title,
         price:      basePrice,
         sale_price: salePrice,
         image_url:  allImages[0] ?? (data.thumbnail as string) ?? null,
@@ -91,11 +101,15 @@ export class MarketplaceScrapingService {
       this.logger.warn(`[ml.scrape] API ${id} falhou (${(e as Error).message}) — fallback HTML`)
     }
 
-    // Fallback HTML scrape
+    // Fallback HTML scrape — só vale se ainda extrair título OU preço
     if (input.url) {
-      return this.scrapeMlHtml(input.url, id)
+      const html = await this.scrapeMlHtml(input.url, id)
+      if (html.title || html.price) return html
     }
-    throw new BadRequestException(`Não foi possível buscar listing ${id}`)
+    throw new BadRequestException(
+      'Anúncio não pertence à sua conta Mercado Livre, está privado ou foi removido. ' +
+      'Para anúncios de outros vendedores, use o Catálogo Vazzo ou cole os dados manualmente.',
+    )
   }
 
   private async scrapeMlHtml(url: string, id: string): Promise<ListingSummary> {
@@ -228,13 +242,110 @@ export class MarketplaceScrapingService {
     }
   }
 
+  // ── ML Catalog (autenticado) ────────────────────────────────────────────
+
+  /** Busca dados de um catálogo ML (MLBU/MLBA/MLBB) via API autenticada
+   * /products/{id}. Diferente de /items/{id}, /products é o produto-pai
+   * sem vendedor específico — geralmente sem preço fixo (cada vendedor
+   * define o seu). Retornamos buy_box_winner.price como referência.
+   *
+   * Requer ML_ACCESS_TOKEN da org em api_credentials. */
+  async scrapeMlCatalog(orgId: string, catalogId: string): Promise<ListingSummary> {
+    if (!/^MLB[UAB]\d{6,}$/.test(catalogId)) {
+      throw new BadRequestException(
+        `ID de catálogo inválido (esperado MLBU/MLBA/MLBB seguido de dígitos): ${catalogId}`,
+      )
+    }
+
+    const token = await this.credentials.getDecryptedKey(orgId, 'mercadolivre', 'ML_ACCESS_TOKEN')
+    if (!token) {
+      throw new BadRequestException(
+        'Conecte sua conta Mercado Livre em Configurações > Integrações para importar de catálogo.',
+      )
+    }
+
+    let data: Record<string, unknown>
+    try {
+      const res = await axios.get(
+        `https://api.mercadolibre.com/products/${catalogId}`,
+        {
+          headers: { ...HEADERS, Authorization: `Bearer ${token}` },
+          timeout: 15_000,
+        },
+      )
+      data = res.data as Record<string, unknown>
+    } catch (e) {
+      const ax = e as { response?: { status?: number; data?: unknown }; message?: string }
+      const status = ax.response?.status
+      this.logger.error(
+        `[ml.catalog] ${catalogId} falhou status=${status ?? '?'} body=${JSON.stringify(ax.response?.data ?? null)} msg=${ax.message ?? '?'}`,
+      )
+      if (status === 401 || status === 403) {
+        throw new BadRequestException(
+          'Token Mercado Livre expirou. Reconecte sua conta em Configurações > Integrações.',
+        )
+      }
+      if (status === 404) {
+        throw new BadRequestException(`Catálogo ${catalogId} não encontrado.`)
+      }
+      throw new BadRequestException(
+        `Falha ao buscar catálogo ${catalogId}: ${status ?? '?'} ${ax.message ?? ''}`,
+      )
+    }
+
+    // Log defensivo na primeira call — shape ML pode variar de produto pra
+    // produto. Mantemos por enquanto pra observabilidade; remover depois.
+    this.logger.debug(`[ml.catalog] ${catalogId} keys=${Object.keys(data).join(',')}`)
+
+    const pictures = Array.isArray(data.pictures) ? data.pictures as Array<{ url?: string; secure_url?: string }> : []
+    const allImages = pictures
+      .map(p => p.secure_url || p.url || '')
+      .filter(u => !!u)
+      .slice(0, 12)
+
+    const buyBox = (data.buy_box_winner ?? null) as { price?: number | string } | null
+    const price  = buyBox?.price != null ? Number(buyBox.price) || null : null
+    const title  = (data.name as string) ?? null
+    const imageUrl = allImages[0] ?? null
+
+    if (!title && !imageUrl) {
+      throw new BadRequestException(
+        'Catálogo retornou shape vazia — pode estar desativado ou ser de outro site.',
+      )
+    }
+
+    return {
+      title,
+      price,
+      sale_price: null,
+      image_url:  imageUrl,
+      all_images: allImages,
+      url:        (data.permalink as string) ?? `https://www.mercadolivre.com.br/p/${catalogId}`,
+      platform:   'mercadolivre',
+      listing_id: catalogId,
+    }
+  }
+
   // ── Auto-detect ─────────────────────────────────────────────────────────
 
-  /** Detecta plataforma da URL e roteia. Usado pelo POST /campaigns/import-from-url */
-  async scrapeFromUrl(url: string): Promise<ListingSummary> {
+  /** Detecta plataforma da URL e roteia. Usado pelo POST /campaigns/import-from-url.
+   * orgId obrigatório pra autenticar /products/{id} quando for catálogo ML. */
+  async scrapeFromUrl(url: string, orgId: string): Promise<ListingSummary> {
     const platform = this.scraper.detectPlatform(url)
-    if (platform === 'mercadolivre') return this.scrapeMlListing({ url })
-    if (platform === 'shopee')       return this.scrapeShopeeListing({ url })
-    throw new BadRequestException(`Plataforma "${platform}" ainda não suportada pelo import de URL`)
+    if (platform === 'mercadolivre') {
+      const normalized = this.normalizeMlUrl(url)
+      const ident      = this.extractMlIdentifier(normalized)
+      if (ident.type === 'catalog' && ident.id) {
+        return this.scrapeMlCatalog(orgId, ident.id)
+      }
+      if (ident.type === 'listing') {
+        return this.scrapeMlListing({ url: normalized })
+      }
+      throw new BadRequestException(
+        'URL Mercado Livre inválida. Esperado MLB-N (anúncio) ou MLBU-N (catálogo).',
+      )
+    }
+    if (platform === 'shopee') return this.scrapeShopeeListing({ url })
+    throw new BadRequestException(`Plataforma "${platform}" não suportada por enquanto.`)
   }
 }
