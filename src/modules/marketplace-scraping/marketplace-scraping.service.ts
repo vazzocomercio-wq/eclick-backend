@@ -38,7 +38,26 @@ export class MarketplaceScrapingService {
   /** Busca dados completos de um anúncio ML (preço, promo, todas as imagens).
    * Usa API pública /items/{id} primeiro; se 403/404 cai no scraper legacy. */
   async scrapeMlListing(input: { url?: string; listingId?: string }): Promise<ListingSummary> {
-    const id = input.listingId ?? this.extractMlbId(input.url ?? '')
+    let id = input.listingId
+
+    if (!id && input.url) {
+      const normalized = this.normalizeMlUrl(input.url)
+      const ident      = this.extractMlIdentifier(normalized)
+
+      if (ident.type === 'catalog') {
+        throw new BadRequestException(
+          `URL aponta para um catálogo (${ident.id}) — abra um anúncio específico (MLB-N) para importar. Catálogo não suportado por enquanto.`,
+        )
+      }
+      if (!ident.id) {
+        throw new BadRequestException(
+          'URL não contém um ID de anúncio ML válido. Esperado: MLB-1234567 ou item_id no pdp_filters.',
+        )
+      }
+      id = ident.id
+      // Reescreve URL pra forma canônica antes do fallback HTML scraper usar
+      input = { ...input, url: normalized }
+    }
     if (!id) throw new BadRequestException('URL ou listingId ML obrigatório')
 
     try {
@@ -123,21 +142,49 @@ export class MarketplaceScrapingService {
     }
   }
 
-  /** Extrai ID canonical do anúncio ML a partir de URL ou raw ID.
+  /** Normaliza URL ML pra forma canônica do anúncio.
    *
-   * Casos cobertos:
-   *   MLB-4422969927       → MLB4422969927    ✓ (URL canonical com hífen)
-   *   MLB4422969927        → MLB4422969927    ✓ (formato API)
-   *   MLBU-3274907         → MLBU3274907      ✓ (catalog product)
-   *   mlb1234567           → MLB1234567       ✓ (case-insensitive)
-   *   /algo-aleatorio      → null             ✓ (não match)
+   * Casos:
+   *  - URL com pdp_filters=item_id:MLBN → reescreve pra produto.mercadolivre.com.br/MLB-N
+   *    (resolve o caso onde a path tem MLBU-N de catálogo + item_id no query)
+   *  - URL canonical produto.mercadolivre.com.br/MLB-N → mantém
+   *  - URL de catálogo puro (MLBU-N sem item_id) → mantém (extractMlIdentifier
+   *    detecta como 'catalog' e o caller throw BadRequest com msg clara)
+   *  - Outras / malformadas → mantém */
+  private normalizeMlUrl(url: string): string {
+    try {
+      const u = new URL(url)
+      const pdpFilters = u.searchParams.get('pdp_filters')
+      if (pdpFilters) {
+        const itemMatch = pdpFilters.match(/item_id[:=]MLB-?(\d{6,})/i)
+        if (itemMatch) return `https://produto.mercadolivre.com.br/MLB-${itemMatch[1]}`
+      }
+      const pathMatch = u.pathname.match(/MLB-?(\d{6,})/i)
+      if (pathMatch && /produto\.mercadoli/i.test(u.hostname) && !/MLB[UAB]/i.test(pathMatch[0])) {
+        return `https://produto.mercadolivre.com.br/MLB-${pathMatch[1]}`
+      }
+      return url
+    } catch {
+      return url
+    }
+  }
+
+  /** Distingue listing (MLB-N) de catalog product (MLBU/MLBA/MLBB-N).
    *
-   * Não cobre (deliberado nesta sprint):
-   *   MLA-9999 (Argentina), MLM (México), etc — Vazzo opera só BR. */
-  private extractMlbId(url: string): string | null {
-    const m = url.match(/(MLB[UAB]?)-?(\d{6,})/i)
-    if (!m) return null
-    return (m[1] + m[2]).toUpperCase()
+   * Listing: vendedor específico, item_id que API ML aceita em /items/{id}
+   * Catalog: produto-pai sem vendedor — não pode ser importado direto */
+  private extractMlIdentifier(url: string): { type: 'listing' | 'catalog' | null; id: string | null } {
+    // Tenta listing puro primeiro (MLB sem letra adicional)
+    const listing = url.match(/MLB-?(\d{6,})(?![\w])/i)
+    if (listing && !/MLB[UAB]/i.test(listing[0])) {
+      return { type: 'listing', id: `MLB${listing[1]}` }
+    }
+    // Catalog (MLBU/MLBA/MLBB)
+    const catalog = url.match(/MLB([UAB])-?(\d{6,})/i)
+    if (catalog) {
+      return { type: 'catalog', id: `MLB${catalog[1].toUpperCase()}${catalog[2]}` }
+    }
+    return { type: null, id: null }
   }
 
   // ── Shopee ──────────────────────────────────────────────────────────────
