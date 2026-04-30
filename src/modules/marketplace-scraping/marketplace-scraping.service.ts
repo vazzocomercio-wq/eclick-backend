@@ -39,9 +39,27 @@ export class MarketplaceScrapingService {
 
   // ── ML ──────────────────────────────────────────────────────────────────
 
+  /** Monta headers pra chamadas /items e /products da API ML.
+   * Se orgId presente, busca token via MercadolivreService (refresh
+   * automático embutido) e adiciona Bearer. Se falhar, segue anônimo
+   * com warning — não impede a chamada (Batch 1.13.2). */
+  private async buildMlHeaders(orgId?: string): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { ...HEADERS, Accept: 'application/json' }
+    if (!orgId) return headers
+    try {
+      const { token } = await this.mercadolivre.getTokenForOrg(orgId)
+      if (token) headers['Authorization'] = `Bearer ${token}`
+    } catch {
+      this.logger.warn(`[ml.scraper] sem token pra orgId=${orgId}, seguindo anônimo`)
+    }
+    return headers
+  }
+
   /** Busca dados completos de um anúncio ML (preço, promo, todas as imagens).
-   * Usa API pública /items/{id} primeiro; se 403/404 cai no scraper legacy. */
-  async scrapeMlListing(input: { url?: string; listingId?: string }): Promise<ListingSummary> {
+   * Usa /items/{id} com Bearer token da org (Batch 1.13.2 — anônimo era
+   * rejeitado pelo PolicyAgent até pra anúncios próprios). Fallback HTML
+   * mantido pra casos extremos. */
+  async scrapeMlListing(input: { url?: string; listingId?: string; orgId?: string }): Promise<ListingSummary> {
     let id = input.listingId
 
     if (!id && input.url) {
@@ -65,9 +83,10 @@ export class MarketplaceScrapingService {
     if (!id) throw new BadRequestException('URL ou listingId ML obrigatório')
 
     try {
+      const headers = await this.buildMlHeaders(input.orgId)
       const { data } = await axios.get(
         `https://api.mercadolibre.com/items/${id}`,
-        { headers: HEADERS, timeout: 10_000 },
+        { headers, timeout: 10_000 },
       )
       const pictures = Array.isArray(data.pictures) ? data.pictures as Array<{ url?: string; secure_url?: string }> : []
       const allImages = pictures
@@ -85,7 +104,9 @@ export class MarketplaceScrapingService {
       // Shape vazia (PolicyAgent): title null E price null. Falha cedo
       // pra não acabar populando "(sem título) R$ 0" no frontend.
       if (!title && !basePrice) {
-        throw new Error('shape vazia ML API')
+        throw new BadRequestException(
+          'Anúncio não retornou dados — pode estar pausado ou removido.',
+        )
       }
       return {
         title,
@@ -98,7 +119,19 @@ export class MarketplaceScrapingService {
         listing_id: id,
       }
     } catch (e) {
-      this.logger.warn(`[ml.scrape] API ${id} falhou (${(e as Error).message}) — fallback HTML`)
+      // Erros estruturados do nosso código (BadRequest da shape vazia) propagam direto
+      if (e instanceof BadRequestException) throw e
+
+      const ax = e as { response?: { status?: number; data?: unknown }; message?: string }
+      const status = ax.response?.status
+      this.logger.warn(`[ml.scrape] API ${id} falhou status=${status ?? '?'} msg=${ax.message ?? '?'} — fallback HTML`)
+
+      if (status === 401 || status === 403) {
+        throw new BadRequestException(
+          'Token Mercado Livre inválido ou expirado. Reconecte sua conta em Configurações > Integrações.',
+        )
+      }
+      // 404 e outros: tenta fallback HTML antes de desistir
     }
 
     // Fallback HTML scrape — só vale se ainda extrair título OU preço
@@ -107,8 +140,7 @@ export class MarketplaceScrapingService {
       if (html.title || html.price) return html
     }
     throw new BadRequestException(
-      'Anúncio não pertence à sua conta Mercado Livre, está privado ou foi removido. ' +
-      'Para anúncios de outros vendedores, use o Catálogo Vazzo ou cole os dados manualmente.',
+      'Anúncio não retornou dados — pode estar pausado, removido ou bloqueado pelo Mercado Livre.',
     )
   }
 
@@ -344,7 +376,7 @@ export class MarketplaceScrapingService {
         return this.scrapeMlCatalog(orgId, ident.id)
       }
       if (ident.type === 'listing') {
-        return this.scrapeMlListing({ url: normalized })
+        return this.scrapeMlListing({ url: normalized, orgId })
       }
       throw new BadRequestException(
         'URL Mercado Livre inválida. Esperado MLB-N (anúncio) ou MLBU-N (catálogo).',
