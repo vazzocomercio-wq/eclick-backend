@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { ScraperService } from '../scraper/scraper.service'
-import { CredentialsService } from '../credentials/credentials.service'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -33,8 +33,8 @@ export class MarketplaceScrapingService {
   private readonly logger = new Logger(MarketplaceScrapingService.name)
 
   constructor(
-    private readonly scraper:     ScraperService,
-    private readonly credentials: CredentialsService,
+    private readonly scraper:      ScraperService,
+    private readonly mercadolivre: MercadolivreService,
   ) {}
 
   // ── ML ──────────────────────────────────────────────────────────────────
@@ -249,7 +249,9 @@ export class MarketplaceScrapingService {
    * sem vendedor específico — geralmente sem preço fixo (cada vendedor
    * define o seu). Retornamos buy_box_winner.price como referência.
    *
-   * Requer ML_ACCESS_TOKEN da org em api_credentials. */
+   * Requer conexão ML ativa da org em ml_connections. Reusa
+   * MercadolivreService.getTokenForOrg que já faz refresh automático
+   * se o token estiver expirado (Batch 1.12.1). */
   async scrapeMlCatalog(orgId: string, catalogId: string): Promise<ListingSummary> {
     if (!/^MLB[UAB]\d{6,}$/.test(catalogId)) {
       throw new BadRequestException(
@@ -257,8 +259,11 @@ export class MarketplaceScrapingService {
       )
     }
 
-    const token = await this.credentials.getDecryptedKey(orgId, 'mercadolivre', 'ML_ACCESS_TOKEN')
-    if (!token) {
+    let token: string
+    try {
+      const result = await this.mercadolivre.getTokenForOrg(orgId)
+      token = result.token
+    } catch {
       throw new BadRequestException(
         'Conecte sua conta Mercado Livre em Configurações > Integrações para importar de catálogo.',
       )

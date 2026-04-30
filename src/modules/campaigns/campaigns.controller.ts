@@ -28,13 +28,14 @@ export class CampaignsController {
   // ── F5-2: Step 1 wizard ─────────────────────────────────────────────────
 
   @Get('products/search')
-  searchProducts(
+  async searchProducts(
     @ReqUser() user: ReqUserPayload,
     @Query('q') q: string,
     @Query('limit') limit?: string,
   ) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    return this.svc.searchProducts(user.orgId, q ?? '', limit ? Number(limit) : undefined)
+    const results = await this.svc.searchProducts(user.orgId, q ?? '', limit ? Number(limit) : undefined)
+    return { results }
   }
 
   @Post('import-from-url')
