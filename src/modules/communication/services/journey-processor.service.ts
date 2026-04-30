@@ -325,13 +325,6 @@ export class JourneyProcessorService {
       throw new Error(`template '${step.template_name}' (channel=${pick.channel}) não encontrado pra org ${orgId}`)
     }
 
-    // Recipient depende do canal escolhido — função SQL retorna phone+email
-    // separados, escolhemos pelo channel pra coluna phone (legacy) e
-    // preservamos AMBOS no context pra debug futuro.
-    const recipient = pick.channel === 'whatsapp'
-      ? (pick.recipient_phone ?? null)
-      : (pick.recipient_email ?? null)
-
     // Context completo pro template renderer (CC-2). Faz JOIN com
     // unified_customers + orders pra popular vars conhecidas: first_name,
     // full_name, order_id, product_name, total_amount, store_name.
@@ -377,7 +370,8 @@ export class JourneyProcessorService {
       journey_id:      ocj.journey_id,
       order_id:        snapshot.external_order_id ?? null,
       customer_id:     customerId,
-      phone:           recipient,
+      phone:           pick.recipient_phone ?? null,
+      email:           pick.recipient_email ?? null,
       // current_step=0 (array 0-indexed): primeiro tick processa steps[0]
       current_step:    0,
       status:          'pending',
@@ -386,7 +380,6 @@ export class JourneyProcessorService {
         // Identificação interna
         ocj_id:            ocj.id,
         channel:           pick.channel,
-        recipient,
         recipient_phone:   pick.recipient_phone ?? null,
         recipient_email:   pick.recipient_email ?? null,
         template_id:       template.id,

@@ -318,7 +318,7 @@ export class JourneyEngineService {
         journey_run_id:  run.id,
         template_id:     tpl.id,
         channel:         ch,
-        phone:           run.phone,
+        phone:           ch === 'whatsapp' ? run.phone : run.email,
         customer_id:     run.customer_id ?? null,
         order_id:        run.order_id    ?? null,
         message_body:    rendered,
