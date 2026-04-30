@@ -35,6 +35,8 @@ import { RoadmapModule } from './modules/roadmap/roadmap.module'
 import { HealthModule } from './modules/health/health.module'
 import { CampaignsModule } from './modules/campaigns/campaigns.module'
 import { AiModule } from './modules/ai/ai.module'
+import { MarketplaceScrapingModule } from './modules/marketplace-scraping/marketplace-scraping.module'
+import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 
 @Module({
   imports: [
@@ -72,6 +74,8 @@ import { AiModule } from './modules/ai/ai.module'
     HealthModule,
     CampaignsModule,
     AiModule,
+    MarketplaceScrapingModule,
+    CanvaOauthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,12 +1,26 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
+import * as FormData from 'form-data'
 import { supabaseAdmin } from '../../common/supabase'
 import { CredentialsService } from '../credentials/credentials.service'
 import { FEATURE_REGISTRY, FeatureKey, Provider } from './defaults'
-import { GenerateTextInput, GenerateTextOutput, FeatureSettingRow } from './types'
+import { GenerateTextInput, GenerateTextOutput, GenerateImageInput, GenerateImageOutput, FeatureSettingRow, ImageFormat } from './types'
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
-const OPENAI_URL    = 'https://api.openai.com/v1/chat/completions'
+const ANTHROPIC_URL  = 'https://api.anthropic.com/v1/messages'
+const OPENAI_URL     = 'https://api.openai.com/v1/chat/completions'
+const OPENAI_IMG_GEN = 'https://api.openai.com/v1/images/generations'
+const OPENAI_IMG_EDT = 'https://api.openai.com/v1/images/edits'
+
+const IMAGE_PRICING: Record<string, number> = {
+  'gpt-image-1': 0.040,    // standard quality, USD/imagem
+  'flux-pro':    0.050,    // referencial — não usado nesta sprint
+}
+
+const FORMAT_SIZE: Record<Exclude<ImageFormat, 'custom'>, string> = {
+  square_1080:     '1024x1024',
+  story_1080x1920: '1024x1536',  // OpenAI suporta 1024x1536 vertical
+  feed_1080x1350:  '1024x1536',  // 4:5 também usa vertical (aproxima)
+}
 
 /** Pricing in USD per 1M tokens. Aligned com src/constants/ai-models.ts —
  * mantém as duas tabelas em sync quando atualizar preços. Modelos fora
@@ -330,5 +344,175 @@ export class LlmService {
       return `HTTP ${(e as AxiosError).response?.status ?? 'no-status'}`
     }
     return (e as Error).message ?? 'unknown'
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // F5-2 — Image generation (gpt-image-1 + Flux stub)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Gera N variações de imagem. gpt-image-1 não suporta n>1 nativo, então
+   * disparamos N chamadas em paralelo. Loga em ai_usage_log com tokens=0
+   * e cost_usd = N * perImage. Sem fallback nesta sprint (feature
+   * campaign_card.fallback=null). */
+  async generateImage(input: GenerateImageInput): Promise<GenerateImageOutput> {
+    const t0 = Date.now()
+    if (!input.prompt || input.prompt.trim().length === 0) {
+      throw new BadRequestException('prompt obrigatório')
+    }
+    const n = Math.max(1, Math.min(6, input.n ?? 1))
+
+    const config = await this.resolveConfig({ orgId: input.orgId, feature: input.feature, userPrompt: input.prompt, override: input.override })
+    let errorMessage: string | null = null
+    let result: GenerateImageOutput | null = null
+
+    try {
+      if (config.primary.provider === 'flux' as Provider || config.primary.model.startsWith('flux')) {
+        // Flux stub (sprint F5-3 implementa de verdade)
+        throw new HttpException(
+          'Flux ainda não implementado — sprint F5-3. Use openai/gpt-image-1 enquanto isso.',
+          HttpStatus.NOT_IMPLEMENTED,
+        )
+      }
+      if (config.primary.provider === 'openai') {
+        result = await this.callOpenAIImage({
+          model:           config.primary.model,
+          orgId:           input.orgId,
+          prompt:          input.prompt,
+          sourceImageUrl:  input.sourceImageUrl,
+          format:          input.format,
+          customSize:      input.customSize,
+          n,
+          t0,
+        })
+        return result
+      }
+      throw new BadRequestException(`Provider ${config.primary.provider} não suporta geração de imagem`)
+    } catch (e) {
+      errorMessage = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
+      throw e
+    } finally {
+      // Log SEMPRE (AI-ABS-2 pattern)
+      const finalOut: GenerateImageOutput = result ?? {
+        images:       [],
+        provider:     config.primary.provider,
+        model:        config.primary.model,
+        costUsd:      0,
+        latencyMs:    Date.now() - t0,
+        fallbackUsed: false,
+      }
+      await this.logImageUsage(finalOut, input.feature, input.orgId, n, !!input.sourceImageUrl, input.format, errorMessage)
+    }
+  }
+
+  private async callOpenAIImage(args: {
+    model:           string
+    orgId:           string
+    prompt:          string
+    sourceImageUrl?: string
+    format:          ImageFormat
+    customSize?:     { width: number; height: number }
+    n:               number
+    t0:              number
+  }): Promise<GenerateImageOutput> {
+    const keyName = 'OPENAI_API_KEY'
+    const key = await this.credentials.getDecryptedKey(args.orgId, 'openai', keyName).catch(() => null)
+      ?? await this.credentials.getDecryptedKey(null, 'openai', keyName).catch(() => null)
+    if (!key) throw new BadRequestException(`${keyName} não configurada`)
+
+    const size = args.format === 'custom'
+      ? `${args.customSize?.width ?? 1024}x${args.customSize?.height ?? 1024}`
+      : FORMAT_SIZE[args.format]
+
+    // gpt-image-1 não aceita n>1 — paralelizamos
+    const callOne = async (): Promise<{ url?: string; b64?: string }> => {
+      if (args.sourceImageUrl) {
+        // Modo edit: precisa download da source primeiro
+        const imgRes = await axios.get<ArrayBuffer>(args.sourceImageUrl, {
+          responseType: 'arraybuffer', timeout: 30_000,
+        })
+        const form = new FormData()
+        form.append('model',  args.model)
+        form.append('prompt', args.prompt.slice(0, 32_000))
+        form.append('size',   size)
+        form.append('image',  Buffer.from(imgRes.data), { filename: 'source.png', contentType: 'image/png' })
+        const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
+          OPENAI_IMG_EDT, form,
+          {
+            headers: { 'Authorization': `Bearer ${key}`, ...form.getHeaders() },
+            timeout: 90_000,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+          },
+        )
+        const d0 = res.data.data?.[0] ?? {}
+        return { url: d0.url, b64: d0.b64_json }
+      }
+
+      const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
+        OPENAI_IMG_GEN,
+        { model: args.model, prompt: args.prompt.slice(0, 32_000), size, n: 1 },
+        {
+          headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+          timeout: 90_000,
+        },
+      )
+      const d0 = res.data.data?.[0] ?? {}
+      return { url: d0.url, b64: d0.b64_json }
+    }
+
+    const settled = await Promise.allSettled(Array.from({ length: args.n }, () => callOne()))
+    const images = settled
+      .filter((r): r is PromiseFulfilledResult<{ url?: string; b64?: string }> => r.status === 'fulfilled')
+      .map(r => r.value)
+    if (images.length === 0) {
+      const reason = (settled[0] as PromiseRejectedResult | undefined)?.reason
+      throw reason ?? new HttpException('OpenAI image gen falhou em todas as N tentativas', HttpStatus.BAD_GATEWAY)
+    }
+
+    const perImage = IMAGE_PRICING[args.model] ?? 0
+    return {
+      images,
+      provider:     'openai',
+      model:        args.model,
+      costUsd:      Math.round(images.length * perImage * 1_000_000) / 1_000_000,
+      latencyMs:    Date.now() - args.t0,
+      fallbackUsed: false,
+    }
+  }
+
+  // TODO sprint futura — implementar quando houver conta Flux ativa pra teste real.
+  // private async callFluxImage(...) — POST https://api.bfl.ai/v1/flux-pro
+  //   + polling /v1/get_result. Mantido fora pra evitar ship sem teste.
+
+  private async logImageUsage(
+    out:           GenerateImageOutput,
+    feature:       FeatureKey,
+    orgId:         string,
+    n:             number,
+    hasSource:     boolean,
+    format:        ImageFormat,
+    errorMessage:  string | null,
+  ): Promise<void> {
+    try {
+      await supabaseAdmin.from('ai_usage_log').insert({
+        organization_id: orgId,
+        provider:        out.provider,
+        model:           out.model,
+        feature,
+        tokens_input:    0,
+        tokens_output:   0,
+        tokens_total:    0,
+        cost_usd:        out.costUsd,
+        latency_ms:      out.latencyMs,
+        fallback_used:   false,
+        error_message:   errorMessage,
+        // metadata seria ideal mas a coluna não existe; serializa em error_message
+        // quando útil pra debug. Schema simples por ora.
+      })
+      // Log estruturado pra Railway (n + format + source pra observabilidade)
+      this.logger.log(`[llm.image] org=${orgId} provider=${out.provider} model=${out.model} n=${n} format=${format} source=${hasSource} cost=$${out.costUsd}`)
+    } catch (e) {
+      this.logger.warn(`[llm.logImageUsage] insert falhou: ${(e as Error).message}`)
+    }
   }
 }

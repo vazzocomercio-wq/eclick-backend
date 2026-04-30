@@ -33,9 +33,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
-  // TODO F6 sprint: campaign_image (gpt-image-1).
-  // Requer callOpenAIImage() em llm.service.ts (POST /v1/images/generations).
-  // Não modelar agora — sprint atual é só text generation.
+  // F5-2: imagens de capa de campanhas via gpt-image-1.
+  // Flux fica como override opcional (não tem callFluxImage ainda).
+  campaign_card: {
+    label:       'Capas de campanhas',
+    description: 'Gera cards promocionais para WhatsApp/Instagram',
+    primary:     { provider: 'openai', model: 'gpt-image-1' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

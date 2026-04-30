@@ -545,6 +545,10 @@ export class CompetitorsService implements OnModuleInit {
 
   // ── Preview ML URL (used by /competitors/preview) ────────────────────────────
 
+  /** @deprecated Sprint F5-2 introduziu MarketplaceScrapingService.scrapeMlListing
+   * com shape mais rica (sale_price + all_images). Migrar este método quando
+   * o /competitors/preview puder usar o novo formato. Mantido por enquanto
+   * pra zero risco de regressão em produção. */
   async previewMlUrl(url: string) {
     const normalized = normalizeMercadoLivreUrl(url)
     if (!normalized) throw new BadRequestException('URL do Mercado Livre inválida')

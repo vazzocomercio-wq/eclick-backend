@@ -1,8 +1,24 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, HttpException, HttpStatus } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
+import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MessagingService } from '../messaging/messaging.service'
 import { LlmService } from '../ai/llm.service'
+import { MarketplaceScrapingService } from '../marketplace-scraping/marketplace-scraping.service'
+import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
+import { CampaignAssetsService, SavedAsset } from './campaign-assets.service'
+import type { ImageFormat } from '../ai/types'
+
+export interface ProductSearchHit {
+  id:             string
+  sku:            string | null
+  title:          string
+  price:          number | null
+  sale_price:     number | null
+  image_url:      string | null
+  ml_listing_id:  string | null
+  url:            string | null
+}
 
 export type CampaignStatus = 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'cancelled'
 export type CampaignChannel = 'whatsapp' | 'email' | 'both'
@@ -56,8 +72,11 @@ export class CampaignsService {
   private readonly logger = new Logger(CampaignsService.name)
 
   constructor(
-    private readonly messaging: MessagingService,
-    private readonly llm:       LlmService,
+    private readonly messaging:   MessagingService,
+    private readonly llm:         LlmService,
+    private readonly scraping:    MarketplaceScrapingService,
+    private readonly canva:       CanvaOauthService,
+    private readonly assets:      CampaignAssetsService,
   ) {}
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -448,6 +467,217 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
     return { variants }
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // F5-2 — Step 1 do wizard: produto / URL / galeria / capa IA
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** GET /campaigns/products/search?q=...&limit=10 — autocomplete catálogo. */
+  async searchProducts(orgId: string, q: string, limit = 10): Promise<ProductSearchHit[]> {
+    const term = q.trim()
+    if (term.length < 2) return []
+    const cap = Math.min(Math.max(limit, 1), 20)
+
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('id, sku, name, ml_title, my_price, price, photo_urls, images, ml_listing_id, ml_permalink, my_url')
+      .eq('organization_id', orgId)
+      .or(`name.ilike.%${term}%,ml_title.ilike.%${term}%,sku.ilike.%${term}%`)
+      .limit(cap)
+    if (error) throw new BadRequestException(error.message)
+
+    return (data ?? []).map(p => {
+      const imgs = Array.isArray(p.photo_urls) && p.photo_urls.length > 0
+        ? p.photo_urls
+        : (Array.isArray(p.images) ? p.images : [])
+      return {
+        id:            p.id as string,
+        sku:           (p.sku as string) ?? null,
+        title:         (p.name as string) ?? (p.ml_title as string) ?? '(sem título)',
+        price:         (p.my_price as number) ?? (p.price as number) ?? null,
+        sale_price:    null,
+        image_url:     imgs[0] ?? null,
+        ml_listing_id: (p.ml_listing_id as string) ?? null,
+        url:           (p.ml_permalink as string) ?? (p.my_url as string) ?? null,
+      }
+    })
+  }
+
+  /** POST /campaigns/import-from-url — detecta marketplace, scrapa retorna shape ProductSearchHit. */
+  async importFromUrl(_orgId: string, url: string): Promise<ProductSearchHit> {
+    if (!url || !/^https?:\/\//i.test(url)) {
+      throw new BadRequestException('URL válida obrigatória')
+    }
+    const summary = await this.scraping.scrapeFromUrl(url)
+    return {
+      id:            '',  // não persistido; frontend pode salvar como produto manual depois
+      sku:           null,
+      title:         summary.title ?? '(sem título)',
+      price:         summary.price,
+      sale_price:    summary.sale_price,
+      image_url:     summary.image_url,
+      ml_listing_id: summary.platform === 'mercadolivre' ? summary.listing_id : null,
+      url:           summary.url,
+    }
+  }
+
+  /** GET /campaigns/listing-images?listing_id=MLB... — galeria do anúncio ML. */
+  async getListingImages(_orgId: string, listingId: string): Promise<Array<{ url: string; position: number }>> {
+    if (!listingId || !/^MLB/i.test(listingId)) {
+      throw new BadRequestException('listing_id ML obrigatório')
+    }
+    const summary = await this.scraping.scrapeMlListing({ listingId })
+    return summary.all_images.map((url, i) => ({ url, position: i }))
+  }
+
+  /** POST /campaigns/generate-card — gera N variações de capa via LlmService. */
+  async generateCard(
+    orgId: string,
+    body: {
+      campaign_id?:       string | null
+      product:            { title: string; price?: number; sale_price?: number }
+      source:             'product_image' | 'listing_image' | 'ai_only'
+      source_image_url?:  string
+      prompt?:            string
+      format:             ImageFormat
+      n:                  number
+      providerOverride?:  { provider: 'anthropic' | 'openai'; model: string }
+    },
+  ): Promise<{ assets: SavedAsset[] }> {
+    if (!body.product?.title) throw new BadRequestException('product.title obrigatório')
+    if (body.source !== 'ai_only' && !body.source_image_url) {
+      throw new BadRequestException('source_image_url obrigatório quando source != ai_only')
+    }
+    const n = Math.max(1, Math.min(6, body.n ?? 1))
+
+    // Monta prompt enriquecido. Inclui specs da spec do user.
+    const discountPct = body.product.sale_price && body.product.price && body.product.price > body.product.sale_price
+      ? Math.round((1 - body.product.sale_price / body.product.price) * 100)
+      : null
+    const priceLine = body.product.sale_price
+      ? `Preço cheio R$${body.product.price?.toFixed(2)} → promo R$${body.product.sale_price.toFixed(2)} (-${discountPct}%)`
+      : body.product.price
+        ? `Preço R$${body.product.price.toFixed(2)}`
+        : ''
+    const userExtra = body.prompt?.trim() ? `\nAjustes do usuário: ${body.prompt.trim()}` : ''
+    const fullPrompt = `Crie um card promocional para WhatsApp/Instagram do produto:
+Nome: ${body.product.title}
+${priceLine}
+Estilo: clean, moderno, fundo gradient claro, foto do produto em destaque, ${discountPct ? 'badge de desconto vermelho top-right, ' : ''}preço grande embaixo, CTA "Saiba mais" bottom. Cores: cyan #00E5FF + branco.
+Formato: ${body.format}.${userExtra}`
+
+    // Chama o LlmService. Para gpt-image-1 com sourceImageUrl, vai modo edit.
+    const result = await this.llm.generateImage({
+      orgId,
+      feature:        'campaign_card',
+      prompt:         fullPrompt,
+      sourceImageUrl: body.source !== 'ai_only' ? body.source_image_url : undefined,
+      format:         body.format,
+      n,
+      override:       body.providerOverride,
+    })
+
+    // Salva cada imagem no Storage + DB
+    const savedAssets: SavedAsset[] = []
+    const perImageCost = result.images.length > 0 ? result.costUsd / result.images.length : 0
+    for (const img of result.images) {
+      try {
+        const saved = await this.assets.saveGeneratedImage({
+          orgId,
+          campaignId:     body.campaign_id ?? null,
+          imageSourceUrl: img.url,
+          imageBase64:    img.b64,
+          format:         body.format,
+          provider:       result.provider,
+          model:          result.model,
+          prompt:         fullPrompt,
+          sourceImageUrl: body.source_image_url,
+          costUsd:        perImageCost,
+        })
+        savedAssets.push(saved)
+      } catch (e) {
+        this.logger.warn(`[generateCard] save asset falhou: ${(e as Error).message}`)
+      }
+    }
+    if (savedAssets.length === 0) {
+      throw new HttpException('Nenhuma imagem gerada foi salva', HttpStatus.BAD_GATEWAY)
+    }
+    return { assets: savedAssets }
+  }
+
+  /** POST /campaigns/assets/:id/approve — flag, vincula campanha, remove TTL. */
+  async approveAsset(orgId: string, assetId: string, campaignId?: string | null) {
+    return this.assets.approve(orgId, assetId, campaignId)
+  }
+
+  /** POST /campaigns/refine-image — Claude Vision rewrite + re-gen. */
+  async refineImage(
+    orgId: string,
+    body: { asset_id: string; refinement_prompt: string },
+  ): Promise<{ assets: SavedAsset[] }> {
+    if (!body.asset_id || !body.refinement_prompt) {
+      throw new BadRequestException('asset_id + refinement_prompt obrigatórios')
+    }
+    const asset = await this.assets.getOne(orgId, body.asset_id)
+
+    // Pede pro Claude reescrever o prompt original incorporando o ajuste.
+    // Nota: Claude Vision visualiza a imagem mas como prompt é texto, basta
+    // text generation aqui pra refinar o prompt (sem custo de visão).
+    const refined = await this.llm.generateText({
+      orgId,
+      feature:      'campaign_copy',  // reusa feature de texto
+      systemPrompt: 'Você reescreve prompts de geração de imagem incorporando ajustes pedidos pelo usuário. Saída: APENAS o novo prompt, sem markdown.',
+      userPrompt:   `PROMPT ORIGINAL:\n${asset.prompt}\n\nAJUSTE PEDIDO:\n${body.refinement_prompt}\n\nNOVO PROMPT:`,
+      maxTokens:    600,
+    })
+
+    // Re-gera com prompt refinado, modo edit usando a imagem atual como base
+    const result = await this.llm.generateImage({
+      orgId,
+      feature:        'campaign_card',
+      prompt:         refined.text,
+      sourceImageUrl: asset.storage_url as string,
+      format:         asset.format as ImageFormat,
+      n:              1,
+    })
+
+    const savedAssets: SavedAsset[] = []
+    const perImageCost = result.images.length > 0 ? result.costUsd / result.images.length : 0
+    for (const img of result.images) {
+      const saved = await this.assets.saveGeneratedImage({
+        orgId,
+        campaignId:     asset.campaign_id as string | null,
+        imageSourceUrl: img.url,
+        imageBase64:    img.b64,
+        format:         asset.format as ImageFormat,
+        provider:       result.provider,
+        model:          result.model,
+        prompt:         refined.text,
+        sourceImageUrl: asset.storage_url as string,
+        costUsd:        perImageCost,
+      })
+      savedAssets.push(saved)
+    }
+    return { assets: savedAssets }
+  }
+
+  /** POST /campaigns/canva/open — upload asset pra Canva + cria design + retorna edit_url. */
+  async openInCanva(orgId: string, body: { asset_id: string }): Promise<{ edit_url: string }> {
+    if (!body.asset_id) throw new BadRequestException('asset_id obrigatório')
+    const asset = await this.assets.getOne(orgId, body.asset_id)
+    if (!asset.storage_url) throw new BadRequestException('Asset sem storage_url')
+
+    // Mapa format → designType Canva
+    const designType = asset.format === 'story_1080x1920' ? 'InstagramStory'
+                     : asset.format === 'square_1080'     ? 'InstagramPost'
+                     : 'InstagramPost'
+
+    const result = await this.canva.uploadAndOpenDesign(orgId, {
+      imageUrl:   asset.storage_url as string,
+      imageName:  `campaign-${asset.id}.png`,
+      designType,
+    })
+    return { edit_url: result.edit_url }
+  }
   // ── Cron: processCampaignTargets ──────────────────────────────────────────
 
   /** A cada 5min, processa targets pending de campaigns running cujo
