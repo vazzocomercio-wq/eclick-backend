@@ -42,6 +42,11 @@ export class CredentialsService {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
+  /** Batch 1.6 — onConflict agora inclui organization_id pra suportar
+   * multi-tenant. Antes, conexão de uma org sobrescrevia a de outra
+   * com mesmo (provider, key_name). Migration
+   * 2026_04_29_api_credentials_org_unique.sql precisa ter rodado pra
+   * o UNIQUE composto existir no DB. */
   async saveCredential(orgId: string | null, userId: string, provider: string, keyName: string, keyValue: string) {
     const encrypted = this.encrypt(keyValue)
     const preview   = this.maskKey(keyValue)
@@ -57,7 +62,7 @@ export class CredentialsService {
         key_preview: preview,
         is_active:   true,
         updated_at:  new Date().toISOString(),
-      }, { onConflict: 'provider,key_name' })
+      }, { onConflict: 'organization_id,provider,key_name' })
       .select('id, provider, key_name, key_preview, is_active, last_tested_at, last_test_status, last_test_message')
       .single()
 
