@@ -65,7 +65,7 @@ export class CampaignsController {
       source:             'product_image' | 'listing_image' | 'ai_only'
       source_image_url?:  string
       prompt?:            string
-      format:             ImageFormat
+      formats:            ImageFormat[]
       n:                  number
       providerOverride?:  { provider: 'anthropic' | 'openai'; model: string }
     },

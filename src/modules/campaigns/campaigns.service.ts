@@ -538,7 +538,7 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
       source:             'product_image' | 'listing_image' | 'ai_only'
       source_image_url?:  string
       prompt?:            string
-      format:             ImageFormat
+      formats:            ImageFormat[]
       n:                  number
       providerOverride?:  { provider: 'anthropic' | 'openai'; model: string }
     },
@@ -547,9 +547,12 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
     if (body.source !== 'ai_only' && !body.source_image_url) {
       throw new BadRequestException('source_image_url obrigatório quando source != ai_only')
     }
+    if (!Array.isArray(body.formats) || body.formats.length === 0) {
+      throw new BadRequestException('formats[] obrigatório (selecione ao menos 1 formato)')
+    }
     const n = Math.max(1, Math.min(6, body.n ?? 1))
 
-    // Monta prompt enriquecido. Inclui specs da spec do user.
+    // Componentes do prompt (independem do formato)
     const discountPct = body.product.sale_price && body.product.price && body.product.price > body.product.sale_price
       ? Math.round((1 - body.product.sale_price / body.product.price) * 100)
       : null
@@ -559,47 +562,61 @@ FORMATO DE RESPOSTA: JSON puro (sem markdown), exatamente assim:
         ? `Preço R$${body.product.price.toFixed(2)}`
         : ''
     const userExtra = body.prompt?.trim() ? `\nAjustes do usuário: ${body.prompt.trim()}` : ''
-    const fullPrompt = `Crie um card promocional para WhatsApp/Instagram do produto:
+
+    // Loop por formato — cada um vira uma chamada N-paralela ao LlmService
+    const savedAssets: SavedAsset[] = []
+    const errors: string[] = []
+    for (const fmt of body.formats) {
+      const fullPrompt = `Crie um card promocional para WhatsApp/Instagram do produto:
 Nome: ${body.product.title}
 ${priceLine}
 Estilo: clean, moderno, fundo gradient claro, foto do produto em destaque, ${discountPct ? 'badge de desconto vermelho top-right, ' : ''}preço grande embaixo, CTA "Saiba mais" bottom. Cores: cyan #00E5FF + branco.
-Formato: ${body.format}.${userExtra}`
+Formato: ${fmt}.${userExtra}`
 
-    // Chama o LlmService. Para gpt-image-1 com sourceImageUrl, vai modo edit.
-    const result = await this.llm.generateImage({
-      orgId,
-      feature:        'campaign_card',
-      prompt:         fullPrompt,
-      sourceImageUrl: body.source !== 'ai_only' ? body.source_image_url : undefined,
-      format:         body.format,
-      n,
-      override:       body.providerOverride,
-    })
-
-    // Salva cada imagem no Storage + DB
-    const savedAssets: SavedAsset[] = []
-    const perImageCost = result.images.length > 0 ? result.costUsd / result.images.length : 0
-    for (const img of result.images) {
+      let result
       try {
-        const saved = await this.assets.saveGeneratedImage({
+        result = await this.llm.generateImage({
           orgId,
-          campaignId:     body.campaign_id ?? null,
-          imageSourceUrl: img.url,
-          imageBase64:    img.b64,
-          format:         body.format,
-          provider:       result.provider,
-          model:          result.model,
+          feature:        'campaign_card',
           prompt:         fullPrompt,
-          sourceImageUrl: body.source_image_url,
-          costUsd:        perImageCost,
+          sourceImageUrl: body.source !== 'ai_only' ? body.source_image_url : undefined,
+          format:         fmt,
+          n,
+          override:       body.providerOverride,
         })
-        savedAssets.push(saved)
       } catch (e) {
-        this.logger.warn(`[generateCard] save asset falhou: ${(e as Error).message}`)
+        errors.push(`${fmt}: ${(e as Error).message}`)
+        this.logger.warn(`[generateCard] ${fmt} falhou: ${(e as Error).message}`)
+        continue
+      }
+
+      const perImageCost = result.images.length > 0 ? result.costUsd / result.images.length : 0
+      for (const img of result.images) {
+        try {
+          const saved = await this.assets.saveGeneratedImage({
+            orgId,
+            campaignId:     body.campaign_id ?? null,
+            imageSourceUrl: img.url,
+            imageBase64:    img.b64,
+            format:         fmt,
+            provider:       result.provider,
+            model:          result.model,
+            prompt:         fullPrompt,
+            sourceImageUrl: body.source_image_url,
+            costUsd:        perImageCost,
+          })
+          savedAssets.push(saved)
+        } catch (e) {
+          this.logger.warn(`[generateCard] save asset (${fmt}) falhou: ${(e as Error).message}`)
+        }
       }
     }
+
     if (savedAssets.length === 0) {
-      throw new HttpException('Nenhuma imagem gerada foi salva', HttpStatus.BAD_GATEWAY)
+      throw new HttpException(
+        `Nenhuma imagem gerada foi salva${errors.length ? ` — ${errors.join(' | ')}` : ''}`,
+        HttpStatus.BAD_GATEWAY,
+      )
     }
     return { assets: savedAssets }
   }
