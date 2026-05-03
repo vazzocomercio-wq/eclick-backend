@@ -38,6 +38,7 @@ import { AiModule } from './modules/ai/ai.module'
 import { MarketplaceScrapingModule } from './modules/marketplace-scraping/marketplace-scraping.module'
 import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 import { CanvaModule } from './modules/canva/canva.module'
+import { WhatsAppFreeModule } from './modules/whatsapp-free/whatsapp-free.module'
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { CanvaModule } from './modules/canva/canva.module'
     MarketplaceScrapingModule,
     CanvaOauthModule,
     CanvaModule,
+    WhatsAppFreeModule,
   ],
   controllers: [AppController],
   providers: [AppService],
