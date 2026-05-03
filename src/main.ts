@@ -5,6 +5,7 @@ if (!globalThis.crypto) {
 
 import 'dotenv/config'
 import { NestFactory } from '@nestjs/core';
+import { IoAdapter } from '@nestjs/platform-socket.io';
 import { AppModule } from './app.module';
 
 // Catch any unhandled rejection / uncaught exception so the log shows the
@@ -26,6 +27,7 @@ async function bootstrap() {
   console.log(`[Bootstrap] ML_CLIENT_ID=${process.env.ML_CLIENT_ID ? 'SET' : 'MISSING'}`);
 
   const app = await NestFactory.create(AppModule);
+  app.useWebSocketAdapter(new IoAdapter(app));
   app.enableCors({
     origin: true,   // allow all origins — restrict after confirmed working
     credentials: true,
