@@ -14,7 +14,10 @@ import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 import { CredentialsModule } from './modules/credentials/credentials.module'
 import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
 import { StockModule } from './modules/stock/stock.module'
+import { MarketplaceChannelsModule } from './modules/marketplace-channels/marketplace-channels.module'
 import { ChannelsModule } from './modules/channels/channels.module'
+import { InternalModule } from './modules/internal/internal.module'
+import { EventsModule } from './modules/events/events.module'
 import { CustomersModule } from './modules/customers/customers.module'
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module'
 import { WebhooksModule } from './modules/webhooks/webhooks.module'
@@ -38,7 +41,6 @@ import { AiModule } from './modules/ai/ai.module'
 import { MarketplaceScrapingModule } from './modules/marketplace-scraping/marketplace-scraping.module'
 import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 import { CanvaModule } from './modules/canva/canva.module'
-import { WhatsAppFreeModule } from './modules/whatsapp-free/whatsapp-free.module'
 
 @Module({
   imports: [
@@ -55,7 +57,10 @@ import { WhatsAppFreeModule } from './modules/whatsapp-free/whatsapp-free.module
     CredentialsModule,
     AiUsageModule,
     StockModule,
+    MarketplaceChannelsModule,
     ChannelsModule,
+    InternalModule,
+    EventsModule,
     CustomersModule,
     WhatsAppModule,
     WidgetsModule,
@@ -79,7 +84,6 @@ import { WhatsAppFreeModule } from './modules/whatsapp-free/whatsapp-free.module
     MarketplaceScrapingModule,
     CanvaOauthModule,
     CanvaModule,
-    WhatsAppFreeModule,
   ],
   controllers: [AppController],
   providers: [AppService],
