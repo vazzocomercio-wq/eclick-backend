@@ -41,6 +41,32 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'openai', model: 'gpt-image-1' },
     fallback:    null,
   },
+  // Sprint ML Questions AI — sugere resposta pra pergunta do ML usando
+  // contexto do anúncio + histórico P&R. Sonnet pra qualidade.
+  ml_question_suggest: {
+    label:       'Sugestão de resposta (ML)',
+    description: 'Gera resposta sugerida para perguntas do Mercado Livre',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  // Transformações rápidas (encurtar/humanizar/garantia/pronta) sobre
+  // texto que o user já está editando. Haiku pra latência baixa.
+  ml_question_transform: {
+    label:       'Transformar resposta (ML)',
+    description: 'Transforma texto de resposta (encurtar/humanizar/etc)',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
+  // Flag-only — não usa generateText. ai_feature_settings.enabled
+  // controla se o cron envia respostas automaticamente quando
+  // confidence >= 0.70. primary/fallback são placeholders exigidos
+  // pelo schema mas não invocados.
+  ml_question_auto_send: {
+    label:       'Auto-resposta de perguntas (ML)',
+    description: 'Envia automaticamente sugestões com confiança >= 0.70',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

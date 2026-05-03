@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Delete,
   Body,
   Query,
@@ -14,6 +15,7 @@ import {
 import { MercadolivreService } from './mercadolivre.service'
 import { MlBillingFetcherService } from './ml-billing-fetcher.service'
 import { OrderDetailService } from './order-detail.service'
+import { MlQuestionsAiService, TransformAction } from './ml-questions-ai.service'
 import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -31,6 +33,7 @@ export class MercadolivreController {
     private readonly scraper: ScraperService,
     private readonly billingFetcher: MlBillingFetcherService,
     private readonly orderDetail: OrderDetailService,
+    private readonly questionsAi: MlQuestionsAiService,
   ) {}
 
   /** GET /ml/orders/:external_order_id/full-detail — agregador read-only
@@ -338,6 +341,33 @@ export class MercadolivreController {
     }
   }
 
+  // ── Sprint ML Questions AI ──────────────────────────────────────────────
+  // Rotas estáticas vêm ANTES de :id pra NestJS resolver corretamente.
+
+  // POST /ml/questions/transform-text  { text, action }
+  @Post('questions/transform-text')
+  @HttpCode(HttpStatus.OK)
+  transformText(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { text: string; action: TransformAction },
+  ) {
+    return this.questionsAi.transformText(user.orgId!, body.text, body.action)
+  }
+
+  // POST /ml/questions/poll — manual trigger do cron de sugestões pra esta org.
+  @Post('questions/poll')
+  @HttpCode(HttpStatus.OK)
+  pollQuestions(@ReqUser() user: ReqUserPayload) {
+    return this.questionsAi.pollAndSuggest(user.orgId!)
+  }
+
+  // GET /ml/questions/ai-stats — métricas dos últimos 30 dias (Aprovação IA)
+  // + contagem de auto-respostas das últimas 24h.
+  @Get('questions/ai-stats')
+  getAiStats(@ReqUser() user: ReqUserPayload) {
+    return this.questionsAi.getAiStats(user.orgId!)
+  }
+
   // POST /ml/questions/:id/answer  { text: string }
   @Post('questions/:id/answer')
   @HttpCode(HttpStatus.OK)
@@ -348,6 +378,44 @@ export class MercadolivreController {
   ) {
     if (!body.text?.trim()) throw new BadRequestException('text é obrigatório')
     return this.ml.answerQuestion(user.orgId!, Number(id), body.text)
+  }
+
+  // POST /ml/questions/:id/suggest-answer
+  @Post('questions/:id/suggest-answer')
+  @HttpCode(HttpStatus.OK)
+  suggestAnswer(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    return this.questionsAi.suggestAnswer(user.orgId!, id)
+  }
+
+  // POST /ml/questions/:id/approve-and-send  { finalAnswer, wasEdited }
+  @Post('questions/:id/approve-and-send')
+  @HttpCode(HttpStatus.OK)
+  approveAndSend(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { finalAnswer: string; wasEdited: boolean },
+  ) {
+    return this.questionsAi.approveAndSend(user.orgId!, id, body.finalAnswer, body.wasEdited === true)
+  }
+
+  // GET /ml/settings/auto-answer
+  @Get('settings/auto-answer')
+  async getAutoAnswerSetting(@ReqUser() user: ReqUserPayload) {
+    const enabled = await this.questionsAi.getAutoSendEnabled(user.orgId!)
+    return { enabled }
+  }
+
+  // PATCH /ml/settings/auto-answer  { enabled: boolean }
+  @Patch('settings/auto-answer')
+  @HttpCode(HttpStatus.OK)
+  setAutoAnswerSetting(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.questionsAi.setAutoSendEnabled(user.orgId!, body.enabled === true)
   }
 
   // GET /ml/claims — always 200, see comment on /questions above.
