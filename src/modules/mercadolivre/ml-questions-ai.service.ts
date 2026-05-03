@@ -18,6 +18,15 @@ const TRANSFORM_PROMPTS: Record<TransformAction, string> = {
 
 const AUTO_SEND_FEATURE_KEY = 'ml_question_auto_send'
 
+function stripMarkdownHeader(raw: string): string {
+  let text = raw.trim()
+  // Remove headers tipo "# Resposta ao Cliente" / "## Resposta" / "### foo" no início
+  text = text.replace(/^#{1,6}\s+.*$/m, '').trim()
+  // Remove "Resposta:" / "Resposta ao Cliente:" no início
+  text = text.replace(/^Resposta(\s+ao\s+Cliente)?:\s*/i, '').trim()
+  return text
+}
+
 @Injectable()
 export class MlQuestionsAiService {
   private readonly logger = new Logger(MlQuestionsAiService.name)
@@ -91,7 +100,11 @@ export class MlQuestionsAiService {
     const systemPrompt =
       `Você é assistente de vendas do Mercado Livre.\n` +
       `${agent?.system_prompt ?? 'Seja objetivo e profissional.'}\n` +
-      `REGRAS: responda só sobre o produto, sem markdown, máx 3 linhas, português brasileiro, sem mencionar concorrentes.`
+      `REGRAS:\n` +
+      `- Responda só sobre o produto, máx 3 linhas, português brasileiro, sem mencionar concorrentes.\n` +
+      `- NUNCA use markdown: nada de #, ##, ###, **negrito**, _itálico_, listas com - ou *.\n` +
+      `- NUNCA inicie com título/header tipo "# Resposta ao Cliente", "## Resposta", "Resposta:" ou similar.\n` +
+      `- Comece DIRETO com a saudação ao cliente (ex: "Olá! Obrigado pela pergunta..." ou "Oi! ...").`
 
     const historyBlock = history.length > 0
       ? 'HISTÓRICO P&R:\n' + history.map(h => `P:${h.question}\nR:${h.answer}`).join('\n')
@@ -111,7 +124,7 @@ export class MlQuestionsAiService {
       maxTokens:    300,
     })
 
-    const suggestedAnswer = llmOut.text.trim()
+    const suggestedAnswer = stripMarkdownHeader(llmOut.text)
 
     const lower = suggestedAnswer.toLowerCase()
     let confidence = 0.9
