@@ -1,9 +1,11 @@
 # dependencies
 /node_modules
+/workers/node_modules
 
 # compiled output
 /dist
 /build
+/workers/dist
 
 # logs
 logs

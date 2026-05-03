@@ -1,18 +1,18 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "commonjs",
-    "outDir": "dist",
-    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node",
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["baileys/**/*.ts"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
