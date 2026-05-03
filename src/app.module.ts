@@ -37,6 +37,7 @@ import { CampaignsModule } from './modules/campaigns/campaigns.module'
 import { AiModule } from './modules/ai/ai.module'
 import { MarketplaceScrapingModule } from './modules/marketplace-scraping/marketplace-scraping.module'
 import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
+import { CanvaModule } from './modules/canva/canva.module'
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
     AiModule,
     MarketplaceScrapingModule,
     CanvaOauthModule,
+    CanvaModule,
   ],
   controllers: [AppController],
   providers: [AppService],
