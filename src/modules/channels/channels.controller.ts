@@ -81,4 +81,23 @@ export class ChannelsController {
     const result = await this.baileys.sendMessage(channel.id, phone, 'text', { body: body.message })
     return { success: true, message_id: result.message_id, channel_id: channel.id, phone }
   }
+
+  /**
+   * TEMPORÁRIO — verifica se um número tem WhatsApp ativo via Baileys.
+   * Útil pra diagnosticar gestores que recebem ack de envio mas não recebem
+   * a mensagem (= número errado/sem WA).
+   */
+  @Post(':id/check-number')
+  async checkNumber(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { phone?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.phone?.trim()) throw new BadRequestException('phone obrigatório')
+    await this.svc.findOne(u.orgId, id)  // valida ownership
+    const phone = body.phone.replace(/\D/g, '')
+    const result = await this.baileys.checkNumber(u.orgId, phone)
+    return { phone, ...result }
+  }
 }
