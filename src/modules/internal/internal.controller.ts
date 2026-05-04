@@ -4,11 +4,20 @@ import {
 } from '@nestjs/common'
 import { InternalKeyGuard } from './internal-key.guard'
 import { EventsGateway } from '../events/events.gateway'
+import { AlertResponseService } from '../intelligence-hub/delivery/alert-response.service'
 
 interface RealtimeBody {
   org_id: string
   event: string
   payload: unknown
+}
+
+interface MessageNewPayload {
+  channel_id?:        string
+  wa_jid?:            string
+  phone?:             string | null
+  channel_message_id?: string
+  content?: { kind: string; body?: string } & Record<string, unknown>
 }
 
 interface InboundProcessedBody {
@@ -33,7 +42,10 @@ interface InboundProcessedBody {
 export class InternalController {
   private readonly logger = new Logger(InternalController.name)
 
-  constructor(private readonly events: EventsGateway) {}
+  constructor(
+    private readonly events:        EventsGateway,
+    private readonly alertResponse: AlertResponseService,
+  ) {}
 
   @Post('realtime')
   @HttpCode(HttpStatus.OK)
@@ -42,6 +54,18 @@ export class InternalController {
       throw new BadRequestException('org_id e event obrigatórios')
     }
     this.events.emitToOrg(body.org_id, body.event, body.payload)
+
+    // Tenta interpretar mensagens inbound como resposta a alerta do Intelligence
+    // Hub. Best-effort, fire-and-forget — não bloqueia o broadcast realtime.
+    if (body.event === 'message:new') {
+      const payload = (body.payload ?? {}) as MessageNewPayload
+      if (payload.content?.kind === 'text' && payload.content.body) {
+        void this.alertResponse
+          .handleInbound(body.org_id, payload.phone ?? null, payload.content.body)
+          .catch(err => this.logger.warn(`[alert-response] erro: ${(err as Error).message}`))
+      }
+    }
+
     return { ok: true }
   }
 

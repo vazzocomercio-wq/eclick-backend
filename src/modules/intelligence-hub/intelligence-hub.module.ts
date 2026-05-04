@@ -10,6 +10,9 @@ import { AlertDeliveriesService } from './alert-deliveries.service'
 import { EstoqueAnalyzer } from './analyzers/estoque.analyzer'
 import { AnalyzersController } from './analyzers/analyzers.controller'
 import { AlertEngineService } from './alert-engine.service'
+import { WhatsAppDeliveryService } from './delivery/whatsapp-delivery.service'
+import { DigestService } from './delivery/digest.service'
+import { AlertResponseService } from './delivery/alert-response.service'
 
 /**
  * Intelligence Hub — Sprint IH-1.
@@ -37,6 +40,9 @@ import { AlertEngineService } from './alert-engine.service'
     AlertSignalsService,
     AlertDeliveriesService,
     AlertEngineService,
+    WhatsAppDeliveryService,
+    DigestService,
+    AlertResponseService,
     EstoqueAnalyzer,
   ],
   exports:     [
@@ -46,6 +52,9 @@ import { AlertEngineService } from './alert-engine.service'
     AlertSignalsService,
     AlertDeliveriesService,
     AlertEngineService,
+    WhatsAppDeliveryService,
+    DigestService,
+    AlertResponseService,
     EstoqueAnalyzer,
   ],
 })

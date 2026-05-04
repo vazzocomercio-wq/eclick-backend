@@ -4,7 +4,7 @@ import { AlertHubConfigService } from './alert-hub-config.service'
 import { AlertSignalsService } from './alert-signals.service'
 import { AlertDeliveriesService } from './alert-deliveries.service'
 import type {
-  AlertSignal, AlertDelivery, DeliveryDraft,
+  AlertSignal, AlertDelivery, DeliveryDraft, DeliveryType, AlertSeverity,
 } from './analyzers/analyzers.types'
 
 interface RoutingRuleRow {
@@ -117,8 +117,11 @@ export class AlertEngineService {
     // 3. Filtrar por anti-spam + quiet hours
     const drafts: DeliveryDraft[] = []
     const now = new Date()
+    const deliveryType = this.deliveryTypeFromSeverity(signal.severity)
     const isQuiet = this.inQuietHours(now, config.quiet_hours, config.digest_config?.timezone ?? 'America/Sao_Paulo')
-    const skipQuiet = isQuiet && signal.severity !== 'critical'
+    // quiet só silencia entregas immediate de severity não-critical.
+    // digests não respeitam quiet — eles só rodam nas janelas configuradas.
+    const skipQuiet = isQuiet && deliveryType === 'immediate' && signal.severity !== 'critical'
 
     for (const m of managers) {
       if (skipQuiet) {
@@ -146,7 +149,7 @@ export class AlertEngineService {
         signal_id:       signal.id,
         manager_id:      m.id,
         channel:         'whatsapp',
-        delivery_type:   'immediate',
+        delivery_type:   deliveryType,
       })
     }
 
@@ -189,6 +192,20 @@ export class AlertEngineService {
       .in('department', departments)
     if (error) throw new BadRequestException(error.message)
     return (data ?? []) as ManagerRow[]
+  }
+
+  /**
+   * Roteamento de severity → janela de entrega:
+   *   critical → immediate (WhatsAppDeliveryService dispara em <30s)
+   *   warning  → digest_morning (próximo digest da manhã)
+   *   info     → digest_evening (digest do fim do dia)
+   *
+   * Override possível via routing_rule.preferences[delivery_type] no futuro.
+   */
+  private deliveryTypeFromSeverity(severity: AlertSeverity): DeliveryType {
+    if (severity === 'critical') return 'immediate'
+    if (severity === 'warning')  return 'digest_morning'
+    return 'digest_evening'
   }
 
   private inQuietHours(now: Date, qh: QuietHours, tz: string): boolean {
