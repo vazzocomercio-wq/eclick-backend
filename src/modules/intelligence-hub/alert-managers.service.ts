@@ -159,6 +159,33 @@ export class AlertManagersService {
       )
     }
 
+    // Lookup JID real do número via Baileys onWhatsApps. Resolve o problema dos
+    // celulares brasileiros pré-2012 cuja JID está registrada SEM o 9 adicional
+    // (cadastrados antes da reforma de numeração). Sem esse lookup, o sendMessage
+    // monta o JID direto do phone e a mensagem cai no vazio quando o número é
+    // pré-2012 mas foi salvo no formato novo (com 9) — ack volta sem entrega.
+    let resolvedPhone = manager.phone
+    try {
+      const check = await this.baileys.checkNumber(orgId, manager.phone)
+      if (!check.exists) {
+        throw new BadRequestException(
+          `O número ${manager.phone} não está registrado no WhatsApp. ` +
+          'Confirme com o gestor se ele tem WhatsApp ativo nesse número.',
+        )
+      }
+      const jidPhone = check.jid?.replace('@s.whatsapp.net', '')
+      if (jidPhone && jidPhone !== manager.phone) {
+        this.logger.log(
+          `[verify] org=${orgId} manager=${id} normalizando phone ${manager.phone} → ${jidPhone} (JID pré-2012)`,
+        )
+        resolvedPhone = jidPhone
+      }
+    } catch (e) {
+      // Se o checkNumber falhou por outro motivo (worker offline etc), repassa
+      if (e instanceof BadRequestException) throw e
+      this.logger.warn(`[verify] checkNumber falhou: ${(e as Error).message} — seguindo com phone original`)
+    }
+
     const code = this.generateCode()
     const expiresAt = new Date(Date.now() + VERIFICATION_TTL_MIN * 60_000).toISOString()
 
@@ -168,6 +195,7 @@ export class AlertManagersService {
         verification_code:       code,
         verification_expires_at: expiresAt,
         channel_id:              channelId,
+        phone:                   resolvedPhone,  // persiste o JID real
         updated_at:              new Date().toISOString(),
       })
       .eq('organization_id', orgId)
@@ -181,13 +209,13 @@ export class AlertManagersService {
       `Válido por ${VERIFICATION_TTL_MIN} minutos.`
 
     try {
-      await this.baileys.sendMessage(channelId, manager.phone, 'text', { body: message })
+      await this.baileys.sendMessage(channelId, resolvedPhone, 'text', { body: message })
     } catch (e) {
       this.logger.error(`[verify] org=${orgId} manager=${id} envio falhou: ${(e as Error).message}`)
       throw e
     }
 
-    this.logger.log(`[verify] org=${orgId} manager=${id} código enviado`)
+    this.logger.log(`[verify] org=${orgId} manager=${id} código enviado pra ${resolvedPhone}`)
     return { ok: true, expires_at: expiresAt }
   }
 
