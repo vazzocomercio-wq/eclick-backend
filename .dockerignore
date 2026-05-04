@@ -1,0 +1,54 @@
+# dependencies installed locally (Windows binaries — incompatíveis com Linux)
+node_modules
+workers/node_modules
+
+# build output (regerado pelo Dockerfile)
+dist
+workers/dist
+
+# git e CI
+.git
+.github
+.gitignore
+.gitattributes
+
+# env (Railway injeta as variáveis)
+.env
+.env.*
+!.env.example
+
+# editores / IDE
+.vscode
+.idea
+.claude
+*.swp
+*.swo
+
+# logs e cache
+*.log
+npm-debug.log*
+.npm
+coverage
+.nyc_output
+*.tsbuildinfo
+.railway-cache-bust
+
+# OS
+.DS_Store
+Thumbs.db
+
+# testes (não rodam em runtime)
+test
+**/*.spec.ts
+**/*.test.ts
+
+# docs
+README.md
+*.md
+
+# migrations rodam fora do app (Supabase CLI, não precisam na imagem)
+supabase
+src/migrations
+
+# workers tem seu próprio service no Railway com Dockerfile próprio
+workers
