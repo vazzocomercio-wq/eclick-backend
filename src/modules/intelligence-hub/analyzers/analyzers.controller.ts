@@ -12,6 +12,7 @@ import { EstoqueAnalyzer } from './estoque.analyzer'
 import { ComprasAnalyzer } from './compras.analyzer'
 import { PrecoAnalyzer } from './preco.analyzer'
 import { MargemAnalyzer } from './margem.analyzer'
+import { AdsAnalyzer } from './ads.analyzer'
 import type { AnalyzerName, AlertSignalStatus, DeliveryStatus } from './analyzers.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -35,6 +36,7 @@ export class AnalyzersController {
     private readonly compras:       ComprasAnalyzer,
     private readonly preco:         PrecoAnalyzer,
     private readonly margem:        MargemAnalyzer,
+    private readonly ads:           AdsAnalyzer,
   ) {}
 
   @Post('analyzers/:name/run')
@@ -107,6 +109,7 @@ export class AnalyzersController {
       case 'compras': return this.compras
       case 'preco':   return this.preco
       case 'margem':  return this.margem
+      case 'ads':     return this.ads
       default:
         throw new NotFoundException(`Analyzer '${name}' não disponível ainda`)
     }

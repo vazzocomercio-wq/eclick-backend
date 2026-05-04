@@ -7,6 +7,7 @@ import { EstoqueAnalyzer } from './estoque.analyzer'
 import { ComprasAnalyzer } from './compras.analyzer'
 import { PrecoAnalyzer } from './preco.analyzer'
 import { MargemAnalyzer } from './margem.analyzer'
+import { AdsAnalyzer } from './ads.analyzer'
 import { BaseAnalyzer } from './base.analyzer'
 import type { AnalyzerName } from './analyzers.types'
 
@@ -39,6 +40,7 @@ export class AnalyzersSchedulerService {
     private readonly compras:    ComprasAnalyzer,
     private readonly preco:      PrecoAnalyzer,
     private readonly margem:     MargemAnalyzer,
+    private readonly ads:        AdsAnalyzer,
   ) {}
 
   @Cron('*/15 * * * *', { name: 'alertHubAnalyzersTick' })
@@ -101,7 +103,7 @@ export class AnalyzersSchedulerService {
 
   /**
    * Registry estático — adicione novos analyzers aqui conforme implementam.
-   * AdsAnalyzer pendente até schema de campaigns/ads-metrics ficar consistente.
+   * cross_intel não fica aqui pois CrossIntelService roda em cron próprio.
    */
   private registry(): Record<AnalyzerName, BaseAnalyzer | undefined> {
     return {
@@ -109,7 +111,7 @@ export class AnalyzersSchedulerService {
       compras:     this.compras,
       preco:       this.preco,
       margem:      this.margem,
-      ads:         undefined,
+      ads:         this.ads,
       cross_intel: undefined,
     } as Record<AnalyzerName, BaseAnalyzer | undefined>
   }

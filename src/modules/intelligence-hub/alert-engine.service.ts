@@ -17,11 +17,18 @@ interface RoutingRuleRow {
   enabled:     boolean
 }
 
+interface LearningPref {
+  action_rate?: number
+  ignore_rate?: number
+  sample_size?: number
+}
+
 interface ManagerRow {
-  id:         string
-  department: string
-  status:     string
-  verified:   boolean
+  id:          string
+  department:  string
+  status:      string
+  verified:    boolean
+  preferences: { learning?: Record<string, LearningPref> } | null
 }
 
 interface QuietHours {
@@ -131,6 +138,11 @@ export class AlertEngineService {
         continue
       }
 
+      if (this.learningSkip(m, signal)) {
+        this.logger.debug(`[engine] manager=${m.id} skip — learning (ignora ${signal.category} consistentemente)`)
+        continue
+      }
+
       const todayCount = await this.deliveriesSvc.countTodayByManager(m.id)
       if (todayCount >= config.max_alerts_per_manager_per_day) {
         this.logger.debug(`[engine] manager=${m.id} skip — max_per_day=${todayCount}`)
@@ -199,13 +211,27 @@ export class AlertEngineService {
     if (departments.length === 0) return []
     const { data, error } = await supabaseAdmin
       .from('alert_managers')
-      .select('id, department, status, verified')
+      .select('id, department, status, verified, preferences')
       .eq('organization_id', orgId)
       .eq('status', 'active')
       .eq('verified', true)
       .in('department', departments)
     if (error) throw new BadRequestException(error.message)
     return (data ?? []) as ManagerRow[]
+  }
+
+  /**
+   * Verifica se o LearningService já marcou que esse gestor ignora essa
+   * categoria com confiança estatística — se sim, pula (a não ser critical).
+   *
+   * Threshold: action_rate < 10% E sample_size >= 10 → "ignora consistentemente".
+   */
+  private learningSkip(m: ManagerRow, signal: AlertSignal): boolean {
+    if (signal.severity === 'critical') return false
+    const learn = m.preferences?.learning?.[signal.category]
+    if (!learn) return false
+    if ((learn.sample_size ?? 0) < 10) return false
+    return (learn.action_rate ?? 1) < 0.1
   }
 
   /**

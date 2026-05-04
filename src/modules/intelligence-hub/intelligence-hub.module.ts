@@ -11,6 +11,7 @@ import { EstoqueAnalyzer } from './analyzers/estoque.analyzer'
 import { ComprasAnalyzer } from './analyzers/compras.analyzer'
 import { PrecoAnalyzer } from './analyzers/preco.analyzer'
 import { MargemAnalyzer } from './analyzers/margem.analyzer'
+import { AdsAnalyzer } from './analyzers/ads.analyzer'
 import { AnalyzersController } from './analyzers/analyzers.controller'
 import { AnalyzersSchedulerService } from './analyzers/analyzers-scheduler.service'
 import { CrossIntelService } from './cross-intel/cross-intel.service'
@@ -58,6 +59,7 @@ import { AlertResponseService } from './delivery/alert-response.service'
     ComprasAnalyzer,
     PrecoAnalyzer,
     MargemAnalyzer,
+    AdsAnalyzer,
   ],
   exports:     [
     AlertManagersService,
@@ -76,6 +78,7 @@ import { AlertResponseService } from './delivery/alert-response.service'
     ComprasAnalyzer,
     PrecoAnalyzer,
     MargemAnalyzer,
+    AdsAnalyzer,
   ],
 })
 export class IntelligenceHubModule {}

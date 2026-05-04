@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Param, Body, Query, UseGuards,
+  Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards,
   BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
@@ -81,6 +81,12 @@ export class AlertHubController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.rulesSvc.update(u.orgId, id, body)
+  }
+
+  @Delete('routing-rules/:id')
+  deleteRule(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.rulesSvc.remove(u.orgId, id)
   }
 
   // ── Stats / Reports ─────────────────────────────────────────────────────────
