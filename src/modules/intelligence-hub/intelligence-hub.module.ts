@@ -13,6 +13,9 @@ import { PrecoAnalyzer } from './analyzers/preco.analyzer'
 import { MargemAnalyzer } from './analyzers/margem.analyzer'
 import { AnalyzersController } from './analyzers/analyzers.controller'
 import { AnalyzersSchedulerService } from './analyzers/analyzers-scheduler.service'
+import { CrossIntelService } from './cross-intel/cross-intel.service'
+import { LearningService } from './learning/learning.service'
+import { AlertHubStatsService } from './alert-hub-stats.service'
 import { AlertEngineService } from './alert-engine.service'
 import { WhatsAppDeliveryService } from './delivery/whatsapp-delivery.service'
 import { DigestService } from './delivery/digest.service'
@@ -48,6 +51,9 @@ import { AlertResponseService } from './delivery/alert-response.service'
     DigestService,
     AlertResponseService,
     AnalyzersSchedulerService,
+    CrossIntelService,
+    LearningService,
+    AlertHubStatsService,
     EstoqueAnalyzer,
     ComprasAnalyzer,
     PrecoAnalyzer,
@@ -63,6 +69,9 @@ import { AlertResponseService } from './delivery/alert-response.service'
     WhatsAppDeliveryService,
     DigestService,
     AlertResponseService,
+    CrossIntelService,
+    LearningService,
+    AlertHubStatsService,
     EstoqueAnalyzer,
     ComprasAnalyzer,
     PrecoAnalyzer,

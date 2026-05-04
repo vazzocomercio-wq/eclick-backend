@@ -1,11 +1,12 @@
 import {
-  Controller, Get, Post, Patch, Param, Body, UseGuards,
+  Controller, Get, Post, Patch, Param, Body, Query, UseGuards,
   BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { AlertHubConfigService } from './alert-hub-config.service'
 import { AlertRoutingRulesService } from './alert-routing-rules.service'
+import { AlertHubStatsService } from './alert-hub-stats.service'
 import type { UpdateHubConfigDto } from './dto/update-hub-config.dto'
 import type {
   CreateRoutingRuleDto, UpdateRoutingRuleDto,
@@ -31,6 +32,7 @@ export class AlertHubController {
   constructor(
     private readonly configSvc: AlertHubConfigService,
     private readonly rulesSvc:  AlertRoutingRulesService,
+    private readonly statsSvc:  AlertHubStatsService,
   ) {}
 
   @Get('config')
@@ -79,5 +81,19 @@ export class AlertHubController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.rulesSvc.update(u.orgId, id, body)
+  }
+
+  // ── Stats / Reports ─────────────────────────────────────────────────────────
+
+  @Get('stats')
+  getStats(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.statsSvc.getOrgStats(u.orgId, days ? Number(days) : 30)
+  }
+
+  @Get('stats/managers')
+  getManagerStats(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.statsSvc.getManagerStats(u.orgId, days ? Number(days) : 30)
   }
 }
