@@ -5,6 +5,11 @@ import { AlertManagersService } from './alert-managers.service'
 import { AlertHubController } from './alert-hub.controller'
 import { AlertHubConfigService } from './alert-hub-config.service'
 import { AlertRoutingRulesService } from './alert-routing-rules.service'
+import { AlertSignalsService } from './alert-signals.service'
+import { AlertDeliveriesService } from './alert-deliveries.service'
+import { EstoqueAnalyzer } from './analyzers/estoque.analyzer'
+import { AnalyzersController } from './analyzers/analyzers.controller'
+import { AlertEngineService } from './alert-engine.service'
 
 /**
  * Intelligence Hub — Sprint IH-1.
@@ -24,16 +29,24 @@ import { AlertRoutingRulesService } from './alert-routing-rules.service'
  */
 @Module({
   imports:     [ChannelsModule],
-  controllers: [AlertManagersController, AlertHubController],
+  controllers: [AlertManagersController, AlertHubController, AnalyzersController],
   providers:   [
     AlertManagersService,
     AlertHubConfigService,
     AlertRoutingRulesService,
+    AlertSignalsService,
+    AlertDeliveriesService,
+    AlertEngineService,
+    EstoqueAnalyzer,
   ],
   exports:     [
     AlertManagersService,
     AlertHubConfigService,
     AlertRoutingRulesService,
+    AlertSignalsService,
+    AlertDeliveriesService,
+    AlertEngineService,
+    EstoqueAnalyzer,
   ],
 })
 export class IntelligenceHubModule {}
