@@ -9,6 +9,9 @@ import { AlertDeliveriesService } from '../alert-deliveries.service'
 import { AlertEngineService } from '../alert-engine.service'
 import { WhatsAppDeliveryService } from '../delivery/whatsapp-delivery.service'
 import { EstoqueAnalyzer } from './estoque.analyzer'
+import { ComprasAnalyzer } from './compras.analyzer'
+import { PrecoAnalyzer } from './preco.analyzer'
+import { MargemAnalyzer } from './margem.analyzer'
 import type { AnalyzerName, AlertSignalStatus, DeliveryStatus } from './analyzers.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -29,6 +32,9 @@ export class AnalyzersController {
     private readonly engine:        AlertEngineService,
     private readonly waDelivery:    WhatsAppDeliveryService,
     private readonly estoque:       EstoqueAnalyzer,
+    private readonly compras:       ComprasAnalyzer,
+    private readonly preco:         PrecoAnalyzer,
+    private readonly margem:        MargemAnalyzer,
   ) {}
 
   @Post('analyzers/:name/run')
@@ -98,6 +104,9 @@ export class AnalyzersController {
   private resolve(name: AnalyzerName) {
     switch (name) {
       case 'estoque': return this.estoque
+      case 'compras': return this.compras
+      case 'preco':   return this.preco
+      case 'margem':  return this.margem
       default:
         throw new NotFoundException(`Analyzer '${name}' não disponível ainda`)
     }

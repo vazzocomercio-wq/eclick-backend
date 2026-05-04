@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { BaileysProvider } from '../../channels/providers/baileys.provider'
+import { EventsGateway } from '../../events/events.gateway'
 import { formatSignalMessage } from './message-formatter'
 import type { AlertSignal } from '../analyzers/analyzers.types'
 
@@ -40,7 +41,10 @@ export class WhatsAppDeliveryService {
   private readonly logger = new Logger(WhatsAppDeliveryService.name)
   private isRunning = false
 
-  constructor(private readonly baileys: BaileysProvider) {}
+  constructor(
+    private readonly baileys: BaileysProvider,
+    private readonly events:  EventsGateway,
+  ) {}
 
   @Cron('*/30 * * * * *', { name: 'alertHubImmediateDelivery' })
   async tick(): Promise<void> {
@@ -141,8 +145,11 @@ export class WhatsAppDeliveryService {
       if (upErr) this.logger.error(`[dispatch] delivery=${id} update sent falhou: ${upErr.message}`)
       else       this.logger.log(`[dispatch] delivery=${id} signal=${signal_id} → manager=${manager_id} sent`)
 
-      // Sinal já está dispatched (do AlertEngine), só atualiza pra delivered no signals
-      // depois que o gestor abrir (status delivered/read vem por webhook/worker — IH-3 PARTE C).
+      this.events.emitToOrg(row.organization_id, 'alert:sent', {
+        delivery_id: id,
+        signal_id,
+        manager_id,
+      })
     } catch (e) {
       const msg = (e as Error).message ?? 'unknown'
       await this.markFailed(id, msg)

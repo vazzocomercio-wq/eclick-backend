@@ -8,7 +8,11 @@ import { AlertRoutingRulesService } from './alert-routing-rules.service'
 import { AlertSignalsService } from './alert-signals.service'
 import { AlertDeliveriesService } from './alert-deliveries.service'
 import { EstoqueAnalyzer } from './analyzers/estoque.analyzer'
+import { ComprasAnalyzer } from './analyzers/compras.analyzer'
+import { PrecoAnalyzer } from './analyzers/preco.analyzer'
+import { MargemAnalyzer } from './analyzers/margem.analyzer'
 import { AnalyzersController } from './analyzers/analyzers.controller'
+import { AnalyzersSchedulerService } from './analyzers/analyzers-scheduler.service'
 import { AlertEngineService } from './alert-engine.service'
 import { WhatsAppDeliveryService } from './delivery/whatsapp-delivery.service'
 import { DigestService } from './delivery/digest.service'
@@ -43,7 +47,11 @@ import { AlertResponseService } from './delivery/alert-response.service'
     WhatsAppDeliveryService,
     DigestService,
     AlertResponseService,
+    AnalyzersSchedulerService,
     EstoqueAnalyzer,
+    ComprasAnalyzer,
+    PrecoAnalyzer,
+    MargemAnalyzer,
   ],
   exports:     [
     AlertManagersService,
@@ -56,6 +64,9 @@ import { AlertResponseService } from './delivery/alert-response.service'
     DigestService,
     AlertResponseService,
     EstoqueAnalyzer,
+    ComprasAnalyzer,
+    PrecoAnalyzer,
+    MargemAnalyzer,
   ],
 })
 export class IntelligenceHubModule {}

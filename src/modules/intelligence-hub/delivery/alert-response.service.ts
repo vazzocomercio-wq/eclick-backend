@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
+import { EventsGateway } from '../../events/events.gateway'
 import type { DeliveryResponse } from '../analyzers/analyzers.types'
 
 interface ManagerRow {
@@ -32,6 +33,8 @@ const RESPONSE_LOOKBACK_HOURS = 6  // só matcheia respostas de alertas das últ
 @Injectable()
 export class AlertResponseService {
   private readonly logger = new Logger(AlertResponseService.name)
+
+  constructor(private readonly events: EventsGateway) {}
 
   async handleInbound(
     orgId:     string,
@@ -107,6 +110,14 @@ export class AlertResponseService {
     this.logger.log(
       `[response] manager=${manager.id} delivery=${delivery.id} type=${responseType} body="${body.slice(0, 30)}"`,
     )
+
+    this.events.emitToOrg(orgId, 'alert:responded', {
+      delivery_id:   delivery.id,
+      signal_id:     delivery.signal_id,
+      manager_id:    manager.id,
+      response_type: responseType,
+    })
+
     return { matched: true, delivery_id: delivery.id, response_type: responseType }
   }
 

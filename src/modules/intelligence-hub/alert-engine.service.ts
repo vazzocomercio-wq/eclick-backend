@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { EventsGateway } from '../events/events.gateway'
 import { AlertHubConfigService } from './alert-hub-config.service'
 import { AlertSignalsService } from './alert-signals.service'
 import { AlertDeliveriesService } from './alert-deliveries.service'
@@ -68,9 +69,10 @@ export class AlertEngineService {
   private readonly logger = new Logger(AlertEngineService.name)
 
   constructor(
-    private readonly hubCfg:       AlertHubConfigService,
-    private readonly signalsSvc:   AlertSignalsService,
+    private readonly hubCfg:        AlertHubConfigService,
+    private readonly signalsSvc:    AlertSignalsService,
     private readonly deliveriesSvc: AlertDeliveriesService,
+    private readonly events:        EventsGateway,
   ) {}
 
   /**
@@ -160,6 +162,18 @@ export class AlertEngineService {
 
     const deliveries = await this.deliveriesSvc.insertMany(drafts)
     await this.signalsSvc.updateStatus(orgId, signal.id, 'dispatched')
+
+    // Realtime: notifica frontend que um signal foi dispatched (com deliveries)
+    this.events.emitToOrg(orgId, 'alert:dispatched', {
+      signal_id:        signal.id,
+      analyzer:         signal.analyzer,
+      category:         signal.category,
+      severity:         signal.severity,
+      score:            signal.score,
+      entity_name:      signal.entity_name,
+      deliveries_count: deliveries.length,
+    })
+
     return deliveries
   }
 
