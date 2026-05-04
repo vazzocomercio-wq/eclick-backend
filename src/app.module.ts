@@ -41,6 +41,7 @@ import { AiModule } from './modules/ai/ai.module'
 import { MarketplaceScrapingModule } from './modules/marketplace-scraping/marketplace-scraping.module'
 import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 import { CanvaModule } from './modules/canva/canva.module'
+import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-hub.module'
 
 @Module({
   imports: [
@@ -84,6 +85,7 @@ import { CanvaModule } from './modules/canva/canva.module'
     MarketplaceScrapingModule,
     CanvaOauthModule,
     CanvaModule,
+    IntelligenceHubModule,
   ],
   controllers: [AppController],
   providers: [AppService],
