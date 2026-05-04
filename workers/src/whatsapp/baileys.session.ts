@@ -34,12 +34,25 @@ interface SessionContext {
  * e broadcast pro frontend via `message:new`. Persistência fica como TODO
  * pra quando o módulo CRM existir.
  */
+const JID_CACHE_TTL_MS = 24 * 3600 * 1000  // 24h
+const JID_CACHE_NEGATIVE_TTL_MS = 30 * 60 * 1000  // 30min pra exists=false (evita re-tentar errado por dia inteiro)
+
 export class BaileysSession {
   private sock: WASocket | null = null
   private auth: BaileysAuthHandle | null = null
   private currentQr: string | null = null
   private connecting = false
   private terminated = false
+
+  /**
+   * Cache phone limpo → JID canônico (com TTL).
+   * Resolve o problema dos celulares brasileiros pré-2012 cujo JID no
+   * WhatsApp NÃO tem o nono dígito (cadastro pré-reforma de 2012).
+   * Sem cache, cada sendMessage faria um onWhatsApp() que custa ~200ms.
+   *
+   * Entry com `jid=null` indica número sem WhatsApp (TTL menor).
+   */
+  private readonly jidCache = new Map<string, { jid: string | null; expiresAt: number }>()
 
   private readonly logger = pino({
     level: process.env.BAILEYS_LOG_LEVEL ?? 'warn',
@@ -127,7 +140,7 @@ export class BaileysSession {
       throw new Error('session_terminated: sessão encerrada')
     }
 
-    const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`
+    const jid = await this.resolveJid(phone)
 
     let payload: Parameters<WASocket['sendMessage']>[1]
     switch (content.kind) {
@@ -175,6 +188,53 @@ export class BaileysSession {
 
   isReady(): boolean {
     return !!this.sock && !this.terminated
+  }
+
+  /**
+   * Resolve `phone` (dígitos puros) ou JID puro pro JID canônico do WhatsApp,
+   * com cache em memória. Lança erro tipado se número não tem WhatsApp —
+   * caller decide se silencia ou propaga.
+   *
+   * Erros possíveis:
+   *   - `number_not_on_whatsapp`: onWhatsApp retornou exists=false
+   *   - `session_not_ready`: socket não conectado
+   */
+  private async resolveJid(phoneOrJid: string): Promise<string> {
+    if (phoneOrJid.includes('@')) return phoneOrJid
+
+    const cleaned = phoneOrJid.replace(/\D/g, '')
+    if (!cleaned) throw new Error('invalid_phone: empty after cleaning')
+
+    const cached = this.jidCache.get(cleaned)
+    if (cached && cached.expiresAt > Date.now()) {
+      if (!cached.jid) throw new Error(`number_not_on_whatsapp: ${cleaned}`)
+      return cached.jid
+    }
+
+    if (!this.sock) throw new Error('session_not_ready: socket Baileys ainda não conectado')
+
+    const results = await this.sock.onWhatsApp(cleaned).catch(() => [])
+    const first = results?.[0]
+
+    if (!first?.exists || !first.jid) {
+      // Cache negativo curto pra evitar lookup pesado em loop
+      this.jidCache.set(cleaned, { jid: null, expiresAt: Date.now() + JID_CACHE_NEGATIVE_TTL_MS })
+      throw new Error(`number_not_on_whatsapp: ${cleaned}`)
+    }
+
+    this.jidCache.set(cleaned, { jid: first.jid, expiresAt: Date.now() + JID_CACHE_TTL_MS })
+
+    // Log apenas quando há normalização (caso pré-2012) — sinaliza pro
+    // operador que o number_input não bate com o JID real.
+    const jidPhone = first.jid.replace('@s.whatsapp.net', '')
+    if (jidPhone !== cleaned) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[baileys ${this.ctx.channelId}] JID normalize ${cleaned} → ${jidPhone} (legacy WA registration)`,
+      )
+    }
+
+    return first.jid
   }
 
   /**
