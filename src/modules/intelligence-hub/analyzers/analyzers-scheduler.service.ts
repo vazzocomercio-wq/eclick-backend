@@ -5,9 +5,9 @@ import { AlertSignalsService } from '../alert-signals.service'
 import { AlertEngineService } from '../alert-engine.service'
 import { EstoqueAnalyzer } from './estoque.analyzer'
 import { ComprasAnalyzer } from './compras.analyzer'
-import { PrecoAnalyzer } from './preco.analyzer'
 import { MargemAnalyzer } from './margem.analyzer'
 import { AdsAnalyzer } from './ads.analyzer'
+// PrecoAnalyzer removido em PRC-2 — PricingIntelligence é fonte única.
 import { BaseAnalyzer } from './base.analyzer'
 import type { AnalyzerName } from './analyzers.types'
 
@@ -38,7 +38,6 @@ export class AnalyzersSchedulerService {
     private readonly engine:     AlertEngineService,
     private readonly estoque:    EstoqueAnalyzer,
     private readonly compras:    ComprasAnalyzer,
-    private readonly preco:      PrecoAnalyzer,
     private readonly margem:     MargemAnalyzer,
     private readonly ads:        AdsAnalyzer,
   ) {}
@@ -109,7 +108,7 @@ export class AnalyzersSchedulerService {
     return {
       estoque:     this.estoque,
       compras:     this.compras,
-      preco:       this.preco,
+      preco:       undefined,        // PRC-2: PricingIntelligence é fonte
       margem:      this.margem,
       ads:         this.ads,
       cross_intel: undefined,

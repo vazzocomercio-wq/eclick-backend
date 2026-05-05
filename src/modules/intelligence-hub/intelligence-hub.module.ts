@@ -9,9 +9,12 @@ import { AlertSignalsService } from './alert-signals.service'
 import { AlertDeliveriesService } from './alert-deliveries.service'
 import { EstoqueAnalyzer } from './analyzers/estoque.analyzer'
 import { ComprasAnalyzer } from './analyzers/compras.analyzer'
-import { PrecoAnalyzer } from './analyzers/preco.analyzer'
 import { MargemAnalyzer } from './analyzers/margem.analyzer'
 import { AdsAnalyzer } from './analyzers/ads.analyzer'
+// PrecoAnalyzer removido em PRC-2 — PricingIntelligence é fonte única
+// pra signals de preço. Cross-intel patterns que dependem de 'preco'
+// (oportunidade_escoamento, promo_agressiva_viavel, prejuizo_estrutural)
+// ficam dormentes sem alimentação.
 import { AnalyzersController } from './analyzers/analyzers.controller'
 import { AnalyzersSchedulerService } from './analyzers/analyzers-scheduler.service'
 import { CrossIntelService } from './cross-intel/cross-intel.service'
@@ -57,7 +60,6 @@ import { AlertResponseService } from './delivery/alert-response.service'
     AlertHubStatsService,
     EstoqueAnalyzer,
     ComprasAnalyzer,
-    PrecoAnalyzer,
     MargemAnalyzer,
     AdsAnalyzer,
   ],
@@ -76,7 +78,6 @@ import { AlertResponseService } from './delivery/alert-response.service'
     AlertHubStatsService,
     EstoqueAnalyzer,
     ComprasAnalyzer,
-    PrecoAnalyzer,
     MargemAnalyzer,
     AdsAnalyzer,
   ],

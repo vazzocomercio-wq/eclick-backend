@@ -10,9 +10,9 @@ import { AlertEngineService } from '../alert-engine.service'
 import { WhatsAppDeliveryService } from '../delivery/whatsapp-delivery.service'
 import { EstoqueAnalyzer } from './estoque.analyzer'
 import { ComprasAnalyzer } from './compras.analyzer'
-import { PrecoAnalyzer } from './preco.analyzer'
 import { MargemAnalyzer } from './margem.analyzer'
 import { AdsAnalyzer } from './ads.analyzer'
+// PrecoAnalyzer removido em PRC-2 — PricingIntelligence é fonte única.
 import type { AnalyzerName, AlertSignalStatus, DeliveryStatus } from './analyzers.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -34,7 +34,6 @@ export class AnalyzersController {
     private readonly waDelivery:    WhatsAppDeliveryService,
     private readonly estoque:       EstoqueAnalyzer,
     private readonly compras:       ComprasAnalyzer,
-    private readonly preco:         PrecoAnalyzer,
     private readonly margem:        MargemAnalyzer,
     private readonly ads:           AdsAnalyzer,
   ) {}
@@ -107,7 +106,7 @@ export class AnalyzersController {
     switch (name) {
       case 'estoque': return this.estoque
       case 'compras': return this.compras
-      case 'preco':   return this.preco
+      // case 'preco': removido em PRC-2 — use /pricing/signals/scan
       case 'margem':  return this.margem
       case 'ads':     return this.ads
       default:
