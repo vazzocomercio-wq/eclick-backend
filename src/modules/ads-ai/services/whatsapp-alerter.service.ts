@@ -75,7 +75,7 @@ export class WhatsAppAlerterService {
 
     if (!pending?.length) return 0
 
-    const waCfg = await this.waConfig.findActive()
+    const waCfg = await this.waConfig.findActive(orgId)
     if (!waCfg) {
       this.logger.warn(`[ads-ai.alerter] org=${orgId}: sem whatsapp_config ativa — alerts não enviados`)
       return 0

@@ -19,10 +19,26 @@ export class WhatsAppController {
     return user.id
   }
 
+  /** Resolve orgId via 1ª org_membership do user — funciona enquanto cada
+   * user tem 1 org. Quando suportarmos multi-org/user, tudo aqui passa
+   * a vir do JWT (header x-org-id). */
+  private async resolveOrgId(userId: string): Promise<string> {
+    const { data } = await supabaseAdmin
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (!data?.organization_id) throw new HttpException('Usuário sem organização', 400)
+    return data.organization_id as string
+  }
+
   @Get()
   async getConfig(@Headers('authorization') auth: string) {
     const userId = await this.resolveUserId(auth)
-    const config = await this.cfg.findByUser(userId)
+    const orgId  = await this.resolveOrgId(userId)
+    const config = await this.cfg.findByOrg(orgId)
     if (!config) return null
     // Strip access_token from response — it's a secret
     return { ...config, access_token: '••••' + (config.access_token?.slice(-4) ?? '') }
@@ -34,7 +50,8 @@ export class WhatsAppController {
     @Body() body: { phone_number_id: string; business_account_id: string; access_token: string; display_phone?: string; display_name?: string; webhook_url?: string },
   ) {
     const userId = await this.resolveUserId(auth)
-    const config = await this.cfg.create(userId, body)
+    const orgId  = await this.resolveOrgId(userId)
+    const config = await this.cfg.create(orgId, userId, body)
     return { ...config, access_token: '••••' + config.access_token.slice(-4) }
   }
 
@@ -64,8 +81,9 @@ export class WhatsAppController {
 
   @Get(':id/webhook-info')
   async webhookInfo(@Headers('authorization') auth: string, @Param('id') id: string) {
-    await this.resolveUserId(auth)
-    const config = await this.cfg.findByUser(await this.resolveUserId(auth))
+    const userId = await this.resolveUserId(auth)
+    const orgId  = await this.resolveOrgId(userId)
+    const config = await this.cfg.findByOrg(orgId)
     if (!config || config.id !== id) throw new HttpException('Config não encontrada', 404)
     return {
       webhook_url:   `${process.env.PUBLIC_BACKEND_URL ?? ''}/webhooks/whatsapp`,

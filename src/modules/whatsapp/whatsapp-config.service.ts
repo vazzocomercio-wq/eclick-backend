@@ -42,14 +42,26 @@ const ZAPI_SYNTHETIC_CONFIG: WhatsAppConfig = {
 
 @Injectable()
 export class WhatsAppConfigService {
-  async findActive(): Promise<WhatsAppConfig | null> {
+  /**
+   * Retorna a config WhatsApp ativa pra uma org. Z-API via env tem
+   * prioridade global (mesma config pra todas orgs — útil enquanto não
+   * migramos pra schema multi-tenant em Z-API).
+   *
+   * Multi-tenant: orgId obrigatório quando há rows persistidas. Sem
+   * orgId, retorna apenas o synthetic Z-API se env setado, senão null.
+   * Callers legacy (webhooks, lead-bridge) que ainda não passam orgId
+   * recebem warning silencioso via null.
+   */
+  async findActive(orgId?: string): Promise<WhatsAppConfig | null> {
     // Z-API tem prioridade — callers só precisam saber que está "ativo"
     if (process.env.ZAPI_INSTANCE_ID && process.env.ZAPI_TOKEN && process.env.ZAPI_CLIENT_TOKEN) {
       return ZAPI_SYNTHETIC_CONFIG
     }
+    if (!orgId) return null
     const { data } = await supabaseAdmin
       .from('whatsapp_config')
       .select('*')
+      .eq('organization_id', orgId)
       .eq('is_active', true)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -58,6 +70,8 @@ export class WhatsAppConfigService {
   }
 
   async findByVerifyToken(token: string): Promise<WhatsAppConfig | null> {
+    // Webhook lookup por verify_token — cross-org por design (Meta envia
+    // verify_token e a config tem que ser achável sem org context).
     const { data } = await supabaseAdmin
       .from('whatsapp_config')
       .select('*')
@@ -66,6 +80,19 @@ export class WhatsAppConfigService {
     return (data as WhatsAppConfig) ?? null
   }
 
+  async findByOrg(orgId: string): Promise<WhatsAppConfig | null> {
+    const { data } = await supabaseAdmin
+      .from('whatsapp_config')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return (data as WhatsAppConfig) ?? null
+  }
+
+  /** @deprecated use findByOrg(orgId) — mantido pra compat dos controllers
+   * que ainda passam userId. Retorna a 1ª config do user em qualquer org. */
   async findByUser(userId: string): Promise<WhatsAppConfig | null> {
     const { data } = await supabaseAdmin
       .from('whatsapp_config')
@@ -77,7 +104,7 @@ export class WhatsAppConfigService {
     return (data as WhatsAppConfig) ?? null
   }
 
-  async create(userId: string, body: {
+  async create(orgId: string, userId: string, body: {
     phone_number_id:     string
     business_account_id: string
     access_token:        string
@@ -90,7 +117,7 @@ export class WhatsAppConfigService {
     }
     const { data, error } = await supabaseAdmin
       .from('whatsapp_config')
-      .insert({ user_id: userId, ...body, is_active: true })
+      .insert({ organization_id: orgId, user_id: userId, ...body, is_active: true })
       .select()
       .single()
     if (error) throw new HttpException(error.message, 400)

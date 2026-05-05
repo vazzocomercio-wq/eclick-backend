@@ -387,7 +387,7 @@ export class JourneyEngineService {
     channel: SendChannel, orgId: string, run: Row, ctx: Record<string, unknown>, tpl: TemplateRow, rendered: string,
   ): Promise<{ success: boolean; error?: string }> {
     if (channel === 'whatsapp') {
-      const cfg = await this.waConfig.findActive()
+      const cfg = await this.waConfig.findActive(orgId)
       if (!cfg) return { success: false, error: 'WhatsApp não configurado' }
       const phone = (run.phone as string | null) ?? (ctx.recipient_phone as string | null) ?? null
       if (!phone) return { success: false, error: 'phone ausente no run/context' }

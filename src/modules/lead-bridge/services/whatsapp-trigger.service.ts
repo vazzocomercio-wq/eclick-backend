@@ -34,7 +34,7 @@ export class WhatsAppTriggerService {
       const digits = phone.replace(/\D/g, '')
       if (!digits) return { success: false, error: 'sem telefone' }
 
-      const config  = await this.waConfig.findActive()
+      const config  = await this.waConfig.findActive(conv.organization_id as string)
       if (!config) return { success: false, error: 'whatsapp não configurado' }
 
       const rendered = this.renderTemplate(message, {

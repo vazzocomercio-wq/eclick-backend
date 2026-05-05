@@ -44,7 +44,7 @@ export class NotificationsController {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const cfg = await this.settings.getOrCreate(user.orgId)
     if (!cfg.whatsapp_phone) throw new BadRequestException('whatsapp_phone não configurado')
-    const wa = await this.waConfig.findActive()
+    const wa = await this.waConfig.findActive(user.orgId)
     if (!wa) throw new BadRequestException('WhatsApp Business não configurado no sistema')
     const message = '✅ *e-Click* — notificações WhatsApp ativadas com sucesso!\n\nEste é um teste. Você receberá alertas de preço pelos critérios configurados.'
     const result = await this.waSender.sendTextMessage({ phone: cfg.whatsapp_phone, message, waConfig: wa })

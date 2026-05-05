@@ -61,9 +61,14 @@ export class WebhooksController {
         const messages = this.waAdapter.normalizeWebhook(body)
         if (!messages.length) return
 
+        // TODO multi-tenant: resolver org via phone_number_id do payload
+        // Meta (entry[].changes[].value.metadata.phone_number_id → lookup
+        // em whatsapp_config). Hoje funciona apenas com Z-API via env
+        // (cross-org synthetic). Pra Meta Cloud multi-tenant, refatorar
+        // depois pra usar findByVerifyToken ou phone_number_id.
         const config = await this.waConfig.findActive()
         if (!config) {
-          this.logger.error(`[wa.webhook] sem whatsapp_config ativa — não é possível responder`)
+          this.logger.error(`[wa.webhook] sem whatsapp_config ativa — não é possível responder (resolver via phone_number_id pendente)`)
           return
         }
 

@@ -87,7 +87,7 @@ export class SignalNotifierService {
     const sigs = (pending ?? []) as PricingSignal[]
     if (sigs.length === 0) return { sent: 0, skipped: 0, failed: 0 }
 
-    const wa = await this.waConfig.findActive()
+    const wa = await this.waConfig.findActive(orgId)
     if (!wa) {
       this.logger.warn(`[pricing.notifier] WhatsApp Business não configurado pra org=${orgId}`)
       return { sent: 0, skipped: 0, failed: 0 }

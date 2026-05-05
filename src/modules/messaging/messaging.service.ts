@@ -143,7 +143,7 @@ export class MessagingService {
       return { ok: false, rendered, error: `Canal ${tpl.channel} ainda não implementado` }
     }
 
-    const cfg = await this.waConfig.findActive()
+    const cfg = await this.waConfig.findActive(orgId)
     if (!cfg) return { ok: false, rendered, error: 'WhatsApp Business não configurado' }
 
     const result = await this.waSender.sendTextMessage({
@@ -394,7 +394,7 @@ export class MessagingService {
     if (!tpl)                       throw new NotFoundException('template não encontrado')
     if (tpl.channel !== 'whatsapp') throw new BadRequestException(`Canal ${tpl.channel} não implementado`)
 
-    const cfg = await this.waConfig.findActive()
+    const cfg = await this.waConfig.findActive(orgId)
     if (!cfg) throw new BadRequestException('WhatsApp Business não configurado')
 
     let q = supabaseAdmin
@@ -483,7 +483,7 @@ export class MessagingService {
       loja: 'Vazzo',
     })
 
-    const cfg = await this.waConfig.findActive()
+    const cfg = await this.waConfig.findActive(orgId)
     if (!cfg) return { success: false, error: 'WhatsApp Business não configurado' }
 
     const result = await this.waSender.sendTextMessage({
