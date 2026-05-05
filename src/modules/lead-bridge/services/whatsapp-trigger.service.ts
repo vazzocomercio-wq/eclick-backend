@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
-import { WhatsAppConfigService } from '../../whatsapp/whatsapp-config.service'
-import { WhatsAppSender } from '../../whatsapp/whatsapp.sender'
+import { UnifiedWhatsAppSender } from '../../wa-router/unified-whatsapp-sender.service'
 import { LeadBridgeService } from '../lead-bridge.service'
 
 @Injectable()
@@ -9,8 +8,7 @@ export class WhatsAppTriggerService {
   private readonly logger = new Logger(WhatsAppTriggerService.name)
 
   constructor(
-    private readonly waConfig: WhatsAppConfigService,
-    private readonly waSender: WhatsAppSender,
+    private readonly unifiedWa: UnifiedWhatsAppSender,
     private readonly leadBridge: LeadBridgeService,
   ) {}
 
@@ -34,15 +32,18 @@ export class WhatsAppTriggerService {
       const digits = phone.replace(/\D/g, '')
       if (!digits) return { success: false, error: 'sem telefone' }
 
-      const config  = await this.waConfig.findActive(conv.organization_id as string)
-      if (!config) return { success: false, error: 'whatsapp não configurado' }
-
       const rendered = this.renderTemplate(message, {
         nome: conv.full_name as string | null,
         first_name: ((conv.full_name as string | null) ?? '').split(' ')[0],
       })
 
-      const send = await this.waSender.sendTextMessage({ phone: digits, message: rendered, waConfig: config })
+      // Routing por purpose='customer_journey' — Baileys/Cloud auto
+      const send = await this.unifiedWa.send(
+        conv.organization_id as string,
+        'customer_journey',
+        digits,
+        rendered,
+      )
       if (!send.success) return { success: false, error: send.error }
 
       await supabaseAdmin

@@ -16,6 +16,7 @@ import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
 import { StockModule } from './modules/stock/stock.module'
 import { MarketplaceChannelsModule } from './modules/marketplace-channels/marketplace-channels.module'
 import { ChannelsModule } from './modules/channels/channels.module'
+import { WaRouterModule } from './modules/wa-router/wa-router.module'
 import { InternalModule } from './modules/internal/internal.module'
 import { EventsModule } from './modules/events/events.module'
 import { CustomersModule } from './modules/customers/customers.module'
@@ -60,6 +61,7 @@ import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-h
     StockModule,
     MarketplaceChannelsModule,
     ChannelsModule,
+    WaRouterModule,
     InternalModule,
     EventsModule,
     CustomersModule,

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
-import { BaileysProvider } from '../../channels/providers/baileys.provider'
+import { UnifiedWhatsAppSender } from '../../wa-router/unified-whatsapp-sender.service'
 import { formatDigestMessage } from './digest-formatter'
 import type { AlertSignal, DeliveryType } from '../analyzers/analyzers.types'
 
@@ -55,7 +55,7 @@ export class DigestService {
   private readonly logger = new Logger(DigestService.name)
   private isRunning = false
 
-  constructor(private readonly baileys: BaileysProvider) {}
+  constructor(private readonly sender: UnifiedWhatsAppSender) {}
 
   @Cron('0 * * * *', { name: 'alertHubDigestTick' })
   async tick(): Promise<void> {
@@ -168,13 +168,13 @@ export class DigestService {
       manager.name,
     )
 
+    // Routing por purpose='internal_alert' — fallback Baileys/cloud
+    const result = await this.sender.send(orgId, 'internal_alert', manager.phone, body)
+    if (!result.success) {
+      await this.markBatchFailed(rows, result.error ?? 'sender falhou')
+      return false
+    }
     try {
-      const result = await this.baileys.sendMessage(
-        manager.channel_id,
-        manager.phone,
-        'text',
-        { body },
-      )
       const ids = rows.map(r => r.id)
       const { error: upErr } = await supabaseAdmin
         .from('alert_deliveries')

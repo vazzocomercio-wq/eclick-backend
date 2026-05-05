@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
-import { BaileysProvider } from '../../channels/providers/baileys.provider'
+import { UnifiedWhatsAppSender } from '../../wa-router/unified-whatsapp-sender.service'
 import { EventsGateway } from '../../events/events.gateway'
 import { formatSignalMessage } from './message-formatter'
 import type { AlertSignal } from '../analyzers/analyzers.types'
@@ -42,8 +42,8 @@ export class WhatsAppDeliveryService {
   private isRunning = false
 
   constructor(
-    private readonly baileys: BaileysProvider,
-    private readonly events:  EventsGateway,
+    private readonly sender: UnifiedWhatsAppSender,
+    private readonly events: EventsGateway,
   ) {}
 
   @Cron('*/30 * * * * *', { name: 'alertHubImmediateDelivery' })
@@ -118,42 +118,34 @@ export class WhatsAppDeliveryService {
       await this.markFailed(id, `manager ${manager_id} não está active+verified`)
       return
     }
-    if (!manager.channel_id) {
-      await this.markFailed(id, `manager ${manager_id} sem channel_id`)
-      return
-    }
 
     const body = formatSignalMessage(signal, manager.name)
 
-    try {
-      const result = await this.baileys.sendMessage(
-        manager.channel_id,
-        manager.phone,
-        'text',
-        { body },
-      )
+    // Routing por purpose='internal_alert' — fallback automático Baileys/cloud
+    const result = await this.sender.send(row.organization_id, 'internal_alert', manager.phone, body)
 
-      const { error: upErr } = await supabaseAdmin
-        .from('alert_deliveries')
-        .update({
-          status:         'sent',
-          sent_at:        new Date().toISOString(),
-          wa_message_id:  result.message_id ?? null,
-          error_message:  null,
-        })
-        .eq('id', id)
-      if (upErr) this.logger.error(`[dispatch] delivery=${id} update sent falhou: ${upErr.message}`)
-      else       this.logger.log(`[dispatch] delivery=${id} signal=${signal_id} → manager=${manager_id} sent`)
-
-      this.events.emitToOrg(row.organization_id, 'alert:sent', {
-        delivery_id: id,
-        signal_id,
-        manager_id,
-      })
-    } catch (e) {
-      const msg = (e as Error).message ?? 'unknown'
-      await this.markFailed(id, msg)
+    if (!result.success) {
+      await this.markFailed(id, result.error ?? 'sender retornou success=false')
+      return
     }
+
+    const { error: upErr } = await supabaseAdmin
+      .from('alert_deliveries')
+      .update({
+        status:         'sent',
+        sent_at:        new Date().toISOString(),
+        wa_message_id:  result.message_id ?? null,
+        error_message:  null,
+      })
+      .eq('id', id)
+    if (upErr) this.logger.error(`[dispatch] delivery=${id} update sent falhou: ${upErr.message}`)
+    else       this.logger.log(`[dispatch] delivery=${id} signal=${signal_id} → manager=${manager_id} sent (${result.channel})`)
+
+    this.events.emitToOrg(row.organization_id, 'alert:sent', {
+      delivery_id: id,
+      signal_id,
+      manager_id,
+    })
   }
 
   private async markFailed(deliveryId: string, error: string): Promise<void> {

@@ -5,6 +5,7 @@ import { TemplateRendererService } from './template-renderer.service'
 import { EmailSenderService } from './email-sender.service'
 import { WhatsAppConfigService } from '../whatsapp/whatsapp-config.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
+import { UnifiedWhatsAppSender } from '../wa-router/unified-whatsapp-sender.service'
 import { JourneyStep } from './messaging.service'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -40,6 +41,7 @@ export class JourneyEngineService {
     private readonly emailSender: EmailSenderService,
     private readonly waConfig: WhatsAppConfigService,
     private readonly waSender: WhatsAppSender,
+    private readonly unifiedWa: UnifiedWhatsAppSender,
   ) {}
 
   @Cron('*/5 * * * *', { name: 'messagingJourneyTick' })
@@ -387,11 +389,11 @@ export class JourneyEngineService {
     channel: SendChannel, orgId: string, run: Row, ctx: Record<string, unknown>, tpl: TemplateRow, rendered: string,
   ): Promise<{ success: boolean; error?: string }> {
     if (channel === 'whatsapp') {
-      const cfg = await this.waConfig.findActive(orgId)
-      if (!cfg) return { success: false, error: 'WhatsApp não configurado' }
       const phone = (run.phone as string | null) ?? (ctx.recipient_phone as string | null) ?? null
       if (!phone) return { success: false, error: 'phone ausente no run/context' }
-      const r = await this.waSender.sendTextMessage({ phone, message: rendered, waConfig: cfg })
+      // Routing por purpose='customer_journey' — fallback automático
+      // entre Baileys e Cloud API conforme assignment ou fallback default.
+      const r = await this.unifiedWa.send(orgId, 'customer_journey', phone, rendered)
       return { success: r.success, error: r.error ?? undefined }
     }
     // email — EM-1 multi-tenant: passa orgId pro dispatcher buscar config

@@ -3,6 +3,8 @@ import { supabaseAdmin } from '../../common/supabase'
 import { TemplateRendererService } from './template-renderer.service'
 import { WhatsAppConfigService } from '../whatsapp/whatsapp-config.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
+import { UnifiedWhatsAppSender } from '../wa-router/unified-whatsapp-sender.service'
+import { ChannelRouterService } from '../wa-router/channel-router.service'
 
 export type MessagingChannel = 'whatsapp' | 'instagram' | 'tiktok'
 export type TriggerEvent =
@@ -55,6 +57,8 @@ export class MessagingService {
     private readonly renderer: TemplateRendererService,
     private readonly waConfig: WhatsAppConfigService,
     private readonly waSender: WhatsAppSender,
+    private readonly unifiedWa: UnifiedWhatsAppSender,
+    private readonly router:   ChannelRouterService,
   ) {}
 
   // ── Templates ───────────────────────────────────────────────────────────
@@ -143,14 +147,9 @@ export class MessagingService {
       return { ok: false, rendered, error: `Canal ${tpl.channel} ainda não implementado` }
     }
 
-    const cfg = await this.waConfig.findActive(orgId)
-    if (!cfg) return { ok: false, rendered, error: 'WhatsApp Business não configurado' }
-
-    const result = await this.waSender.sendTextMessage({
-      phone:    input.phone,
-      message:  rendered,
-      waConfig: cfg,
-    })
+    // Preview usa purpose='customer_campaign' (mesmo que vai disparar
+    // depois). Router decide canal.
+    const result = await this.unifiedWa.send(orgId, 'customer_campaign', input.phone, rendered)
 
     await supabaseAdmin.from('messaging_sends').insert({
       organization_id: orgId,
@@ -394,8 +393,10 @@ export class MessagingService {
     if (!tpl)                       throw new NotFoundException('template não encontrado')
     if (tpl.channel !== 'whatsapp') throw new BadRequestException(`Canal ${tpl.channel} não implementado`)
 
-    const cfg = await this.waConfig.findActive(orgId)
-    if (!cfg) throw new BadRequestException('WhatsApp Business não configurado')
+    // Verifica se há canal disponível pra purpose 'customer_campaign'
+    // antes de iterar customers (fail-fast). Sender unifica Baileys/Meta.
+    const route = await this.router.resolveChannel(orgId, 'customer_campaign')
+    if (!route) throw new BadRequestException('Sem canal WhatsApp configurado pra campanhas')
 
     let q = supabaseAdmin
       .from('unified_customers')
@@ -424,11 +425,7 @@ export class MessagingService {
         nome: c.display_name ?? '',
         loja: 'Vazzo',
       })
-      const result = await this.waSender.sendTextMessage({
-        phone:    c.phone as string,
-        message:  rendered,
-        waConfig: cfg,
-      })
+      const result = await this.unifiedWa.send(orgId, 'customer_campaign', c.phone as string, rendered)
       await supabaseAdmin.from('messaging_sends').insert({
         organization_id: orgId,
         template_id:     input.template_id,
@@ -483,14 +480,7 @@ export class MessagingService {
       loja: 'Vazzo',
     })
 
-    const cfg = await this.waConfig.findActive(orgId)
-    if (!cfg) return { success: false, error: 'WhatsApp Business não configurado' }
-
-    const result = await this.waSender.sendTextMessage({
-      phone:    customer.phone as string,
-      message:  rendered,
-      waConfig: cfg,
-    })
+    const result = await this.unifiedWa.send(orgId, 'customer_campaign', customer.phone as string, rendered)
 
     const { data: sendRow } = await supabaseAdmin
       .from('messaging_sends').insert({
