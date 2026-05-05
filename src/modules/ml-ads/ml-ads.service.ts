@@ -319,6 +319,128 @@ export class MlAdsService {
     return rows.map(r => ({ ...r, campaign_id: r.campaign_id ?? campaignId }))
   }
 
+  // ── Campaign mutations (pause/resume/budget) ──────────────────────────────
+
+  /**
+   * Atualiza status e/ou daily_budget de uma campanha no ML Ads + DB local.
+   * Resolve advertiser_id e type a partir do row local pra montar a URL certa.
+   *
+   * Status values aceitos pela API ML: 'active' | 'paused'.
+   * Budget é decimal em BRL (mesma unidade do daily_budget).
+   */
+  async updateCampaign(
+    orgId:      string,
+    campaignId: string,
+    patch:      { status?: 'active' | 'paused'; daily_budget?: number },
+  ): Promise<{ id: string; status: string | null; daily_budget: number | null }> {
+    if (patch.status === undefined && patch.daily_budget === undefined) {
+      throw new HttpException('patch vazio', 400)
+    }
+    if (patch.status && !['active', 'paused'].includes(patch.status)) {
+      throw new HttpException('status deve ser active ou paused', 400)
+    }
+    if (patch.daily_budget !== undefined && (patch.daily_budget < 0 || !Number.isFinite(patch.daily_budget))) {
+      throw new HttpException('daily_budget inválido', 400)
+    }
+
+    // 1. Pega campaign do DB pra resolver advertiser_id + type
+    const { data: camp, error: cErr } = await supabaseAdmin
+      .from('ml_ads_campaigns')
+      .select('id, advertiser_id, type, status, daily_budget')
+      .eq('organization_id', orgId)
+      .eq('id', campaignId)
+      .maybeSingle()
+    if (cErr)  throw new HttpException(cErr.message, 500)
+    if (!camp) throw new HttpException('campanha não encontrada', 404)
+
+    const product = this.productFromType(camp.type as string | null)
+    const segment = this.productPath(product)
+    const headers = await this.authHeaders(orgId)
+    const url     = `${ML_BASE}/advertising/advertisers/${camp.advertiser_id}/${segment}/campaigns/${campaignId}`
+
+    // 2. Body do PATCH ML
+    //    Brand/Product Ads aceita status (active/paused) e budget (objeto com amount).
+    const body: Record<string, unknown> = {}
+    if (patch.status !== undefined) body.status = patch.status
+    if (patch.daily_budget !== undefined) body.budget = { amount: patch.daily_budget, currency: 'BRL' }
+
+    try {
+      await axios.put(url, body, { headers })
+    } catch (e: any) {
+      const status = e?.response?.status ?? '?'
+      const detail = e?.response?.data?.message ?? e?.response?.data?.error ?? e?.message ?? ''
+      this.logger.warn(`[ml-ads.update.${status}] ${product}/${campaignId}: ${detail}`)
+      throw new HttpException(`ML rejeitou: ${detail}`, status === 401 ? 401 : 400)
+    }
+
+    // 3. Espelha no DB local (sem esperar próximo sync)
+    const dbPatch: Record<string, unknown> = { synced_at: new Date().toISOString() }
+    if (patch.status !== undefined)        dbPatch.status        = patch.status
+    if (patch.daily_budget !== undefined)  dbPatch.daily_budget  = patch.daily_budget
+
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('ml_ads_campaigns')
+      .update(dbPatch)
+      .eq('organization_id', orgId)
+      .eq('id', campaignId)
+      .select('id, status, daily_budget')
+      .single()
+    if (uErr) throw new HttpException(uErr.message, 500)
+
+    this.logger.log(`[ml-ads.update] org=${orgId} ${campaignId} ${JSON.stringify(patch)}`)
+    return updated as { id: string; status: string | null; daily_budget: number | null }
+  }
+
+  /**
+   * Mapeia campaign.type (campo legado: 'PADS'|'BADS'|'DISPLAY' ou
+   * 'product_ads'|'brand_ads' ou ainda apenas o sub-tipo do ML Ads que cai
+   * no PADS por default) pro product code que a API ML aceita.
+   */
+  private productFromType(type: string | null): 'PADS' | 'BADS' | 'DISPLAY' {
+    const t = (type ?? '').toUpperCase()
+    if (t.includes('BAD') || t.includes('BRAND'))   return 'BADS'
+    if (t.includes('DISPLAY'))                       return 'DISPLAY'
+    return 'PADS'
+  }
+
+  /** Retorna a lista de items (item_ids) vinculados à campanha + lookup
+   * pra products.ml_listing_id quando possível. */
+  async getCampaignItems(orgId: string, campaignId: string): Promise<Array<{ item_id: string; product_id?: string; product_name?: string; sku?: string }>> {
+    const { data: camp, error: cErr } = await supabaseAdmin
+      .from('ml_ads_campaigns')
+      .select('items')
+      .eq('organization_id', orgId)
+      .eq('id', campaignId)
+      .maybeSingle()
+    if (cErr)  throw new HttpException(cErr.message, 500)
+    if (!camp) return []
+
+    const itemsRaw = (camp.items ?? []) as Array<unknown>
+    const itemIds  = itemsRaw
+      .map(i => (typeof i === 'string' ? i : (i as { item_id?: string })?.item_id))
+      .filter((x): x is string => !!x)
+    if (itemIds.length === 0) return []
+
+    // Match com products via ml_listing_id pra enriquecer com nome+sku
+    const { data: products } = await supabaseAdmin
+      .from('products')
+      .select('id, ml_listing_id, name, sku')
+      .eq('organization_id', orgId)
+      .in('ml_listing_id', itemIds)
+    const byListing = new Map<string, { id: string; name: string | null; sku: string | null }>()
+    for (const p of (products ?? []) as Array<{ id: string; ml_listing_id: string; name: string | null; sku: string | null }>) {
+      byListing.set(p.ml_listing_id, p)
+    }
+
+    return itemIds.map(item_id => {
+      const p = byListing.get(item_id)
+      return {
+        item_id,
+        ...(p ? { product_id: p.id, product_name: p.name ?? undefined, sku: p.sku ?? undefined } : {}),
+      }
+    })
+  }
+
   /** Tolerant on shape. PADS returns an array of per-campaign rows; BADS
    * returns a per-advertiser dashboard with a series per metric:
    *   { dashboard: { prints: [{x: "YYYY-MM-DD", y: 123}], clicks: [...], ... } }

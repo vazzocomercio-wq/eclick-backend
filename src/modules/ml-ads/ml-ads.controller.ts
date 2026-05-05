@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, UseGuards, HttpCode, HttpStatus,
+  Controller, Get, Post, Patch, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
   BadRequestException,
 } from '@nestjs/common'
 import { MlAdsService } from './ml-ads.service'
@@ -105,6 +105,28 @@ export class MlAdsController {
         reports: 0,
         message: err?.message ?? 'Erro durante sync',
       }
+    }
+  }
+
+  @Patch('campaigns/:id')
+  async updateCampaign(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { status?: 'active' | 'paused'; daily_budget?: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.updateCampaign(u.orgId, id, body ?? {})
+  }
+
+  @Get('campaigns/:id/items')
+  async getCampaignItems(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    try {
+      return await this.svc.getCampaignItems(u.orgId, id)
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] items erro:', err?.message)
+      return []
     }
   }
 }
