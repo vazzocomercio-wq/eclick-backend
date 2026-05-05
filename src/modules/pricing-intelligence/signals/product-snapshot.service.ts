@@ -182,21 +182,75 @@ export class ProductSnapshotService {
   }
 
   private async fetchAds(orgId: string, productId: string): Promise<ProductSnapshot['ads']> {
+    // FIX PRC-3: antes ctr/roas/acos sempre eram null → triggers ctr_drop,
+    // high_roas e active_ads (com base em performance) ficavam mortos.
+    // Agora agrega ml_ads_reports últimos 7d das campaigns que contêm o
+    // ml_listing_id deste produto.
     try {
-      // Best-effort: ml_ads_campaigns ou similar. Se não existir, retorna nulls.
-      const { data } = await supabaseAdmin
-        .from('ml_ads_campaigns').select('id, items, is_active')
-        .eq('organization_id', orgId).eq('is_active', true)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const campaigns = (data ?? []) as any[]
-      const inActiveCampaign = campaigns.some(c =>
-        Array.isArray(c.items) && c.items.some((it: { product_id?: string }) => it.product_id === productId),
-      )
-      return {
-        ctr_7d: null, roas_7d: null, acos_7d: null,
-        in_active_campaign: inActiveCampaign,
+      // 1. Resolve ml_listing_id do produto
+      const { data: prod } = await supabaseAdmin
+        .from('products').select('ml_listing_id')
+        .eq('id', productId).eq('organization_id', orgId).maybeSingle()
+      const listingId = (prod as { ml_listing_id?: string | null } | null)?.ml_listing_id
+      if (!listingId) {
+        return { ctr_7d: null, roas_7d: null, acos_7d: null, in_active_campaign: false }
       }
-    } catch {
+
+      // 2. Campaigns ativas da org que contêm esse listing_id em items[]
+      const { data: campaignsData } = await supabaseAdmin
+        .from('ml_ads_campaigns').select('id, items, is_active, status')
+        .eq('organization_id', orgId)
+        .eq('is_active', true)
+      const campaigns = (campaignsData ?? []) as Array<{ id: string; items: unknown; is_active: boolean; status: string | null }>
+
+      const matchingCampIds: string[] = []
+      for (const c of campaigns) {
+        const items = Array.isArray(c.items) ? c.items : []
+        const has = items.some((it: unknown) =>
+          (typeof it === 'string' && it === listingId) ||
+          (typeof it === 'object' && it !== null && (it as { item_id?: string }).item_id === listingId),
+        )
+        if (has) matchingCampIds.push(c.id)
+      }
+
+      if (matchingCampIds.length === 0) {
+        return { ctr_7d: null, roas_7d: null, acos_7d: null, in_active_campaign: false }
+      }
+
+      // 3. Reports últimos 7d agregados pra essas campaigns
+      const since = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10)
+      const { data: reportsData } = await supabaseAdmin
+        .from('ml_ads_reports')
+        .select('clicks, impressions, spend, revenue, conversions')
+        .eq('organization_id', orgId)
+        .in('campaign_id', matchingCampIds)
+        .gte('date', since)
+
+      const reports = (reportsData ?? []) as Array<{
+        clicks: number | null; impressions: number | null
+        spend: number | null; revenue: number | null; conversions: number | null
+      }>
+
+      let clicks = 0, impressions = 0, spend = 0, revenue = 0
+      for (const r of reports) {
+        clicks      += Number(r.clicks ?? 0)
+        impressions += Number(r.impressions ?? 0)
+        spend       += Number(r.spend ?? 0)
+        revenue     += Number(r.revenue ?? 0)
+      }
+
+      const ctr_7d  = impressions > 0 ? clicks / impressions     : null
+      const roas_7d = spend       > 0 ? revenue / spend          : null
+      const acos_7d = revenue     > 0 ? spend   / revenue        : null
+
+      return {
+        ctr_7d,
+        roas_7d,
+        acos_7d,
+        in_active_campaign: true,
+      }
+    } catch (e) {
+      this.logger.warn(`[snapshot.ads] ${(e as Error).message}`)
       return { ctr_7d: null, roas_7d: null, acos_7d: null, in_active_campaign: false }
     }
   }
