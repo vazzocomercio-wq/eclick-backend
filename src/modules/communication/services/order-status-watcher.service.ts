@@ -45,17 +45,25 @@ export class OrderStatusWatcherService {
     }
   }
 
-  /** Exposto pra POST admin (futuro) e testes. Retorna {checked, unblocked}. */
-  async tick(): Promise<{ checked: number; unblocked: number }> {
-    // Busca runs paused com order_id (não trata runs sem order — não tem
-    // o que watchear). Cap 500 por tick pra evitar travada em orgs grandes.
-    const { data: runs, error } = await supabaseAdmin
+  /** Exposto pra POST admin (futuro) e testes. Retorna {checked, unblocked}.
+   *
+   * Multi-tenant: query global respeitada porque cada `processRun` usa
+   * `run.organization_id` próprio em todas as derivações. O cap 500 ainda
+   * é shared entre orgs, mas isso é aceitável (watcher só observa, não
+   * envia mensagens; queue starvation nesse cron é menos sério que CC-1).
+   *
+   * Pra fairness real, seria possível iterar por org com cap individual —
+   * mas o ROI é baixo aqui dado que processRun é I/O leve. */
+  async tick(opts: { orgId?: string } = {}): Promise<{ checked: number; unblocked: number }> {
+    let q = supabaseAdmin
       .from('messaging_journey_runs')
       .select('id, journey_id, order_id, current_step, organization_id, context, updated_at')
       .eq('status', 'pending')
       .is('next_step_at', null)
       .not('order_id', 'is', null)
       .limit(500)
+    if (opts.orgId) q = q.eq('organization_id', opts.orgId)
+    const { data: runs, error } = await q
 
     if (error) {
       this.logger.error(`[CC-3.fetch] ${error.message}`)
@@ -76,11 +84,12 @@ export class OrderStatusWatcherService {
   }
 
   private async processRun(run: Record<string, Json>): Promise<boolean> {
-    // Step atual da journey
+    // Step atual da journey — filtra por org pra evitar collision UUID (defesa)
     const { data: journey } = await supabaseAdmin
       .from('messaging_journeys')
       .select('steps, is_active')
       .eq('id', run.journey_id)
+      .eq('organization_id', run.organization_id as string)
       .maybeSingle()
     if (!journey?.is_active) return false
     const steps = (journey.steps ?? []) as JourneyStepRow[]
@@ -104,6 +113,7 @@ export class OrderStatusWatcherService {
     const { data: order } = await supabaseAdmin
       .from('orders')
       .select('shipping_status')
+      .eq('organization_id', run.organization_id as string)
       .eq('external_order_id', run.order_id as string)
       .maybeSingle()
     const actual = (order?.shipping_status as string | null | undefined) ?? null

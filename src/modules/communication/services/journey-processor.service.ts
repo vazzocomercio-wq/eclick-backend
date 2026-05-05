@@ -77,14 +77,21 @@ export class JourneyProcessorService {
     if (this.isRunning) return // evita overlap se cron disparar antes do anterior terminar
     this.isRunning = true
     try {
-      const r = await this.processPending(10)
-      if (r.processed > 0) {
-        const counts = r.results.reduce<Record<string, number>>((m, x) => {
-          m[x.final_state] = (m[x.final_state] ?? 0) + 1
-          return m
-        }, {})
-        const summary = Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')
-        this.logger.log(`[CC-1.cron] ${r.processed} processadas | ${summary} — ${r.total_duration_ms}ms`)
+      // Multi-tenant: itera por orgs distintas com OCJs pending pra evitar
+      // que uma org com fila grande sufoque outras (fairness).
+      const orgIds = await this.listOrgsWithPending()
+      if (orgIds.length === 0) return
+
+      let totalProcessed = 0
+      const totalCounts: Record<string, number> = {}
+      for (const orgId of orgIds) {
+        const r = await this.processPending({ orgId, limit: 10 })
+        totalProcessed += r.processed
+        for (const x of r.results) totalCounts[x.final_state] = (totalCounts[x.final_state] ?? 0) + 1
+      }
+      if (totalProcessed > 0) {
+        const summary = Object.entries(totalCounts).map(([k, v]) => `${k}=${v}`).join(' ')
+        this.logger.log(`[CC-1.cron] orgs=${orgIds.length} processadas=${totalProcessed} | ${summary}`)
       }
     } catch (e: unknown) {
       this.logger.error(`[CC-1.cron] tick falhou: ${(e as Error)?.message}`)
@@ -93,17 +100,41 @@ export class JourneyProcessorService {
     }
   }
 
-  /** Processa até `limit` jornadas pending. Cada uma é isolada em try/catch
-   * — exceções viram state='failed' + last_error, nunca derrubam o loop. */
-  async processPending(limit = 10): Promise<ProcessPendingResponse> {
-    const t0 = Date.now()
+  /** Lista orgs distintas que têm OCJs pending — usado pelo cron pra
+   * processar uma por uma (round-robin barato). */
+  private async listOrgsWithPending(): Promise<string[]> {
+    const { data, error } = await supabaseAdmin
+      .from('order_communication_journeys')
+      .select('organization_id')
+      .eq('state', 'pending')
+      .limit(1000)
+    if (error) {
+      this.logger.error(`[CC-1.orgs] ${error.message}`)
+      return []
+    }
+    return [...new Set((data ?? []).map(r => r.organization_id as string).filter(Boolean))]
+  }
 
-    const { data: pending, error } = await supabaseAdmin
+  /** Processa até `limit` jornadas pending por org. Itera por todas orgs com
+   * OCJs pending pra evitar starvation entre orgs (multi-tenant). Quando
+   * `opts.orgId` é passado, processa só aquela org (manual/admin trigger).
+   *
+   * Cada OCJ é isolada em try/catch — exceções viram state='failed' +
+   * last_error, nunca derrubam o loop. */
+  async processPending(opts: { orgId?: string; limit?: number } = {}): Promise<ProcessPendingResponse> {
+    const t0 = Date.now()
+    const limit = opts.limit ?? 10
+    const cap   = Math.min(Math.max(limit, 1), 100)
+
+    let q = supabaseAdmin
       .from('order_communication_journeys')
       .select('*')
       .eq('state', 'pending')
       .order('created_at', { ascending: true })
-      .limit(Math.min(Math.max(limit, 1), 100))
+      .limit(cap)
+    if (opts.orgId) q = q.eq('organization_id', opts.orgId)
+
+    const { data: pending, error } = await q
 
     if (error) {
       this.logger.error(`[CC-1.fetch] falhou: ${error.message}`)

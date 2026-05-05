@@ -554,8 +554,12 @@ export class MessagingService {
     const tplIds = [...new Set(all.map(s => s.template_id).filter(Boolean) as string[])]
     let tplMap = new Map<string, string>()
     if (tplIds.length > 0) {
+      // FIX multi-tenant: filtra por org junto com in(ids) — defesa contra
+      // collision (UUID v4 quase impossível, mas zero overhead).
       const { data: tpls } = await supabaseAdmin
-        .from('messaging_templates').select('id, name').in('id', tplIds)
+        .from('messaging_templates').select('id, name')
+        .eq('organization_id', orgId)
+        .in('id', tplIds)
       tplMap = new Map((tpls ?? []).map(t => [t.id as string, t.name as string]))
     }
     const byTplMap = new Map<string, { sent: number; delivered: number; read: number; failed: number }>()

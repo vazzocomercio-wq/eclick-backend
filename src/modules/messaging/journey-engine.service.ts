@@ -48,18 +48,26 @@ export class JourneyEngineService {
   }
 
   /** Idêntico ao tick, mas chamável via POST /messaging/runs/process-now
-   * pra debug/testes manuais sem esperar 5min do cron. */
-  async runOnce(): Promise<{ processed: number; sent: number; failed: number; completed: number; duration_ms: number }> {
+   * pra debug/testes manuais sem esperar 5min do cron.
+   *
+   * Multi-tenant: aceita orgId opcional. Sem orgId, query continua global
+   * (cap 200) — runs herdam organization_id próprio em todas as
+   * derivações, evitando vazamento. Com orgId, processa só aquela org
+   * (admin trigger). */
+  async runOnce(opts: { orgId?: string } = {}): Promise<{ processed: number; sent: number; failed: number; completed: number; duration_ms: number }> {
     const t0 = Date.now()
     let processed = 0, sent = 0, failed = 0, completed = 0
 
-    const { data: runs, error } = await supabaseAdmin
+    let q = supabaseAdmin
       .from('messaging_journey_runs')
       .select('*')
       .in('status', ['pending', 'active'])
       .lte('next_step_at', new Date().toISOString())
       .order('next_step_at', { ascending: true })
       .limit(200)
+    if (opts.orgId) q = q.eq('organization_id', opts.orgId)
+
+    const { data: runs, error } = await q
     if (error) {
       this.logger.error(`[messaging.cron] fetch falhou: ${error.message}`)
       return { processed: 0, sent: 0, failed: 0, completed: 0, duration_ms: Date.now() - t0 }
@@ -96,17 +104,19 @@ export class JourneyEngineService {
    * desbloqueia rows que ainda estão paused matching. CC-3 cron faz a
    * mesma coisa em loop @5min — esse método é o caminho rápido. */
   async triggerOrderEvent(
+    orgId:   string,
     orderId: string,
     event:   'ready_to_ship' | 'shipped' | 'delivered',
   ): Promise<{ unblocked: number; checked: number }> {
     const { data: runs } = await supabaseAdmin
       .from('messaging_journey_runs')
-      .select('id, journey_id, current_step')
+      .select('id, journey_id, current_step, organization_id')
+      .eq('organization_id', orgId)
       .eq('status', 'pending')
       .is('next_step_at', null)
       .eq('order_id', orderId)
     if (!runs?.length) {
-      this.logger.log(`[messaging.event] order=${orderId} event=${event} unblocked=0/0 (sem runs paused)`)
+      this.logger.log(`[messaging.event] org=${orgId} order=${orderId} event=${event} unblocked=0/0 (sem runs paused)`)
       return { unblocked: 0, checked: 0 }
     }
 
@@ -114,7 +124,9 @@ export class JourneyEngineService {
     for (const run of runs) {
       const { data: journey } = await supabaseAdmin
         .from('messaging_journeys').select('steps, is_active')
-        .eq('id', run.journey_id as string).maybeSingle()
+        .eq('id', run.journey_id as string)
+        .eq('organization_id', orgId)
+        .maybeSingle()
       if (!journey?.is_active) continue
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const steps = (journey.steps ?? []) as any[]
@@ -142,7 +154,7 @@ export class JourneyEngineService {
         .eq('id', run.id as string)
       unblocked++
     }
-    this.logger.log(`[messaging.event] order=${orderId} event=${event} unblocked=${unblocked}/${runs.length}`)
+    this.logger.log(`[messaging.event] org=${orgId} order=${orderId} event=${event} unblocked=${unblocked}/${runs.length}`)
     return { unblocked, checked: runs.length }
   }
 
@@ -151,6 +163,7 @@ export class JourneyEngineService {
       .from('messaging_journeys')
       .select('id, organization_id, steps, is_active')
       .eq('id', run.journey_id)
+      .eq('organization_id', run.organization_id)
       .maybeSingle()
     if (!journey || !journey.is_active) {
       await this.markRun(run.id, 'failed')
@@ -336,10 +349,13 @@ export class JourneyEngineService {
     orgId: string,
   ): Promise<TemplateRow | null> {
     if (spec.template_id) {
+      // FIX multi-tenant: filtra por org junto com id pra defender contra
+      // colisão (improvável com UUID v4 mas é zero overhead).
       const { data } = await supabaseAdmin
         .from('messaging_templates')
         .select('id, channel, name, message_body')
         .eq('id', spec.template_id)
+        .eq('organization_id', orgId)
         .maybeSingle()
       return (data as TemplateRow | null) ?? null
     }

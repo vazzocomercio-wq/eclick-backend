@@ -9,11 +9,16 @@ export class AdminCommunicationController {
 
   /** POST /admin/communication/process-pending — dispara processPending()
    * sem esperar cron. Auth via header `x-admin-secret` (env ADMIN_SECRET).
-   * Útil pra testes manuais e GitHub Actions. */
+   * Útil pra testes manuais e GitHub Actions.
+   *
+   * Body opcional: { org_id?, limit? }. Sem org_id processa todas as orgs
+   * com OCJs pending, igual o cron faz. Com org_id processa só aquela. */
   @Post('process-pending')
   @HttpCode(HttpStatus.OK)
-  processPending(@Body() body?: { limit?: number }) {
-    const limit = body?.limit ?? 10
-    return this.processor.processPending(limit)
+  processPending(@Body() body?: { org_id?: string; limit?: number }) {
+    return this.processor.processPending({
+      orgId: body?.org_id,
+      limit: body?.limit ?? 10,
+    })
   }
 }

@@ -211,12 +211,12 @@ export class MessagingController {
   }
 
   /** POST /messaging/runs/process-now — força tick do JourneyEngine sem
-   * esperar cron. Útil pra testes manuais e debug. */
+   * esperar cron. Processa apenas runs da org do JWT (multi-tenant). */
   @Post('runs/process-now')
   @HttpCode(HttpStatus.OK)
   processNow(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    return this.engine.runOnce()
+    return this.engine.runOnce({ orgId: user.orgId })
   }
 
   @Get('runs/:id')
