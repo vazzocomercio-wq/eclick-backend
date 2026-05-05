@@ -129,9 +129,134 @@ const PATTERN_PROMO_AGRESSIVA: NamedPattern = {
   },
 }
 
+// ── Padrão 5: ads gastando + ROAS alto ────────────────────────────────────────
+// "Campanha rentável — escalar investimento"
+const PATTERN_ESCALA_ADS: NamedPattern = {
+  name: 'ads_escalar',
+  match(signals) {
+    const performance = findCat(signals, 'ads',     'performance_alta')
+    const margemBoa   = findCat(signals, 'margem',  'margem_alta')
+    if (!performance || !margemBoa) return null
+
+    const name = performance.entity_name ?? margemBoa.entity_name ?? 'Produto'
+    return {
+      category:  'ads_escalar',
+      severity:  'info',
+      score:     60,
+      summary_pt:
+        `${name}: campanha com ROAS alto + margem alta. ` +
+        `Cenário ideal pra aumentar daily_budget e capturar mais demanda.`,
+      suggestion_pt:
+        'Considerar 50-100% de aumento no daily budget — produto suporta a escala.',
+      source_signals: [performance, margemBoa],
+    }
+  },
+}
+
+// ── Padrão 6: ads sem conversão + estoque baixo ───────────────────────────────
+// "Pausar ads que tá queimando dinheiro num produto que vai acabar de qualquer jeito"
+const PATTERN_PARAR_ADS_RUPTURA: NamedPattern = {
+  name: 'parar_ads_ruptura',
+  match(signals) {
+    const adsZero  = findCat(signals, 'ads',     'sem_conversao', 'roas_baixo')
+    const ruptura  = findCat(signals, 'estoque', 'ruptura_iminente', 'estoque_baixo')
+    if (!adsZero || !ruptura) return null
+
+    const name = adsZero.entity_name ?? ruptura.entity_name ?? 'Produto'
+    return {
+      category:  'parar_ads_ruptura',
+      severity:  'warning',
+      score:     70,
+      summary_pt:
+        `${name}: ads gastando sem retorno + estoque acabando. ` +
+        `Manter campanha aqui é desperdício duplo.`,
+      suggestion_pt:
+        'Pausar campanha imediatamente; reativar só após reposição do estoque.',
+      source_signals: [adsZero, ruptura],
+    }
+  },
+}
+
+// ── Padrão 7: margem crítica + preço já abaixo ────────────────────────────────
+// "Tá vendendo no prejuízo e não dá pra abaixar mais — revisar custo, não preço"
+const PATTERN_PREJUIZO_INEVITAVEL: NamedPattern = {
+  name: 'prejuizo_estrutural',
+  match(signals) {
+    const margemRuim = findCat(signals, 'margem', 'margem_critica')
+    const precoBaixo = findCat(signals, 'preco',  'preco_competitivo')
+    if (!margemRuim || !precoBaixo) return null
+
+    const name = margemRuim.entity_name ?? 'Produto'
+    return {
+      category:  'prejuizo_estrutural',
+      severity:  'critical',
+      score:     88,
+      summary_pt:
+        `${name}: margem crítica E já abaixo do mercado. ` +
+        `Não dá pra resolver via preço — é estrutural (custo, frete, taxa).`,
+      suggestion_pt:
+        'Renegociar custo com fornecedor, revisar frete/taxas ou descontinuar SKU.',
+      source_signals: [margemRuim, precoBaixo],
+    }
+  },
+}
+
+// ── Padrão 8: PO chegando + estoque baixo ─────────────────────────────────────
+// "Estoque tá apertado mas reposição confirmada — não panic"
+const PATTERN_REPOSICAO_NO_CAMINHO: NamedPattern = {
+  name: 'reposicao_no_caminho',
+  match(signals) {
+    const baixo     = findCat(signals, 'estoque', 'estoque_baixo', 'ruptura_iminente')
+    const chegando  = findCat(signals, 'compras', 'po_chegando')
+    if (!baixo || !chegando) return null
+
+    const name = baixo.entity_name ?? 'Produto'
+    return {
+      category:  'reposicao_no_caminho',
+      severity:  'info',
+      score:     35,
+      summary_pt:
+        `${name}: estoque apertado mas tem PO chegando nos próximos dias. ` +
+        `Sem ação adicional necessária.`,
+      suggestion_pt:
+        'Apenas garantir recebimento conforme programado.',
+      source_signals: [baixo, chegando],
+    }
+  },
+}
+
+// ── Padrão 9: estoque alto + margem baixa ─────────────────────────────────────
+// "Estoque parado E margem ruim — pior cenário, agir rápido"
+const PATTERN_ESTOQUE_PRESO_BAIXA_MARGEM: NamedPattern = {
+  name: 'estoque_preso_margem_baixa',
+  match(signals) {
+    const estoque = findCat(signals, 'estoque', 'estoque_alto', 'sem_movimento')
+    const margem  = findCat(signals, 'margem',  'margem_critica', 'margem_baixa')
+    if (!estoque || !margem) return null
+
+    const name = estoque.entity_name ?? 'Produto'
+    return {
+      category:  'estoque_preso_margem_baixa',
+      severity:  'warning',
+      score:     72,
+      summary_pt:
+        `${name}: estoque alto + margem baixa. ` +
+        `Capital travado em produto que não rende — precisa decisão.`,
+      suggestion_pt:
+        'Liquidar com desconto agressivo ou descontinuar — segurar custa caro.',
+      source_signals: [estoque, margem],
+    }
+  },
+}
+
 export const CROSS_INTEL_PATTERNS: NamedPattern[] = [
   PATTERN_RUPTURA_PO_ATRASADA,
   PATTERN_ESTOQUE_BAIXO_PRECO_ACIMA,
   PATTERN_MARGEM_ALTA_ESTOQUE_PARADO,
   PATTERN_PROMO_AGRESSIVA,
+  PATTERN_ESCALA_ADS,
+  PATTERN_PARAR_ADS_RUPTURA,
+  PATTERN_PREJUIZO_INEVITAVEL,
+  PATTERN_REPOSICAO_NO_CAMINHO,
+  PATTERN_ESTOQUE_PRESO_BAIXA_MARGEM,
 ]
