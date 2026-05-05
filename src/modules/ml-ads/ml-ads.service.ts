@@ -40,8 +40,12 @@ export class MlAdsService {
   // ML Ads requires Api-Version: 1 on every call — without it the endpoints
   // return 404. Base path is /advertising (NOT /advertising/product_ads) and
   // campaign + metrics calls live under /brand_ads/.
-  private async authHeaders(): Promise<Record<string, string>> {
-    const { token } = await this.ml.getValidToken()
+  //
+  // Multi-tenant: TODAS as chamadas pra ML API recebem orgId — pegamos o
+  // token específico da org via getTokenForOrg, não mais o connections[0]
+  // global do getValidToken (que era o bug que misturava dados entre orgs).
+  private async authHeaders(orgId: string): Promise<Record<string, string>> {
+    const { token } = await this.ml.getTokenForOrg(orgId)
     return {
       Authorization: `Bearer ${token}`,
       'Api-Version': '1',
@@ -60,8 +64,8 @@ export class MlAdsService {
 
   /** Returns the first advertiser found across PADS/BADS/DISPLAY (for the
    * page header). Never throws. */
-  async getAdvertiser(): Promise<{ advertiser_id: string; account_name: string | null } | null> {
-    const all = await this.getAllAdvertisers()
+  async getAdvertiser(orgId: string): Promise<{ advertiser_id: string; account_name: string | null } | null> {
+    const all = await this.getAllAdvertisers(orgId)
     const first = all[0]
     if (!first) return null
     return { advertiser_id: first.advertiser_id, account_name: first.account_name }
@@ -71,8 +75,8 @@ export class MlAdsService {
    * Returns ALL (advertiser_id, product) pairs — same advertiser_id may
    * appear under multiple products, and each product slot owns DIFFERENT
    * campaigns, so we must NOT dedupe by advertiser_id alone. */
-  async getAllAdvertisers(): Promise<Array<{ advertiser_id: string; product: string; account_name: string | null }>> {
-    const headers = await this.authHeaders()
+  async getAllAdvertisers(orgId: string): Promise<Array<{ advertiser_id: string; product: string; account_name: string | null }>> {
+    const headers = await this.authHeaders(orgId)
     const fetches = this.PRODUCTS.map(async product => {
       try {
         const { data } = await axios.get(`${ML_BASE}/advertising/advertisers`, {
@@ -105,8 +109,8 @@ export class MlAdsService {
 
   /** Paginated fetch of all campaigns for one advertiser/product.
    * Loops until ML returns fewer rows than the page size. */
-  async getCampaignsRaw(advertiserId: string, product = 'PADS'): Promise<CampaignRaw[]> {
-    const headers  = await this.authHeaders()
+  async getCampaignsRaw(orgId: string, advertiserId: string, product = 'PADS'): Promise<CampaignRaw[]> {
+    const headers  = await this.authHeaders(orgId)
     const segment  = this.productPath(product)
     const url      = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns`
     const all: CampaignRaw[] = []
@@ -140,16 +144,17 @@ export class MlAdsService {
    * the metrics= csv. Returns DailyMetricRow[] either way.
    */
   async getMetricsRaw(
+    orgId:        string,
     advertiserId: string,
     dateFrom:     string,
     dateTo:       string,
     product = 'PADS',
     _campaignIds: string[] = [],
   ): Promise<DailyMetricRow[]> {
-    if (product === 'PADS') return this.getPadsMetrics(advertiserId, dateFrom, dateTo)
+    if (product === 'PADS') return this.getPadsMetrics(orgId, advertiserId, dateFrom, dateTo)
 
     // BADS / DISPLAY — legacy v1 dashboard endpoint.
-    const headers = await this.authHeaders()
+    const headers = await this.authHeaders(orgId)
     const segment = this.productPath(product)
     const url     = `${ML_BASE}/advertising/advertisers/${advertiserId}/${segment}/campaigns/metrics`
     const params  = { date_from: dateFrom, date_to: dateTo, aggregation_type: 'daily' }
@@ -173,11 +178,12 @@ export class MlAdsService {
    * Output: one DailyMetricRow per (campaign that had activity, day in
    * range), with derived ctr/acos/roas calculated from the totals. */
   private async getPadsMetrics(
+    orgId:        string,
     advertiserId: string,
     dateFrom:     string,
     dateTo:       string,
   ): Promise<DailyMetricRow[]> {
-    const { token } = await this.ml.getValidToken()
+    const { token } = await this.ml.getTokenForOrg(orgId)
     const headers = {
       Authorization: `Bearer ${token}`,
       'Api-Version': '2',
@@ -279,13 +285,14 @@ export class MlAdsService {
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
    * nothing. Stamps campaign_id onto rows that come back without it. */
   async getCampaignMetricsRaw(
+    orgId:        string,
     advertiserId: string,
     campaignId:   string,
     dateFrom:     string,
     dateTo:       string,
     product = 'PADS',
   ): Promise<DailyMetricRow[]> {
-    const headers = await this.authHeaders()
+    const headers = await this.authHeaders(orgId)
     const segment = this.productPath(product)
 
     let url: string
@@ -356,9 +363,9 @@ export class MlAdsService {
   // ── Sync ──────────────────────────────────────────────────────────────────
 
   /** Fetch every advertiser across PADS/BADS/DISPLAY, then their campaigns
-   * and last-30d metrics. Upserts everything into Supabase. */
-  async syncAll(): Promise<{ ok: boolean; advertiser_id: string | null; campaigns: number; reports: number; message?: string }> {
-    const advertisers = await this.getAllAdvertisers()
+   * and last-30d metrics. Upserts everything into Supabase scoped to orgId. */
+  async syncForOrg(orgId: string): Promise<{ ok: boolean; advertiser_id: string | null; campaigns: number; reports: number; message?: string }> {
+    const advertisers = await this.getAllAdvertisers(orgId)
     if (advertisers.length === 0) {
       return { ok: false, advertiser_id: null, campaigns: 0, reports: 0, message: 'Conta sem ML Ads ativo' }
     }
@@ -367,6 +374,7 @@ export class MlAdsService {
     await supabaseAdmin
       .from('ml_ads_campaigns')
       .delete()
+      .eq('organization_id', orgId)
       .in('id', ['undefined', 'null', ''])
 
     // ML Ads only accepts up to yesterday — today's row isn't closed yet.
@@ -380,7 +388,7 @@ export class MlAdsService {
       // Campaigns for this advertiser
       let campaigns: CampaignRaw[] = []
       try {
-        campaigns = await this.getCampaignsRaw(adv.advertiser_id, adv.product)
+        campaigns = await this.getCampaignsRaw(orgId, adv.advertiser_id, adv.product)
       } catch (e: any) {
         this.logger.warn(`[ml-ads.sync] campaigns ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
         continue
@@ -399,16 +407,17 @@ export class MlAdsService {
           const budget = c.budget as { amount?: number } | undefined
           const items  = Array.isArray(c.items) ? c.items : []
           return {
-            id:            sId,
-            advertiser_id: adv.advertiser_id,
-            name:          (c.name ?? c.headline ?? '(sem nome)') as string,
-            status:        (c.status ?? 'active') as string,
-            daily_budget:  (budget?.amount ?? null) as number | null,
-            type:          (c.campaign_type ?? c.type ?? adv.product) as string | null,
-            start_date:    (c.start_date ?? null) as string | null,
-            end_date:      (c.end_date ?? null) as string | null,
+            id:               sId,
+            organization_id:  orgId,
+            advertiser_id:    adv.advertiser_id,
+            name:             (c.name ?? c.headline ?? '(sem nome)') as string,
+            status:           (c.status ?? 'active') as string,
+            daily_budget:     (budget?.amount ?? null) as number | null,
+            type:             (c.campaign_type ?? c.type ?? adv.product) as string | null,
+            start_date:       (c.start_date ?? null) as string | null,
+            end_date:         (c.end_date ?? null) as string | null,
             items,
-            synced_at:     new Date().toISOString(),
+            synced_at:        new Date().toISOString(),
           }
         })
         .filter((r): r is NonNullable<typeof r> => r !== null)
@@ -434,7 +443,7 @@ export class MlAdsService {
       // expose the latter).
       let metrics: DailyMetricRow[] = []
       try {
-        metrics = await this.getMetricsRaw(adv.advertiser_id, dateFrom, dateTo, adv.product)
+        metrics = await this.getMetricsRaw(orgId, adv.advertiser_id, dateFrom, dateTo, adv.product)
       } catch (e: any) {
         this.logger.warn(`[ml-ads.sync] bulk metrics ${adv.product}/${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
       }
@@ -442,7 +451,7 @@ export class MlAdsService {
       if (metrics.length === 0 && adv.product !== 'PADS') {
         for (const c of campaignRows) {
           try {
-            const rows = await this.getCampaignMetricsRaw(adv.advertiser_id, c.id, dateFrom, dateTo, adv.product)
+            const rows = await this.getCampaignMetricsRaw(orgId, adv.advertiser_id, c.id, dateFrom, dateTo, adv.product)
             metrics.push(...rows)
           } catch (e: any) {
             this.logger.warn(`[ml-ads.sync] per-campaign ${c.id}: ${e?.response?.status ?? ''} ${e?.message}`)
@@ -471,17 +480,18 @@ export class MlAdsService {
           if (!cid || !d || cid === 'undefined' || cid === 'null') return null
           const met = (mr.metrics ?? mr) as Record<string, unknown>
           return {
-            campaign_id: cid,
-            date:        d,
-            clicks:      Number(met.clicks ?? 0),
-            impressions: Number(met.prints ?? met.impressions ?? 0),
-            ctr:         Number(met.ctr ?? 0),
-            spend:       Number(met.consumed_budget ?? met.cost ?? met.spend ?? 0),
-            conversions: Number(met.attribution_order_conversions ?? met.conversions ?? 0),
-            revenue:     Number(met.attribution_order_amount ?? met.total_revenue ?? met.revenue ?? 0),
-            roas:        Number(met.roas ?? 0),
-            acos:        Number(met.acos ?? 0),
-            synced_at:   new Date().toISOString(),
+            organization_id: orgId,
+            campaign_id:     cid,
+            date:            d,
+            clicks:          Number(met.clicks ?? 0),
+            impressions:     Number(met.prints ?? met.impressions ?? 0),
+            ctr:             Number(met.ctr ?? 0),
+            spend:           Number(met.consumed_budget ?? met.cost ?? met.spend ?? 0),
+            conversions:     Number(met.attribution_order_conversions ?? met.conversions ?? 0),
+            revenue:         Number(met.attribution_order_amount ?? met.total_revenue ?? met.revenue ?? 0),
+            roas:            Number(met.roas ?? 0),
+            acos:            Number(met.acos ?? 0),
+            synced_at:       new Date().toISOString(),
           }
         })
         .filter((r): r is NonNullable<typeof r> => r !== null)
@@ -495,8 +505,34 @@ export class MlAdsService {
       }
     }
 
-    this.logger.log(`[ml-ads.sync] ${advertisers.length} advertisers, ${totalCampaigns} campanhas, ${totalReports} reports`)
+    this.logger.log(`[ml-ads.sync] org=${orgId} ${advertisers.length} advertisers, ${totalCampaigns} campanhas, ${totalReports} reports`)
     return { ok: true, advertiser_id: advertisers[0].advertiser_id, campaigns: totalCampaigns, reports: totalReports }
+  }
+
+  /** Backwards-compat shim — algumas chamadas legadas ainda chamam syncAll().
+   * Itera por todas as orgs com conexão ML; usado pelo cron e por scripts. */
+  async syncAllOrgs(): Promise<{ orgs: number; total_campaigns: number; total_reports: number }> {
+    const { data: conns, error } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id')
+    if (error) {
+      this.logger.error(`[ml-ads.syncAllOrgs] ${error.message}`)
+      return { orgs: 0, total_campaigns: 0, total_reports: 0 }
+    }
+    const orgIds = [...new Set((conns ?? []).map(c => c.organization_id).filter(Boolean) as string[])]
+    let total_campaigns = 0
+    let total_reports   = 0
+    for (const orgId of orgIds) {
+      try {
+        const r = await this.syncForOrg(orgId)
+        total_campaigns += r.campaigns
+        total_reports   += r.reports
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.syncAllOrgs] org=${orgId}: ${e?.message}`)
+      }
+    }
+    this.logger.log(`[ml-ads.syncAllOrgs] orgs=${orgIds.length} campaigns=${total_campaigns} reports=${total_reports}`)
+    return { orgs: orgIds.length, total_campaigns, total_reports }
   }
 
   // ── Read endpoints ────────────────────────────────────────────────────────
@@ -527,10 +563,11 @@ export class MlAdsService {
     }
   }
 
-  async listCampaigns() {
+  async listCampaigns(orgId: string) {
     const { data, error } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .select('id, advertiser_id, name, status, daily_budget, type, start_date, end_date, synced_at')
+      .eq('organization_id', orgId)
       .order('name', { ascending: true })
     if (error) {
       if (this.isMissingTableError(error)) return []
@@ -539,10 +576,11 @@ export class MlAdsService {
     return data ?? []
   }
 
-  async getSummaryReport(dateFrom: string, dateTo: string) {
+  async getSummaryReport(orgId: string, dateFrom: string, dateTo: string) {
     const { data, error } = await supabaseAdmin
       .from('ml_ads_reports')
       .select('date, clicks, impressions, spend, conversions, revenue')
+      .eq('organization_id', orgId)
       .gte('date', dateFrom)
       .lte('date', dateTo)
       .order('date', { ascending: true })
@@ -596,10 +634,11 @@ export class MlAdsService {
   }
 
   /** Per-campaign aggregation for the table view. */
-  async getCampaignAggregation(dateFrom: string, dateTo: string) {
+  async getCampaignAggregation(orgId: string, dateFrom: string, dateTo: string) {
     const { data: campaigns, error: cErr } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .select('id, name, status, daily_budget, type')
+      .eq('organization_id', orgId)
     if (cErr) {
       if (this.isMissingTableError(cErr)) return []
       throw new HttpException(cErr.message, 500)
@@ -609,6 +648,7 @@ export class MlAdsService {
     const { data: reports, error: rErr } = await supabaseAdmin
       .from('ml_ads_reports')
       .select('campaign_id, clicks, impressions, spend, conversions, revenue')
+      .eq('organization_id', orgId)
       .gte('date', dateFrom)
       .lte('date', dateTo)
     if (rErr && !this.isMissingTableError(rErr)) {
@@ -646,10 +686,11 @@ export class MlAdsService {
     })
   }
 
-  async getCampaignDailySeries(campaignId: string, dateFrom: string, dateTo: string) {
+  async getCampaignDailySeries(orgId: string, campaignId: string, dateFrom: string, dateTo: string) {
     const { data, error } = await supabaseAdmin
       .from('ml_ads_reports')
       .select('date, clicks, impressions, spend, conversions, revenue, roas, acos, ctr')
+      .eq('organization_id', orgId)
       .eq('campaign_id', campaignId)
       .gte('date', dateFrom)
       .lte('date', dateTo)
@@ -666,7 +707,7 @@ export class MlAdsService {
   @Cron('0 */6 * * *')
   async scheduledSync() {
     try {
-      await this.syncAll()
+      await this.syncAllOrgs()
     } catch (e: any) {
       this.logger.error(`[ml-ads.cron] ${e?.message}`)
     }

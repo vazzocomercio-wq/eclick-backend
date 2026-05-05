@@ -21,11 +21,12 @@ export class ContextBuilderService {
   private readonly logger = new Logger(ContextBuilderService.name)
 
   /** All campaigns + their last-30d aggregated metrics. */
-  async loadCampaignsContext(_orgId: string): Promise<CampaignContext[]> {
+  async loadCampaignsContext(orgId: string): Promise<CampaignContext[]> {
     try {
       const { data: campaigns } = await supabaseAdmin
         .from('ml_ads_campaigns')
         .select('id, name, status, daily_budget, type, items')
+        .eq('organization_id', orgId)
 
       if (!campaigns?.length) return []
 
@@ -34,6 +35,7 @@ export class ContextBuilderService {
       const { data: reports } = await supabaseAdmin
         .from('ml_ads_reports')
         .select('campaign_id, date, clicks, impressions, spend, revenue, ctr, roas, acos, conversions')
+        .eq('organization_id', orgId)
         .in('campaign_id', ids)
         .gte('date', dateFrom)
         .order('date', { ascending: true })

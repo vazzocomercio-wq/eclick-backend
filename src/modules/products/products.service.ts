@@ -77,7 +77,7 @@ export class ProductsService {
     // Set de listings em campanha ativa pra os filtros in_ads / no_ads
     let adsListingIds: Set<string> | null = null
     if (opts.quick_filter === 'in_ads' || opts.quick_filter === 'no_ads') {
-      adsListingIds = await this.getActiveAdsListingIds()
+      adsListingIds = await this.getActiveAdsListingIds(orgId)
     }
 
     let q = supabaseAdmin
@@ -126,7 +126,7 @@ export class ProductsService {
         ? supabaseAdmin.from('products').select('ml_listing_id').eq('organization_id', orgId).not('ml_listing_id', 'is', null)
         : supabaseAdmin.from('products').select('ml_listing_id').not('ml_listing_id', 'is', null)
       ),
-      this.getActiveAdsListingIds(),
+      this.getActiveAdsListingIds(orgId),
     ])
 
     const allListings = ((allListingsRes.data ?? []) as Array<{ ml_listing_id: string | null }>)
@@ -142,12 +142,14 @@ export class ProductsService {
     }
   }
 
-  /** Set de ml_listing_id que estão em ml_ads_campaigns ativas. */
-  private async getActiveAdsListingIds(): Promise<Set<string>> {
-    const { data } = await supabaseAdmin
+  /** Set de ml_listing_id que estão em ml_ads_campaigns ativas da org. */
+  private async getActiveAdsListingIds(orgId: string | null): Promise<Set<string>> {
+    let q = supabaseAdmin
       .from('ml_ads_campaigns')
       .select('items')
       .eq('status', 'active')
+    if (orgId) q = q.eq('organization_id', orgId)
+    const { data } = await q
     const out = new Set<string>()
     for (const c of (data ?? []) as Array<{ items?: string[] | null }>) {
       for (const id of (c.items ?? [])) if (typeof id === 'string') out.add(id)

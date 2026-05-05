@@ -1,6 +1,12 @@
-import { Controller, Get, Post, Param, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
+import {
+  Controller, Get, Post, Param, Query, UseGuards, HttpCode, HttpStatus,
+  BadRequestException,
+} from '@nestjs/common'
 import { MlAdsService } from './ml-ads.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { ReqUser } from '../../common/decorators/user.decorator'
+
+interface ReqUserPayload { id: string; orgId: string | null }
 
 const EMPTY_SUMMARY = {
   totals: {
@@ -17,9 +23,10 @@ export class MlAdsController {
   constructor(private readonly svc: MlAdsService) {}
 
   @Get('advertiser')
-  async advertiser() {
+  async advertiser(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      return await this.svc.getAdvertiser()
+      return await this.svc.getAdvertiser(u.orgId)
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] advertiser erro:', err?.message)
@@ -30,12 +37,14 @@ export class MlAdsController {
 
   @Get('campaigns')
   async getCampaigns(
+    @ReqUser() u: ReqUserPayload,
     @Query('from') dateFrom?: string,
     @Query('to')   dateTo?:   string,
   ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      if (dateFrom && dateTo) return await this.svc.getCampaignAggregation(dateFrom, dateTo)
-      return await this.svc.listCampaigns()
+      if (dateFrom && dateTo) return await this.svc.getCampaignAggregation(u.orgId, dateFrom, dateTo)
+      return await this.svc.listCampaigns(u.orgId)
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] campaigns erro:', err?.message)
@@ -46,11 +55,13 @@ export class MlAdsController {
 
   @Get('reports/summary')
   async getSummary(
+    @ReqUser() u: ReqUserPayload,
     @Query('from') dateFrom: string,
     @Query('to')   dateTo:   string,
   ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      return await this.svc.getSummaryReport(dateFrom, dateTo)
+      return await this.svc.getSummaryReport(u.orgId, dateFrom, dateTo)
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] summary erro:', err?.message)
@@ -61,12 +72,14 @@ export class MlAdsController {
 
   @Get('reports/campaign/:id')
   async getCampaignSeries(
+    @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
     @Query('from') dateFrom: string,
     @Query('to')   dateTo:   string,
   ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      return await this.svc.getCampaignDailySeries(id, dateFrom, dateTo)
+      return await this.svc.getCampaignDailySeries(u.orgId, id, dateFrom, dateTo)
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] campaign series erro:', err?.message)
@@ -77,9 +90,10 @@ export class MlAdsController {
 
   @Post('sync')
   @HttpCode(HttpStatus.OK)
-  async sync() {
+  async sync(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      return await this.svc.syncAll()
+      return await this.svc.syncForOrg(u.orgId)
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] sync erro:', err?.message)
