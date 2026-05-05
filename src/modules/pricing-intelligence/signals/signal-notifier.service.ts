@@ -49,29 +49,43 @@ export class SignalNotifierService {
     return stats
   }
 
-  /** Processa pendentes de 1 org. Returns counts. */
+  /** Processa pendentes de 1 org. Returns counts.
+   *
+   * IMPORTANTE: skips (disabled/quiet/weekend/rate-limit) NÃO marcam signals
+   * como `skipped` — deixam `pending` pra retry no próximo ciclo. O bug
+   * original (markSkipped agressivo) fazia signals críticos sumirem
+   * silenciosamente após 1 ciclo de quiet hours.
+   *
+   * Quando o gate fica false (saindo da janela quiet, novo dia pra rate
+   * limit, etc), próximo cron pega os mesmos signals e tenta enviar. */
   async notifyOrg(orgId: string): Promise<{ sent: number; skipped: number; failed: number }> {
     const cfg = await this.settings.getOrCreate(orgId)
     if (!cfg.whatsapp_enabled || !cfg.whatsapp_phone) {
-      await this.markSkipped(orgId, 'disabled')
+      this.logger.debug(`[pricing.notifier] org=${orgId} skip: disabled (kept pending)`)
       return { sent: 0, skipped: 0, failed: 0 }
     }
 
     // Quiet hours / weekend check
     if (this.isQuietNow(cfg)) {
-      await this.markSkipped(orgId, 'quiet_hours')
+      this.logger.debug(`[pricing.notifier] org=${orgId} skip: quiet_hours (kept pending)`)
       return { sent: 0, skipped: 0, failed: 0 }
     }
     if (this.isWeekend() && !cfg.notify_weekends) {
-      await this.markSkipped(orgId, 'weekend')
+      this.logger.debug(`[pricing.notifier] org=${orgId} skip: weekend (kept pending)`)
       return { sent: 0, skipped: 0, failed: 0 }
     }
 
     // Rate limits — conta logs recentes
     const sentThisHour = await this.countSentSince(orgId, 60 * 60_000)
     const sentToday    = await this.countSentSince(orgId, 24 * 60 * 60_000)
-    if (sentThisHour >= cfg.max_per_hour) return { sent: 0, skipped: 0, failed: 0 }
-    if (sentToday    >= cfg.max_per_day)  return { sent: 0, skipped: 0, failed: 0 }
+    if (sentThisHour >= cfg.max_per_hour) {
+      this.logger.debug(`[pricing.notifier] org=${orgId} skip: max_per_hour (${sentThisHour}/${cfg.max_per_hour})`)
+      return { sent: 0, skipped: 0, failed: 0 }
+    }
+    if (sentToday    >= cfg.max_per_day)  {
+      this.logger.debug(`[pricing.notifier] org=${orgId} skip: max_per_day (${sentToday}/${cfg.max_per_day})`)
+      return { sent: 0, skipped: 0, failed: 0 }
+    }
 
     // Busca pendentes filtrando por severities/types do settings
     const { data: pending } = await supabaseAdmin
@@ -219,16 +233,20 @@ export class SignalNotifierService {
       }).in('id', ids)
   }
 
-  private async markSkipped(orgId: string, reason: string): Promise<void> {
-    await supabaseAdmin
-      .from('pricing_signals').update({
-        notification_status: 'skipped',
-        updated_at:          new Date().toISOString(),
-      })
-      .eq('organization_id', orgId)
-      .eq('notification_status', 'pending')
-      .eq('status', 'active')
-    this.logger.log(`[pricing.notifier] org=${orgId} skipped (${reason})`)
+  /**
+   * @deprecated Não usar — bug histórico marcava todos signals pending como
+   * skipped quando havia rate-limit/quiet-hours/disabled, fazendo críticos
+   * sumirem após 1 ciclo. Hoje os skips só dão return; signals ficam
+   * pending e re-tentam no próximo cron.
+   *
+   * Mantido aqui só pra referência caso surja caso de uso intencional
+   * (ex: signal expirado, força admin). Se for usar, restringir por id
+   * específico — não em massa por (org, status).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private async _markSkippedLegacy(orgId: string, reason: string): Promise<void> {
+    void orgId; void reason
+    // intencionalmente vazio
   }
 
   private async logSend(

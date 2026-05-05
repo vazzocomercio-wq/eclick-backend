@@ -122,7 +122,7 @@ export class ProductSnapshotService {
     try {
       const { data: prod } = await supabaseAdmin
         .from('products').select('stock_quantity')
-        .eq('id', productId).maybeSingle()
+        .eq('id', productId).eq('organization_id', orgId).maybeSingle()
       const quantity = (prod?.stock_quantity as number | null) ?? null
 
       // Velocity = sales 30d / 30
@@ -249,13 +249,22 @@ export class ProductSnapshotService {
     }
   }
 
-  private async fetchPriceHistory(_orgId: string, productId: string): Promise<ProductSnapshot['history']> {
+  private async fetchPriceHistory(orgId: string, productId: string): Promise<ProductSnapshot['history']> {
+    // FIX PRC-1: tabela price_history nunca existiu. Antes a função sempre
+    // falhava silencioso retornando null → trigger 'recent_change' (do_not_touch)
+    // nunca disparava. Fallback honesto: products.updated_at é proxy aceitável
+    // (não é exatamente "last price change" mas captura mudanças recentes).
+    //
+    // TODO sprint próprio: criar tabela price_history (org, product_id,
+    // old_price, new_price, changed_at) com hook em UPDATE de products
+    // pra ter timestamp exato de mudança de preço.
     try {
-      // Best-effort: tenta price_history; se não existir, usa products.updated_at
       const { data } = await supabaseAdmin
-        .from('price_history').select('created_at')
-        .eq('product_id', productId).order('created_at', { ascending: false }).limit(1).maybeSingle()
-      const lastChangeAt = (data as { created_at?: string } | null)?.created_at ?? null
+        .from('products').select('updated_at')
+        .eq('id', productId)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      const lastChangeAt = (data as { updated_at?: string } | null)?.updated_at ?? null
       const days = lastChangeAt
         ? Math.floor((Date.now() - new Date(lastChangeAt).getTime()) / 86_400_000)
         : null
