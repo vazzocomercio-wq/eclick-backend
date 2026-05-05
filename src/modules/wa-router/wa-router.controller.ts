@@ -32,6 +32,14 @@ export class WaRouterController {
     return this.router.listAssignments(u.orgId)
   }
 
+  /** GET /wa-router/assignments/channels — lista unificada Baileys + Cloud
+   * pra a UI montar dropdowns. */
+  @Get('channels')
+  channels(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.router.listAvailableChannels(u.orgId)
+  }
+
   @Post()
   upsert(
     @ReqUser() u: ReqUserPayload,

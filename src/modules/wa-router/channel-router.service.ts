@@ -26,6 +26,55 @@ export class ChannelRouterService {
 
   constructor(private readonly waConfig: WhatsAppConfigService) {}
 
+  // ── Lista unificada de canais disponíveis (Baileys + Cloud) ────────────────
+
+  async listAvailableChannels(orgId: string): Promise<Array<{
+    kind:   'baileys' | 'cloud_api'
+    id:     string
+    name:   string
+    phone:  string | null
+    status: string
+    detail: string | null
+  }>> {
+    const [baileysRes, cloudRes] = await Promise.all([
+      supabaseAdmin
+        .from('channels')
+        .select('id, name, phone_number, status, channel_type, external_id')
+        .eq('organization_id', orgId)
+        .eq('channel_type', 'whatsapp_free')
+        .order('created_at', { ascending: false }),
+      supabaseAdmin
+        .from('whatsapp_config')
+        .select('id, display_name, display_phone, phone_number_id, is_active, is_verified')
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false }),
+    ])
+
+    const out: Array<{ kind: 'baileys' | 'cloud_api'; id: string; name: string; phone: string | null; status: string; detail: string | null }> = []
+
+    for (const b of (baileysRes.data ?? [])) {
+      out.push({
+        kind:   'baileys',
+        id:     b.id as string,
+        name:   (b.name as string | null) ?? (b.external_id as string | null) ?? 'WhatsApp Free',
+        phone:  (b.phone_number as string | null) ?? null,
+        status: (b.status as string) ?? 'unknown',
+        detail: 'Baileys (gratuito, não-oficial)',
+      })
+    }
+    for (const c of (cloudRes.data ?? [])) {
+      out.push({
+        kind:   'cloud_api',
+        id:     c.id as string,
+        name:   (c.display_name as string | null) ?? 'WhatsApp Cloud API',
+        phone:  (c.display_phone as string | null) ?? null,
+        status: c.is_active ? (c.is_verified ? 'verified' : 'active') : 'inactive',
+        detail: 'Meta Cloud API (oficial)',
+      })
+    }
+    return out
+  }
+
   // ── CRUD de assignments (usado pela UI COM-3) ──────────────────────────────
 
   async listAssignments(orgId: string): Promise<ChannelAssignment[]> {
