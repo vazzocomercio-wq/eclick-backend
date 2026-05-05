@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
-import { WhatsAppConfigService } from '../../whatsapp/whatsapp-config.service'
-import { WhatsAppSender } from '../../whatsapp/whatsapp.sender'
+import { UnifiedWhatsAppSender } from '../../wa-router/unified-whatsapp-sender.service'
 import { NotificationSettingsService } from './notification-settings.service'
 import { PricingSignal, Severity, NotificationSettings } from './types'
 
@@ -27,9 +26,8 @@ export class SignalNotifierService {
   private readonly logger = new Logger(SignalNotifierService.name)
 
   constructor(
-    private readonly settings: NotificationSettingsService,
-    private readonly waConfig: WhatsAppConfigService,
-    private readonly waSender: WhatsAppSender,
+    private readonly settings:  NotificationSettingsService,
+    private readonly unifiedWa: UnifiedWhatsAppSender,
   ) {}
 
   /** Notifica TODAS as orgs com whatsapp_enabled. Chamado pelo cron
@@ -101,21 +99,13 @@ export class SignalNotifierService {
     const sigs = (pending ?? []) as PricingSignal[]
     if (sigs.length === 0) return { sent: 0, skipped: 0, failed: 0 }
 
-    const wa = await this.waConfig.findActive(orgId)
-    if (!wa) {
-      this.logger.warn(`[pricing.notifier] WhatsApp Business não configurado pra org=${orgId}`)
-      return { sent: 0, skipped: 0, failed: 0 }
-    }
-
     let sent = 0, failed = 0
     if (cfg.group_notifications) {
-      // Mensagem única agrupada
+      // Mensagem única agrupada — purpose='internal_alert' (router decide
+      // canal: Baileys gratuito por default em internal, ou Cloud se org
+      // assinou rota explícita)
       const message = this.buildGroupedMessage(sigs)
-      const result = await this.waSender.sendTextMessage({
-        phone:    cfg.whatsapp_phone,
-        message,
-        waConfig: wa,
-      })
+      const result = await this.unifiedWa.send(orgId, 'internal_alert', cfg.whatsapp_phone, message)
       const ids = sigs.map(s => s.id!).filter(Boolean)
       await this.logSend(orgId, cfg.whatsapp_phone, ids, message, result.success, result.error)
       if (result.success) {
@@ -133,11 +123,7 @@ export class SignalNotifierService {
         if (inHour >= cfg.max_per_hour) break
         if (inDay  >= cfg.max_per_day)  break
         const message = this.buildSingleMessage(sig)
-        const result = await this.waSender.sendTextMessage({
-          phone:    cfg.whatsapp_phone,
-          message,
-          waConfig: wa,
-        })
+        const result = await this.unifiedWa.send(orgId, 'internal_alert', cfg.whatsapp_phone, message)
         await this.logSend(orgId, cfg.whatsapp_phone, [sig.id!], message, result.success, result.error)
         if (result.success) {
           sent++; inHour++; inDay++
