@@ -698,7 +698,38 @@ export class MlAdsService {
     return data ?? []
   }
 
-  async getSummaryReport(orgId: string, dateFrom: string, dateTo: string) {
+  async getSummaryReport(
+    orgId:    string,
+    dateFrom: string,
+    dateTo:   string,
+    opts:     { compare?: boolean } = {},
+  ) {
+    const cur = await this.aggregateRange(orgId, dateFrom, dateTo)
+    if (!opts.compare) return cur
+
+    // Período anterior: mesma duração, terminando 1 dia antes do dateFrom.
+    const fromMs = Date.parse(dateFrom + 'T00:00:00Z')
+    const toMs   = Date.parse(dateTo   + 'T00:00:00Z')
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return cur
+    const days     = Math.floor((toMs - fromMs) / 86_400_000) + 1
+    const prevToMs = fromMs - 86_400_000
+    const prevFromMs = prevToMs - (days - 1) * 86_400_000
+    const prevFrom = new Date(prevFromMs).toISOString().slice(0, 10)
+    const prevTo   = new Date(prevToMs).toISOString().slice(0, 10)
+
+    const prev = await this.aggregateRange(orgId, prevFrom, prevTo)
+    return {
+      ...cur,
+      previous: {
+        from:   prevFrom,
+        to:     prevTo,
+        totals: prev.totals,
+      },
+    }
+  }
+
+  /** Aggregação per-day comum entre o summary atual e o de comparação. */
+  private async aggregateRange(orgId: string, dateFrom: string, dateTo: string) {
     const { data, error } = await supabaseAdmin
       .from('ml_ads_reports')
       .select('date, clicks, impressions, spend, conversions, revenue')
@@ -753,6 +784,114 @@ export class MlAdsService {
       },
       series,
     }
+  }
+
+  /**
+   * Relatório por SKU/produto: pra cada item de campanha, agrega o gasto e
+   * receita das campanhas onde está, no período. Cada item ganha uma linha,
+   * com nome+SKU enriquecidos via lookup em products.ml_listing_id quando
+   * possível.
+   *
+   * NOTA: quando uma campanha tem N itens, esse método "atribui" o gasto
+   * total da campanha pra TODOS os itens (não há split). Isso permite ver
+   * "qual SKU é alvo de quais gastos", mas a soma de spend cross-itens não
+   * bate com o total da org. Usar pra ranking, não pra contabilidade.
+   */
+  async getReportBySku(orgId: string, dateFrom: string, dateTo: string) {
+    const [campsRes, reportsRes, productsRes] = await Promise.all([
+      supabaseAdmin
+        .from('ml_ads_campaigns')
+        .select('id, name, status, items')
+        .eq('organization_id', orgId),
+      supabaseAdmin
+        .from('ml_ads_reports')
+        .select('campaign_id, spend, revenue, clicks, impressions, conversions')
+        .eq('organization_id', orgId)
+        .gte('date', dateFrom)
+        .lte('date', dateTo),
+      supabaseAdmin
+        .from('products')
+        .select('id, ml_listing_id, name, sku')
+        .eq('organization_id', orgId)
+        .not('ml_listing_id', 'is', null),
+    ])
+    if (campsRes.error && !this.isMissingTableError(campsRes.error))   throw new HttpException(campsRes.error.message, 500)
+    if (reportsRes.error && !this.isMissingTableError(reportsRes.error)) throw new HttpException(reportsRes.error.message, 500)
+
+    const campaigns = (campsRes.data ?? []) as Array<{ id: string; name: string | null; status: string | null; items?: unknown }>
+    if (campaigns.length === 0) return []
+
+    // Agrega métricas por campaign
+    type Met = { spend: number; revenue: number; clicks: number; impressions: number; conversions: number }
+    const byCamp = new Map<string, Met>()
+    for (const r of (reportsRes.data ?? [])) {
+      const cid = r.campaign_id as string
+      const cur = byCamp.get(cid) ?? { spend: 0, revenue: 0, clicks: 0, impressions: 0, conversions: 0 }
+      cur.spend       += Number(r.spend ?? 0)
+      cur.revenue     += Number(r.revenue ?? 0)
+      cur.clicks      += Number(r.clicks ?? 0)
+      cur.impressions += Number(r.impressions ?? 0)
+      cur.conversions += Number(r.conversions ?? 0)
+      byCamp.set(cid, cur)
+    }
+
+    // Lookup de products por ml_listing_id
+    const productByListing = new Map<string, { id: string; name: string | null; sku: string | null }>()
+    for (const p of ((productsRes.data ?? []) as Array<{ id: string; ml_listing_id: string; name: string | null; sku: string | null }>)) {
+      productByListing.set(p.ml_listing_id, p)
+    }
+
+    // Agrega por item_id (somando todas as campaigns onde o item aparece)
+    interface Bucket {
+      item_id:        string
+      product_id?:    string
+      product_name?:  string
+      sku?:           string
+      campaign_count: number
+      campaign_names: string[]
+      spend:          number
+      revenue:        number
+      clicks:         number
+      impressions:    number
+      conversions:    number
+    }
+    const byItem = new Map<string, Bucket>()
+    for (const c of campaigns) {
+      const items = Array.isArray(c.items) ? c.items as Array<unknown> : []
+      const itemIds = items
+        .map(i => (typeof i === 'string' ? i : (i as { item_id?: string })?.item_id))
+        .filter((x): x is string => !!x)
+      if (itemIds.length === 0) continue
+
+      const met = byCamp.get(c.id) ?? { spend: 0, revenue: 0, clicks: 0, impressions: 0, conversions: 0 }
+      for (const item_id of itemIds) {
+        const p = productByListing.get(item_id)
+        const cur = byItem.get(item_id) ?? {
+          item_id,
+          ...(p ? { product_id: p.id, product_name: p.name ?? undefined, sku: p.sku ?? undefined } : {}),
+          campaign_count: 0,
+          campaign_names: [],
+          spend: 0, revenue: 0, clicks: 0, impressions: 0, conversions: 0,
+        } as Bucket
+        cur.campaign_count++
+        if (c.name && !cur.campaign_names.includes(c.name)) cur.campaign_names.push(c.name)
+        cur.spend       += met.spend
+        cur.revenue     += met.revenue
+        cur.clicks      += met.clicks
+        cur.impressions += met.impressions
+        cur.conversions += met.conversions
+        byItem.set(item_id, cur)
+      }
+    }
+
+    return [...byItem.values()]
+      .map(b => ({
+        ...b,
+        roas: b.spend > 0 ? b.revenue / b.spend : 0,
+        acos: b.revenue > 0 ? b.spend / b.revenue : 0,
+        ctr:  b.impressions > 0 ? b.clicks / b.impressions : 0,
+      }))
+      .sort((a, b) => b.spend - a.spend)
   }
 
   /** Per-campaign aggregation for the table view. */

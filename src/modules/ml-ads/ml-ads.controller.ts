@@ -56,17 +56,37 @@ export class MlAdsController {
   @Get('reports/summary')
   async getSummary(
     @ReqUser() u: ReqUserPayload,
-    @Query('from') dateFrom: string,
-    @Query('to')   dateTo:   string,
+    @Query('from')    dateFrom: string,
+    @Query('to')      dateTo:   string,
+    @Query('compare') compare?: string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
-      return await this.svc.getSummaryReport(u.orgId, dateFrom, dateTo)
+      return await this.svc.getSummaryReport(
+        u.orgId, dateFrom, dateTo,
+        { compare: compare === '1' || compare === 'true' },
+      )
     } catch (e: unknown) {
       const err = e as Error
       console.error('[ml-ads] summary erro:', err?.message)
       if (err?.stack) console.error(err.stack)
       return EMPTY_SUMMARY
+    }
+  }
+
+  @Get('reports/by-sku')
+  async getBySku(
+    @ReqUser() u: ReqUserPayload,
+    @Query('from') dateFrom: string,
+    @Query('to')   dateTo:   string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    try {
+      return await this.svc.getReportBySku(u.orgId, dateFrom, dateTo)
+    } catch (e: unknown) {
+      const err = e as Error
+      console.error('[ml-ads] by-sku erro:', err?.message)
+      return []
     }
   }
 
