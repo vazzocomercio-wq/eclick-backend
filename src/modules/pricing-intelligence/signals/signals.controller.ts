@@ -39,13 +39,23 @@ export class SignalsController {
     if (severity)   q = q.eq('severity', severity)
     if (productId)  q = q.eq('product_id', productId)
     if (channel)    q = q.eq('channel', channel)
-    q = q.order('severity', { ascending: false })
-         .order('created_at', { ascending: false })
+    // FIX PRC-6: severity como string ordena ASCII (critical < high <
+    // low < medium) — quebra a ordem semântica esperada. Ordenamos por
+    // created_at no SQL e re-ordenamos por severity em JS depois.
+    q = q.order('created_at', { ascending: false })
          .range(offset, offset + limit - 1)
 
     const { data, error, count } = await q
     if (error) throw new BadRequestException(error.message)
-    return { signals: data ?? [], total: count ?? 0, limit, offset }
+
+    const SEV_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
+    const sorted = (data ?? []).slice().sort((a, b) => {
+      const rA = SEV_RANK[a.severity as string] ?? 99
+      const rB = SEV_RANK[b.severity as string] ?? 99
+      if (rA !== rB) return rA - rB
+      return String(b.created_at).localeCompare(String(a.created_at))
+    })
+    return { signals: sorted, total: count ?? 0, limit, offset }
   }
 
   /** GET /pricing/signals/summary — counts por severity e signal_type. */

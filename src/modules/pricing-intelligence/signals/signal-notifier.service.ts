@@ -85,7 +85,9 @@ export class SignalNotifierService {
       return { sent: 0, skipped: 0, failed: 0 }
     }
 
-    // Busca pendentes filtrando por severities/types do settings
+    // Busca pendentes filtrando por severities/types do settings.
+    // FIX PRC-6: severity como string ordena ASCII errada — re-ordenamos
+    // em JS por SEV_RANK abaixo (critical → high → medium → low).
     const { data: pending } = await supabaseAdmin
       .from('pricing_signals').select('*')
       .eq('organization_id', orgId)
@@ -93,10 +95,13 @@ export class SignalNotifierService {
       .eq('status', 'active')
       .in('severity', cfg.notify_severities ?? ['critical', 'high'])
       .in('signal_type', cfg.notify_signal_types ?? ['decrease_price', 'increase_price'])
-      .order('severity', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(50)
 
-    const sigs = (pending ?? []) as PricingSignal[]
+    const SEV_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 }
+    const sigs = ((pending ?? []) as PricingSignal[])
+      .slice()
+      .sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity])
     if (sigs.length === 0) return { sent: 0, skipped: 0, failed: 0 }
 
     let sent = 0, failed = 0
