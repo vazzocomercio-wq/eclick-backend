@@ -528,6 +528,67 @@ export class MercadolivreService {
     }
   }
 
+  // ── Creative E3c helpers — endpoints públicos do ML ──────────────────────
+  /** Predict de categoria a partir do título (domain_discovery/search).
+   *  Endpoint público, não requer auth. */
+  async predictCategory(title: string): Promise<{
+    category_id:   string | null
+    category_name: string | null
+    domain_id:     string | null
+    domain_name:   string | null
+    attributes:    Array<{ id: string; name: string; value_id?: string; value_name?: string }>
+  }> {
+    if (!title?.trim()) {
+      return { category_id: null, category_name: null, domain_id: null, domain_name: null, attributes: [] }
+    }
+    try {
+      const { data } = await axios.get<Array<{
+        category_id:    string
+        category_name:  string
+        domain_id:      string
+        domain_name:    string
+        attributes?:    Array<{ id: string; name: string; value_id?: string; value_name?: string }>
+      }>>(
+        `${ML_BASE}/sites/MLB/domain_discovery/search`,
+        { params: { q: title.slice(0, 60), limit: 1 }, timeout: 10_000 },
+      )
+      const top = data?.[0]
+      if (!top) return { category_id: null, category_name: null, domain_id: null, domain_name: null, attributes: [] }
+      return {
+        category_id:   top.category_id,
+        category_name: top.category_name,
+        domain_id:     top.domain_id,
+        domain_name:   top.domain_name,
+        attributes:    top.attributes ?? [],
+      }
+    } catch {
+      return { category_id: null, category_name: null, domain_id: null, domain_name: null, attributes: [] }
+    }
+  }
+
+  /** Lista atributos de uma categoria. Endpoint público. */
+  async getCategoryAttributes(categoryId: string): Promise<Array<{
+    id:                    string
+    name:                  string
+    value_type:            string
+    value_max_length?:     number
+    values?:               Array<{ id: string; name: string }>
+    tags?:                 Record<string, boolean>
+    hint?:                 string
+    hierarchy?:            string
+    relevance?:            number
+  }>> {
+    try {
+      const { data } = await axios.get(
+        `${ML_BASE}/categories/${encodeURIComponent(categoryId)}/attributes`,
+        { timeout: 10_000 },
+      )
+      return Array.isArray(data) ? data : []
+    } catch {
+      return []
+    }
+  }
+
   async getItemDetail(orgId: string, mlbId: string) {
     const { token } = await this.getValidToken()
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {

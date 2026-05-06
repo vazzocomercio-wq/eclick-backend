@@ -12,6 +12,7 @@ import {
 } from './creative.service'
 import { CreativeImagePipelineService } from './creative-image-pipeline.service'
 import { CreativeVideoPipelineService } from './creative-video-pipeline.service'
+import { CreativeMlPublisherService } from './creative-ml-publisher.service'
 import type { Marketplace } from './creative.marketplace-rules'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -25,6 +26,7 @@ export class CreativeController {
     private readonly svc:    CreativeService,
     private readonly images: CreativeImagePipelineService,
     private readonly videos: CreativeVideoPipelineService,
+    private readonly mlPub:  CreativeMlPublisherService,
   ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
@@ -264,5 +266,44 @@ export class CreativeController {
     @Body() body: { prompt?: string },
   ) {
     return this.videos.regenerateVideo(this.orgOrThrow(u), id, body?.prompt)
+  }
+
+  // ── ML publisher (E3c F1+F2 — preview/mapping, sem publicar) ──────────────
+
+  @Get('listings/:id/ml-context')
+  getMlContext(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.getPublishContext(this.orgOrThrow(u), id)
+  }
+
+  @Get('ml/predict-category')
+  predictMlCategory(@ReqUser() u: ReqUserPayload, @Query('title') title: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!title)   throw new BadRequestException('title obrigatório')
+    return this.mlPub.predictCategoryFromTitle(title)
+  }
+
+  @Get('ml/categories/:id/attributes')
+  getMlCategoryAttributes(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.mlPub.getRequiredAttributes(id)
+  }
+
+  @Post('listings/:id/ml-preview')
+  @HttpCode(HttpStatus.OK)
+  buildMlPreview(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: {
+      image_ids:     string[]
+      video_id?:     string | null
+      price:         number
+      stock:         number
+      listing_type?: 'free' | 'gold_special' | 'gold_pro'
+      category_id?:  string
+      attributes?:   Array<{ id: string; value_name?: string; value_id?: string }>
+      condition?:    'new' | 'used' | 'not_specified'
+    },
+  ) {
+    return this.mlPub.buildPreview(this.orgOrThrow(u), id, body)
   }
 }
