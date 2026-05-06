@@ -81,6 +81,52 @@ export class ActiveBridgeClient {
     }
   }
 
+  /** Health check sem spam: chama notify-lojista com severity='low'
+   *  (que vai pra digest diário no Active, não dispara WhatsApp imediato).
+   *  Retorna sucesso se Active validou o secret e gravou em
+   *  automation_executions. Útil pra smoke test pós-setup das env vars. */
+  async pingBridge(orgId: string): Promise<{
+    configured:    boolean
+    reachable:     boolean
+    authenticated: boolean
+    response?:     unknown
+    error?:        string
+  }> {
+    if (!this.isConfigured()) {
+      return { configured: false, reachable: false, authenticated: false, error: 'Env vars não setadas' }
+    }
+    const { url, secret } = this.getEnv()
+
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/notify-lojista`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify({
+          organization_id: orgId,
+          message:         '🔍 Bridge SaaS↔Active health check (ignore esta mensagem — irá pro digest diário e não dispara WhatsApp imediato).',
+          severity:        'low' as const,
+        }),
+      })
+      const body = await res.text()
+
+      if (res.status === 401 || res.status === 403) {
+        return { configured: true, reachable: true, authenticated: false, error: `Active rejeitou auth: ${body.slice(0, 200)}` }
+      }
+      if (!res.ok) {
+        return { configured: true, reachable: true, authenticated: false, error: `Active respondeu ${res.status}: ${body.slice(0, 200)}` }
+      }
+
+      let parsed: unknown
+      try { parsed = JSON.parse(body) } catch { parsed = body }
+      return { configured: true, reachable: true, authenticated: true, response: parsed }
+    } catch (e) {
+      return { configured: true, reachable: false, authenticated: false, error: (e as Error).message }
+    }
+  }
+
   async triggerCartRecovery(input: TriggerCartRecoveryInput): Promise<{
     dispatched?: number
     skipped?:    number

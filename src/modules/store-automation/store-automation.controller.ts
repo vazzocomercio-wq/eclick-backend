@@ -3,6 +3,7 @@ import {
   UseGuards, BadRequestException, HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { StoreAutomationService } from './store-automation.service'
+import { ActiveBridgeClient } from './active-bridge.client'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import type {
@@ -29,7 +30,18 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('store-automation')
 @UseGuards(SupabaseAuthGuard)
 export class StoreAutomationController {
-  constructor(private readonly svc: StoreAutomationService) {}
+  constructor(
+    private readonly svc:    StoreAutomationService,
+    private readonly bridge: ActiveBridgeClient,
+  ) {}
+
+  /** GET /store-automation/bridge-health — smoke test do bridge SaaS↔Active.
+   *  Usa notify-lojista com severity='low' (digest, não spam). */
+  @Get('bridge-health')
+  bridgeHealth(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.bridge.pingBridge(u.orgId)
+  }
 
   @Get('actions')
   list(
