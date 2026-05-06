@@ -122,7 +122,7 @@ export class LlmService {
     } finally {
       // SEMPRE loga, sucesso ou falha (AI-ABS-2 Bug 4)
       if (out) {
-        await this.logUsage(out, input.feature, input.orgId, null, input.creative)
+        await this.logUsage(out, input.feature, input.orgId, null, input.creative, input.catalog)
       } else {
         // Failure path — sintetiza output zero pra logar
         const failOut: GenerateTextOutput = {
@@ -135,7 +135,7 @@ export class LlmService {
           latencyMs:    Date.now() - t0,
           fallbackUsed,
         }
-        await this.logUsage(failOut, input.feature, input.orgId, errorMessage, input.creative)
+        await this.logUsage(failOut, input.feature, input.orgId, errorMessage, input.creative, input.catalog)
       }
       // void toThrow — o throw original já está no path do try
       void toThrow
@@ -307,6 +307,7 @@ export class LlmService {
     orgId:         string,
     errorMessage:  string | null,
     creative?:     { productId: string; operation: string },
+    catalog?:      { productId: string; operation: string },
   ): Promise<void> {
     try {
       await supabaseAdmin.from('ai_usage_log').insert({
@@ -322,7 +323,8 @@ export class LlmService {
         fallback_used:       out.fallbackUsed,
         error_message:       errorMessage,         // AI-ABS-2 Bug 4: NULL em sucesso, mensagem em falha
         creative_product_id: creative?.productId ?? null,
-        creative_operation:  creative?.operation  ?? null,
+        creative_operation:  creative?.operation  ?? catalog?.operation ?? null,
+        catalog_product_id:  catalog?.productId  ?? null,
       })
     } catch (e) {
       this.logger.warn(`[llm.logUsage] insert falhou: ${(e as Error).message}`)

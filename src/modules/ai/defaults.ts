@@ -100,6 +100,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    null,
   },
+  // Onda 1 M2: enriquecimento de catálogo
+  catalog_enrichment: {
+    label:       'Enriquecimento AI do catálogo',
+    description: 'Sonnet lê produto + foto e gera short/long description, keywords, target audience, use cases, pros/cons, SEO',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

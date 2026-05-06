@@ -13,6 +13,9 @@ export interface GenerateTextInput {
   /** F6 Creative — quando preenchido, ai_usage_log recebe creative_product_id
    *  + creative_operation pra rastreio por produto na esteira de geração. */
   creative?:     { productId: string; operation: string }
+  /** Onda 1 M2 — quando preenchido, ai_usage_log.catalog_product_id é setado
+   *  pra rastreio de custo de enriquecimento por produto do catálogo. */
+  catalog?:      { productId: string; operation: string }
 }
 
 export interface GenerateTextOutput {

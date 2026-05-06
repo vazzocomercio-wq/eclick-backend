@@ -1,5 +1,6 @@
 import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
+import { ProductsEnrichmentService } from './products-enrichment.service'
 import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -12,7 +13,26 @@ export class ProductsController {
   constructor(
     private readonly products: ProductsService,
     private readonly creative: CreativeService,
+    private readonly enrichment: ProductsEnrichmentService,
   ) {}
+
+  // ── Onda 1 M2 — Enriquecimento AI do catálogo ───────────────────────────
+
+  /** POST /products/:id/enrich — chama Sonnet pra preencher 9 campos AI. */
+  @Post(':id/enrich')
+  @HttpCode(HttpStatus.OK)
+  enrichProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.enrichProduct(u.orgId, id)
+  }
+
+  /** POST /products/:id/recompute-score — reavalia score sem chamar AI. */
+  @Post(':id/recompute-score')
+  @HttpCode(HttpStatus.OK)
+  recomputeScore(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.recomputeScore(u.orgId, id)
+  }
 
   // ── Onda 1 M1 — Bridge com módulo IA Criativo ───────────────────────────
 
