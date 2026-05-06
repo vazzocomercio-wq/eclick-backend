@@ -210,6 +210,79 @@ export class SocialCommerceService {
     return { synced, failed, skipped }
   }
 
+  /** Worker — produtos com sync_status pending/error de canais conectados.
+   *  Cross-org, retorna até `limit`. */
+  async listPendingSyncs(limit = 20): Promise<Array<{
+    organization_id: string
+    product_id:      string
+    channel:         SocialCommerceChannel
+  }>> {
+    const { data, error } = await supabaseAdmin
+      .from('social_commerce_products')
+      .select(`
+        organization_id, product_id,
+        channel:social_commerce_channels!inner(channel, status)
+      `)
+      .in('sync_status', ['pending', 'error'])
+      .limit(limit)
+    if (error) {
+      this.logger.warn(`[social-commerce] listPendingSyncs: ${error.message}`)
+      return []
+    }
+    type Row = {
+      organization_id: string
+      product_id:      string
+      channel: { channel: SocialCommerceChannel; status: string } | { channel: SocialCommerceChannel; status: string }[]
+    }
+    return ((data ?? []) as Row[])
+      .map(r => {
+        const ch = Array.isArray(r.channel) ? r.channel[0] : r.channel
+        return ch?.status === 'connected'
+          ? { organization_id: r.organization_id, product_id: r.product_id, channel: ch.channel }
+          : null
+      })
+      .filter((x): x is { organization_id: string; product_id: string; channel: SocialCommerceChannel } => x !== null)
+  }
+
+  /** Onda 3 / S3 — TikTok Shop readiness checklist. Não exige integração
+   *  real ainda; só verifica se o produto está pronto pra ir quando a API
+   *  liberar no Brasil. */
+  async tiktokReadiness(orgId: string, productId: string): Promise<{
+    ready: boolean
+    checks: Array<{ key: string; ok: boolean; label: string; hint?: string }>
+  }> {
+    const { data: p, error } = await supabaseAdmin
+      .from('products')
+      .select('id, name, photo_urls, price, category, channel_titles')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    if (!p)    throw new NotFoundException('Produto não encontrado')
+
+    // Conta vídeos do creative aprovados ligados ao produto (best-effort)
+    const { count: videoCount } = await supabaseAdmin
+      .from('creative_videos')
+      .select('id', { count: 'exact', head: true })
+      .eq('product_id', productId)
+      .eq('status', 'approved')
+
+    const photos: string[] = (p as { photo_urls: string[] | null }).photo_urls ?? []
+    const ttTitle = ((p as { channel_titles: Record<string, string> | null }).channel_titles?.tiktok)
+      ?? (p as { name: string }).name
+    const checks = [
+      { key: 'has_video',     label: 'Tem vídeo aprovado',           ok: (videoCount ?? 0) > 0,
+        hint: 'Gere via IA Criativo (E3a) — TikTok Shop requer vídeo curto' },
+      { key: 'short_title',   label: 'Título ≤ 60 chars',            ok: ttTitle.length <= 60,
+        hint: `Título atual: ${ttTitle.length} chars. Defina channel_titles.tiktok mais curto.` },
+      { key: 'has_price',     label: 'Tem preço',                    ok: ((p as { price: number | null }).price ?? 0) > 0 },
+      { key: 'enough_photos', label: '≥ 5 imagens',                  ok: photos.length >= 5,
+        hint: `Atual: ${photos.length}. TikTok Shop exige boa cobertura visual.` },
+      { key: 'has_category',  label: 'Categoria definida',           ok: Boolean((p as { category: string | null }).category) },
+    ]
+    return { ready: checks.every(c => c.ok), checks }
+  }
+
   async listSyncedProducts(orgId: string, channel: SocialCommerceChannel): Promise<SocialCommerceProductRow[]> {
     const ch = await this.getStatus(orgId, channel)
     if (!ch) return []

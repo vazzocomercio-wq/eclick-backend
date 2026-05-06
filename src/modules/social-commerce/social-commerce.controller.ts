@@ -202,4 +202,18 @@ export class SocialCommerceController {
     if (!body?.product_ids?.length)  throw new BadRequestException('product_ids obrigatório')
     return this.svc.removeProductsFromSync(u.orgId, 'instagram_shop', body.product_ids)
   }
+
+  // ── S3 — TikTok Shop readiness (sem API real ainda) ──────────────
+
+  /** GET /social-commerce/tiktok/readiness/:productId — checklist
+   *  pra preparar produto pro TikTok Shop quando a API liberar BR. */
+  @Get('tiktok/readiness/:productId')
+  @UseGuards(SupabaseAuthGuard)
+  tiktokReadiness(
+    @ReqUser() u: ReqUserPayload,
+    @Param('productId') productId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.tiktokReadiness(u.orgId, productId)
+  }
 }
