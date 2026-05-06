@@ -35,8 +35,8 @@ export class ProductsController {
     return this.enrichment.recomputeScore(u.orgId, id)
   }
 
-  /** POST /products/enrich-bulk (L1) — marca N produtos como pending pra
-   *  worker M2.2 processar em background. Cap 200 produtos/call. */
+  /** POST /products/enrich-bulk (L1 hybrid C) — cria job pra batch
+   *  enrichment. Worker dedicado processa, UI faz polling. Cap 200/job. */
   @Post('enrich-bulk')
   @HttpCode(HttpStatus.OK)
   enrichBulk(
@@ -46,10 +46,24 @@ export class ProductsController {
       missing_enrichment?: boolean
       ai_score_lt?:        number
       limit?:              number
+      max_cost_usd?:       number
     },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.enrichment.enrichBulk(u.orgId, body)
+    return this.enrichment.enrichBulk(u.orgId, u.id, body)
+  }
+
+  @Get('enrichment-jobs/:id')
+  getEnrichmentJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.getEnrichmentJob(u.orgId, id)
+  }
+
+  @Post('enrichment-jobs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelEnrichmentJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.cancelEnrichmentJob(u.orgId, id)
   }
 
   /** GET /products/enrichment-summary — KPIs de enriquecimento da org. */
@@ -57,6 +71,25 @@ export class ProductsController {
   enrichmentSummary(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.enrichment.enrichmentSummary(u.orgId)
+  }
+
+  /** GET /products/catalog-health — count de produtos por catalog_status. */
+  @Get('catalog-health')
+  catalogHealth(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.getCatalogHealth(u.orgId)
+  }
+
+  /** PATCH /products/:id/catalog-status — toggle paused/ready manual. */
+  @Patch(':id/catalog-status')
+  setCatalogStatus(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { status: 'paused' | 'ready' | 'draft' },
+  ) {
+    if (!u.orgId)        throw new BadRequestException('orgId ausente')
+    if (!body?.status)   throw new BadRequestException('status obrigatório')
+    return this.enrichment.setCatalogStatus(u.orgId, id, body.status)
   }
 
   /** GET /products/recommendations (L3) — buckets de produtos que precisam atenção. */

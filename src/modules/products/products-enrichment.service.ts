@@ -100,7 +100,14 @@ export interface EnrichmentOutput {
   ai_cons?:                 string[]
   ai_seo_keywords?:         string[]
   ai_seasonality_hint?:     string
+  /** Onda 1 hybrid C — multicanal */
+  channel_titles?:          Record<string, string>
+  channel_descriptions?:    Record<string, string>
 }
+
+/** Marketplaces suportados pra channel_titles/descriptions. */
+export const CHANNEL_KEYS = ['mercado_livre', 'shopee', 'amazon', 'magalu', 'loja_propria'] as const
+export type ChannelKey = typeof CHANNEL_KEYS[number]
 
 @Injectable()
 export class ProductsEnrichmentService {
@@ -313,25 +320,26 @@ export class ProductsEnrichmentService {
   // WORKER QUEUE (M2.2)
   // ════════════════════════════════════════════════════════════════════════
 
-  /** L1 — Enriquecimento em massa.
-   *  Marca produtos como pending=true (worker M2.2 enriquece em background).
-   *  Aceita IDs explícitos OU filtros. Cap de segurança em 200 produtos/call.
+  /** L1 hybrid C — cria product_enrichment_jobs row pra batch tracking.
+   *  Worker dedicado drena product_ids do job, atualiza progress.
+   *  Trigger M2.2 (single-product changes) continua funcionando em paralelo.
    *
-   *  Custo estimado: ~$0.02/produto × N. Caller deve confirmar antes de chamar.
+   *  Cap 200 produtos/job (1 job = 1 batch atômico).
    */
-  async enrichBulk(orgId: string, body: {
+  async enrichBulk(orgId: string, userId: string, body: {
     product_ids?:        string[]
     missing_enrichment?: boolean       // ai_enriched_at IS NULL
     ai_score_lt?:        number        // ai_score < N (inclusive null)
     limit?:              number
-  }): Promise<{ marked: number; estimated_cost_usd: number }> {
+    options?:            Record<string, unknown>
+    max_cost_usd?:       number
+  }): Promise<{ job_id: string; total: number; estimated_cost_usd: number }> {
     const cap = Math.max(1, Math.min(200, body.limit ?? 100))
 
     let q = supabaseAdmin
       .from('products')
       .select('id', { count: 'exact', head: false })
       .eq('organization_id', orgId)
-      .eq('ai_enrichment_pending', false) // só novos pendentes
       .neq('status', 'archived')
       .limit(cap)
 
@@ -343,7 +351,6 @@ export class ProductsEnrichmentService {
       }
       if (typeof body.ai_score_lt === 'number') {
         const threshold = Math.max(0, Math.min(100, body.ai_score_lt))
-        // OR: ai_score < threshold OR ai_score IS NULL (sem score conta como baixo)
         q = q.or(`ai_score.lt.${threshold},ai_score.is.null`)
       }
     }
@@ -352,19 +359,197 @@ export class ProductsEnrichmentService {
     if (fetchErr) throw new BadRequestException(`enrichBulk.fetch: ${fetchErr.message}`)
 
     const ids = (products ?? []).map(p => (p as { id: string }).id)
-    if (ids.length === 0) return { marked: 0, estimated_cost_usd: 0 }
+    if (ids.length === 0) {
+      throw new BadRequestException('Nenhum produto encontrado nos critérios — ajuste os filtros.')
+    }
 
-    const { error: updateErr } = await supabaseAdmin
-      .from('products')
-      .update({ ai_enrichment_pending: true, updated_at: new Date().toISOString() })
-      .in('id', ids)
-      .eq('organization_id', orgId) // tenant guard adicional
-    if (updateErr) throw new BadRequestException(`enrichBulk.update: ${updateErr.message}`)
+    const estimatedCost = ids.length * 0.02
+    const maxCost = Math.max(0.5, Math.min(20, body.max_cost_usd ?? Math.max(1, estimatedCost * 1.5)))
 
-    this.logger.log(`[catalog.bulk] ${ids.length} produtos marcados pending — worker vai processar`)
+    const { data: job, error: jobErr } = await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .insert({
+        organization_id:  orgId,
+        user_id:          userId,
+        product_ids:      ids,
+        total_count:      ids.length,
+        options:          body.options ?? {},
+        max_cost_usd:     maxCost,
+      })
+      .select('id, total_count')
+      .single()
+    if (jobErr || !job) throw new BadRequestException(`enrichBulk.createJob: ${jobErr?.message ?? 'falhou'}`)
+
+    this.logger.log(`[catalog.bulk] job ${(job as { id: string }).id} criado — ${ids.length} produtos, max=$${maxCost}`)
     return {
-      marked:             ids.length,
-      estimated_cost_usd: ids.length * 0.02, // estimativa Sonnet ~$0.01-0.03
+      job_id:             (job as { id: string }).id,
+      total:              (job as { total_count: number }).total_count,
+      estimated_cost_usd: estimatedCost,
+    }
+  }
+
+  // ── Job worker support (Delta 2) ─────────────────────────────────────────
+
+  async getEnrichmentJob(orgId: string, jobId: string): Promise<Record<string, unknown>> {
+    const { data, error } = await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('id', jobId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`getEnrichmentJob: ${error.message}`)
+    if (!data)  throw new NotFoundException('job não encontrado')
+    return data as Record<string, unknown>
+  }
+
+  async cancelEnrichmentJob(orgId: string, jobId: string): Promise<Record<string, unknown>> {
+    const job = await this.getEnrichmentJob(orgId, jobId)
+    if (job.status === 'completed' || job.status === 'cancelled' || job.status === 'failed') return job
+    const { data, error } = await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .update({
+        status:       'cancelled',
+        completed_at: new Date().toISOString(),
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('organization_id', orgId)
+      .eq('id', jobId)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`cancelEnrichmentJob: ${error.message}`)
+    return data as Record<string, unknown>
+  }
+
+  /** Lista jobs queued ordenados — worker pega o próximo. */
+  async claimNextEnrichmentJob(): Promise<{
+    id: string; organization_id: string; product_ids: string[];
+    total_count: number; max_cost_usd: number; total_cost_usd: number;
+    processed_count: number; results: unknown[];
+  } | null> {
+    const { data: queued } = await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .select('id')
+      .eq('status', 'queued')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (!queued) return null
+
+    const { data: claimed } = await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .update({
+        status:     'processing',
+        started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', (queued as { id: string }).id)
+      .eq('status', 'queued')
+      .select('id, organization_id, product_ids, total_count, max_cost_usd, total_cost_usd, processed_count, results')
+      .maybeSingle()
+    if (!claimed) return null
+    return claimed as {
+      id: string; organization_id: string; product_ids: string[];
+      total_count: number; max_cost_usd: number; total_cost_usd: number;
+      processed_count: number; results: unknown[];
+    }
+  }
+
+  /** Processa 1 produto do job. Loop de chamadas vem do worker. */
+  async processJobProduct(jobId: string, orgId: string, productId: string): Promise<{ success: boolean; cost: number; error?: string; score_after?: number | null }> {
+    try {
+      const result = await this.enrichProduct(orgId, productId)
+      // Append em results
+      const { data: job } = await supabaseAdmin
+        .from('product_enrichment_jobs')
+        .select('processed_count, success_count, results, total_cost_usd, max_cost_usd, total_count')
+        .eq('id', jobId)
+        .maybeSingle()
+      if (!job) return { success: false, cost: 0, error: 'job desapareceu' }
+      const j = job as { processed_count: number; success_count: number; results: unknown[]; total_cost_usd: number; max_cost_usd: number; total_count: number }
+      const newCost = Number(j.total_cost_usd) + Number(result.cost_usd)
+      await supabaseAdmin
+        .from('product_enrichment_jobs')
+        .update({
+          processed_count: j.processed_count + 1,
+          success_count:   j.success_count + 1,
+          results:         [...j.results, { product_id: productId, status: 'success', score_after: result.score, cost_usd: result.cost_usd }],
+          total_cost_usd:  newCost,
+          updated_at:      new Date().toISOString(),
+        })
+        .eq('id', jobId)
+      return { success: true, cost: result.cost_usd, score_after: result.score }
+    } catch (e: unknown) {
+      const msg = (e as Error).message
+      const { data: job } = await supabaseAdmin
+        .from('product_enrichment_jobs')
+        .select('processed_count, error_count, results')
+        .eq('id', jobId)
+        .maybeSingle()
+      if (job) {
+        const j = job as { processed_count: number; error_count: number; results: unknown[] }
+        await supabaseAdmin
+          .from('product_enrichment_jobs')
+          .update({
+            processed_count: j.processed_count + 1,
+            error_count:     j.error_count + 1,
+            results:         [...j.results, { product_id: productId, status: 'error', error: msg }],
+            updated_at:      new Date().toISOString(),
+          })
+          .eq('id', jobId)
+      }
+      return { success: false, cost: 0, error: msg }
+    }
+  }
+
+  async finalizeJob(jobId: string, status: 'completed' | 'failed' | 'cancelled', errorMessage?: string): Promise<void> {
+    const update: Record<string, unknown> = {
+      status,
+      completed_at: new Date().toISOString(),
+      updated_at:   new Date().toISOString(),
+    }
+    if (errorMessage) update.error_message = errorMessage
+    await supabaseAdmin
+      .from('product_enrichment_jobs')
+      .update(update)
+      .eq('id', jobId)
+  }
+
+  /** Setter explícito de catalog_status — usado pra paused/ready manual. */
+  async setCatalogStatus(orgId: string, productId: string, status: 'paused' | 'ready' | 'draft'): Promise<{ catalog_status: string }> {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .update({ catalog_status: status, updated_at: new Date().toISOString() })
+      .eq('organization_id', orgId)
+      .eq('id', productId)
+      .select('catalog_status')
+      .single()
+    if (error) throw new BadRequestException(`setCatalogStatus: ${error.message}`)
+    return data as { catalog_status: string }
+  }
+
+  /** Health do catálogo: count por catalog_status. Pra dashboard L3 / bulk. */
+  async getCatalogHealth(orgId: string): Promise<{
+    by_status: Record<string, number>
+    total:     number
+  }> {
+    // Roda 1 query agregada via RPC — supabase-js não suporta GROUP BY direto,
+    // então usamos count em paralelo por status (mesmo pattern do enrichmentSummary).
+    const STATUSES = ['incomplete', 'draft', 'enriching', 'enriched', 'ready', 'published', 'paused']
+    const counts = await Promise.all(
+      STATUSES.map(s =>
+        supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+          .eq('organization_id', orgId).neq('status', 'archived')
+          .eq('catalog_status', s)
+          .then(r => ({ status: s, count: r.count ?? 0 })),
+      ),
+    )
+    const total = await supabaseAdmin
+      .from('products').select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId).neq('status', 'archived')
+
+    return {
+      by_status: Object.fromEntries(counts.map(c => [c.status, c.count])),
+      total:     total.count ?? 0,
     }
   }
 
@@ -525,6 +710,17 @@ export class ProductsEnrichmentService {
       const newTotalCost = Number(((product as ProductRow & { ai_enrichment_cost_usd?: number })
         .ai_enrichment_cost_usd ?? 0)) + Number(out.costUsd)
 
+      // Sanitiza channel_titles/descriptions — só aceita keys válidas
+      const sanitizeChannels = (v: unknown): Record<string, string> => {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+        const out: Record<string, string> = {}
+        for (const k of CHANNEL_KEYS) {
+          const val = (v as Record<string, unknown>)[k]
+          if (typeof val === 'string' && val.trim()) out[k] = val.trim()
+        }
+        return out
+      }
+
       const { error } = await supabaseAdmin
         .from('products')
         .update({
@@ -537,6 +733,8 @@ export class ProductsEnrichmentService {
           ai_cons:                parsed.ai_cons              ?? [],
           ai_seo_keywords:        parsed.ai_seo_keywords      ?? [],
           ai_seasonality_hint:    parsed.ai_seasonality_hint  ?? null,
+          channel_titles:         sanitizeChannels(parsed.channel_titles),
+          channel_descriptions:   sanitizeChannels(parsed.channel_descriptions),
           ai_score:               score,
           ai_score_breakdown:     breakdown,
           ai_enriched_at:         new Date().toISOString(),
@@ -613,6 +811,21 @@ ${JSON.stringify(p.attributes ?? {}, null, 2)}
 - ai_seo_keywords: 5-10 keywords pra Google/marketplace, podem incluir long-tail (frases). Em pt-BR.
 - ai_seasonality_hint: texto livre 1-2 frases sobre quando vende mais (Black Friday? Dia das Mães?). NULL se sem padrão sazonal claro.
 
+## TÍTULOS POR CANAL (channel_titles)
+Adapte o título do produto pra cada marketplace, respeitando regras específicas:
+- mercado_livre: máx 60 chars. Formato: [Produto] [Característica] [Marca] [Modelo]. Sem CAPS LOCK, sem palavras tipo "promoção", "oferta", "frete grátis".
+- shopee: máx 120 chars. Mais descritivo, pode usar hashtags no final (#categoria, #marca).
+- amazon: máx 200 chars. Formato: [Marca] - [Produto] - [Características] - [Quantidade/Tamanho]. Capitalize First Letter.
+- magalu: máx 150 chars. Similar ao ML mas mais longo.
+- loja_propria: livre, foco em SEO + conversão.
+
+## DESCRIÇÕES POR CANAL (channel_descriptions)
+Adapte a descrição pra cada canal (use ai_long_description como base):
+- mercado_livre: até 2000 chars, parágrafos curtos.
+- shopee: até 1500 chars, pode usar emojis moderadamente.
+- amazon: até 2000 chars, texto puro sem emoji.
+- loja_propria: livre.
+
 Retorne APENAS o JSON (sem markdown, sem explicação):
 {
   "ai_short_description": "...",
@@ -623,7 +836,20 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
   "ai_pros": ["..."],
   "ai_cons": ["..."],
   "ai_seo_keywords": ["..."],
-  "ai_seasonality_hint": "..."
+  "ai_seasonality_hint": "...",
+  "channel_titles": {
+    "mercado_livre": "...",
+    "shopee": "...",
+    "amazon": "...",
+    "magalu": "...",
+    "loja_propria": "..."
+  },
+  "channel_descriptions": {
+    "mercado_livre": "...",
+    "shopee": "...",
+    "amazon": "...",
+    "loja_propria": "..."
+  }
 }`
   }
 
@@ -639,6 +865,15 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
         Array.isArray(v) ? v.map(String).filter(s => s.trim().length > 0) : []
       const str = (v: unknown): string | undefined =>
         typeof v === 'string' && v.trim() ? v.trim() : undefined
+      const obj = (v: unknown): Record<string, string> | undefined => {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+        const out: Record<string, string> = {}
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof val === 'string' && val.trim()) out[k] = val.trim()
+        }
+        return Object.keys(out).length > 0 ? out : undefined
+      }
+
       return {
         ai_short_description: str(parsed.ai_short_description),
         ai_long_description:  str(parsed.ai_long_description),
@@ -649,6 +884,8 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
         ai_cons:              arr(parsed.ai_cons),
         ai_seo_keywords:      arr(parsed.ai_seo_keywords),
         ai_seasonality_hint:  str(parsed.ai_seasonality_hint),
+        channel_titles:       obj(parsed.channel_titles),
+        channel_descriptions: obj(parsed.channel_descriptions),
       }
     } catch {
       return null
