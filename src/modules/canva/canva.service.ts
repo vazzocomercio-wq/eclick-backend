@@ -476,6 +476,32 @@ export class CanvaService {
     })
   }
 
+  // ── Creative integration (E3b) ─────────────────────────────────────────
+  /** Genérico: sobe uma imagem qualquer (URL pública/signed) pro Canva como
+   *  novo design + retorna edit_url. Diferente de createProductImageDesign,
+   *  NÃO faz lookup na tabela `products` — usa direto o que o caller manda.
+   *  Pensado pra integrar imagens do módulo Creative (creative_products,
+   *  creative_images), mas é genérico o suficiente pra qualquer source URL. */
+  async uploadAndOpenForCreative(
+    orgId: string,
+    params: { imageUrl: string; marketplace: MarketplaceKey; title?: string },
+  ): Promise<{ edit_url: string; design_id: string; asset_id: string }> {
+    if (!(params.marketplace in MARKETPLACE_DIMS)) {
+      throw new BadRequestException(
+        `Marketplace inválido. Válidos: ${Object.keys(MARKETPLACE_DIMS).join(', ')}`,
+      )
+    }
+    const dims = MARKETPLACE_DIMS[params.marketplace]
+    const baseTitle = (params.title ?? 'e-Click Creative').slice(0, 80)
+    return this.canvaOauth.uploadAndOpenDesign(orgId, {
+      imageUrl:  params.imageUrl,
+      imageName: `creative-${Date.now()}.png`,
+      width:     dims.w,
+      height:    dims.h,
+      title:     `${baseTitle} — ${dims.label}`,
+    })
+  }
+
   // ── Galeria local de canva_assets ──────────────────────────────────────
 
   async listAssets(

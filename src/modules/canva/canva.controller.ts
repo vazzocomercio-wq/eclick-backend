@@ -78,6 +78,24 @@ export class CanvaController {
     return this.canva.exportDesign(u.orgId, u.id, body)
   }
 
+  // ── Generic upload + open (E3b — usado pelo modulo Creative) ───────────
+  /** POST /canva/upload-and-open — generico, nao depende de tabela products.
+   *  Recebe image_url + marketplace + title opcional, retorna edit_url. */
+  @Post('upload-and-open')
+  async uploadAndOpen(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { image_url: string; marketplace: MarketplaceKey; title?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.image_url)   throw new BadRequestException('image_url obrigatório')
+    if (!body?.marketplace) throw new BadRequestException('marketplace obrigatório')
+    return this.canva.uploadAndOpenForCreative(u.orgId, {
+      imageUrl:    body.image_url,
+      marketplace: body.marketplace,
+      title:       body.title,
+    })
+  }
+
   // ── Criar capa de produto (sobe imagem + abre editor Canva) ────────────
 
   @Post('product-image/:productId')
