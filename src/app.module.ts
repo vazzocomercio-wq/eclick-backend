@@ -44,6 +44,7 @@ import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 import { CanvaModule } from './modules/canva/canva.module'
 import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-hub.module'
 import { CreativeModule } from './modules/creative/creative.module'
+import { CopilotModule } from './modules/copilot/copilot.module'
 
 @Module({
   imports: [
@@ -90,6 +91,7 @@ import { CreativeModule } from './modules/creative/creative.module'
     CanvaModule,
     IntelligenceHubModule,
     CreativeModule,
+    CopilotModule,
   ],
   controllers: [AppController],
   providers: [AppService],

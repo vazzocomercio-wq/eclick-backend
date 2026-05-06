@@ -100,6 +100,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    null,
   },
+  // Copiloto flutuante (V1) — Haiku pra latência baixa + custo mínimo
+  copilot_help: {
+    label:       'Copiloto flutuante',
+    description: 'Responde dúvidas em tempo real sobre tela atual. Haiku pra ser snappy.',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+  },
   // Onda 1 M2: enriquecimento de catálogo
   catalog_enrichment: {
     label:       'Enriquecimento AI do catálogo',
