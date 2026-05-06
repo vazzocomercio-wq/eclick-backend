@@ -1,6 +1,7 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, Inject, forwardRef } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { StoreAutomationEngine } from './store-automation.engine'
+import { StoreAutomationExecutor } from './store-automation.executor'
 import type {
   StoreAutomationAction,
   StoreAutomationConfig,
@@ -13,7 +14,11 @@ import type {
 export class StoreAutomationService {
   private readonly logger = new Logger(StoreAutomationService.name)
 
-  constructor(private readonly engine: StoreAutomationEngine) {}
+  constructor(
+    private readonly engine: StoreAutomationEngine,
+    @Inject(forwardRef(() => StoreAutomationExecutor))
+    private readonly executor: StoreAutomationExecutor,
+  ) {}
 
   // ─────────────────────────────────────────────────────────────────
   // CONFIG
@@ -191,10 +196,14 @@ export class StoreAutomationService {
     return data as StoreAutomationAction
   }
 
-  /** Aprovar = marcar como approved. Execução real fica pra Sprint 4
-   *  (executor service), aqui só transição de estado. */
+  /** Aprovar = marca como approved → executor dispara → completed/failed. */
   async approve(id: string, orgId: string): Promise<StoreAutomationAction> {
-    return this.transition(id, orgId, 'approved', ['pending'])
+    const approved = await this.transition(id, orgId, 'approved', ['pending'])
+    // Dispara executor em background (caller não fica esperando)
+    void this.executor.execute(approved).catch(e =>
+      this.logger.warn(`[approve] executor ${id} falhou: ${(e as Error).message}`),
+    )
+    return approved
   }
 
   async reject(id: string, orgId: string, feedback?: 'util'|'nao_relevante'|'timing_ruim'|'acao_errada'): Promise<StoreAutomationAction> {
