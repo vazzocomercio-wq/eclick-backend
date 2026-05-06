@@ -10,6 +10,9 @@ export interface GenerateTextInput {
   jsonMode?:     boolean
   /** Force a specific provider/model (skips ai_feature_settings + registry). */
   override?:     { provider: Provider; model: string }
+  /** F6 Creative — quando preenchido, ai_usage_log recebe creative_product_id
+   *  + creative_operation pra rastreio por produto na esteira de geração. */
+  creative?:     { productId: string; operation: string }
 }
 
 export interface GenerateTextOutput {

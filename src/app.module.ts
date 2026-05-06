@@ -43,6 +43,7 @@ import { MarketplaceScrapingModule } from './modules/marketplace-scraping/market
 import { CanvaOauthModule } from './modules/canva-oauth/canva-oauth.module'
 import { CanvaModule } from './modules/canva/canva.module'
 import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-hub.module'
+import { CreativeModule } from './modules/creative/creative.module'
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-h
     CanvaOauthModule,
     CanvaModule,
     IntelligenceHubModule,
+    CreativeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

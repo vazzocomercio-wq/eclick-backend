@@ -67,6 +67,19 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    null,
   },
+  // Sprint F6 IA Criativo — Vision + listing generation
+  creative_vision: {
+    label:       'Análise visual de produto (Creative)',
+    description: 'Vision: detecta tipo, cor, material e riscos visuais do produto',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null, // OpenAI vision pode ser adicionado depois
+  },
+  creative_listing: {
+    label:       'Anúncio de marketplace (Creative)',
+    description: 'Gera título + descrição + bullets + ficha técnica + SEO',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

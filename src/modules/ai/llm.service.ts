@@ -121,7 +121,7 @@ export class LlmService {
     } finally {
       // SEMPRE loga, sucesso ou falha (AI-ABS-2 Bug 4)
       if (out) {
-        await this.logUsage(out, input.feature, input.orgId, null)
+        await this.logUsage(out, input.feature, input.orgId, null, input.creative)
       } else {
         // Failure path — sintetiza output zero pra logar
         const failOut: GenerateTextOutput = {
@@ -134,7 +134,7 @@ export class LlmService {
           latencyMs:    Date.now() - t0,
           fallbackUsed,
         }
-        await this.logUsage(failOut, input.feature, input.orgId, errorMessage)
+        await this.logUsage(failOut, input.feature, input.orgId, errorMessage, input.creative)
       }
       // void toThrow — o throw original já está no path do try
       void toThrow
@@ -305,20 +305,23 @@ export class LlmService {
     feature:       FeatureKey,
     orgId:         string,
     errorMessage:  string | null,
+    creative?:     { productId: string; operation: string },
   ): Promise<void> {
     try {
       await supabaseAdmin.from('ai_usage_log').insert({
-        organization_id: orgId,
-        provider:        out.provider,
-        model:           out.model,
+        organization_id:     orgId,
+        provider:            out.provider,
+        model:               out.model,
         feature,
-        tokens_input:    out.inputTokens,
-        tokens_output:   out.outputTokens,
-        tokens_total:    out.inputTokens + out.outputTokens,
-        cost_usd:        out.costUsd,
-        latency_ms:      out.latencyMs,
-        fallback_used:   out.fallbackUsed,
-        error_message:   errorMessage,         // AI-ABS-2 Bug 4: NULL em sucesso, mensagem em falha
+        tokens_input:        out.inputTokens,
+        tokens_output:       out.outputTokens,
+        tokens_total:        out.inputTokens + out.outputTokens,
+        cost_usd:            out.costUsd,
+        latency_ms:          out.latencyMs,
+        fallback_used:       out.fallbackUsed,
+        error_message:       errorMessage,         // AI-ABS-2 Bug 4: NULL em sucesso, mensagem em falha
+        creative_product_id: creative?.productId ?? null,
+        creative_operation:  creative?.operation  ?? null,
       })
     } catch (e) {
       this.logger.warn(`[llm.logUsage] insert falhou: ${(e as Error).message}`)
@@ -344,6 +347,132 @@ export class LlmService {
       return `HTTP ${(e as AxiosError).response?.status ?? 'no-status'}`
     }
     return (e as Error).message ?? 'unknown'
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // F6 — Vision (Anthropic-only nesta sprint)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Analisa uma imagem via Vision (Anthropic Sonnet 4.6). Mesma estrutura
+   * de generateText (resolve config → call → log) mas envia content blocks
+   * com image+text. URL pública preferida; base64 aceito como fallback.
+   *
+   * Sem fallback OpenAI nesta sprint — feature key creative_vision tem
+   * fallback=null. Quando OpenAI vision for adicionado, basta plugar aqui. */
+  async analyzeImage(input: {
+    orgId:         string
+    feature:       FeatureKey
+    imageUrl?:     string
+    imageBase64?:  string
+    imageMimeType?: string
+    systemPrompt?: string
+    userPrompt:    string
+    maxTokens?:    number
+    jsonMode?:     boolean
+    creative?:     { productId: string; operation: string }
+  }): Promise<GenerateTextOutput> {
+    const t0 = Date.now()
+    if (!input.userPrompt || input.userPrompt.trim().length === 0) {
+      throw new BadRequestException('userPrompt obrigatório')
+    }
+    if (!input.imageUrl && !input.imageBase64) {
+      throw new BadRequestException('imageUrl ou imageBase64 obrigatório')
+    }
+
+    const config = await this.resolveConfig({ orgId: input.orgId, feature: input.feature, userPrompt: input.userPrompt })
+    if (config.primary.provider !== 'anthropic') {
+      throw new BadRequestException(`Vision suportado apenas via anthropic — feature ${input.feature} configurada com ${config.primary.provider}`)
+    }
+
+    let out:           GenerateTextOutput | null = null
+    let errorMessage:  string | null              = null
+    try {
+      const result = await this.callAnthropicVision({
+        orgId:        input.orgId,
+        model:        config.primary.model,
+        systemPrompt: input.systemPrompt,
+        userPrompt:   input.jsonMode
+          ? `${input.userPrompt}\n\nResponda APENAS com JSON válido, sem markdown.`
+          : input.userPrompt,
+        imageUrl:     input.imageUrl,
+        imageBase64:  input.imageBase64,
+        imageMime:    input.imageMimeType ?? 'image/jpeg',
+        maxTokens:    input.maxTokens ?? 1500,
+      })
+      out = this.finalize(config.primary, result, t0, false)
+      return out
+    } catch (e) {
+      errorMessage = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
+      throw e
+    } finally {
+      if (out) {
+        await this.logUsage(out, input.feature, input.orgId, null, input.creative)
+      } else {
+        const failOut: GenerateTextOutput = {
+          text:         '',
+          provider:     config.primary.provider,
+          model:        config.primary.model,
+          inputTokens:  0,
+          outputTokens: 0,
+          costUsd:      0,
+          latencyMs:    Date.now() - t0,
+          fallbackUsed: false,
+        }
+        await this.logUsage(failOut, input.feature, input.orgId, errorMessage, input.creative)
+      }
+    }
+  }
+
+  private async callAnthropicVision(args: {
+    orgId:        string
+    model:        string
+    systemPrompt?: string
+    userPrompt:   string
+    imageUrl?:    string
+    imageBase64?: string
+    imageMime:    string
+    maxTokens:    number
+  }): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+    const keyName = 'ANTHROPIC_API_KEY'
+    const apiKey = await this.credentials.getDecryptedKey(args.orgId, 'anthropic', keyName).catch(() => null)
+      ?? await this.credentials.getDecryptedKey(null, 'anthropic', keyName).catch(() => null)
+    if (!apiKey) throw new BadRequestException(`${keyName} não configurada`)
+
+    const imageBlock = args.imageUrl
+      ? { type: 'image', source: { type: 'url', url: args.imageUrl } }
+      : { type: 'image', source: { type: 'base64', media_type: args.imageMime, data: args.imageBase64 } }
+
+    const body: Record<string, unknown> = {
+      model: args.model,
+      max_tokens: args.maxTokens,
+      messages: [{
+        role: 'user',
+        content: [imageBlock, { type: 'text', text: args.userPrompt }],
+      }],
+    }
+    if (args.systemPrompt) body.system = args.systemPrompt
+
+    const res = await axios.post<{
+      content: Array<{ type: string; text?: string }>
+      usage:   { input_tokens: number; output_tokens: number }
+    }>(ANTHROPIC_URL, body, {
+      headers: {
+        'x-api-key':         apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type':      'application/json',
+      },
+      timeout: 90_000, // Vision pode demorar mais que texto puro
+    })
+    const text = (res.data.content ?? [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text ?? '')
+      .join('')
+      .trim()
+    return {
+      text,
+      inputTokens:  res.data.usage?.input_tokens  ?? 0,
+      outputTokens: res.data.usage?.output_tokens ?? 0,
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════════
