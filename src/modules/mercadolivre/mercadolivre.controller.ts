@@ -262,9 +262,13 @@ export class MercadolivreController {
   // ── Pipeline endpoints ────────────────────────────────────────────────────
 
   // GET /ml/my-items
+  // GET /ml/my-items?seller_id=...
   @Get('my-items')
-  getMyItems(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getMyItems(user.orgId!)
+  getMyItems(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getMyItems(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
   // GET /ml/categories/:id  — proxies ML API, no seller token needed
@@ -434,10 +438,13 @@ export class MercadolivreController {
 
   // ── Catalog / Listings ────────────────────────────────────────────────────
 
-  // GET /ml/orders/kpis
+  // GET /ml/orders/kpis?seller_id=...
   @Get('orders/kpis')
-  getOrdersKpis(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getOrdersKpis(user.orgId!)
+  getOrdersKpis(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getOrdersKpis(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
   // GET /ml/orders/enriched?offset=0&limit=20&q=...&seller_id=...

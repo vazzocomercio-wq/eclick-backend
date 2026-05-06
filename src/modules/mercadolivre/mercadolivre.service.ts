@@ -563,8 +563,8 @@ export class MercadolivreService {
 
   // ── Pipeline endpoints ───────────────────────────────────────────────────
 
-  async getMyItems(orgId: string) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getMyItems(orgId: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
     const { data: body } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { status: 'active', limit: 50 },
@@ -1284,8 +1284,8 @@ export class MercadolivreService {
 
   // ── Orders enriched ──────────────────────────────────────────────────────
 
-  async getOrdersKpis(orgId: string) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getOrdersKpis(orgId: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
     const now      = new Date()
     const todayFr  = new Date(now.getFullYear(), now.getMonth(), now.getDate())
