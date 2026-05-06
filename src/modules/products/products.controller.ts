@@ -34,6 +34,30 @@ export class ProductsController {
     return this.enrichment.recomputeScore(u.orgId, id)
   }
 
+  /** POST /products/enrich-bulk (L1) — marca N produtos como pending pra
+   *  worker M2.2 processar em background. Cap 200 produtos/call. */
+  @Post('enrich-bulk')
+  @HttpCode(HttpStatus.OK)
+  enrichBulk(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      product_ids?:        string[]
+      missing_enrichment?: boolean
+      ai_score_lt?:        number
+      limit?:              number
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.enrichBulk(u.orgId, body)
+  }
+
+  /** GET /products/enrichment-summary — KPIs de enriquecimento da org. */
+  @Get('enrichment-summary')
+  enrichmentSummary(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.enrichmentSummary(u.orgId)
+  }
+
   // ── Onda 1 M1 — Bridge com módulo IA Criativo ───────────────────────────
 
   /** GET /products/:id/creatives — lista creative_products vinculados ao produto. */

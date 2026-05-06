@@ -79,6 +79,100 @@ export class ProductsEnrichmentService {
   // WORKER QUEUE (M2.2)
   // ════════════════════════════════════════════════════════════════════════
 
+  /** L1 — Enriquecimento em massa.
+   *  Marca produtos como pending=true (worker M2.2 enriquece em background).
+   *  Aceita IDs explícitos OU filtros. Cap de segurança em 200 produtos/call.
+   *
+   *  Custo estimado: ~$0.02/produto × N. Caller deve confirmar antes de chamar.
+   */
+  async enrichBulk(orgId: string, body: {
+    product_ids?:        string[]
+    missing_enrichment?: boolean       // ai_enriched_at IS NULL
+    ai_score_lt?:        number        // ai_score < N (inclusive null)
+    limit?:              number
+  }): Promise<{ marked: number; estimated_cost_usd: number }> {
+    const cap = Math.max(1, Math.min(200, body.limit ?? 100))
+
+    let q = supabaseAdmin
+      .from('products')
+      .select('id', { count: 'exact', head: false })
+      .eq('organization_id', orgId)
+      .eq('ai_enrichment_pending', false) // só novos pendentes
+      .neq('status', 'archived')
+      .limit(cap)
+
+    if (body.product_ids && body.product_ids.length > 0) {
+      q = q.in('id', body.product_ids.slice(0, cap))
+    } else {
+      if (body.missing_enrichment) {
+        q = q.is('ai_enriched_at', null)
+      }
+      if (typeof body.ai_score_lt === 'number') {
+        const threshold = Math.max(0, Math.min(100, body.ai_score_lt))
+        // OR: ai_score < threshold OR ai_score IS NULL (sem score conta como baixo)
+        q = q.or(`ai_score.lt.${threshold},ai_score.is.null`)
+      }
+    }
+
+    const { data: products, error: fetchErr } = await q
+    if (fetchErr) throw new BadRequestException(`enrichBulk.fetch: ${fetchErr.message}`)
+
+    const ids = (products ?? []).map(p => (p as { id: string }).id)
+    if (ids.length === 0) return { marked: 0, estimated_cost_usd: 0 }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('products')
+      .update({ ai_enrichment_pending: true, updated_at: new Date().toISOString() })
+      .in('id', ids)
+      .eq('organization_id', orgId) // tenant guard adicional
+    if (updateErr) throw new BadRequestException(`enrichBulk.update: ${updateErr.message}`)
+
+    this.logger.log(`[catalog.bulk] ${ids.length} produtos marcados pending — worker vai processar`)
+    return {
+      marked:             ids.length,
+      estimated_cost_usd: ids.length * 0.02, // estimativa Sonnet ~$0.01-0.03
+    }
+  }
+
+  /** Resumo do estado de enriquecimento da org — pra UI da bulk page. */
+  async enrichmentSummary(orgId: string): Promise<{
+    total:          number
+    enriched:       number
+    pending:        number
+    missing:        number
+    score_under_60: number
+    score_under_40: number
+  }> {
+    const [total, enriched, pending, missing, scoreLow, scoreVeryLow] = await Promise.all([
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived'),
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .not('ai_enriched_at', 'is', null),
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .eq('ai_enrichment_pending', true),
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .is('ai_enriched_at', null),
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .lt('ai_score', 60),
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .lt('ai_score', 40),
+    ])
+
+    return {
+      total:          total.count        ?? 0,
+      enriched:       enriched.count     ?? 0,
+      pending:        pending.count      ?? 0,
+      missing:        missing.count      ?? 0,
+      score_under_60: scoreLow.count     ?? 0,
+      score_under_40: scoreVeryLow.count ?? 0,
+    }
+  }
+
   /** Lista produtos com ai_enrichment_pending=true. Worker M2.2 chama
    *  isso a cada tick, processa cada um via enrichProduct(). */
   async listPendingEnrichment(maxItems = 5): Promise<Array<{ id: string; organization_id: string }>> {
