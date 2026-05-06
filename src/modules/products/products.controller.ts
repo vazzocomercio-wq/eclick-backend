@@ -1,8 +1,9 @@
-import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException, NotFoundException } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
 import { ProductsEnrichmentService } from './products-enrichment.service'
 import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -56,6 +57,29 @@ export class ProductsController {
   enrichmentSummary(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.enrichment.enrichmentSummary(u.orgId)
+  }
+
+  // ── L2 — Landing page pública ─────────────────────────────────────────────
+
+  /** PATCH /products/:id/landing — toggle landing_published. */
+  @Patch(':id/landing')
+  setLanding(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { published: boolean },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.setLandingPublished(u.orgId, id, !!body?.published)
+  }
+
+  /** GET /public/products/:id/landing — endpoint PÚBLICO (sem auth) usado
+   *  pela rota /p/:id no frontend. 404 se não publicado. */
+  @Get('/public/:id/landing')
+  @Public()
+  async getPublicLanding(@Param('id') id: string) {
+    const product = await this.enrichment.getLandingProduct(id)
+    if (!product) throw new NotFoundException('produto não disponível')
+    return product
   }
 
   // ── Onda 1 M1 — Bridge com módulo IA Criativo ───────────────────────────

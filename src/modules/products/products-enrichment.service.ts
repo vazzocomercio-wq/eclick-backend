@@ -43,6 +43,39 @@ interface ProductRow {
   status:             string | null
 }
 
+export interface PublicLandingProduct {
+  id:                       string
+  name:                     string
+  brand:                    string | null
+  category:                 string | null
+  description:              string | null
+  price:                    number | null
+  photo_urls:               string[] | null
+  gtin:                     string | null
+  status:                   string | null
+  condition:                string | null
+  weight_kg:                number | null
+  width_cm:                 number | null
+  length_cm:                number | null
+  height_cm:                number | null
+  ml_permalink:             string | null
+  ml_listing_id:            string | null
+  ai_short_description:     string | null
+  ai_long_description:      string | null
+  ai_keywords:              string[]
+  ai_target_audience:       string | null
+  ai_use_cases:             string[]
+  ai_pros:                  string[]
+  ai_cons:                  string[]
+  ai_seo_keywords:          string[]
+  ai_seasonality_hint:      string | null
+  ai_score:                 number | null
+  ai_enriched_at:           string | null
+  landing_published:        boolean
+  landing_views:            number
+  landing_published_at:     string | null
+}
+
 export interface ScoreBreakdown {
   has_name:               { points: number; max: number }
   has_description:        { points: number; max: number }
@@ -74,6 +107,63 @@ export class ProductsEnrichmentService {
   private readonly logger = new Logger(ProductsEnrichmentService.name)
 
   constructor(private readonly llm: LlmService) {}
+
+  // ════════════════════════════════════════════════════════════════════════
+  // L2 — Landing page pública
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Toggle landing_published. Quando true, produto fica acessível em
+   *  rota pública /p/:id (sem auth). User precisa explicitamente ativar. */
+  async setLandingPublished(orgId: string, productId: string, published: boolean): Promise<{ landing_published: boolean; landing_published_at: string | null }> {
+    const update: Record<string, unknown> = {
+      landing_published: published,
+      updated_at:        new Date().toISOString(),
+    }
+    if (published) update.landing_published_at = new Date().toISOString()
+
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .update(update)
+      .eq('organization_id', orgId)
+      .eq('id', productId)
+      .select('landing_published, landing_published_at')
+      .single()
+    if (error) throw new BadRequestException(`setLandingPublished: ${error.message}`)
+    return data as { landing_published: boolean; landing_published_at: string | null }
+  }
+
+  /** Busca produto pra render PÚBLICO (sem auth). Retorna 404 se não
+   *  publicado. Filtra apenas safe fields (sem cost_price, sem stock
+   *  exato, etc). Bumpa landing_views (sem rate limit aqui — ok pra MVP). */
+  async getLandingProduct(productId: string): Promise<PublicLandingProduct | null> {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select(`
+        id, name, brand, category, description, price,
+        photo_urls, gtin, status, condition,
+        weight_kg, width_cm, length_cm, height_cm,
+        ml_permalink, ml_listing_id,
+        ai_short_description, ai_long_description,
+        ai_keywords, ai_target_audience, ai_use_cases,
+        ai_pros, ai_cons, ai_seo_keywords, ai_seasonality_hint,
+        ai_score, ai_enriched_at,
+        landing_published, landing_views, landing_published_at
+      `)
+      .eq('id', productId)
+      .eq('landing_published', true)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`getLandingProduct: ${error.message}`)
+    if (!data) return null
+
+    // Bump views fire-and-forget (não bloqueia render)
+    void supabaseAdmin
+      .from('products')
+      .update({ landing_views: ((data as { landing_views: number }).landing_views ?? 0) + 1 })
+      .eq('id', productId)
+      .then(() => undefined)
+
+    return data as PublicLandingProduct
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // WORKER QUEUE (M2.2)
