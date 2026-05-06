@@ -430,43 +430,68 @@ export class CreativeVideoPipelineService {
       .update({ status: 'generating_prompts', started_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq('id', job.id)
 
-    const out = await this.llm.generateText({
-      orgId:      job.organization_id,
-      feature:    'creative_video_prompts',
-      userPrompt: buildVideoPromptsRequest({
-        product:  {
-          name:            product.name,
-          category:        product.category,
-          brand:           product.brand,
-          color:           product.color,
-          material:        product.material,
-          dimensions:      product.dimensions,
-          differentials:   product.differentials,
-          target_audience: product.target_audience,
-          ai_analysis:     product.ai_analysis,
-        },
-        briefing: {
-          target_marketplace: briefing.target_marketplace as Marketplace,
-          visual_style:       briefing.visual_style,
-          environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
-          custom_environment: briefing.custom_environment,
-          custom_prompt:      briefing.custom_prompt,
-          background_color:   briefing.background_color,
-          use_logo:           briefing.use_logo,
-          communication_tone: briefing.communication_tone,
-          image_count:        briefing.image_count,
-        },
-        count:       job.requested_count,
-        durationSec: (job.duration_seconds === 10 ? 10 : 5),
-        aspectRatio: job.aspect_ratio,
-      }),
-      jsonMode:  true,
-      maxTokens: 3000,
-      creative:  { productId: product.id, operation: 'video_prompt_generation' },
-    })
+    // Reaproveita base editavel de prompts do briefing quando preenchida
+    // (bloco 3 do workflow). Falha pra Sonnet on-demand quando vazia.
+    const baseVideoPrompts = briefing.video_prompts ?? []
+    let prompts: string[] = []
+    let promptsMetadata: Record<string, unknown> = {}
+    let promptsCostUsd = 0
 
-    const prompts = parsePromptsArray(out.text, job.requested_count)
-    if (prompts.length === 0) throw new Error('LLM retornou nenhum prompt válido')
+    if (baseVideoPrompts.length > 0) {
+      prompts = Array.from({ length: job.requested_count }, (_, i) => baseVideoPrompts[i % baseVideoPrompts.length])
+      promptsMetadata = { source: 'briefing.video_prompts', base_count: baseVideoPrompts.length }
+    } else {
+      const out = await this.llm.generateText({
+        orgId:      job.organization_id,
+        feature:    'creative_video_prompts',
+        userPrompt: buildVideoPromptsRequest({
+          product:  {
+            name:            product.name,
+            category:        product.category,
+            brand:           product.brand,
+            color:           product.color,
+            material:        product.material,
+            dimensions:      product.dimensions,
+            differentials:   product.differentials,
+            target_audience: product.target_audience,
+            ai_analysis:     product.ai_analysis,
+          },
+          briefing: {
+            target_marketplace: briefing.target_marketplace as Marketplace,
+            visual_style:       briefing.visual_style,
+            environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
+            custom_environment: briefing.custom_environment,
+            custom_prompt:      briefing.custom_prompt,
+            background_color:   briefing.background_color,
+            use_logo:           briefing.use_logo,
+            communication_tone: briefing.communication_tone,
+            image_count:        briefing.image_count,
+          },
+          count:       job.requested_count,
+          durationSec: (job.duration_seconds === 10 ? 10 : 5),
+          aspectRatio: job.aspect_ratio,
+        }),
+        jsonMode:  true,
+        maxTokens: 3000,
+        creative:  { productId: product.id, operation: 'video_prompt_generation' },
+      })
+
+      prompts = parsePromptsArray(out.text, job.requested_count)
+      promptsMetadata = {
+        source:        'on_demand',
+        provider:      out.provider,
+        model:         out.model,
+        input_tokens:  out.inputTokens,
+        output_tokens: out.outputTokens,
+        cost_usd:      out.costUsd,
+        latency_ms:    out.latencyMs,
+      }
+      promptsCostUsd = out.costUsd
+    }
+
+    if (prompts.length === 0) {
+      throw new Error('Nenhum prompt valido (base do briefing vazia + LLM falhou)')
+    }
 
     const rows = prompts.map((prompt, i) => ({
       job_id:           job.id,
@@ -488,12 +513,8 @@ export class CreativeVideoPipelineService {
       .update({
         status:            'generating_videos',
         prompts_generated: prompts,
-        prompts_metadata: {
-          provider: out.provider, model: out.model,
-          input_tokens: out.inputTokens, output_tokens: out.outputTokens,
-          cost_usd: out.costUsd, latency_ms: out.latencyMs,
-        },
-        total_cost_usd:    out.costUsd,
+        prompts_metadata:  promptsMetadata,
+        total_cost_usd:    promptsCostUsd,
         updated_at:        new Date().toISOString(),
       })
       .eq('id', job.id)

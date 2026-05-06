@@ -5,8 +5,11 @@ import {
   PRODUCT_ANALYSIS_PROMPT,
   buildListingPrompt,
   buildVariantPrompt,
+  buildImagePromptsRequest,
+  buildVideoPromptsRequest,
   type ListingPromptInput,
 } from './creative.prompts'
+import type { Provider } from '../ai/defaults'
 import { getMarketplaceRules, type Marketplace } from './creative.marketplace-rules'
 
 // ── Types refletindo o schema ─────────────────────────────────────────────
@@ -558,6 +561,121 @@ export class CreativeService {
     return data as CreativeBriefing
   }
 
+  /** Atualiza qualquer campo do briefing — usado pra editar a base de
+   *  prompts (image_prompts, video_prompts) e ajustes pontuais no fluxo. */
+  async updateBriefing(orgId: string, briefingId: string, patch: Partial<{
+    target_marketplace:  Marketplace
+    visual_style:        string
+    environments:        string[]
+    custom_environment:  string | null
+    custom_prompt:       string | null
+    background_color:    string
+    use_logo:            boolean
+    logo_url:            string | null
+    logo_storage_path:   string | null
+    communication_tone:  string
+    image_count:         number
+    image_format:        string
+    image_prompts:       string[] | null
+    video_prompts:       string[] | null
+  }>): Promise<CreativeBriefing> {
+    // Sanity check de existência + scope da org
+    await this.getBriefing(orgId, briefingId)
+
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    for (const k of Object.keys(patch)) {
+      const v = (patch as Record<string, unknown>)[k]
+      if (v !== undefined) update[k] = v
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_briefings')
+      .update(update)
+      .eq('organization_id', orgId)
+      .eq('id', briefingId)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`updateBriefing: ${error.message}`)
+    return data as CreativeBriefing
+  }
+
+  /** Gera (via LLM) a base de prompts editaveis ligada ao briefing.
+   *  Pipelines de imagem/video reusam essa base nas geracoes seguintes
+   *  ao inves de chamar Sonnet toda vez. User pode editar a base entre
+   *  geracoes pra refinar manualmente. */
+  async generatePromptsBase(orgId: string, briefingId: string, opts: {
+    scope:              'image' | 'video' | 'both'
+    override?:          { provider: Provider; model: string }
+    /** Default = briefing.image_count. */
+    imageCount?:        number
+    /** Default = 5. */
+    videoCount?:        number
+    /** Default = 10. */
+    videoDurationSec?:  5 | 10
+    /** Default = '9:16'. */
+    videoAspectRatio?:  '1:1' | '16:9' | '9:16'
+  }): Promise<CreativeBriefing> {
+    const briefing = await this.getBriefing(orgId, briefingId)
+    const product = await this.getProduct(orgId, briefing.product_id)
+
+    const productInput = {
+      name:            product.name,
+      category:        product.category,
+      brand:           product.brand,
+      color:           product.color,
+      material:        product.material,
+      dimensions:      product.dimensions,
+      differentials:   product.differentials,
+      target_audience: product.target_audience,
+      ai_analysis:     product.ai_analysis,
+    }
+    const briefingInput = {
+      target_marketplace: briefing.target_marketplace,
+      visual_style:       briefing.visual_style,
+      environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
+      custom_environment: briefing.custom_environment,
+      custom_prompt:      briefing.custom_prompt,
+      background_color:   briefing.background_color,
+      use_logo:           briefing.use_logo,
+      communication_tone: briefing.communication_tone,
+      image_count:        briefing.image_count,
+    }
+
+    const patch: { image_prompts?: string[]; video_prompts?: string[] } = {}
+
+    if (opts.scope === 'image' || opts.scope === 'both') {
+      const count = opts.imageCount ?? briefing.image_count ?? 10
+      const out = await this.llm.generateText({
+        orgId,
+        feature:    'creative_image_prompts',
+        userPrompt: buildImagePromptsRequest({ product: productInput, briefing: briefingInput, count }),
+        jsonMode:   true,
+        maxTokens:  4000,
+        override:   opts.override,
+        creative:   { productId: product.id, operation: 'prompts_base_image' },
+      })
+      patch.image_prompts = parsePromptsArrayJson(out.text, count)
+    }
+
+    if (opts.scope === 'video' || opts.scope === 'both') {
+      const count = opts.videoCount ?? 5
+      const durationSec = opts.videoDurationSec ?? 10
+      const aspectRatio = opts.videoAspectRatio ?? '9:16'
+      const out = await this.llm.generateText({
+        orgId,
+        feature:    'creative_video_prompts',
+        userPrompt: buildVideoPromptsRequest({ product: productInput, briefing: briefingInput, count, durationSec, aspectRatio }),
+        jsonMode:   true,
+        maxTokens:  3000,
+        override:   opts.override,
+        creative:   { productId: product.id, operation: 'prompts_base_video' },
+      })
+      patch.video_prompts = parsePromptsArrayJson(out.text, count)
+    }
+
+    return this.updateBriefing(orgId, briefingId, patch)
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   // BRIEFING TEMPLATES (melhoria #2)
   // ════════════════════════════════════════════════════════════════════════
@@ -1093,4 +1211,20 @@ function mapValues<V, R>(obj: Record<string, V>, fn: (v: V) => R): Record<string
   const out: Record<string, R> = {}
   for (const k of Object.keys(obj)) out[k] = fn(obj[k])
   return out
+}
+
+/** Parse de array JSON de prompts retornado pelo LLM. Tolerante a wrapper
+ *  markdown (```json ... ```). Pareado com parsePromptsArray dos pipelines. */
+function parsePromptsArrayJson(text: string, expected: number): string[] {
+  const cleaned = text
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim()
+  let parsed: unknown
+  try { parsed = JSON.parse(cleaned) } catch { return [] }
+  if (!Array.isArray(parsed)) return []
+  return parsed
+    .map(p => typeof p === 'string' ? p.trim() : '')
+    .filter(p => p.length > 0)
+    .slice(0, expected)
 }

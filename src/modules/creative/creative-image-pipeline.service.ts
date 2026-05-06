@@ -401,42 +401,66 @@ export class CreativeImagePipelineService {
       .update({ status: 'generating_prompts', updated_at: new Date().toISOString() })
       .eq('id', job.id)
 
-    const out = await this.llm.generateText({
-      orgId:      job.organization_id,
-      feature:    'creative_image_prompts',
-      userPrompt: buildImagePromptsRequest({
-        product:  {
-          name:            product.name,
-          category:        product.category,
-          brand:           product.brand,
-          color:           product.color,
-          material:        product.material,
-          dimensions:      product.dimensions,
-          differentials:   product.differentials,
-          target_audience: product.target_audience,
-          ai_analysis:     product.ai_analysis,
-        },
-        briefing: {
-          target_marketplace: briefing.target_marketplace as Marketplace,
-          visual_style:       briefing.visual_style,
-          environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
-          custom_environment: briefing.custom_environment,
-          custom_prompt:      briefing.custom_prompt,
-          background_color:   briefing.background_color,
-          use_logo:           briefing.use_logo,
-          communication_tone: briefing.communication_tone,
-          image_count:        briefing.image_count,
-        },
-        count: job.requested_count,
-      }),
-      jsonMode:  true,
-      maxTokens: 4000,
-      creative:  { productId: product.id, operation: 'prompt_generation' },
-    })
+    // Reaproveita a base editavel de prompts do briefing quando preenchida
+    // (bloco 3 do workflow). Falha pra Sonnet on-demand quando vazia.
+    const baseImagePrompts = briefing.image_prompts ?? []
+    let prompts: string[] = []
+    let promptsMetadata: Record<string, unknown> = {}
+    let promptsCostUsd = 0
 
-    const prompts = parsePromptsArray(out.text, job.requested_count)
+    if (baseImagePrompts.length > 0) {
+      // Distribui base entre N posicoes (round-robin se base < requested).
+      prompts = Array.from({ length: job.requested_count }, (_, i) => baseImagePrompts[i % baseImagePrompts.length])
+      promptsMetadata = { source: 'briefing.image_prompts', base_count: baseImagePrompts.length }
+    } else {
+      const out = await this.llm.generateText({
+        orgId:      job.organization_id,
+        feature:    'creative_image_prompts',
+        userPrompt: buildImagePromptsRequest({
+          product:  {
+            name:            product.name,
+            category:        product.category,
+            brand:           product.brand,
+            color:           product.color,
+            material:        product.material,
+            dimensions:      product.dimensions,
+            differentials:   product.differentials,
+            target_audience: product.target_audience,
+            ai_analysis:     product.ai_analysis,
+          },
+          briefing: {
+            target_marketplace: briefing.target_marketplace as Marketplace,
+            visual_style:       briefing.visual_style,
+            environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
+            custom_environment: briefing.custom_environment,
+            custom_prompt:      briefing.custom_prompt,
+            background_color:   briefing.background_color,
+            use_logo:           briefing.use_logo,
+            communication_tone: briefing.communication_tone,
+            image_count:        briefing.image_count,
+          },
+          count: job.requested_count,
+        }),
+        jsonMode:  true,
+        maxTokens: 4000,
+        creative:  { productId: product.id, operation: 'prompt_generation' },
+      })
+
+      prompts = parsePromptsArray(out.text, job.requested_count)
+      promptsMetadata = {
+        source:        'on_demand',
+        provider:      out.provider,
+        model:         out.model,
+        input_tokens:  out.inputTokens,
+        output_tokens: out.outputTokens,
+        cost_usd:      out.costUsd,
+        latency_ms:    out.latencyMs,
+      }
+      promptsCostUsd = out.costUsd
+    }
+
     if (prompts.length === 0) {
-      throw new Error('LLM retornou nenhum prompt válido')
+      throw new Error('Nenhum prompt valido (base do briefing vazia + LLM falhou)')
     }
 
     // Insere uma row creative_images por prompt (status pending)
@@ -457,20 +481,13 @@ export class CreativeImagePipelineService {
       .update({
         status:            'generating_images',
         prompts_generated: prompts,
-        prompts_metadata: {
-          provider:      out.provider,
-          model:         out.model,
-          input_tokens:  out.inputTokens,
-          output_tokens: out.outputTokens,
-          cost_usd:      out.costUsd,
-          latency_ms:    out.latencyMs,
-        },
-        total_cost_usd:    out.costUsd,
+        prompts_metadata:  promptsMetadata,
+        total_cost_usd:    promptsCostUsd,
         updated_at:        new Date().toISOString(),
       })
       .eq('id', job.id)
 
-    this.logger.log(`[creative.image] job ${job.id} prompts: ${prompts.length} gerados — cost=$${out.costUsd}`)
+    this.logger.log(`[creative.image] job ${job.id} prompts: ${prompts.length} gerados — cost=$${promptsCostUsd}`)
   }
 
   private async generatePendingImages(jobId: string): Promise<void> {

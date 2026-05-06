@@ -98,6 +98,41 @@ export class CreativeController {
     return this.svc.listBriefings(this.orgOrThrow(u), id)
   }
 
+  @Patch('briefings/:id')
+  updateBriefing(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.svc.updateBriefing(this.orgOrThrow(u), id, body)
+  }
+
+  /** Gera (ou regenera) a base de prompts editaveis ligada ao briefing.
+   *  Body opcional aceita { scope, override, imageCount, videoCount,
+   *  videoDurationSec, videoAspectRatio }. */
+  @Post('briefings/:id/generate-prompts')
+  generatePromptsBase(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: {
+      scope?:             'image' | 'video' | 'both'
+      override?:          { provider: 'anthropic' | 'openai'; model: string }
+      imageCount?:        number
+      videoCount?:        number
+      videoDurationSec?:  5 | 10
+      videoAspectRatio?:  '1:1' | '16:9' | '9:16'
+    },
+  ) {
+    return this.svc.generatePromptsBase(this.orgOrThrow(u), id, {
+      scope:             body?.scope ?? 'both',
+      override:          body?.override,
+      imageCount:        body?.imageCount,
+      videoCount:        body?.videoCount,
+      videoDurationSec:  body?.videoDurationSec,
+      videoAspectRatio:  body?.videoAspectRatio,
+    })
+  }
+
   // ── Briefing templates (melhoria #2) ─────────────────────────────────────
 
   @Get('briefing-templates')
