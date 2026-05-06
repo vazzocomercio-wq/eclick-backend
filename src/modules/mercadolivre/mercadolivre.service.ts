@@ -1382,8 +1382,8 @@ export class MercadolivreService {
     return { marked: data?.length ?? 0 }
   }
 
-  async getOrdersEnriched(orgId: string, offset = 0, limit = 20, q?: string) {
-    const { token, sellerId } = await this.getValidToken()
+  async getOrdersEnriched(orgId: string, offset = 0, limit = 20, q?: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
     const params: Record<string, unknown> = { seller: sellerId, sort: 'date_desc', limit, offset }
     if (q?.trim()) params.q = q.trim()

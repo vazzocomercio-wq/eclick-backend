@@ -440,15 +440,22 @@ export class MercadolivreController {
     return this.ml.getOrdersKpis(user.orgId!)
   }
 
-  // GET /ml/orders/enriched?offset=0&limit=20&q=...
+  // GET /ml/orders/enriched?offset=0&limit=20&q=...&seller_id=...
   @Get('orders/enriched')
   getOrdersEnriched(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
     @Query('limit')  limit?: string,
     @Query('q')      q?: string,
+    @Query('seller_id') sellerId?: string,
   ) {
-    return this.ml.getOrdersEnriched(user.orgId!, Number(offset ?? 0), Number(limit ?? 20), q)
+    return this.ml.getOrdersEnriched(
+      user.orgId!,
+      Number(offset ?? 0),
+      Number(limit ?? 20),
+      q,
+      sellerId ? Number(sellerId) : undefined,
+    )
   }
 
   // GET /ml/listings/visits
