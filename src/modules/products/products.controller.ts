@@ -1,5 +1,6 @@
-import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
 import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
+import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -8,7 +9,33 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('products')
 @UseGuards(SupabaseAuthGuard)
 export class ProductsController {
-  constructor(private readonly products: ProductsService) {}
+  constructor(
+    private readonly products: ProductsService,
+    private readonly creative: CreativeService,
+  ) {}
+
+  // ── Onda 1 M1 — Bridge com módulo IA Criativo ───────────────────────────
+
+  /** GET /products/:id/creatives — lista creative_products vinculados ao produto. */
+  @Get(':id/creatives')
+  listProductCreatives(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.creative.listCreativesForCatalogProduct(u.orgId, id)
+  }
+
+  /** POST /products/:id/creative — cria criativo pré-preenchido com dados do
+   *  produto. Body: { main_image_url, main_image_storage_path } (frontend
+   *  faz upload primeiro pra bucket creative). */
+  @Post(':id/creative')
+  @HttpCode(HttpStatus.OK)
+  createCreativeFromProduct(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { main_image_url: string; main_image_storage_path: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.creative.createCreativeFromCatalogProduct(u.orgId, u.id, id, body)
+  }
 
   // GET /products
   // Quando query params de paginação são passados (page, per_page, search, etc),

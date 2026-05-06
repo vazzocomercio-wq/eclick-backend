@@ -80,6 +80,12 @@ export class CreativeController {
     return this.svc.analyzeProduct(this.orgOrThrow(u), id)
   }
 
+  @Post('products/:id/to-catalog')
+  @HttpCode(HttpStatus.OK)
+  creativeToCatalog(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.creativeToCatalog(this.orgOrThrow(u), id)
+  }
+
   // ── Briefings ────────────────────────────────────────────────────────────
 
   @Post('products/:id/briefings')

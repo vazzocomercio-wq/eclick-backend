@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, ConflictException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import {
@@ -33,6 +33,8 @@ export interface CreativeProduct {
   reference_video_url:      string | null
   brand_identity_url:       string | null
   status:                   'draft' | 'analyzing' | 'ready' | 'archived'
+  /** Onda 1 M1 — vínculo opcional com catálogo mestre `products` */
+  product_id:               string | null
   created_at:               string
   updated_at:               string
 }
@@ -103,9 +105,11 @@ export interface CreateProductDto {
   competitor_links?:        string[]
   reference_video_url?:     string
   brand_identity_url?:      string
+  /** Onda 1 M1 — vincula direto ao catálogo no momento da criação */
+  product_id?:              string
 }
 
-export type UpdateProductDto = Partial<CreateProductDto>
+export type UpdateProductDto = Partial<CreateProductDto> & { product_id?: string | null }
 
 export interface CreateBriefingDto {
   target_marketplace:  Marketplace
@@ -137,6 +141,11 @@ export class CreativeService {
     if (!dto.main_image_url?.trim()) throw new BadRequestException('main_image_url obrigatório')
     if (!dto.main_image_storage_path?.trim()) throw new BadRequestException('main_image_storage_path obrigatório')
 
+    // Se product_id passado, valida que pertence ao mesmo org
+    if (dto.product_id) {
+      await this.assertCatalogProductInOrg(orgId, dto.product_id)
+    }
+
     const { data, error } = await supabaseAdmin
       .from('creative_products')
       .insert({
@@ -158,12 +167,27 @@ export class CreativeService {
         competitor_links:        dto.competitor_links ?? [],
         reference_video_url:     dto.reference_video_url ?? null,
         brand_identity_url:      dto.brand_identity_url ?? null,
+        product_id:              dto.product_id ?? null,
         status:                  'draft',
       })
       .select('*')
       .single()
     if (error) throw new BadRequestException(`createProduct: ${error.message}`)
     return data as CreativeProduct
+  }
+
+  /** Valida que catalog_product pertence à mesma org. Lança 404/403. */
+  private async assertCatalogProductInOrg(orgId: string, catalogProductId: string): Promise<void> {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('id, organization_id')
+      .eq('id', catalogProductId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`assertCatalog: ${error.message}`)
+    if (!data) throw new NotFoundException('produto do catálogo não encontrado')
+    if ((data as { organization_id: string | null }).organization_id !== orgId) {
+      throw new ForbiddenException('produto do catálogo pertence a outra organização')
+    }
   }
 
   async listProducts(orgId: string, opts: {
@@ -227,6 +251,12 @@ export class CreativeService {
 
   async updateProduct(orgId: string, id: string, dto: UpdateProductDto): Promise<CreativeProduct> {
     await this.getProduct(orgId, id) // valida existência + tenant
+
+    // Se product_id passado (não-null), valida tenant. Aceitar null = desvincular.
+    if (dto.product_id) {
+      await this.assertCatalogProductInOrg(orgId, dto.product_id)
+    }
+
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
     for (const k of Object.keys(dto) as Array<keyof UpdateProductDto>) {
       if (dto[k] !== undefined) patch[k] = dto[k]
@@ -240,6 +270,136 @@ export class CreativeService {
       .single()
     if (error) throw new BadRequestException(`updateProduct: ${error.message}`)
     return data as CreativeProduct
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Onda 1 M1 — Bridge Creative ↔ Catálogo
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Lista creative_products vinculados a um produto do catálogo. */
+  async listCreativesForCatalogProduct(orgId: string, catalogProductId: string): Promise<CreativeProduct[]> {
+    await this.assertCatalogProductInOrg(orgId, catalogProductId)
+    const { data, error } = await supabaseAdmin
+      .from('creative_products')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('product_id', catalogProductId)
+      .neq('status', 'archived')
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new BadRequestException(`listCreativesForCatalogProduct: ${error.message}`)
+    return (data ?? []) as CreativeProduct[]
+  }
+
+  /** Cria creative_product pré-preenchido com dados de um produto do catálogo.
+   *  Usuário ainda precisa subir imagem (main_image_url + main_image_storage_path
+   *  vêm do upload no frontend, este service só cria a row). */
+  async createCreativeFromCatalogProduct(
+    orgId: string,
+    userId: string,
+    catalogProductId: string,
+    upload: { main_image_url: string; main_image_storage_path: string },
+  ): Promise<CreativeProduct> {
+    if (!upload.main_image_url || !upload.main_image_storage_path) {
+      throw new BadRequestException('main_image_url e main_image_storage_path obrigatórios')
+    }
+
+    // Pega catalog product (já valida tenant)
+    const { data: catalog, error } = await supabaseAdmin
+      .from('products')
+      .select('id, organization_id, name, brand, category, sku, gtin, weight_kg, width_cm, length_cm, height_cm, attributes, description, photo_urls')
+      .eq('id', catalogProductId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`fetchCatalog: ${error.message}`)
+    if (!catalog) throw new NotFoundException('produto do catálogo não encontrado')
+    const cat = catalog as {
+      id: string; organization_id: string | null; name: string; brand: string | null;
+      category: string | null; sku: string | null; gtin: string | null;
+      weight_kg: number | null; width_cm: number | null; length_cm: number | null;
+      height_cm: number | null; attributes: Record<string, unknown> | null;
+      description: string | null; photo_urls: string[] | null;
+    }
+    if (cat.organization_id !== orgId) {
+      throw new ForbiddenException('produto do catálogo pertence a outra organização')
+    }
+
+    // Pré-preenche creative_product a partir do catalog
+    const dimensions: Record<string, string> = {}
+    if (cat.weight_kg) dimensions.peso         = `${cat.weight_kg} kg`
+    if (cat.width_cm)  dimensions.largura      = `${cat.width_cm} cm`
+    if (cat.length_cm) dimensions.profundidade = `${cat.length_cm} cm`
+    if (cat.height_cm) dimensions.altura       = `${cat.height_cm} cm`
+
+    return this.createProduct(orgId, userId, {
+      name:                    cat.name,
+      category:                cat.category ?? 'Diversos',
+      brand:                   cat.brand ?? undefined,
+      main_image_url:          upload.main_image_url,
+      main_image_storage_path: upload.main_image_storage_path,
+      dimensions:              Object.keys(dimensions).length > 0 ? dimensions : undefined,
+      sku:                     cat.sku ?? undefined,
+      ean:                     cat.gtin ?? undefined,
+      reference_images:        cat.photo_urls ?? undefined,
+      product_id:              cat.id,
+    })
+  }
+
+  /** Cria um produto no catálogo (`products`) a partir de um creative_product
+   *  e atualiza o vínculo. Usado quando user criou criativo do zero (cenário B)
+   *  e depois quer "salvar no catálogo". */
+  async creativeToCatalog(orgId: string, creativeId: string): Promise<{ creative: CreativeProduct; catalog_product_id: string }> {
+    const creative = await this.getProduct(orgId, creativeId)
+    if (creative.product_id) {
+      throw new ConflictException(`criativo já vinculado ao catálogo (product_id=${creative.product_id})`)
+    }
+
+    // Extrai dimensions
+    const dim = (creative.dimensions ?? {}) as Record<string, string>
+    const parseNumber = (v: string | undefined): number | null => {
+      if (!v) return null
+      const m = v.match(/[\d.,]+/)?.[0]?.replace(',', '.')
+      const n = m ? Number(m) : NaN
+      return Number.isFinite(n) ? n : null
+    }
+
+    const { data: created, error } = await supabaseAdmin
+      .from('products')
+      .insert({
+        organization_id: orgId,
+        name:            creative.name,
+        sku:             creative.sku,
+        gtin:            creative.ean,
+        brand:           creative.brand,
+        category:        creative.category,
+        description:     null,
+        weight_kg:       parseNumber(dim.peso),
+        width_cm:        parseNumber(dim.largura),
+        length_cm:       parseNumber(dim.profundidade),
+        height_cm:       parseNumber(dim.altura),
+        photo_urls:      creative.main_image_url ? [creative.main_image_url, ...creative.reference_images] : creative.reference_images,
+        attributes:      {
+          color:           creative.color,
+          material:        creative.material,
+          target_audience: creative.target_audience,
+          differentials:   creative.differentials,
+          ai_analysis:     creative.ai_analysis,
+        },
+        status:          'draft',
+        condition:       'new',
+      })
+      .select('id')
+      .single()
+    if (error) throw new BadRequestException(`creativeToCatalog.insert: ${error.message}`)
+    const catalogId = (created as { id: string }).id
+
+    // Atualiza vínculo
+    await supabaseAdmin
+      .from('creative_products')
+      .update({ product_id: catalogId, updated_at: new Date().toISOString() })
+      .eq('id', creative.id)
+
+    const updated = await this.getProduct(orgId, creative.id)
+    return { creative: updated, catalog_product_id: catalogId }
   }
 
   async archiveProduct(orgId: string, id: string): Promise<{ ok: true }> {
