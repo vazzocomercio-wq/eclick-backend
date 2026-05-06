@@ -111,22 +111,14 @@ social_content_gen, ads_campaign_gen,         ← Onda 3
 pricing_ai_suggest, kits_generate, collections_generate, store_copilot  ← Onda 4
 ```
 
-## ⚠️ AÇÃO PENDENTE — Bridge SaaS↔Active
+## Bridge SaaS↔Active
 
-Active confirmou que está pronto. Falta:
-
-### 1. Railway do SaaS (eclick-backend)
-```
-ACTIVE_AUTOMATION_BRIDGE_URL=https://<URL-DO-API-DO-ACTIVE>
-ACTIVE_AUTOMATION_BRIDGE_SECRET=c4f3211792b95ff4b0766c152504fb6f8164e0fe315fe919e9ffb4e8c7d20c3c
-```
-
-### 2. Railway do Active (eclick-active)
-```
-AUTOMATION_BRIDGE_SECRET=c4f3211792b95ff4b0766c152504fb6f8164e0fe315fe919e9ffb4e8c7d20c3c
-```
-
-> Mesmo valor nos dois lados. SaaS envia no header `X-Automation-Bridge-Token`, Active valida.
+### Status
+- ✅ Active deployado em `https://api.active.eclick.app.br`
+- ✅ SaaS Railway com `ACTIVE_AUTOMATION_BRIDGE_URL` + `ACTIVE_AUTOMATION_BRIDGE_SECRET` setadas
+- ⏳ Aguardando smoke test em `/store-automation/bridge-health`
+- 🔐 Secret value: gerenciado no Railway (vide vars). Deve ser idêntico em
+  `AUTOMATION_BRIDGE_SECRET` no Railway do Active.
 
 ### 3. Validar
 Após reboot dos Railways, chamar com JWT autenticado:
