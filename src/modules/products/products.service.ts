@@ -5,7 +5,7 @@ import { StockService } from '../stock/stock.service'
 const PRODUCT_FIELDS = `id,name,sku,brand,price,stock,status,platforms,photo_urls,
   ml_title,condition,category,created_at,
   wholesale_enabled,wholesale_levels,ml_listing_type,
-  ml_free_shipping,ml_flex,ml_listing_id,ml_permalink,cost_price,tax_percentage,tax_on_freight`
+  ml_free_shipping,ml_flex,ml_item_id,ml_listing_id,ml_permalink,cost_price,tax_percentage,tax_on_freight`
 
 export interface UpdateProductCostsDto {
   cost_price?:    number | null
