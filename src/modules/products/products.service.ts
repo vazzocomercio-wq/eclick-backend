@@ -216,6 +216,102 @@ export class ProductsService {
     if (error) throw new Error(error.message)
   }
 
+  /** Atualização em massa por SKU. Cada row tem { sku, cost_price?,
+   *  tax_percentage? }. Match por SKU exato dentro da org. Retorna
+   *  contagens e lista de SKUs não-encontrados / com erro. */
+  async bulkUpdateCostsBySku(
+    orgId: string | null,
+    rows: Array<{ sku: string; cost_price?: number | null; tax_percentage?: number | null; tax_on_freight?: boolean }>,
+  ): Promise<{
+    updated:    number
+    not_found:  number
+    errors:     number
+    not_found_skus: string[]
+    error_details:  Array<{ sku: string; reason: string }>
+  }> {
+    let updated = 0
+    let notFound = 0
+    let errors = 0
+    const notFoundSkus: string[] = []
+    const errorDetails: Array<{ sku: string; reason: string }> = []
+
+    // Carrega todos os products dessa org de uma vez pra match local —
+    // bem mais rápido do que 1 query por SKU.
+    let baseQuery = supabaseAdmin
+      .from('products')
+      .select('id, sku')
+      .not('sku', 'is', null)
+      .neq('sku', '')
+    if (orgId) baseQuery = (baseQuery as any).eq('organization_id', orgId)
+
+    const { data: existingProducts, error: loadErr } = await baseQuery
+    if (loadErr) {
+      throw new Error(`Erro ao carregar catálogo: ${loadErr.message}`)
+    }
+
+    const skuToId = new Map<string, string>()
+    for (const p of (existingProducts ?? []) as Array<{ id: string; sku: string }>) {
+      if (!p.sku) continue
+      // Normaliza SKU pra match case-insensitive
+      skuToId.set(p.sku.trim().toUpperCase(), p.id)
+    }
+
+    // Aplica updates em lote (1 por row) — sequencial pra coletar erros
+    for (const row of rows) {
+      const skuRaw = (row.sku ?? '').trim()
+      if (!skuRaw) {
+        errors++
+        errorDetails.push({ sku: skuRaw || '(vazio)', reason: 'SKU vazio' })
+        continue
+      }
+      const skuKey = skuRaw.toUpperCase()
+      const productId = skuToId.get(skuKey)
+      if (!productId) {
+        notFound++
+        notFoundSkus.push(skuRaw)
+        continue
+      }
+
+      // Validação simples
+      if (row.cost_price != null && (row.cost_price < 0 || !isFinite(row.cost_price))) {
+        errors++
+        errorDetails.push({ sku: skuRaw, reason: `cost_price inválido: ${row.cost_price}` })
+        continue
+      }
+      if (row.tax_percentage != null && (row.tax_percentage < 0 || row.tax_percentage > 100 || !isFinite(row.tax_percentage))) {
+        errors++
+        errorDetails.push({ sku: skuRaw, reason: `tax_percentage inválido (deve ser 0-100): ${row.tax_percentage}` })
+        continue
+      }
+
+      // Monta patch: só atualiza campos que vieram (≠ undefined). null
+      // explícito é permitido pra LIMPAR um valor.
+      const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
+      if (row.cost_price     !== undefined) patch.cost_price     = row.cost_price
+      if (row.tax_percentage !== undefined) patch.tax_percentage = row.tax_percentage
+      if (row.tax_on_freight !== undefined) patch.tax_on_freight = row.tax_on_freight
+
+      const { error: updErr } = await supabaseAdmin
+        .from('products')
+        .update(patch)
+        .eq('id', productId)
+      if (updErr) {
+        errors++
+        errorDetails.push({ sku: skuRaw, reason: updErr.message })
+      } else {
+        updated++
+      }
+    }
+
+    return {
+      updated,
+      not_found:      notFound,
+      errors,
+      not_found_skus: notFoundSkus.slice(0, 50),  // limita pra não estourar payload
+      error_details:  errorDetails.slice(0, 50),
+    }
+  }
+
   async deleteMany(ids: string[]) {
     const { error } = await supabaseAdmin
       .from('products')

@@ -260,4 +260,38 @@ export class ProductsController {
   bulkDelete(@Body() body: { ids: string[] }) {
     return this.products.deleteMany(body.ids)
   }
+
+  /** POST /products/bulk-update-costs
+   *
+   *  Atualiza cost_price + tax_percentage de produtos do catálogo,
+   *  matched por SKU. Aceita até 1000 rows por chamada.
+   *
+   *  Body: {
+   *    rows: Array<{ sku: string; cost_price?: number; tax_percentage?: number; tax_on_freight?: boolean }>
+   *  }
+   *
+   *  Retorna: { updated, not_found, errors, not_found_skus[], error_details[] }
+   */
+  @Post('bulk-update-costs')
+  @HttpCode(HttpStatus.OK)
+  bulkUpdateCosts(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: {
+      rows: Array<{
+        sku:               string
+        cost_price?:       number | null
+        tax_percentage?:   number | null
+        tax_on_freight?:   boolean
+      }>
+    },
+  ) {
+    const rows = body?.rows ?? []
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new BadRequestException('rows obrigatório (≥1)')
+    }
+    if (rows.length > 1000) {
+      throw new BadRequestException('Máximo 1000 rows por chamada')
+    }
+    return this.products.bulkUpdateCostsBySku(user.orgId ?? null, rows)
+  }
 }
