@@ -1,12 +1,22 @@
 # HANDOFF — e-Click SaaS
 
-> **Última atualização:** 2026-05-06 — fim da sessão que entregou Onda 4 completa.
+> **Última atualização:** 2026-05-06 — fim da sessão. Onda 4 completa, bridge SaaS↔Active operacional.
 
 ## TL;DR
 
-- **Onda 1 (Catálogo AI), Onda 3 (Social+Ads) e Onda 4 (Loja Autônoma) entregues no SaaS.**
+- **Ondas 1 (Catálogo AI), 3 (Social+Ads) e 4 (Loja Autônoma) entregues no SaaS — em prod.**
 - **Onda 2 (WhatsApp Commerce) e Onda 3/S5 (Calendário) vivem no Active** — projeto separado em `C:\Users\ECLICK 1\eclick-active`.
-- **Pendência ativa:** setar 2 envs no Railway (SaaS) + 1 env (Active) pra ativar bridge SaaS↔Active.
+- **Bridge SaaS↔Active 100% operacional** — smoke test passou (vide seção Bridge).
+- **Última sprint:** A6 (white-label) + bug-fix FK em `active.automation_executions`.
+- **Próxima direção:** definir pelo user (Onda 5? refactor? testing?).
+
+## Último estado git
+
+| Repo | Branch | Último commit |
+|---|---|---|
+| eclick-backend | main | `b9f468a` docs(handoff): bridge SaaS<->Active operacional |
+| eclick-frontend | main | `0b73673` feat(store): Onda 4 A6 frontend |
+| eclick-active | (separado) | gerenciado em outra sessão Claude |
 
 ## Estrutura dos Repos
 
