@@ -752,15 +752,44 @@ export class MercadolivreService {
   }
 
   async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string, sellerIdFilter?: number) {
+    // Multi-conta: sem sellerIdFilter → fan-out sobre todas contas da org
+    if (sellerIdFilter == null) {
+      const tokens = await this.getAllTokensForOrg(orgId).catch(() => [])
+      if (tokens.length === 0) throw new HttpException('ML não conectado — verifique a integração', 401)
+      if (tokens.length === 1) {
+        return this._getRecentOrdersForSeller(orgId, tokens[0].token, tokens[0].sellerId, dateFrom, dateTo)
+      }
+      const perAccount = await Promise.all(
+        tokens.map(t =>
+          this._getRecentOrdersForSeller(orgId, t.token, t.sellerId, dateFrom, dateTo)
+            .catch(e => {
+              console.error(`[recent-orders] account ${t.sellerId} falhou:`, e?.message)
+              return { orders: [], total: 0 }
+            }),
+        ),
+      )
+      const orders = perAccount.flatMap(r => r.orders)
+      // Sort merged orders by date_created desc pra UI consistente
+      orders.sort((a: any, b: any) => (b.date_created ?? '').localeCompare(a.date_created ?? ''))
+      return {
+        orders,
+        total: perAccount.reduce((s, r) => s + r.total, 0),
+      }
+    }
+
+    // Conta especifica selecionada
     let token: string
     let sellerId: number
     try {
       ;({ token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter))
     } catch (authErr: any) {
-      console.error('[recent-orders] getValidToken failed:', authErr?.message ?? authErr)
+      console.error('[recent-orders] getTokenForOrg failed:', authErr?.message ?? authErr)
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
+    return this._getRecentOrdersForSeller(orgId, token, sellerId, dateFrom, dateTo)
+  }
 
+  private async _getRecentOrdersForSeller(_orgId: string, token: string, sellerId: number, dateFrom?: string, dateTo?: string) {
     try {
       const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, true)
       const shipMap = await this._fetchShipments(token, rawOrders)
@@ -1285,8 +1314,57 @@ export class MercadolivreService {
   // ── Orders enriched ──────────────────────────────────────────────────────
 
   async getOrdersKpis(orgId: string, sellerIdFilter?: number) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    // Multi-conta: sem sellerIdFilter → fan-out + soma KPIs de todas contas
+    if (sellerIdFilter == null) {
+      const tokens = await this.getAllTokensForOrg(orgId).catch(() => [])
+      if (tokens.length === 0) throw new HttpException('ML não conectado', 401)
+      if (tokens.length === 1) {
+        return this._getOrdersKpisForSeller(tokens[0].token, tokens[0].sellerId)
+      }
+      const perAccount = await Promise.all(
+        tokens.map(t =>
+          this._getOrdersKpisForSeller(t.token, t.sellerId)
+            .catch(e => {
+              console.error(`[orders-kpis] account ${t.sellerId} falhou:`, e?.message)
+              return null
+            }),
+        ),
+      )
+      // Agrega: soma counts/revenue/etc. de cada periodo
+      const merge = (key: 'today' | 'current_month' | 'last_month') => {
+        const aggs = perAccount.filter(p => p !== null).map(p => p![key])
+        const byDayMap: Record<string, { count: number; revenue: number }> = {}
+        for (const a of aggs) {
+          for (const b of a.by_day) {
+            byDayMap[b.date] = byDayMap[b.date] ?? { count: 0, revenue: 0 }
+            byDayMap[b.date].count   += b.count
+            byDayMap[b.date].revenue += b.revenue
+          }
+        }
+        return {
+          count:            aggs.reduce((s, a) => s + a.count, 0),
+          revenue:          Math.round(aggs.reduce((s, a) => s + a.revenue, 0) * 100) / 100,
+          pending_shipment: aggs.reduce((s, a) => s + a.pending_shipment, 0),
+          in_transit:       aggs.reduce((s, a) => s + a.in_transit, 0),
+          delivered:        aggs.reduce((s, a) => s + a.delivered, 0),
+          by_day: Object.entries(byDayMap)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([date, v]) => ({ date, count: v.count, revenue: Math.round(v.revenue * 100) / 100 })),
+        }
+      }
+      return {
+        today:         merge('today'),
+        current_month: merge('current_month'),
+        last_month:    merge('last_month'),
+      }
+    }
 
+    // Conta especifica
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    return this._getOrdersKpisForSeller(token, sellerId)
+  }
+
+  private async _getOrdersKpisForSeller(token: string, sellerId: number) {
     const now      = new Date()
     const todayFr  = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     const curFrom  = new Date(now.getFullYear(), now.getMonth(), 1)
@@ -1622,42 +1700,55 @@ export class MercadolivreService {
     orgId: string,
     dateFrom: string,
     dateTo: string,
+    sellerIdFilter?: number,
   ): Promise<{ total_revenue: number; total_orders: number; ml_total: number; average_ticket: number; date_from: string; date_to: string }> {
-    let token: string
-    let sellerId: number
-    try {
-      ;({ token, sellerId } = await this.getTokenForOrg(orgId))
-    } catch {
-      throw new HttpException('ML não conectado', 401)
-    }
-
     const from = dateFrom.slice(0, 10)
     const to   = dateTo.slice(0, 10)
+
+    // Multi-conta: sem sellerIdFilter → fan-out (soma totals de todas contas da org)
+    let tokensToUse: Array<{ token: string; sellerId: number }>
+    if (sellerIdFilter == null) {
+      tokensToUse = await this.getAllTokensForOrg(orgId).catch(() => [])
+      if (tokensToUse.length === 0) throw new HttpException('ML não conectado', 401)
+    } else {
+      try {
+        const t = await this.getTokenForOrg(orgId, sellerIdFilter)
+        tokensToUse = [{ token: t.token, sellerId: t.sellerId }]
+      } catch {
+        throw new HttpException('ML não conectado', 401)
+      }
+    }
 
     let totalRevenue    = 0
     let totalOrders     = 0
     let paginationTotal = 0
-    let offset          = 0
-    let pageResults: any[] = []
 
-    do {
-      const url =
-        `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=50&offset=${offset}` +
-        `&order.date_created.from=${from}T00:00:00.000-03:00` +
-        `&order.date_created.to=${to}T23:59:59.999-03:00`
+    for (const { token, sellerId } of tokensToUse) {
+      let offset = 0
+      let pageResults: any[] = []
+      let accountTotal = 0
+      do {
+        const url =
+          `${ML_BASE}/orders/search?seller=${sellerId}&sort=date_desc&limit=50&offset=${offset}` +
+          `&order.date_created.from=${from}T00:00:00.000-03:00` +
+          `&order.date_created.to=${to}T23:59:59.999-03:00`
 
-      const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
-      pageResults = data?.results ?? []
+        const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
+          .catch(e => {
+            console.error(`[order-totals] account ${sellerId} falhou:`, e?.message)
+            return { data: { results: [], paging: { total: 0 } } }
+          })
+        pageResults = data?.results ?? []
+        if (offset === 0) accountTotal = data?.paging?.total ?? 0
 
-      if (offset === 0) paginationTotal = data?.paging?.total ?? 0
-
-      for (const order of pageResults) {
-        totalRevenue += order.total_amount ?? 0
-        totalOrders++
-      }
-
-      offset += 50
-    } while (pageResults.length === 50 && totalOrders < paginationTotal)
+        for (const order of pageResults) {
+          totalRevenue += order.total_amount ?? 0
+          totalOrders++
+        }
+        offset += 50
+      } while (pageResults.length === 50 && totalOrders < (paginationTotal + accountTotal))
+      paginationTotal += accountTotal
+    }
 
     return {
       total_revenue:  totalRevenue,
@@ -1671,23 +1762,51 @@ export class MercadolivreService {
 
   // ── Financial Summary ─────────────────────────────────────────────────────
 
+  /** Helper interno: pega token fresco da primeira conta (org-scoped) pra
+   *  enrich shared (shipments / item thumbs) que so precisa de 1 token. */
+  private async _refreshFirstConnection(orgId: string, sellerId: number): Promise<string> {
+    const { data } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, access_token, refresh_token, expires_at')
+      .eq('organization_id', orgId)
+      .eq('seller_id', sellerId)
+      .maybeSingle()
+    if (!data) throw new HttpException('Conexao ML nao encontrada', 401)
+    return this.refreshIfNeeded(data as MlConnection)
+  }
+
   async getFinancialSummary(
     orgId: string,
     dateFrom: string,
     dateTo: string,
     statusFilter?: string,
     kpisOnly = false,
+    sellerIdFilter?: number,
   ) {
-    const connections = await this.getAllConnections()
-    if (!connections.length) throw new UnauthorizedException('ML não conectado')
+    // Org-scoped (era getAllConnections sem filtro - vazava cross-tenant).
+    // Quando sellerIdFilter informado, restringe a 1 conta especifica.
+    const orgConns = await this.getConnections(orgId)
+    if (!orgConns.length) throw new UnauthorizedException('ML não conectado')
+    const filtered = sellerIdFilter != null
+      ? orgConns.filter(c => c.seller_id === sellerIdFilter)
+      : orgConns
+    if (!filtered.length) throw new UnauthorizedException(`Conta ML ${sellerIdFilter} nao encontrada`)
 
     const fmt = (s: string) =>
       new Date(s).toISOString().slice(0, 19) + '.000-03:00'
 
     const allOrders: any[] = []
 
-    for (const conn of connections) {
-      const token = await this.refreshIfNeeded(conn)
+    for (const conn of filtered) {
+      // Carrega row completa (com tokens) — getConnections só retorna metadados
+      const { data } = await supabaseAdmin
+        .from('ml_connections')
+        .select('seller_id, access_token, refresh_token, expires_at')
+        .eq('organization_id', orgId)
+        .eq('seller_id', conn.seller_id)
+        .maybeSingle()
+      if (!data) continue
+      const token = await this.refreshIfNeeded(data as MlConnection)
       let offset = 0
       const perPage = 50
       const maxOrders = 500
@@ -1732,7 +1851,7 @@ export class MercadolivreService {
         ...new Set(allOrders.map((o: any) => o.shipping?.id).filter(Boolean)),
       ] as number[]
       if (shipIds.length > 0) {
-        const firstToken = await this.refreshIfNeeded(connections[0])
+        const firstToken = await this._refreshFirstConnection(orgId, filtered[0].seller_id)
         const batchSize = 20
         for (let i = 0; i < shipIds.length; i += batchSize) {
           const batch = shipIds.slice(i, i + batchSize)
@@ -1784,7 +1903,7 @@ export class MercadolivreService {
       ] as string[]
       if (itemIds.length > 0) {
         try {
-          const firstToken = await this.refreshIfNeeded(connections[0])
+          const firstToken = await this._refreshFirstConnection(orgId, filtered[0].seller_id)
           const { data: batchItems } = await axios.get(`${ML_BASE}/items`, {
             headers: { Authorization: `Bearer ${firstToken}` },
             params: {

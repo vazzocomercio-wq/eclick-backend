@@ -517,7 +517,7 @@ export class MercadolivreController {
     return this.ml.createFromListing(user.orgId, ids, sellerId)
   }
 
-  // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true
+  // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true&seller_id=...
   @Get('financial-summary')
   getFinancialSummary(
     @ReqUser() user: ReqUserPayload,
@@ -526,12 +526,14 @@ export class MercadolivreController {
     @Query('status')       status?: string,
     @Query('kpis_only')    kpisOnly?: string,
     @Query('totals_only')  totalsOnly?: string,
+    @Query('seller_id')    sellerId?: string,
   ) {
     const now  = new Date()
     const from = dateFrom ?? new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const to   = dateTo   ?? now.toISOString()
+    const sellerIdNum = sellerId ? Number(sellerId) : undefined
     if (totalsOnly === 'true') {
-      return this.ml.getOrderTotals(user.orgId!, from, to)
+      return this.ml.getOrderTotals(user.orgId!, from, to, sellerIdNum)
     }
     return this.ml.getFinancialSummary(
       user.orgId!,
@@ -539,6 +541,7 @@ export class MercadolivreController {
       to,
       status,
       kpisOnly === 'true',
+      sellerIdNum,
     )
   }
 
