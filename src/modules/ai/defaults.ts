@@ -131,6 +131,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Onda 4 A1: Pricing AI — sugere preço ótimo com 3 cenários
+  // Sonnet pra raciocínio analítico (margem + concorrência + estoque + vendas)
+  pricing_ai_suggest: {
+    label:       'Sugestão de preço (A1)',
+    description: 'Analisa fatores e sugere preço ótimo com cenários conservador/ótimo/agressivo',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

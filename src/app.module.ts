@@ -49,6 +49,7 @@ import { SocialContentModule } from './modules/social-content/social-content.mod
 import { SocialCommerceModule } from './modules/social-commerce/social-commerce.module'
 import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module'
 import { ProductsAnalyticsModule } from './modules/products-analytics/products-analytics.module'
+import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { ProductsAnalyticsModule } from './modules/products-analytics/products-a
     SocialCommerceModule,
     AdsCampaignsModule,
     ProductsAnalyticsModule,
+    PricingAiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
