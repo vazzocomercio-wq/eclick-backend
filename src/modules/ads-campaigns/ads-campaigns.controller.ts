@@ -1,10 +1,13 @@
 import {
   Controller, Get, Post, Patch, Delete,
   Body, Param, Query, UseGuards, BadRequestException,
-  HttpCode, HttpStatus,
+  HttpCode, HttpStatus, Res,
 } from '@nestjs/common'
+import type { Response } from 'express'
 import { AdsCampaignsService } from './ads-campaigns.service'
+import { MetaAdsService } from './meta-ads.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import type {
   AdsPlatform, AdsObjective, AdsStatus, AdCopy,
@@ -32,7 +35,83 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('ads')
 @UseGuards(SupabaseAuthGuard)
 export class AdsCampaignsController {
-  constructor(private readonly svc: AdsCampaignsService) {}
+  constructor(
+    private readonly svc:     AdsCampaignsService,
+    private readonly metaAds: MetaAdsService,
+  ) {}
+
+  // ── OAuth Meta Ads (Sprint 6) ────────────────────────────────────
+
+  /** GET /ads/meta/connect */
+  @Get('meta/connect')
+  metaConnect(
+    @ReqUser() u: ReqUserPayload,
+    @Query('redirect_to') redirectTo?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.metaAds.buildAuthorizeUrl(u.orgId, u.id, redirectTo)
+  }
+
+  /** GET /ads/meta/callback (Public — Meta chama) */
+  @Get('meta/callback')
+  @Public()
+  async metaCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Res() res: Response,
+  ) {
+    if (!code || !state) throw new BadRequestException('code/state ausentes')
+    const r = await this.metaAds.exchangeCode(code, state)
+    const frontendBase = process.env.FRONTEND_URL ?? 'https://eclick.app.br'
+    const target = r.redirect_to
+      ? `${frontendBase}${r.redirect_to.startsWith('/') ? '' : '/'}${r.redirect_to}`
+      : `${frontendBase}/dashboard/ads?meta_connected=1`
+    return res.redirect(target)
+  }
+
+  /** POST /ads/meta/disconnect */
+  @Post('meta/disconnect')
+  @HttpCode(HttpStatus.OK)
+  metaDisconnect(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.metaAds.disconnect(u.orgId)
+  }
+
+  /** GET /ads/meta/ad-accounts */
+  @Get('meta/ad-accounts')
+  async metaAdAccounts(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const stored = await this.metaAds.getStoredToken(u.orgId)
+    if (!stored?.access_token) throw new BadRequestException('Conecte Meta Ads primeiro')
+    return this.metaAds.listAdAccounts(stored.access_token)
+  }
+
+  /** POST /ads/meta/select-ad-account */
+  @Post('meta/select-ad-account')
+  @HttpCode(HttpStatus.OK)
+  metaSelectAccount(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { ad_account_id: string },
+  ) {
+    if (!u.orgId)            throw new BadRequestException('orgId ausente')
+    if (!body?.ad_account_id) throw new BadRequestException('ad_account_id obrigatório')
+    return this.metaAds.setAdAccount(u.orgId, body.ad_account_id)
+  }
+
+  /** GET /ads/meta/status */
+  @Get('meta/status')
+  async metaStatus(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const stored = await this.metaAds.getStoredToken(u.orgId)
+    return {
+      configured_globally: this.metaAds.isConfigured(),
+      connected:           Boolean(stored?.access_token),
+      ad_account_id:       stored?.ad_account_id ?? null,
+      expires_at:          stored?.expires_at ?? null,
+    }
+  }
+
+  // ── Ads Campaigns (todas autenticadas) ───────────────────────────
 
   /** POST /ads/products/:id/generate-campaign */
   @Post('products/:id/generate-campaign')
@@ -184,5 +263,21 @@ export class AdsCampaignsController {
   metrics(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getMetrics(id, u.orgId)
+  }
+
+  /** POST /ads/campaigns/:id/publish (Sprint 6) */
+  @Post('campaigns/:id/publish')
+  @HttpCode(HttpStatus.OK)
+  publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.publish(id, u.orgId)
+  }
+
+  /** POST /ads/campaigns/:id/sync-metrics */
+  @Post('campaigns/:id/sync-metrics')
+  @HttpCode(HttpStatus.OK)
+  syncMetrics(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.syncMetrics(id, u.orgId)
   }
 }

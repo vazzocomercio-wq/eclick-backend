@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { LlmService } from '../ai/llm.service'
 import { supabaseAdmin } from '../../common/supabase'
+import { MetaAdsService } from './meta-ads.service'
 import {
   buildAdsCampaignPrompt,
   buildRegenerateCopiesPrompt,
@@ -25,7 +26,10 @@ interface GenerateInput {
 export class AdsCampaignsService {
   private readonly logger = new Logger(AdsCampaignsService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm:     LlmService,
+    private readonly metaAds: MetaAdsService,
+  ) {}
 
   // ─────────────────────────────────────────────────────────────────
   // GERAÇÃO COM IA
@@ -341,12 +345,97 @@ export class AdsCampaignsService {
     return data as AdsCampaign
   }
 
-  /** Marca como pronta pra publicar — Sprint 6 implementa o publish real. */
+  /** Marca como pronta pra publicar (sem ainda mandar pra plataforma). */
   async markReady(id: string, orgId: string): Promise<AdsCampaign> {
     const c = await this.get(id, orgId)
     if (c.ad_copies.length === 0) throw new BadRequestException('Adicione ao menos 1 copy antes de marcar como pronta')
     if (!c.destination_url)       throw new BadRequestException('Defina a URL de destino antes de marcar como pronta')
     return this.transition(id, orgId, 'ready', ['draft'])
+  }
+
+  /** Publica campanha real na plataforma (Sprint 6 — Meta Ads only por
+   *  enquanto). Cria Campaign+AdSet+Ad no Meta com status PAUSED, salva
+   *  external_*_ids, marca status='active'. User libera no Meta UI. */
+  async publish(id: string, orgId: string): Promise<AdsCampaign> {
+    const c = await this.get(id, orgId)
+    if (c.platform !== 'meta') {
+      throw new BadRequestException(`Publicação automática para ${c.platform} ainda não está disponível — ativaremos em sprints futuras`)
+    }
+    if (c.ad_copies.length === 0) throw new BadRequestException('Sem copies pra publicar')
+    if (!c.destination_url)       throw new BadRequestException('Sem destination_url')
+    if (c.status !== 'ready' && c.status !== 'draft') {
+      throw new BadRequestException(`Não pode publicar em status '${c.status}'`)
+    }
+
+    // Marca como publishing
+    await this.transition(id, orgId, 'publishing', ['ready', 'draft'])
+
+    try {
+      const result = await this.metaAds.publish(orgId, c)
+      const { data, error } = await supabaseAdmin
+        .from('ads_campaigns')
+        .update({
+          status:               'active',
+          external_campaign_id: result.campaign_id,
+          external_adset_id:    result.adset_id,
+          external_ad_ids:      result.ad_ids,
+          published_at:         new Date().toISOString(),
+        })
+        .eq('id', id)
+        .eq('organization_id', orgId)
+        .select('*')
+        .maybeSingle()
+      if (error || !data) throw new BadRequestException(`Erro ao salvar publish: ${error?.message ?? 'sem dados'}`)
+      return data as AdsCampaign
+    } catch (e) {
+      await supabaseAdmin
+        .from('ads_campaigns')
+        .update({ status: 'error' })
+        .eq('id', id)
+        .eq('organization_id', orgId)
+      throw e
+    }
+  }
+
+  /** Sync de métricas pra 1 campanha (puxa insights da plataforma). */
+  async syncMetrics(id: string, orgId: string): Promise<AdsCampaign> {
+    const c = await this.get(id, orgId)
+    if (!c.external_campaign_id) {
+      throw new BadRequestException('Campanha ainda não publicada')
+    }
+    if (c.platform !== 'meta') {
+      throw new BadRequestException(`Sync de métricas para ${c.platform} não disponível`)
+    }
+
+    const stored = await this.metaAds.getStoredToken(orgId)
+    if (!stored?.access_token) throw new BadRequestException('Meta Ads não conectado')
+
+    const insights = await this.metaAds.fetchInsights(stored.access_token, c.external_campaign_id)
+
+    const { data, error } = await supabaseAdmin
+      .from('ads_campaigns')
+      .update({ metrics: insights })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .select('*')
+      .maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'sem dados'}`)
+    return data as AdsCampaign
+  }
+
+  /** Lista campanhas active/publishing pra o worker tickar sync de métricas. */
+  async listForMetricsSync(limit = 30): Promise<Array<{ id: string; organization_id: string; platform: AdsPlatform; external_campaign_id: string }>> {
+    const { data, error } = await supabaseAdmin
+      .from('ads_campaigns')
+      .select('id, organization_id, platform, external_campaign_id')
+      .in('status', ['active', 'publishing'])
+      .not('external_campaign_id', 'is', null)
+      .limit(limit)
+    if (error) {
+      this.logger.warn(`[ads.listForMetricsSync] ${error.message}`)
+      return []
+    }
+    return (data ?? []) as Array<{ id: string; organization_id: string; platform: AdsPlatform; external_campaign_id: string }>
   }
 
   // ─────────────────────────────────────────────────────────────────
