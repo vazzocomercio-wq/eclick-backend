@@ -425,8 +425,10 @@ export class MercadolivreService {
 
   // ── Vínculo preview ──────────────────────────────────────────────────────
 
-  async getListingPreview(listingId: string) {
-    const { token } = await this.getValidToken()
+  async getListingPreview(listingId: string, orgId?: string) {
+    const { token } = orgId
+      ? await this.getTokenForOrg(orgId)
+      : await this.getValidToken()
     const { data } = await axios.get(`${ML_BASE}/items/${listingId}`, {
       headers: { Authorization: `Bearer ${token}` },
       params:  { attributes: 'id,title,price,available_quantity,pictures,permalink,status' },
@@ -445,7 +447,7 @@ export class MercadolivreService {
   // ── Items ────────────────────────────────────────────────────────────────
 
   async getItems(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
 
     const { data: search } = await axios.get(
       `${ML_BASE}/users/${sellerId}/items/search`,
@@ -473,7 +475,7 @@ export class MercadolivreService {
   }
 
   async importItem(orgId: string, mlItemId: string): Promise<{ id: string }> {
-    const { token } = await this.getValidToken()
+    const { token } = await this.getTokenForOrg(orgId)
 
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlItemId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -509,7 +511,7 @@ export class MercadolivreService {
   // ── Orders ───────────────────────────────────────────────────────────────
 
   async getOrders(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
 
     const { data } = await axios.get(
       `${ML_BASE}/orders/search`,
@@ -525,7 +527,7 @@ export class MercadolivreService {
   // ── Metrics ──────────────────────────────────────────────────────────────
 
   async getMetrics(orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
 
     const [visits, sales] = await Promise.all([
       axios.get(`${ML_BASE}/users/${sellerId}/items_visits`, {
@@ -562,7 +564,7 @@ export class MercadolivreService {
   // ── Pipeline endpoints ───────────────────────────────────────────────────
 
   async getMyItems(orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
     const { data: body } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { status: 'active', limit: 50 },
@@ -643,7 +645,7 @@ export class MercadolivreService {
   }
 
   async getItemDetail(orgId: string, mlbId: string) {
-    const { token } = await this.getValidToken()
+    const { token } = await this.getTokenForOrg(orgId)
     const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
       headers: { Authorization: `Bearer ${token}` },
     }).catch((err: any) => {
@@ -659,7 +661,7 @@ export class MercadolivreService {
   }
 
   async getItemVisits(orgId: string, mlbId: string) {
-    const { token } = await this.getValidToken()
+    const { token } = await this.getTokenForOrg(orgId)
     const { data: body } = await axios.get(`${ML_BASE}/items/${mlbId}/visits/time_window`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { last: 7, unit: 'day' },
@@ -753,7 +755,7 @@ export class MercadolivreService {
     let token: string
     let sellerId: number
     try {
-      ;({ token, sellerId } = await this.getValidToken())
+      ;({ token, sellerId } = await this.getTokenForOrg(orgId))
     } catch (authErr: any) {
       console.error('[recent-orders] getValidToken failed:', authErr?.message ?? authErr)
       throw new HttpException('ML não conectado — verifique a integração', 401)
@@ -797,8 +799,10 @@ export class MercadolivreService {
 
   // ── ML stock sync ────────────────────────────────────────────────────────
 
-  async updateListingStock(listingId: string, newQuantity: number): Promise<void> {
-    const { token } = await this.getValidToken()
+  async updateListingStock(listingId: string, newQuantity: number, orgId?: string): Promise<void> {
+    const { token } = orgId
+      ? await this.getTokenForOrg(orgId)
+      : await this.getValidToken()
     try {
       await axios.put(
         `${ML_BASE}/items/${listingId}`,
@@ -946,7 +950,7 @@ export class MercadolivreService {
   }
 
   async getCatalogCompetitors(orgId: string, catalogId: string) {
-    const { token } = await this.getValidToken()
+    const { token } = await this.getTokenForOrg(orgId)
     const { data: body } = await axios.get(`${ML_BASE}/products/${catalogId}/items`, {
       headers: { Authorization: `Bearer ${token}` },
       params: { status: 'active' },
@@ -957,7 +961,7 @@ export class MercadolivreService {
   }
 
   async getSellerInfo(orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
     const { data: user } = await axios.get(`${ML_BASE}/users/${sellerId}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -973,7 +977,7 @@ export class MercadolivreService {
 
   async getReputation(orgId: string) {
     try {
-      const { token: accessToken } = await this.getValidToken()
+      const { token: accessToken } = await this.getTokenForOrg(orgId)
 
       const response = await axios.get(`${ML_BASE}/users/me`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -1052,7 +1056,7 @@ export class MercadolivreService {
   }
 
   async answerQuestion(orgId: string | null, questionId: number, text: string) {
-    const { token } = await this.getValidToken()
+    const { token } = await this.getTokenForOrg(orgId)
     try {
       const { data } = await axios.post(
         `${ML_BASE}/answers`,
@@ -1082,7 +1086,7 @@ export class MercadolivreService {
 
   async getClaims(orgId: string) {
     try {
-      const { token } = await this.getValidToken()
+      const { token } = await this.getTokenForOrg(orgId)
       const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { role: 'seller', status: 'opened' },
@@ -1240,7 +1244,7 @@ export class MercadolivreService {
   }
 
   async getListingsVisits(orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
 
     const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -1280,8 +1284,8 @@ export class MercadolivreService {
 
   // ── Orders enriched ──────────────────────────────────────────────────────
 
-  async getOrdersKpis(_orgId: string) {
-    const { token, sellerId } = await this.getValidToken()
+  async getOrdersKpis(orgId: string) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId)
 
     const now      = new Date()
     const todayFr  = new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -1622,7 +1626,7 @@ export class MercadolivreService {
     let token: string
     let sellerId: number
     try {
-      ;({ token, sellerId } = await this.getValidToken())
+      ;({ token, sellerId } = await this.getTokenForOrg(orgId))
     } catch {
       throw new HttpException('ML não conectado', 401)
     }
@@ -1937,7 +1941,7 @@ export class MercadolivreService {
   // ── Create products from listings ─────────────────────────────────────────
 
   async createFromListing(orgId: string | null, listingIds: string[]) {
-    const { token, sellerId: tokenSellerId } = await this.getValidToken()
+    const { token, sellerId: tokenSellerId } = await this.getTokenForOrg(orgId)
 
     let resolvedOrgId = orgId
     if (!resolvedOrgId) {
