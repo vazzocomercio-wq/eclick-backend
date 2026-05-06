@@ -113,12 +113,37 @@ pricing_ai_suggest, kits_generate, collections_generate, store_copilot  ← Onda
 
 ## Bridge SaaS↔Active
 
+### URLs e estado
+- SaaS API: `https://api.eclick.app.br`
+- Active API: `https://api.active.eclick.app.br`
+
 ### Status
-- ✅ Active deployado em `https://api.active.eclick.app.br`
-- ✅ SaaS Railway com `ACTIVE_AUTOMATION_BRIDGE_URL` + `ACTIVE_AUTOMATION_BRIDGE_SECRET` setadas
-- ⏳ Aguardando smoke test em `/store-automation/bridge-health`
-- 🔐 Secret value: gerenciado no Railway (vide vars). Deve ser idêntico em
-  `AUTOMATION_BRIDGE_SECRET` no Railway do Active.
+- ✅ Envs Railway setadas em ambos os lados (mesmo secret)
+- ✅ Active alcançável e autenticando o secret
+- ❌ **Bug ativo no Active:** tabela `active.automation_executions` tem FK
+  `organization_id → active.organizations` que bloqueia inserts vindos do
+  bridge (orgs vivem no SaaS, não estão espelhadas no Active).
+
+### Próximo passo
+Active session precisa rodar:
+```sql
+ALTER TABLE active.automation_executions
+  DROP CONSTRAINT IF EXISTS automation_executions_org_id_fkey;
+```
+Mesma correção pra qualquer outra tabela do bridge com FK
+em `organization_id` apontando pra `active.organizations`.
+`organization_id` é referência LÓGICA cross-project (mesma `auth.users`
+do Supabase compartilhado), não deve ter constraint física.
+
+### Smoke test pós-correção
+```
+GET https://api.eclick.app.br/store-automation/bridge-health
+```
+Esperado:
+```json
+{ "configured": true, "reachable": true, "authenticated": true,
+  "response": { "ok": true, "queued_for_digest": true } }
+```
 
 ### 3. Validar
 Após reboot dos Railways, chamar com JWT autenticado:
