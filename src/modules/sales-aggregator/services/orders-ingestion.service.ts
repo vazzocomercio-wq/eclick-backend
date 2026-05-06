@@ -389,6 +389,7 @@ export class OrdersIngestionService {
           organization_id:         orgId,
           source:                  'mercadolivre',
           platform:                'mercadolivre',
+          seller_id:               sellerId,
           external_order_id:       String(order.id),
           marketplace_listing_id:  listingId,
           product_id:              prod?.product_id ?? null,
