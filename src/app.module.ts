@@ -54,6 +54,7 @@ import { StoreAutomationModule } from './modules/store-automation/store-automati
 import { KitsModule } from './modules/kits/kits.module'
 import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
+import { StoreConfigModule } from './modules/store-config/store-config.module'
 
 @Module({
   imports: [
@@ -110,6 +111,7 @@ import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module
     KitsModule,
     StorefrontModule,
     StoreCopilotModule,
+    StoreConfigModule,
   ],
   controllers: [AppController],
   providers: [AppService],
