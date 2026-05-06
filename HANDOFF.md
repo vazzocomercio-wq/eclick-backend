@@ -197,6 +197,13 @@ Lojista habilita por trigger em `/dashboard/automation/config`.
   Sintoma se esquecer: API retorna 400 "permission denied for table X".
   Hotfix histórico: `20260527_fix_grants_ondas_3_4.sql`.
 - **TSC:** rodar `npx tsc --noEmit` (ou `node node_modules/typescript/bin/tsc --noEmit` no Windows) ao fim de cada sprint, zero erros
+- ⚠️ **Frontend Next.js:** rodar `next build` (não só `tsc --noEmit`) antes de
+  considerar uma sprint pronta. ESLint do Next trata vários warnings como
+  ERROR e bloqueia deploy no Vercel — TSC sozinho não pega:
+  - `@next/next/no-html-link-for-pages` (usar `<Link>` em vez de `<a>` pra rotas internas)
+  - `@next/next/no-img-element` (warning, mas usar `eslint-disable-next-line` se precisar)
+  - Hot bug histórico: commit `36bb128`. Frontend ficou ~6 commits sem deploy
+    porque um `<a>` interno bloqueava build.
 - **Commits:** mensagens em português, seguindo formato `feat(módulo): descrição` com `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` no rodapé
 - **Responsividade:** todas as UIs precisam funcionar em mobile/tablet/desktop (não opcional)
 - **Tags visuais:** pílulas coloridas (rounded-full + border + bg/[10%] + text mesma cor) — semânticas fixas + livres com hash
