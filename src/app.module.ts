@@ -50,6 +50,7 @@ import { SocialCommerceModule } from './modules/social-commerce/social-commerce.
 import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module'
 import { ProductsAnalyticsModule } from './modules/products-analytics/products-analytics.module'
 import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
+import { StoreAutomationModule } from './modules/store-automation/store-automation.module'
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
     AdsCampaignsModule,
     ProductsAnalyticsModule,
     PricingAiModule,
+    StoreAutomationModule,
   ],
   controllers: [AppController],
   providers: [AppService],
