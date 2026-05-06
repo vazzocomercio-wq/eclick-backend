@@ -47,6 +47,7 @@ import { CreativeModule } from './modules/creative/creative.module'
 import { CopilotModule } from './modules/copilot/copilot.module'
 import { SocialContentModule } from './modules/social-content/social-content.module'
 import { SocialCommerceModule } from './modules/social-commerce/social-commerce.module'
+import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module'
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { SocialCommerceModule } from './modules/social-commerce/social-commerce.
     CopilotModule,
     SocialContentModule,
     SocialCommerceModule,
+    AdsCampaignsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

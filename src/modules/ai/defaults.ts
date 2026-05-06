@@ -123,6 +123,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Onda 3 S4: Ads Hub — gera campanha completa (público + copies + budget + UTMs)
+  // Sonnet pra qualidade do strategist + jsonMode pra estrutura
+  ads_campaign_gen: {
+    label:       'Campanhas Ads (S4)',
+    description: 'Gera campanha Meta/Google/TikTok com targeting + copies A/B + budget + UTMs',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
