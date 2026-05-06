@@ -45,8 +45,11 @@ export interface CreativeBriefing {
   organization_id:     string
   target_marketplace:  Marketplace
   visual_style:        string
+  /** @deprecated use environments[] */
   environment:         string | null
+  environments:        string[]
   custom_environment:  string | null
+  custom_prompt:       string | null
   background_color:    string
   use_logo:            boolean
   logo_url:            string | null
@@ -54,6 +57,8 @@ export interface CreativeBriefing {
   communication_tone:  string
   image_count:         number
   image_format:        string
+  image_prompts:       string[] | null
+  video_prompts:       string[] | null
   marketplace_rules:   Record<string, unknown>
   is_active:           boolean
   created_at:          string
@@ -114,14 +119,19 @@ export type UpdateProductDto = Partial<CreateProductDto> & { product_id?: string
 export interface CreateBriefingDto {
   target_marketplace:  Marketplace
   visual_style?:       string
+  /** @deprecated use environments[] */
   environment?:        string
+  environments?:       string[]
   custom_environment?: string
+  custom_prompt?:      string
   background_color?:   string
   use_logo?:           boolean
   logo_url?:           string
   logo_storage_path?:  string
   communication_tone?: string
   image_count?:        number
+  image_prompts?:      string[]
+  video_prompts?:      string[]
   image_format?:       string
 }
 
@@ -504,8 +514,9 @@ export class CreativeService {
         organization_id:    orgId,
         target_marketplace: dto.target_marketplace,
         visual_style:       dto.visual_style ?? 'clean',
-        environment:        dto.environment ?? null,
+        environments:       dto.environments ?? (dto.environment ? [dto.environment] : []),
         custom_environment: dto.custom_environment ?? null,
+        custom_prompt:      dto.custom_prompt ?? null,
         background_color:   dto.background_color ?? '#FFFFFF',
         use_logo:           dto.use_logo ?? false,
         logo_url:           dto.logo_url ?? null,
@@ -513,6 +524,8 @@ export class CreativeService {
         communication_tone: dto.communication_tone ?? 'vendedor',
         image_count:        dto.image_count ?? 10,
         image_format:       dto.image_format ?? '1200x1200',
+        image_prompts:      dto.image_prompts ?? null,
+        video_prompts:      dto.video_prompts ?? null,
         marketplace_rules:  rules as unknown as Record<string, unknown>,
         is_active:          true,
       })
@@ -565,8 +578,11 @@ export class CreativeService {
     description?:        string
     target_marketplace:  Marketplace
     visual_style?:       string
+    /** @deprecated use environments[] */
     environment?:        string
+    environments?:       string[]
     custom_environment?: string
+    custom_prompt?:      string
     background_color?:   string
     use_logo?:           boolean
     logo_url?:           string
@@ -597,8 +613,9 @@ export class CreativeService {
         description:         dto.description ?? null,
         target_marketplace:  dto.target_marketplace,
         visual_style:        dto.visual_style ?? 'clean',
-        environment:         dto.environment ?? null,
+        environments:        dto.environments ?? (dto.environment ? [dto.environment] : []),
         custom_environment:  dto.custom_environment ?? null,
+        custom_prompt:       dto.custom_prompt ?? null,
         background_color:    dto.background_color ?? '#FFFFFF',
         use_logo:            dto.use_logo ?? false,
         logo_url:            dto.logo_url ?? null,
@@ -619,8 +636,11 @@ export class CreativeService {
     description:         string
     target_marketplace:  Marketplace
     visual_style:        string
+    /** @deprecated use environments[] */
     environment:         string
+    environments:        string[]
     custom_environment:  string
+    custom_prompt:       string
     background_color:    string
     use_logo:            boolean
     logo_url:            string
