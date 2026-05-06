@@ -111,39 +111,41 @@ social_content_gen, ads_campaign_gen,         ← Onda 3
 pricing_ai_suggest, kits_generate, collections_generate, store_copilot  ← Onda 4
 ```
 
-## Bridge SaaS↔Active
+## Bridge SaaS↔Active — ✅ OPERACIONAL
 
-### URLs e estado
+### URLs
 - SaaS API: `https://api.eclick.app.br`
 - Active API: `https://api.active.eclick.app.br`
 
-### Status
-- ✅ Envs Railway setadas em ambos os lados (mesmo secret)
-- ✅ Active alcançável e autenticando o secret
-- ❌ **Bug ativo no Active:** tabela `active.automation_executions` tem FK
-  `organization_id → active.organizations` que bloqueia inserts vindos do
-  bridge (orgs vivem no SaaS, não estão espelhadas no Active).
-
-### Próximo passo
-Active session precisa rodar:
-```sql
-ALTER TABLE active.automation_executions
-  DROP CONSTRAINT IF EXISTS automation_executions_org_id_fkey;
-```
-Mesma correção pra qualquer outra tabela do bridge com FK
-em `organization_id` apontando pra `active.organizations`.
-`organization_id` é referência LÓGICA cross-project (mesma `auth.users`
-do Supabase compartilhado), não deve ter constraint física.
-
-### Smoke test pós-correção
-```
-GET https://api.eclick.app.br/store-automation/bridge-health
-```
-Esperado:
+### Smoke test passou (2026-05-06)
 ```json
-{ "configured": true, "reachable": true, "authenticated": true,
-  "response": { "ok": true, "queued_for_digest": true } }
+{
+  "configured": true,
+  "reachable": true,
+  "authenticated": true,
+  "response": {
+    "ok": true,
+    "sent": false,
+    "queued_for_digest": true,
+    "execution_id": "66a026bb-5bbe-4462-83c4-6d0068bd367d"
+  }
+}
 ```
+
+### Histórico
+1. Envs setadas no Railway dos dois lados (mesmo secret)
+2. Bridge alcançável e auth OK
+3. Bug FK em `active.automation_executions` bloqueava inserts —
+   Active corrigiu via `DROP CONSTRAINT automation_executions_org_id_fkey`
+4. Smoke test re-rodado: 3 booleans `true`, execution_id retornado
+
+### O que está liberado
+- Auto-execução de `notify_lojista` (WhatsApp ao lojista)
+- Auto-execução de `send_recovery` (cart recovery em massa)
+- Worker `store-automation` (60min tick) dispara análise + auto-execute
+  pra triggers em `config.auto_execute_triggers`
+
+Lojista habilita por trigger em `/dashboard/automation/config`.
 
 ### 3. Validar
 Após reboot dos Railways, chamar com JWT autenticado:
