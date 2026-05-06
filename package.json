@@ -34,6 +34,7 @@
     "@nestjs/platform-socket.io": "^11.1.19",
     "@nestjs/schedule": "^6.1.3",
     "@nestjs/websockets": "^11.1.19",
+    "@sentry/node": "^10.51.0",
     "@supabase/supabase-js": "^2.104.0",
     "@whiskeysockets/baileys": "^6.7.0",
     "axios": "^1.15.2",

@@ -7,16 +7,25 @@ import 'dotenv/config'
 import { NestFactory } from '@nestjs/core';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 import { AppModule } from './app.module';
+import { initSentry, captureException, flushSentry } from './common/sentry';
+
+// Sentry init early — antes do bootstrap pra capturar erros de import
+const sentryActive = initSentry()
+if (sentryActive) console.log('[Bootstrap] Sentry inicializado')
 
 // Catch any unhandled rejection / uncaught exception so the log shows the
 // real cause before Railway stops the container.
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] Uncaught exception:', err?.message ?? err)
   console.error(err?.stack)
+  captureException(err, { source: 'uncaughtException' })
+  void flushSentry()
 })
 process.on('unhandledRejection', (reason: any) => {
   console.error('[FATAL] Unhandled rejection:', reason?.message ?? reason)
   if (reason?.stack) console.error(reason.stack)
+  captureException(reason, { source: 'unhandledRejection' })
+  void flushSentry()
 })
 
 async function bootstrap() {
@@ -40,5 +49,6 @@ async function bootstrap() {
 bootstrap().catch((err) => {
   console.error('[Bootstrap] FATAL — app failed to start:', err?.message ?? err)
   console.error(err?.stack)
-  process.exit(1)
+  captureException(err, { source: 'bootstrap' })
+  void flushSentry().finally(() => process.exit(1))
 });
