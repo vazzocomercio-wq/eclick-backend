@@ -51,6 +51,7 @@ import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module
 import { ProductsAnalyticsModule } from './modules/products-analytics/products-analytics.module'
 import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
 import { StoreAutomationModule } from './modules/store-automation/store-automation.module'
+import { KitsModule } from './modules/kits/kits.module'
 
 @Module({
   imports: [
@@ -104,6 +105,7 @@ import { StoreAutomationModule } from './modules/store-automation/store-automati
     ProductsAnalyticsModule,
     PricingAiModule,
     StoreAutomationModule,
+    KitsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

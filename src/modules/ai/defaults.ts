@@ -139,6 +139,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Onda 4 A5: Kits & Combos — IA sugere kits comerciais a partir do catálogo
+  kits_generate: {
+    label:       'Geração de kits (A5)',
+    description: 'IA combina produtos do catálogo em kits/combos com naming + pricing + reasoning',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
