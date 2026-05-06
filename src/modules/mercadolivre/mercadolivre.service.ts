@@ -130,12 +130,13 @@ export class MercadolivreService {
     return fallback
   }
 
-  // Returns all connections (safe — no tokens)
-  async getConnections(_orgId: string) {
+  /** Lista todas as conexoes ML da org (sem tokens — safe pra UI/seletor). */
+  async getConnections(orgId: string) {
     const { data } = await supabaseAdmin
       .from('ml_connections')
-      .select('seller_id, expires_at, nickname, created_at, organization_id')
-      .order('created_at', { ascending: true })
+      .select('seller_id, expires_at, nickname, created_at, updated_at, organization_id')
+      .eq('organization_id', orgId)
+      .order('updated_at', { ascending: false })
     return data || []
   }
 
@@ -279,27 +280,73 @@ export class MercadolivreService {
     return { token, sellerId: conn.seller_id }
   }
 
-  async getTokenForOrg(orgId: string): Promise<{ token: string; sellerId: number }> {
-    let { data: conn } = await supabaseAdmin
-      .from('ml_connections')
-      .select('seller_id, access_token, refresh_token, expires_at')
-      .eq('organization_id', orgId)
-      .maybeSingle()
+  /** Resolve token de uma conta ML conectada da org.
+   *
+   * - Quando `sellerId` informado → busca aquela conta especifica.
+   * - Quando omitido (legacy) → pega a conta mais recente (ORDER BY
+   *   updated_at DESC) — comportamento deterministico, mas deve ser
+   *   migrado pra passar `sellerId` explicito quando ha multi-conta.
+   * - Fallback global (sem org_id) mantido pra setups onde o connect
+   *   nao gravou organization_id.
+   */
+  async getTokenForOrg(orgId: string, sellerId?: number): Promise<{ token: string; sellerId: number }> {
+    let conn: MlConnection | null = null
 
-    // Fallback: first available connection (solo-owner setup where org_id wasn't set on connect)
-    if (!conn) {
-      const { data: fallback } = await supabaseAdmin
+    if (sellerId != null) {
+      const { data } = await supabaseAdmin
         .from('ml_connections')
         .select('seller_id, access_token, refresh_token, expires_at')
-        .order('created_at', { ascending: true })
+        .eq('organization_id', orgId)
+        .eq('seller_id', sellerId)
+        .maybeSingle()
+      conn = (data as MlConnection | null) ?? null
+      if (!conn) throw new UnauthorizedException(`Conta ML ${sellerId} nao encontrada nesta organizacao`)
+    } else {
+      const { data } = await supabaseAdmin
+        .from('ml_connections')
+        .select('seller_id, access_token, refresh_token, expires_at')
+        .eq('organization_id', orgId)
+        .order('updated_at', { ascending: false })
         .limit(1)
         .maybeSingle()
-      conn = fallback
+      conn = (data as MlConnection | null) ?? null
+
+      // Fallback global: solo-owner setup onde org_id nao foi setado no connect
+      if (!conn) {
+        const { data: fallback } = await supabaseAdmin
+          .from('ml_connections')
+          .select('seller_id, access_token, refresh_token, expires_at')
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+        conn = (fallback as MlConnection | null) ?? null
+      }
     }
 
     if (!conn) throw new UnauthorizedException('ML não conectado para esta organização')
-    const token = await this.refreshIfNeeded(conn as MlConnection)
+    const token = await this.refreshIfNeeded(conn)
     return { token, sellerId: conn.seller_id as number }
+  }
+
+  /** Resolve tokens de TODAS as contas ML conectadas da org. Util pra
+   *  fan-out em workers (orders ingestion, ml-ads aggregator). */
+  async getAllTokensForOrg(orgId: string): Promise<Array<{ token: string; sellerId: number }>> {
+    const conns = await this.getConnections(orgId)
+    if (conns.length === 0) throw new UnauthorizedException('ML não conectado para esta organização')
+    const tokens = await Promise.all(
+      conns.map(async c => {
+        const { data } = await supabaseAdmin
+          .from('ml_connections')
+          .select('seller_id, access_token, refresh_token, expires_at')
+          .eq('organization_id', orgId)
+          .eq('seller_id', c.seller_id)
+          .maybeSingle()
+        if (!data) return null
+        const token = await this.refreshIfNeeded(data as MlConnection)
+        return { token, sellerId: c.seller_id as number }
+      }),
+    )
+    return tokens.filter((t): t is { token: string; sellerId: number } => t !== null)
   }
 
   // ── Item info (for competitor lookup) ────────────────────────────────────
