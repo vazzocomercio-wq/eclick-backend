@@ -1502,7 +1502,14 @@ export class MercadolivreService {
           }
           if (costsRes[i].status === 'fulfilled') {
             const c: any = (costsRes[i] as PromiseFulfilledResult<any>).value.data
-            accCostsMap[id] = c?.gross_amount ?? c?.amount ?? 0
+            // Frete REAL pago pelo vendedor (líquido após descontos do ML).
+            // ML retorna 3 valores em /shipments/{id}/costs:
+            //   - gross_amount: valor cheio do frete (sem descontos) — NÃO USAR
+            //   - senders[0].cost: quanto o vendedor paga de fato ✓
+            //   - receivers[0].cost: quanto o comprador paga (geralmente 0)
+            // Bug histórico: usar gross_amount inflava frete (R$38 vs R$14,35
+            // real) e gerava margens negativas falsas.
+            accCostsMap[id] = c?.senders?.[0]?.cost ?? c?.amount ?? c?.gross_amount ?? 0
           }
         })
       }
@@ -1908,8 +1915,11 @@ export class MercadolivreService {
       }
     }
 
-    // Shipments (only when full detail is needed)
-    const shipMap: Record<number, any> = {}
+    // Shipments + costs (only when full detail is needed)
+    // Costs vem de /shipments/{id}/costs e é a fonte de verdade do frete
+    // pago pelo VENDEDOR (senders[0].cost). shipMap só tem dados públicos.
+    const shipMap:  Record<number, any>    = {}
+    const costsMap: Record<number, number> = {}
     if (!kpisOnly) {
       const shipIds = [
         ...new Set(allOrders.map((o: any) => o.shipping?.id).filter(Boolean)),
@@ -1919,16 +1929,31 @@ export class MercadolivreService {
         const batchSize = 20
         for (let i = 0; i < shipIds.length; i += batchSize) {
           const batch = shipIds.slice(i, i + batchSize)
-          const res = await Promise.allSettled(
-            batch.map(id =>
-              axios.get(`${ML_BASE}/shipments/${id}`, {
-                headers: { Authorization: `Bearer ${firstToken}` },
-              }),
+          const [shipRes, costsRes] = await Promise.all([
+            Promise.allSettled(
+              batch.map(id =>
+                axios.get(`${ML_BASE}/shipments/${id}`, {
+                  headers: { Authorization: `Bearer ${firstToken}` },
+                }),
+              ),
             ),
-          )
+            Promise.allSettled(
+              batch.map(id =>
+                axios.get(`${ML_BASE}/shipments/${id}/costs`, {
+                  headers: { Authorization: `Bearer ${firstToken}` },
+                }),
+              ),
+            ),
+          ])
           batch.forEach((id, j) => {
-            if (res[j].status === 'fulfilled')
-              shipMap[id] = (res[j] as any).value.data
+            if (shipRes[j].status === 'fulfilled') {
+              shipMap[id] = (shipRes[j] as any).value.data
+            }
+            if (costsRes[j].status === 'fulfilled') {
+              const c: any = (costsRes[j] as any).value.data
+              // senders[0].cost = quanto vendedor paga (líquido após descontos)
+              costsMap[id] = c?.senders?.[0]?.cost ?? c?.amount ?? c?.gross_amount ?? 0
+            }
           })
         }
       }
@@ -1995,11 +2020,14 @@ export class MercadolivreService {
       const totalAmount: number = o.total_amount ?? 0
       const isCancelled = o.status === 'cancelled'
       const tarifaML = Math.round(totalAmount * 0.115 * 100) / 100
-      const freteVendedor: number = ship
-        ? (ship.cost_components?.receiver_shipping_cost ?? ship.base_cost ?? 0)
-        : 0
+      // Frete REAL pago pelo vendedor: prioriza /shipments/{id}/costs.
+      // Fallback no shipMap.cost_components.amount (não receiver_shipping_cost
+      // que era o erro: receiver_shipping_cost = quanto o COMPRADOR paga).
+      const freteVendedor: number = o.shipping?.id != null && costsMap[o.shipping.id] != null
+        ? costsMap[o.shipping.id]
+        : (ship?.cost_components?.amount ?? ship?.base_cost ?? 0)
       const freteComprador: number =
-        ship?.cost_components?.buyer_shipping_cost ?? 0
+        ship?.cost_components?.receiver_shipping_cost ?? 0
       const lucroBruto =
         Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
 
