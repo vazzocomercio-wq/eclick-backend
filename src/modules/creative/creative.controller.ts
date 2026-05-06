@@ -86,6 +86,45 @@ export class CreativeController {
     return this.svc.listBriefings(this.orgOrThrow(u), id)
   }
 
+  // ── Briefing templates (melhoria #2) ─────────────────────────────────────
+
+  @Get('briefing-templates')
+  listBriefingTemplates(@ReqUser() u: ReqUserPayload) {
+    return this.svc.listBriefingTemplates(this.orgOrThrow(u))
+  }
+
+  @Post('briefing-templates')
+  createBriefingTemplate(@ReqUser() u: ReqUserPayload, @Body() body: {
+    name:                string
+    description?:        string
+    target_marketplace:  Marketplace
+    visual_style?:       string
+    environment?:        string
+    custom_environment?: string
+    background_color?:   string
+    use_logo?:           boolean
+    communication_tone?: string
+    image_count?:        number
+    image_format?:       string
+    is_default?:         boolean
+  }) {
+    return this.svc.createBriefingTemplate(this.orgOrThrow(u), u.id, body)
+  }
+
+  @Patch('briefing-templates/:id')
+  updateBriefingTemplate(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.svc.updateBriefingTemplate(this.orgOrThrow(u), id, body)
+  }
+
+  @Delete('briefing-templates/:id')
+  deleteBriefingTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.deleteBriefingTemplate(this.orgOrThrow(u), id)
+  }
+
   @Get('products/:id/listings')
   listProductListings(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.listListingsByProduct(this.orgOrThrow(u), id)

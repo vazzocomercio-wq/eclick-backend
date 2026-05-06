@@ -366,6 +366,127 @@ export class CreativeService {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // BRIEFING TEMPLATES (melhoria #2)
+  // ════════════════════════════════════════════════════════════════════════
+
+  async listBriefingTemplates(orgId: string): Promise<Array<Record<string, unknown>>> {
+    const { data, error } = await supabaseAdmin
+      .from('creative_briefing_templates')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('is_default', { ascending: false })
+      .order('created_at', { ascending: false })
+    if (error) throw new BadRequestException(`listBriefingTemplates: ${error.message}`)
+    return (data ?? []) as Array<Record<string, unknown>>
+  }
+
+  async createBriefingTemplate(orgId: string, userId: string, dto: {
+    name:                string
+    description?:        string
+    target_marketplace:  Marketplace
+    visual_style?:       string
+    environment?:        string
+    custom_environment?: string
+    background_color?:   string
+    use_logo?:           boolean
+    logo_url?:           string
+    logo_storage_path?:  string
+    communication_tone?: string
+    image_count?:        number
+    image_format?:       string
+    is_default?:         boolean
+  }): Promise<Record<string, unknown>> {
+    if (!dto.name?.trim())              throw new BadRequestException('name obrigatório')
+    if (!dto.target_marketplace)        throw new BadRequestException('target_marketplace obrigatório')
+
+    // Se vai ser default, desativa o atual default da org
+    if (dto.is_default) {
+      await supabaseAdmin
+        .from('creative_briefing_templates')
+        .update({ is_default: false, updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId)
+        .eq('is_default', true)
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_briefing_templates')
+      .insert({
+        organization_id:     orgId,
+        user_id:             userId,
+        name:                dto.name.trim(),
+        description:         dto.description ?? null,
+        target_marketplace:  dto.target_marketplace,
+        visual_style:        dto.visual_style ?? 'clean',
+        environment:         dto.environment ?? null,
+        custom_environment:  dto.custom_environment ?? null,
+        background_color:    dto.background_color ?? '#FFFFFF',
+        use_logo:            dto.use_logo ?? false,
+        logo_url:            dto.logo_url ?? null,
+        logo_storage_path:   dto.logo_storage_path ?? null,
+        communication_tone:  dto.communication_tone ?? 'vendedor',
+        image_count:         dto.image_count ?? 10,
+        image_format:        dto.image_format ?? '1200x1200',
+        is_default:          dto.is_default ?? false,
+      })
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`createBriefingTemplate: ${error.message}`)
+    return data as Record<string, unknown>
+  }
+
+  async updateBriefingTemplate(orgId: string, id: string, patch: Partial<{
+    name:                string
+    description:         string
+    target_marketplace:  Marketplace
+    visual_style:        string
+    environment:         string
+    custom_environment:  string
+    background_color:    string
+    use_logo:            boolean
+    logo_url:            string
+    logo_storage_path:   string
+    communication_tone:  string
+    image_count:         number
+    image_format:        string
+    is_default:          boolean
+  }>): Promise<Record<string, unknown>> {
+    if (patch.is_default === true) {
+      await supabaseAdmin
+        .from('creative_briefing_templates')
+        .update({ is_default: false, updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId)
+        .eq('is_default', true)
+        .neq('id', id)
+    }
+
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    for (const k of Object.keys(patch)) {
+      const v = (patch as Record<string, unknown>)[k]
+      if (v !== undefined) update[k] = v
+    }
+    const { data, error } = await supabaseAdmin
+      .from('creative_briefing_templates')
+      .update(update)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`updateBriefingTemplate: ${error.message}`)
+    if (!data) throw new NotFoundException('template não encontrado')
+    return data as Record<string, unknown>
+  }
+
+  async deleteBriefingTemplate(orgId: string, id: string): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin
+      .from('creative_briefing_templates')
+      .delete()
+      .eq('organization_id', orgId)
+      .eq('id', id)
+    if (error) throw new BadRequestException(`deleteBriefingTemplate: ${error.message}`)
+    return { ok: true }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // LISTINGS — geração textual
   // ════════════════════════════════════════════════════════════════════════
 
