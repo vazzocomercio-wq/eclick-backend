@@ -146,6 +146,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Onda 4 A2: Coleções de produtos
+  collections_generate: {
+    label:       'Geração de coleções (A2)',
+    description: 'IA agrupa produtos em coleções comerciais por tema/categoria/ocasião',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

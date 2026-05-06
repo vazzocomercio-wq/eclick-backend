@@ -52,6 +52,7 @@ import { ProductsAnalyticsModule } from './modules/products-analytics/products-a
 import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
 import { StoreAutomationModule } from './modules/store-automation/store-automation.module'
 import { KitsModule } from './modules/kits/kits.module'
+import { StorefrontModule } from './modules/storefront/storefront.module'
 
 @Module({
   imports: [
@@ -106,6 +107,7 @@ import { KitsModule } from './modules/kits/kits.module'
     PricingAiModule,
     StoreAutomationModule,
     KitsModule,
+    StorefrontModule,
   ],
   controllers: [AppController],
   providers: [AppService],
