@@ -1,15 +1,15 @@
 import type { AdsPlatform, AdsObjective } from './ads-campaigns.types'
 
 interface ProductSummary {
-  name:               string
-  brand?:             string | null
-  category?:          string | null
-  price?:             number | null
-  short_description?: string | null
-  description?:       string | null
-  differentials?:     string[] | null
-  target_audience?:   string | null
-  ai_score?:          number | null
+  name:                  string
+  brand?:                string | null
+  category?:             string | null
+  price?:                number | null
+  ai_short_description?: string | null
+  description?:          string | null
+  differentials?:        string[] | null
+  ai_target_audience?:   string | null
+  ai_score?:             number | null
 }
 
 const SYSTEM_PROMPT = `Você é um gestor de tráfego pago especialista em e-commerce brasileiro
@@ -45,9 +45,9 @@ Nome: ${product.name}
 Marca: ${product.brand ?? '-'}
 Categoria: ${product.category ?? '-'}
 Preço: ${product.price != null ? `R$ ${Number(product.price).toFixed(2)}` : '-'}
-Descrição: ${(product.short_description ?? product.description ?? '').substring(0, 500)}
+Descrição: ${(product.ai_short_description ?? product.description ?? '').substring(0, 500)}
 Diferenciais: ${(product.differentials ?? []).join(', ') || '-'}
-Público: ${product.target_audience ?? 'Geral'}
+Público: ${product.ai_target_audience ?? 'Geral'}
 ${product.ai_score != null ? `Score do catálogo: ${product.ai_score}/100` : ''}
 
 ## PLATAFORMA: ${platform.toUpperCase()}

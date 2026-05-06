@@ -199,7 +199,7 @@ export class StoreConfigService {
     const offset = Math.max(opts.offset ?? 0, 0)
     let q = supabaseAdmin
       .from('products')
-      .select('id, name, price, photo_urls, category, ai_score, short_description')
+      .select('id, name, price, photo_urls, category, ai_score, ai_short_description')
       .eq('organization_id', orgId)
       .in('catalog_status', ['ready', 'live'])
       .gt('stock', 0)

@@ -8,17 +8,17 @@ import type { SocialChannel } from './social-content.types'
  */
 
 interface ProductSummary {
-  name:               string
-  brand?:             string | null
-  category?:          string | null
-  price?:             number | null
-  short_description?: string | null
-  description?:       string | null
-  differentials?:     string[] | null
-  bullets?:           string[] | null
-  target_audience?:   string | null
-  tags?:              string[] | null
-  ai_analysis?:       Record<string, unknown> | null
+  name:                  string
+  brand?:                string | null
+  category?:             string | null
+  price?:                number | null
+  ai_short_description?: string | null
+  description?:          string | null
+  differentials?:        string[] | null
+  bullets?:              string[] | null
+  ai_target_audience?:   string | null
+  tags?:                 string[] | null
+  ai_analysis?:          Record<string, unknown> | null
 }
 
 const SYSTEM_PROMPT = `Você é um social media manager especialista em e-commerce brasileiro.
@@ -51,10 +51,10 @@ Nome: ${product.name}
 Marca: ${product.brand || 'Não informada'}
 Categoria: ${product.category || 'Geral'}
 Preço: ${product.price != null ? `R$ ${Number(product.price).toFixed(2)}` : 'Sob consulta'}
-Descrição: ${(product.short_description || product.description || '').substring(0, 600)}
+Descrição: ${(product.ai_short_description || product.description || '').substring(0, 600)}
 Diferenciais: ${(product.differentials ?? []).join(', ') || '-'}
 Bullets: ${(product.bullets ?? []).join(' | ') || '-'}
-Público-alvo: ${product.target_audience || 'Geral'}
+Público-alvo: ${product.ai_target_audience || 'Geral'}
 Tags: ${(product.tags ?? []).join(', ') || '-'}
 ${product.ai_analysis && Object.keys(product.ai_analysis).length > 0
   ? `\n## ANÁLISE VISUAL\n${JSON.stringify(product.ai_analysis).slice(0, 800)}`

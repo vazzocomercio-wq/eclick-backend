@@ -18,7 +18,7 @@ interface ProductForSync {
   price:                 number | null
   stock:                 number | null
   description:           string | null
-  short_description:     string | null
+  ai_short_description:  string | null
   photo_urls:            string[] | null
   channel_titles:        Record<string, string> | null
   channel_descriptions:  Record<string, string> | null
@@ -367,7 +367,7 @@ export class SocialCommerceService {
       .from('products')
       .select(`
         id, organization_id, name, brand, category, price, stock,
-        description, short_description, photo_urls,
+        description, ai_short_description, photo_urls,
         channel_titles, channel_descriptions, gtin, condition,
         ml_permalink, sku, landing_page_enabled, landing_page_slug
       `)
@@ -412,7 +412,7 @@ export class SocialCommerceService {
       ?? p.name
 
     const description = p.channel_descriptions?.instagram
-      ?? p.short_description
+      ?? p.ai_short_description
       ?? p.description
       ?? p.name
 

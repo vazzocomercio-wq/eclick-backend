@@ -542,8 +542,8 @@ export class AdsCampaignsService {
       .from('products')
       .select(`
         id, name, brand, category, price,
-        short_description, description,
-        differentials, target_audience, ai_score
+        ai_short_description, description,
+        differentials, ai_target_audience, ai_score
       `)
       .eq('id', productId)
       .eq('organization_id', orgId)
@@ -556,11 +556,11 @@ export class AdsCampaignsService {
       brand:             string | null
       category:          string | null
       price:             number | null
-      short_description: string | null
-      description:       string | null
-      differentials:     string[] | null
-      target_audience:   string | null
-      ai_score:          number | null
+      ai_short_description: string | null
+      description:          string | null
+      differentials:        string[] | null
+      ai_target_audience:   string | null
+      ai_score:             number | null
     }
   }
 }

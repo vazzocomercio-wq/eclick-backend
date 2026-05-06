@@ -381,8 +381,8 @@ export class SocialContentService {
       .from('products')
       .select(`
         id, organization_id, name, brand, category, price,
-        short_description, description, differentials, bullets,
-        target_audience, tags, ai_analysis
+        ai_short_description, description, differentials, bullets,
+        ai_target_audience, tags, ai_analysis
       `)
       .eq('id', productId)
       .eq('organization_id', orgId)
@@ -395,11 +395,11 @@ export class SocialContentService {
       brand:              string | null
       category:           string | null
       price:              number | null
-      short_description:  string | null
-      description:        string | null
-      differentials:      string[] | null
-      bullets:            string[] | null
-      target_audience:    string | null
+      ai_short_description: string | null
+      description:          string | null
+      differentials:        string[] | null
+      bullets:              string[] | null
+      ai_target_audience:   string | null
       tags:               string[] | null
       ai_analysis:        Record<string, unknown> | null
     }
