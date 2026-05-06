@@ -306,6 +306,387 @@ const PUBLIC_ENTRIES: KbEntry[] = [
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// Atendente IA
+// ════════════════════════════════════════════════════════════════════════
+
+const ATENDENTE_IA_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/atendente-ia', '/dashboard/atendente-ia/agentes', '/dashboard/atendente-ia/agentes/[id]'],
+    category: 'atendente-ia',
+    title:    'Agentes de IA — perfis de atendimento',
+    content: `**Agentes** são personas de IA que respondem clientes. Cada agente tem persona, knowledge base, tom, regras de transferência.
+
+**O que configurar**:
+- Nome e descrição (visível pro cliente)
+- Persona: tom, formalidade, restrições
+- KB: arquivos/textos que o agente lê pra responder
+- Threshold de confiança: <X% transfere pra humano
+- Canais ativos (WhatsApp, widget, etc.)
+
+**Boas práticas**:
+- KB enxuta > KB enorme (qualidade > quantidade)
+- Teste com perguntas reais antes de ativar
+- Reviews periódicos das conversas pra refinar`,
+    tags: ['atendente-ia', 'agents', 'persona'],
+  },
+  {
+    routes:   ['/dashboard/atendente-ia/conversas'],
+    category: 'atendente-ia',
+    title:    'Conversas (Inbox)',
+    content: `**Inbox unificada** de conversas com clientes (todos canais).
+
+**Filtros**: por canal, status (aberta/escalada/fechada), agente, data.
+
+**Ações por conversa**:
+- Tomar (pula IA, vira humano)
+- Transferir pra outro atendente
+- Responder com sugestão IA (Sonnet)
+- Adicionar tag, marcar resolvido
+
+**Métricas no header**: tempo médio de resposta, taxa de resolução IA, escalações.`,
+    tags: ['atendente-ia', 'conversations', 'inbox'],
+  },
+  {
+    routes:   ['/dashboard/atendente-ia/conhecimento'],
+    category: 'atendente-ia',
+    title:    'Base de Conhecimento (KB)',
+    content: `**Documentos que os agentes IA leem** pra responder. Suporta texto livre, FAQ estruturado, links pra docs externos.
+
+**Boas práticas**:
+- Use FAQ pra perguntas frequentes diretas
+- Texto livre pra políticas, procedimentos
+- Mantenha ≤ 50 docs por agente — qualidade > quantidade
+- Atualize quando produto/processo mudar`,
+    tags: ['atendente-ia', 'kb', 'knowledge'],
+  },
+  {
+    routes:   ['/dashboard/atendente-ia/treinamento'],
+    category: 'atendente-ia',
+    title:    'Treinamento de agentes',
+    content: `**Refina os agentes** com base em conversas reais. Sistema captura interações onde IA errou ou foi corrigida, você revisa e marca certo/errado, padrões aprendidos viram regras.
+
+**Quando treinar**:
+- Após 50+ conversas (volume estatístico)
+- Quando notar padrão de erro recorrente
+- Semanal nos primeiros 3 meses`,
+    tags: ['atendente-ia', 'training'],
+  },
+  {
+    routes:   ['/dashboard/atendente-ia/widget'],
+    category: 'atendente-ia',
+    title:    'Widget de chat (embed)',
+    content: `**Chat IA pra colar no seu site/loja**. Cliente conversa, IA responde, conversa vira lead.
+
+**Setup**:
+1. Cria widget aqui → gera \`widget_token\`
+2. Cola snippet no \`<head>\` do seu site
+3. Configurar: cor, posição, mensagem inicial, formulário de captura
+4. Vincula a um agente IA
+
+**Boas práticas**:
+- Configure \`allowed_origins\` (domínios autorizados)
+- Comece com \`auto_reply\` ligado
+- Acompanhe em \`/dashboard/atendente-ia/conversas\` filtrando channel='widget'`,
+    tags: ['atendente-ia', 'widget', 'embed'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// CRM
+// ════════════════════════════════════════════════════════════════════════
+
+const CRM_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/crm/clientes', '/dashboard/crm/customer-hub'],
+    category: 'crm',
+    title:    'Clientes & Customer Hub',
+    content: `**Visão 360 do cliente.** Histórico de pedidos, conversas, campanhas, valor de vida.
+
+**No card do cliente**:
+- Dados básicos, LTV, última compra, ticket médio
+- Segmentos (VIP, frequente, dormindo)
+- Conversas vinculadas (cross-channel)
+
+**Use pra**:
+- Preparar atendimento personalizado
+- Identificar oportunidades de upsell
+- Detectar churn (sem compra > 90d)`,
+    tags: ['crm', 'customers', 'ltv'],
+  },
+  {
+    routes:   ['/dashboard/crm/pipeline'],
+    category: 'crm',
+    title:    'Pipeline (Kanban de oportunidades)',
+    content: `**Funil visual de deals.** Drag-and-drop entre estágios.
+
+**Setup**: defina estágios em \`/dashboard/configuracoes\` (Lead → Qualificado → Proposta → Fechado).
+
+**Cada deal**: valor, probabilidade, próxima ação, owner.
+
+**Métricas**: pipeline value, win rate, ciclo médio.`,
+    tags: ['crm', 'pipeline', 'deals'],
+  },
+  {
+    routes:   ['/dashboard/crm/pos-venda'],
+    category: 'crm',
+    title:    'Pós-venda',
+    content: `**Acompanhamento depois da compra.** NPS, follow-up, recompra.
+
+**Automações comuns**:
+- 7 dias após entrega → pesquisa NPS
+- 30 dias → "como está usando?"
+- 90 dias → ofertar recompra/upsell
+
+**KPIs**: NPS médio, taxa de recompra, churn pós-1ª compra.`,
+    tags: ['crm', 'pos-venda', 'nps'],
+  },
+  {
+    routes:   ['/dashboard/campanhas'],
+    category: 'crm',
+    title:    'Campanhas WhatsApp/Email',
+    content: `**Disparo segmentado** pra base de clientes.
+
+**Setup**:
+1. Segmento: todos / VIP / com CPF / custom
+2. Template (WhatsApp pré-aprovado ou email livre)
+3. Produto destacado
+4. Janela: imediato ou agendado
+5. A/B opcional (mede CTR)
+
+**Limites**: daily_limit por canal, interval_jitter pra parecer humano, opt-out STOP.
+
+**KPIs**: enviadas, entregues, lidas, respostas, conversões.`,
+    tags: ['crm', 'campaigns', 'whatsapp'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Compras + Pricing
+// ════════════════════════════════════════════════════════════════════════
+
+const COMPRAS_PRICING_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/compras/inteligencia'],
+    category: 'compras',
+    title:    'Inteligência de Compras',
+    content: `**Painel de decisão de compras.** IA detecta produtos críticos, sugere quantidade ideal.
+
+**Sinais monitorados**:
+- Estoque vs demanda (vendas últimos 30/60d)
+- Lead time fornecedor + safety days
+- Sazonalidade detectada
+- Margem do produto
+- Preço competitivo
+
+**Ações sugeridas**: "Comprar X de Y porque...", "Atrasar compra de Z — estoque cobre 45 dias".
+
+**Boas práticas**: revise diários os críticos, mantenha lead times atualizados, foque ABC=A primeiro (80% receita).`,
+    tags: ['compras', 'inteligencia'],
+  },
+  {
+    routes:   ['/dashboard/compras/fornecedores'],
+    category: 'compras',
+    title:    'Fornecedores',
+    content: `**Cadastro de fornecedores** com lead time, termos de pagamento, pedido mínimo, performance histórica.
+
+**Use pra**:
+- IA de compras calcular safety days
+- Comparar fornecedores do mesmo produto
+- Auto-gerar pedidos recorrentes`,
+    tags: ['compras', 'suppliers'],
+  },
+  {
+    routes:   ['/dashboard/pricing/configuracao', '/dashboard/pricing/analise'],
+    category: 'pricing',
+    title:    'Pricing — análise vs concorrência',
+    content: `**Monitoramento de preço dos concorrentes** + sugestões de ajuste.
+
+**Setup**:
+- Cadastre concorrentes por SKU (URLs ML/Shopee)
+- Sistema scrapeia periodicamente
+- Define regras: "5% abaixo do menor" ou "match preço"
+
+**Análise**: tabela seu vs concorrentes, sinais críticos em vermelho, histórico de preço.
+
+**Chat IA** em \`/dashboard/pricing/chat\` cruza vendas + concorrência + margem.`,
+    tags: ['pricing', 'concorrentes'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Vendas / Pedidos / Atendimento marketplace
+// ════════════════════════════════════════════════════════════════════════
+
+const SALES_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/pedidos'],
+    category: 'vendas',
+    title:    'Pedidos',
+    content: `**Lista de pedidos consolidada** de todos canais.
+
+**Filtros**: canal, status, data, valor.
+
+**Atrasados** (sem update X dias) ficam em vermelho.
+
+**Ações**: ver detalhe, marcar problema, vincular a conversa do CRM.`,
+    tags: ['pedidos', 'orders'],
+  },
+  {
+    routes:   ['/dashboard/atendimento/perguntas'],
+    category: 'atendimento',
+    title:    'Perguntas do Mercado Livre',
+    content: `**Inbox de perguntas pré-venda** dos compradores ML.
+
+**3 colunas**:
+1. Pergunta + produto + comprador
+2. Sugestão IA (Sonnet com contexto do anúncio)
+3. Ações: editar, encurtar, humanizar, add garantia, resposta pronta
+
+**Auto-resposta**: confidence ≥ 0.70 → envia automático (config em \`/dashboard/configuracoes/ia\`).
+
+**Boas práticas**: revise primeiras 50 antes de auto-send, ajuste tom, use templates pra repetitivas.`,
+    tags: ['atendimento', 'ml', 'perguntas'],
+  },
+  {
+    routes:   ['/dashboard/atendimento/reclamacoes'],
+    category: 'atendimento',
+    title:    'Reclamações',
+    content: `**Tickets de reclamação** dos marketplaces (mediation no ML).
+
+**Severidade**: alta (penalização) > média > baixa.
+
+**KPI crítico**: SLA de resposta (ML penaliza > 24h).`,
+    tags: ['atendimento', 'reclamacoes', 'sla'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Ads
+// ════════════════════════════════════════════════════════════════════════
+
+const ADS_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/ads', '/dashboard/ads/mercadolivre'],
+    category: 'ads',
+    title:    'ML Ads — campanhas pagas',
+    content: `**Gestão de Product Ads ML.**
+
+**Métricas**: ROAS (receita/gasto), ACOS (gasto/receita), CTR, CPC, conversões.
+
+**Boas práticas**:
+- Pause ROAS < 2x (perde dinheiro)
+- Aumente budget de ROAS > 5x
+- ACOS alvo varia por categoria — descubra break-even (margem)
+- Termos negativos cortam custo
+
+**Especialista ML Ads** (sininho flutuante): chat IA com contexto das campanhas. "Qual pausar?", "onde perco dinheiro?".`,
+    tags: ['ads', 'ml', 'roas'],
+  },
+  {
+    routes:   ['/dashboard/ads/inteligencia'],
+    category: 'ads',
+    title:    'Inteligência de Ads',
+    content: `**Insights automáticos.** IA detecta oportunidades + alertas.
+
+**Sinais**:
+- Campaign fatigue: CTR↓ + CPC↑ (criativo cansado)
+- Audience burnout: frequência↑ + CTR↓
+- Scaling inefficiency: budget dobrou mas conversões não
+- Pixel drift: conversões caíram sem mudar spend
+
+**Severidade**: warning (revisão) vs critical (ação imediata).`,
+    tags: ['ads', 'insights'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Estoque / Logística / Financeiro
+// ════════════════════════════════════════════════════════════════════════
+
+const OPS_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/catalogo/estoque'],
+    category: 'estoque',
+    title:    'Estoque — visão geral',
+    content: `**Painel consolidado.**
+
+**Indicadores**:
+- Sem estoque (vermelho)
+- Crítico (< min_stock)
+- OK
+- Excesso (> ideal_stock — capital parado)
+
+**stock_mode**: \`shared\` (estoque comum) ou \`isolated\` (separado por canal).
+
+**Ações**: ajuste manual (auditável), sync com marketplace, histórico de movimentações.`,
+    tags: ['estoque', 'stock'],
+  },
+  {
+    routes:   ['/dashboard/logistica'],
+    category: 'logistica',
+    title:    'Logística',
+    content: `**Acompanhamento de envios.** Status: aguardando coleta → em trânsito → saiu pra entrega → entregue / extraviado.
+
+**Atrasos** em vermelho (rastreio sem update > 5 dias úteis).
+
+**Ações**: reimprimir etiqueta, solicitar reentrega, abrir reclamação com transportadora.`,
+    tags: ['logistica', 'envios'],
+  },
+  {
+    routes:   ['/dashboard/financeiro', '/dashboard/financeiro/resumo', '/dashboard/financeiro/fluxo', '/dashboard/financeiro/dre'],
+    category: 'financeiro',
+    title:    'Financeiro — resumo + DRE',
+    content: `**3 visões**:
+
+1. **Resumo**: receita, despesa, lucro líquido. Top 5 produtos por margem.
+2. **Fluxo de caixa**: entradas vs saídas projetadas. Detecta gaps.
+3. **DRE**: receita bruta → impostos → líquida → CMV → bruta → despesas → líquida.
+
+**Importante**: dados vêm de pedidos pagos + custos cadastrados. Precisa \`cost_price\` correto pra DRE fazer sentido.`,
+    tags: ['financeiro', 'dre'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Configurações & Integrações
+// ════════════════════════════════════════════════════════════════════════
+
+const CONFIG_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/configuracoes', '/dashboard/configuracoes/ia'],
+    category: 'configuracoes',
+    title:    'Configurações de IA',
+    content: `**Provider e modelo por feature.**
+
+**Por feature** (campaign_copy, atendente_response, ml_question_suggest, copilot_help, catalog_enrichment, etc.):
+- Provider primário (Anthropic | OpenAI)
+- Modelo primário
+- Provider/modelo de fallback (opcional)
+- Enabled/disabled
+
+**Custos**: ai_usage_log rastreia tudo. Dashboard em \`/dashboard/atendente-ia/analytics\`.
+
+**Auto-resposta ML**: \`ml_question_auto_send\` flag — envia automático se confidence ≥ 0.70.`,
+    tags: ['configuracoes', 'ia'],
+  },
+  {
+    routes:   ['/dashboard/integracoes'],
+    category: 'configuracoes',
+    title:    'Integrações',
+    content: `**Conectores externos.**
+
+- **Mercado Livre** (OAuth) — vendas, perguntas, ML Ads
+- **Shopee** (em breve)
+- **Canva** (OAuth) — editor designs do IA Criativo
+- **Kling** (API key) — geração de vídeos
+- **Anthropic / OpenAI** (API keys per-org pra LlmService)
+
+**Status verde** = funcionando, **vermelho** = expirou. Reconexão necessária ao expirar token.`,
+    tags: ['configuracoes', 'integracoes'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Geral / cross-cutting
 // ════════════════════════════════════════════════════════════════════════
 
@@ -338,6 +719,13 @@ export const KB: KbEntry[] = [
   ...CATALOG_ENTRIES,
   ...CREATIVE_ENTRIES,
   ...PUBLIC_ENTRIES,
+  ...ATENDENTE_IA_ENTRIES,
+  ...CRM_ENTRIES,
+  ...COMPRAS_PRICING_ENTRIES,
+  ...SALES_ENTRIES,
+  ...ADS_ENTRIES,
+  ...OPS_ENTRIES,
+  ...CONFIG_ENTRIES,
 ]
 
 /** Match Next.js route patterns ('/x/[id]') contra pathname real ('/x/abc-123'). */

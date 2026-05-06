@@ -46,4 +46,30 @@ export class CopilotController {
   listKb() {
     return this.svc.listKbByCategory()
   }
+
+  /** POST /copilot/feedback — thumbs up/down + comentário opcional. */
+  @Post('feedback')
+  @HttpCode(HttpStatus.OK)
+  feedback(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      pathname: string
+      question: string
+      answer:   string
+      rating:   'up' | 'down'
+      comment?: string
+    },
+  ) {
+    if (!u.orgId)        throw new BadRequestException('orgId ausente')
+    if (!body?.rating)   throw new BadRequestException('rating obrigatório')
+    return this.svc.recordFeedback({
+      orgId:    u.orgId,
+      userId:   u.id,
+      pathname: body.pathname ?? '',
+      question: body.question ?? '',
+      answer:   body.answer ?? '',
+      rating:   body.rating,
+      comment:  body.comment,
+    })
+  }
 }

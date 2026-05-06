@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import { LlmService } from '../ai/llm.service'
+import { supabaseAdmin } from '../../common/supabase'
 import { matchKbEntries, KB, type KbEntry } from './copilot.kb'
 
 interface ChatInput {
@@ -97,5 +98,54 @@ Responda agora:`
       grouped[cat].push({ title: entry.title, tags: entry.tags ?? [], routes: entry.routes })
     }
     return grouped
+  }
+
+  /** Feedback do user sobre uma resposta — registra em ai_usage_log via
+   *  metadata pro futuro tuning de KB / prompt. */
+  async recordFeedback(input: {
+    orgId:        string
+    userId:       string
+    pathname:     string
+    question:     string
+    answer:       string
+    rating:       'up' | 'down'
+    comment?:     string
+  }): Promise<{ ok: true }> {
+    if (!input.question?.trim() || !input.answer?.trim()) {
+      throw new BadRequestException('question + answer obrigatórios')
+    }
+    if (input.rating !== 'up' && input.rating !== 'down') {
+      throw new BadRequestException('rating deve ser up|down')
+    }
+
+    // Loga em ai_usage_log com error_message=feedback (gambiarra simples)
+    // ou em tabela dedicada futura. Pra MVP usa o que já tem.
+    try {
+      await supabaseAdmin.from('ai_usage_log').insert({
+        organization_id: input.orgId,
+        provider:        'feedback',
+        model:           'copilot_help',
+        feature:         'copilot_help',
+        tokens_input:    0,
+        tokens_output:   0,
+        tokens_total:    0,
+        cost_usd:        0,
+        latency_ms:      0,
+        fallback_used:   false,
+        error_message:   JSON.stringify({
+          type: 'copilot_feedback',
+          rating: input.rating,
+          pathname: input.pathname,
+          question: input.question.slice(0, 500),
+          answer: input.answer.slice(0, 1000),
+          comment: input.comment?.slice(0, 500) ?? null,
+          user_id: input.userId,
+        }),
+      })
+    } catch (e) {
+      this.logger.warn(`[copilot.feedback] insert falhou: ${(e as Error).message}`)
+    }
+
+    return { ok: true }
   }
 }
