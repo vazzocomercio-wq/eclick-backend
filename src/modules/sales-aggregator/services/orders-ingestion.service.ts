@@ -405,6 +405,8 @@ export class OrdersIngestionService {
           contribution_margin:     cm != null ? Math.round(cm * 100) / 100 : null,
           contribution_margin_pct: cmPct != null ? Math.round(cmPct * 100) / 100 : null,
           status:                  order.status,
+          shipping_id:             order.shipping?.id      ?? null,
+          shipping_status:         order.shipping?.status  ?? null,
           buyer_name:              buyerNameFallback,
           buyer_username:          order.buyer?.nickname ?? null,
           buyer_doc_type:          buyer?.doc_type        ?? null,
@@ -437,7 +439,16 @@ export class OrdersIngestionService {
               first_name: order.buyer?.first_name ?? null,
               last_name:  order.buyer?.last_name  ?? null,
             },
+            shipping: order.shipping
+              ? {
+                  id:             order.shipping.id,
+                  status:         order.shipping.status        ?? null,
+                  logistic_type:  order.shipping.logistic_type ?? null,
+                }
+              : null,
             shipping_id: order.shipping?.id ?? null,
+            mediations:  order.mediations ?? [],
+            tags:        order.tags       ?? [],
           },
           updated_at: now,
         })

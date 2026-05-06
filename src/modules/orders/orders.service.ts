@@ -99,9 +99,9 @@ export class OrdersService {
     }
 
     // Filtro por tab — espelha classifyOrder() do frontend, em SQL.
-    // Ordem importa: 'mediacao' tem prioridade sobre tudo, depois pgto_pendente,
-    // depois encerradas (cancelled/delivered), depois flex (logistic_type),
-    // depois despachadas/em_preparacao, por fim 'abertas' (resto).
+    // NOTA: shipping_status pode ser NULL pra muitos pedidos (worker antigo
+    // não populava). Filtros tratam NULL como "ativo / aberto" — mesmo
+    // comportamento de pedidos só com status='paid' sem detalhe de envio.
     if (options.tab) {
       switch (options.tab) {
         case 'mediacao':
@@ -118,27 +118,24 @@ export class OrdersService {
           q = q.or('status.eq.cancelled,shipping_status.in.(delivered,not_delivered)')
           break
         case 'flex':
+          // Flex precisa de logistic_type — se worker não populou, ninguém aparece
           q = q.eq('raw_data->shipping->>logistic_type', 'self_service')
-          // Excluir já encerradas/cancelled — flex é status ativo
           q = q.neq('status', 'cancelled')
-          q = q.not('shipping_status', 'in', '(delivered,not_delivered)')
           break
         case 'despachadas':
+          // Só funciona quando worker popular shipping_status
           q = q.in('shipping_status', ['shipped', 'in_transit'])
           q = q.neq('status', 'cancelled')
           break
         case 'em_preparacao':
           q = q.in('shipping_status', ['handling', 'ready_to_ship'])
           q = q.neq('status', 'cancelled')
-          // Excluir flex (que tem prioridade)
-          q = q.neq('raw_data->shipping->>logistic_type', 'self_service')
           break
         case 'abertas':
-          // O que sobra: não cancelled, sem shipping_status terminal,
-          // sem payment_required, sem flex
+          // Pedido ativo: status='paid' (ou sem cancelled/payment), e sem
+          // shipping_status terminal. NULL conta como aberto.
           q = q.not('status', 'in', '(cancelled,payment_required,payment_in_process)')
-          q = q.not('shipping_status', 'in', '(delivered,not_delivered,shipped,in_transit,handling,ready_to_ship)')
-          q = q.neq('raw_data->shipping->>logistic_type', 'self_service')
+          q = q.or('shipping_status.is.null,shipping_status.in.(pending,not_specified)')
           break
       }
     }

@@ -35,7 +35,13 @@ export interface MlOrder {
     last_name?: string
     email?: string
   }
-  shipping: { id: number } | null
+  shipping: {
+    id:             number
+    status?:        string | null    // pending, ready_to_ship, shipped, delivered, etc
+    logistic_type?: string | null    // self_service (flex), drop_off, fulfillment, etc
+  } | null
+  mediations?: unknown[]
+  tags?:       string[]
   payments: Array<{ payment_method_id: string; payment_type: string }>
 }
 
