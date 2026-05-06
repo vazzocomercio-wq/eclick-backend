@@ -1227,41 +1227,72 @@ export class MercadolivreService {
 
   // ── Orders enriched ──────────────────────────────────────────────────────
 
-  async getOrdersKpis(orgId: string) {
+  async getOrdersKpis(_orgId: string) {
     const { token, sellerId } = await this.getValidToken()
 
-    const now     = new Date()
-    const curFrom = new Date(now.getFullYear(), now.getMonth(), 1)
-    const prvFrom = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    const prvTo   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59)
-    const fmt     = (d: Date) => d.toISOString().slice(0, 19) + '.000-03:00'
+    const now      = new Date()
+    const todayFr  = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const curFrom  = new Date(now.getFullYear(), now.getMonth(), 1)
+    const prvFrom  = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    const prvTo    = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59)
+    const fmt      = (d: Date) => d.toISOString().slice(0, 19) + '.000-03:00'
 
-    const [curRes, prvRes] = await Promise.allSettled([
+    // Sem filtro de status restritivo — agrega todos pedidos não-cancelled.
+    // Isso reflete melhor o que o user vê na lista (que também mostra paid +
+    // payment_required + confirmed). Em paralelo: today + current_month +
+    // last_month.
+    const [todayRes, curRes, prvRes] = await Promise.allSettled([
       axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { seller: sellerId, 'order.status': 'paid', 'order.date_created.from': fmt(curFrom), limit: 200, sort: 'date_asc' },
+        params: { seller: sellerId, 'order.date_created.from': fmt(todayFr), limit: 100, sort: 'date_desc' },
       }),
       axios.get(`${ML_BASE}/orders/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { seller: sellerId, 'order.status': 'paid', 'order.date_created.from': fmt(prvFrom), 'order.date_created.to': fmt(prvTo), limit: 200, sort: 'date_asc' },
+        params: { seller: sellerId, 'order.date_created.from': fmt(curFrom), limit: 200, sort: 'date_asc' },
+      }),
+      axios.get(`${ML_BASE}/orders/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { seller: sellerId, 'order.date_created.from': fmt(prvFrom), 'order.date_created.to': fmt(prvTo), limit: 200, sort: 'date_asc' },
       }),
     ])
 
-    const aggregate = (orders: any[]) => {
+    type Agg = {
+      count:            number
+      revenue:          number
+      pending_shipment: number
+      in_transit:       number
+      delivered:        number
+      by_day:           Array<{ date: string; count: number; revenue: number }>
+    }
+
+    const aggregate = (orders: any[]): Agg => {
       const byDay: Record<string, { count: number; revenue: number }> = {}
       let count = 0; let revenue = 0
+      let pendingShipment = 0; let inTransit = 0; let delivered = 0
       for (const o of orders) {
+        // Pula pedidos cancelados/inválidos (não são vendas reais)
+        if (o.status === 'cancelled' || o.status === 'invalid') continue
+
         const d = (o.date_created ?? '').substring(0, 10)
         if (d) {
           byDay[d] = byDay[d] ?? { count: 0, revenue: 0 }
           byDay[d].count++
           byDay[d].revenue += o.total_amount ?? 0
         }
-        count++; revenue += o.total_amount ?? 0
+        count++
+        revenue += o.total_amount ?? 0
+
+        const ss = o.shipping?.status
+        if (ss === 'pending' || ss === 'ready_to_ship' || ss === 'handling') pendingShipment++
+        else if (ss === 'shipped' || ss === 'in_transit')                    inTransit++
+        else if (ss === 'delivered')                                          delivered++
       }
       return {
         count,
         revenue: Math.round(revenue * 100) / 100,
+        pending_shipment: pendingShipment,
+        in_transit:       inTransit,
+        delivered,
         by_day: Object.entries(byDay)
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([date, { count: c, revenue: r }]) => ({ date, count: c, revenue: Math.round(r * 100) / 100 })),
@@ -1269,8 +1300,9 @@ export class MercadolivreService {
     }
 
     return {
-      current_month: aggregate(curRes.status === 'fulfilled' ? curRes.value.data.results ?? [] : []),
-      last_month:    aggregate(prvRes.status === 'fulfilled' ? prvRes.value.data.results ?? [] : []),
+      today:         aggregate(todayRes.status === 'fulfilled' ? todayRes.value.data.results ?? [] : []),
+      current_month: aggregate(curRes.status   === 'fulfilled' ? curRes.value.data.results   ?? [] : []),
+      last_month:    aggregate(prvRes.status   === 'fulfilled' ? prvRes.value.data.results   ?? [] : []),
     }
   }
 
