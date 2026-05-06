@@ -510,8 +510,8 @@ export class MercadolivreService {
 
   // ── Orders ───────────────────────────────────────────────────────────────
 
-  async getOrders(orgId: string, offset = 0, limit = 50) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getOrders(orgId: string, offset = 0, limit = 50, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
     const { data } = await axios.get(
       `${ML_BASE}/orders/search`,
@@ -526,8 +526,8 @@ export class MercadolivreService {
 
   // ── Metrics ──────────────────────────────────────────────────────────────
 
-  async getMetrics(orgId: string) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getMetrics(orgId: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
     const [visits, sales] = await Promise.all([
       axios.get(`${ML_BASE}/users/${sellerId}/items_visits`, {
@@ -751,11 +751,11 @@ export class MercadolivreService {
     return { results: allOrders, total: total ?? 0 }
   }
 
-  async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string) {
+  async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string, sellerIdFilter?: number) {
     let token: string
     let sellerId: number
     try {
-      ;({ token, sellerId } = await this.getTokenForOrg(orgId))
+      ;({ token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter))
     } catch (authErr: any) {
       console.error('[recent-orders] getValidToken failed:', authErr?.message ?? authErr)
       throw new HttpException('ML não conectado — verifique a integração', 401)
@@ -960,8 +960,8 @@ export class MercadolivreService {
     return body
   }
 
-  async getSellerInfo(orgId: string) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getSellerInfo(orgId: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
     const { data: user } = await axios.get(`${ML_BASE}/users/${sellerId}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -975,9 +975,9 @@ export class MercadolivreService {
     }
   }
 
-  async getReputation(orgId: string) {
+  async getReputation(orgId: string, sellerIdFilter?: number) {
     try {
-      const { token: accessToken } = await this.getTokenForOrg(orgId)
+      const { token: accessToken } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
       const response = await axios.get(`${ML_BASE}/users/me`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -1084,9 +1084,9 @@ export class MercadolivreService {
     }
   }
 
-  async getClaims(orgId: string) {
+  async getClaims(orgId: string, sellerIdFilter?: number) {
     try {
-      const { token } = await this.getTokenForOrg(orgId)
+      const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
       const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
         headers: { Authorization: `Bearer ${token}` },
         params: { role: 'seller', status: 'opened' },
@@ -1217,7 +1217,7 @@ export class MercadolivreService {
     return { items: allItems, total: totalSum }
   }
 
-  async getListingsCounts(orgId: string) {
+  async getListingsCounts(orgId: string, sellerIdFilter?: number) {
     const connections = await this.getAllConnections()
     const statuses = ['active', 'paused', 'closed', 'under_review']
     const counts: Record<string, number> = { active: 0, paused: 0, closed: 0, under_review: 0 }
@@ -1243,8 +1243,8 @@ export class MercadolivreService {
     return counts
   }
 
-  async getListingsVisits(orgId: string) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId)
+  async getListingsVisits(orgId: string, sellerIdFilter?: number) {
+    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
 
     const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -1940,8 +1940,14 @@ export class MercadolivreService {
 
   // ── Create products from listings ─────────────────────────────────────────
 
-  async createFromListing(orgId: string | null, listingIds: string[]) {
-    const { token, sellerId: tokenSellerId } = await this.getTokenForOrg(orgId)
+  async createFromListing(orgId: string | null, listingIds: string[], sellerIdFilter?: number) {
+    // Multi-conta: usa o seller_id passado pelo frontend (conta selecionada
+    // no AccountSelector) pra garantir que o token bate com o anúncio.
+    // Sem isso, com 2+ contas, o backend pegava a default ("updated_at DESC")
+    // e ML retornava 404 quando o anúncio era da outra conta.
+    const { token, sellerId: tokenSellerId } = orgId
+      ? await this.getTokenForOrg(orgId, sellerIdFilter)
+      : await this.getValidToken()
 
     let resolvedOrgId = orgId
     if (!resolvedOrgId) {

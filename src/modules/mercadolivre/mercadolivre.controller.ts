@@ -243,20 +243,29 @@ export class MercadolivreController {
     return this.ml.importItem(user.orgId!, body.ml_item_id)
   }
 
-  // GET /ml/orders?offset=0&limit=50
+  // GET /ml/orders?offset=0&limit=50&seller_id=...
   @Get('orders')
   getOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
+    @Query('seller_id') sellerId?: string,
   ) {
-    return this.ml.getOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 50))
+    return this.ml.getOrders(
+      user.orgId!,
+      Number(offset ?? 0),
+      Number(limit ?? 50),
+      sellerId ? Number(sellerId) : undefined,
+    )
   }
 
-  // GET /ml/metrics
+  // GET /ml/metrics?seller_id=...
   @Get('metrics')
-  getMetrics(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getMetrics(user.orgId!)
+  getMetrics(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getMetrics(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
   // ── Pipeline endpoints ────────────────────────────────────────────────────
@@ -295,7 +304,7 @@ export class MercadolivreController {
     return this.ml.getItemVisits(user.orgId!, mlbId)
   }
 
-  // GET /ml/recent-orders?offset=0&limit=50&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+  // GET /ml/recent-orders?offset=0&limit=50&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&seller_id=...
   @Get('recent-orders')
   getRecentOrders(
     @ReqUser() user: ReqUserPayload,
@@ -303,8 +312,16 @@ export class MercadolivreController {
     @Query('limit')     limit?:    string,
     @Query('date_from') dateFrom?: string,
     @Query('date_to')   dateTo?:   string,
+    @Query('seller_id') sellerId?: string,
   ) {
-    return this.ml.getRecentOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 50), dateFrom, dateTo)
+    return this.ml.getRecentOrders(
+      user.orgId!,
+      Number(offset ?? 0),
+      Number(limit ?? 50),
+      dateFrom,
+      dateTo,
+      sellerId ? Number(sellerId) : undefined,
+    )
   }
 
   // GET /ml/catalog-competitors/:catalogId
@@ -316,16 +333,22 @@ export class MercadolivreController {
     return this.ml.getCatalogCompetitors(user.orgId!, catalogId)
   }
 
-  // GET /ml/seller-info
+  // GET /ml/seller-info?seller_id=...
   @Get('seller-info')
-  getSellerInfo(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getSellerInfo(user.orgId!)
+  getSellerInfo(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getSellerInfo(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
-  // GET /ml/reputation
+  // GET /ml/reputation?seller_id=...
   @Get('reputation')
-  getReputation(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getReputation(user.orgId!)
+  getReputation(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getReputation(user.orgId!, sellerId ? Number(sellerId) : undefined)
   }
 
   // GET /ml/questions?status=UNANSWERED
@@ -424,11 +447,14 @@ export class MercadolivreController {
     return this.questionsAi.setAutoSendEnabled(user.orgId!, body.enabled === true)
   }
 
-  // GET /ml/claims — always 200, see comment on /questions above.
+  // GET /ml/claims?seller_id=... — always 200, see comment on /questions above.
   @Get('claims')
-  async getClaims(@ReqUser() user: ReqUserPayload) {
+  async getClaims(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
     try {
-      return await this.ml.getClaims(user.orgId!)
+      return await this.ml.getClaims(user.orgId!, sellerId ? Number(sellerId) : undefined)
     } catch (e: unknown) {
       const err = e as { message?: string }
       console.error('[ml.claims] erro:', err?.message)
@@ -477,17 +503,18 @@ export class MercadolivreController {
     return this.ml.getListingsCounts(user.orgId!)
   }
 
-  // POST /ml/products/from-listing  { listing_ids: string[] }
+  // POST /ml/products/from-listing  { listing_ids: string[]; seller_id?: number }
   @Post('products/from-listing')
   @HttpCode(HttpStatus.OK)
   async createFromListing(
     @ReqUser() user: ReqUserPayload,
-    @Body() body: { listing_ids?: string[] },
+    @Body() body: { listing_ids?: string[]; seller_id?: number | string },
   ) {
     const ids = body.listing_ids ?? []
     if (!ids.length) throw new BadRequestException('listing_ids é obrigatório')
     if (ids.length > 20) throw new BadRequestException('Máximo 20 anúncios por vez')
-    return this.ml.createFromListing(user.orgId, ids)
+    const sellerId = body.seller_id != null ? Number(body.seller_id) : undefined
+    return this.ml.createFromListing(user.orgId, ids, sellerId)
   }
 
   // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true
