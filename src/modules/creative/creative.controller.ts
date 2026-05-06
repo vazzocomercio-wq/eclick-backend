@@ -306,4 +306,35 @@ export class CreativeController {
   ) {
     return this.mlPub.buildPreview(this.orgOrThrow(u), id, body)
   }
+
+  @Post('listings/:id/ml-publish')
+  @HttpCode(HttpStatus.OK)
+  publishMl(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: {
+      idempotency_key: string
+      image_ids:       string[]
+      video_id?:       string | null
+      price:           number
+      stock:           number
+      listing_type?:   'free' | 'gold_special' | 'gold_pro'
+      category_id?:    string
+      attributes?:     Array<{ id: string; value_name?: string; value_id?: string }>
+      condition?:      'new' | 'used' | 'not_specified'
+    },
+  ) {
+    if (!body?.idempotency_key) throw new BadRequestException('idempotency_key obrigatório')
+    return this.mlPub.publishToMl(this.orgOrThrow(u), u.id, id, body)
+  }
+
+  @Get('listings/:id/publications')
+  listListingPublications(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.listPublicationsByListing(this.orgOrThrow(u), id)
+  }
+
+  @Get('publications/:id')
+  getPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.getPublication(this.orgOrThrow(u), id)
+  }
 }

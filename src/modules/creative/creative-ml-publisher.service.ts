@@ -1,7 +1,10 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus } from '@nestjs/common'
+import axios, { AxiosError } from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
+
+const ML_BASE = 'https://api.mercadolibre.com'
 
 /**
  * F6 IA Criativo E3c — Publisher para Mercado Livre.
@@ -61,6 +64,9 @@ export interface PreviewBuildOpts {
 export interface PreviewResponse {
   ready:    boolean
   warnings: string[]
+  /** Feature flag: backend permite publicar de fato? Frontend usa
+   *  pra mostrar/esconder o botão "Publicar agora". */
+  publish_enabled: boolean
   predicted_category: {
     category_id:   string | null
     category_name: string | null
@@ -79,6 +85,43 @@ export interface PreviewResponse {
   }>
   /** Objeto que iria pro POST /items. Frontend mostra como JSON formatado. */
   ml_payload: Record<string, unknown>
+}
+
+export interface PublishMlOpts extends PreviewBuildOpts {
+  /** UUID gerado pela UI quando abre dialog de confirmação. Mesma key
+   *  = mesma publicação (idempotente). */
+  idempotency_key: string
+}
+
+export interface CreativePublication {
+  id:                     string
+  organization_id:        string
+  listing_id:             string
+  product_id:             string
+  user_id:                string | null
+  marketplace:            'mercado_livre' | 'shopee' | 'amazon' | 'magalu'
+  status:                 'pending' | 'publishing' | 'published' | 'failed'
+  idempotency_key:        string
+  image_ids:              string[]
+  video_id:               string | null
+  category_id:            string | null
+  listing_type:           string | null
+  condition:              string | null
+  price:                  number | null
+  stock:                  number | null
+  attributes:             unknown[]
+  payload_sent:           Record<string, unknown> | null
+  external_id:            string | null
+  external_url:           string | null
+  external_picture_ids:   string[]
+  external_video_id:      string | null
+  ml_response:            Record<string, unknown> | null
+  last_synced_status:     string | null
+  last_synced_at:         string | null
+  error_message:          string | null
+  published_at:           string | null
+  created_at:             string
+  updated_at:             string
 }
 
 @Injectable()
@@ -323,6 +366,7 @@ export class CreativeMlPublisherService {
     return {
       ready,
       warnings,
+      publish_enabled: this.isPublishEnabled(),
       predicted_category: {
         category_id:          categoryId,
         category_name:        categoryName,
@@ -334,4 +378,228 @@ export class CreativeMlPublisherService {
       ml_payload:          mlPayload,
     }
   }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PUBLISH (F3 — gated por feature flag)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Feature flag: só ativa publicação real quando explicitamente liberado.
+   *  Default desligado pra evitar publicar acidentalmente em conta de prod. */
+  isPublishEnabled(): boolean {
+    return process.env.CREATIVE_ML_PUBLISH_ENABLED === 'true'
+  }
+
+  /** Publica de fato no ML. Status final do anúncio = `paused` (default
+   *  user revisa no ML antes de ativar). Idempotente via idempotency_key. */
+  async publishToMl(
+    orgId:    string,
+    userId:   string,
+    listingId: string,
+    opts:     PublishMlOpts,
+  ): Promise<CreativePublication> {
+    if (!this.isPublishEnabled()) {
+      throw new ForbiddenException(
+        'Publicação real desabilitada. Setar CREATIVE_ML_PUBLISH_ENABLED=true no Railway pra ativar.',
+      )
+    }
+    if (!opts.idempotency_key) {
+      throw new BadRequestException('idempotency_key obrigatório')
+    }
+
+    // Idempotência: se já tem publication com essa key, retorna ela
+    const existing = await this.findByIdempotencyKey(orgId, 'mercado_livre', opts.idempotency_key)
+    if (existing) {
+      this.logger.log(`[creative.ml.publish] idempotency hit — retornando publication ${existing.id} (status=${existing.status})`)
+      return existing
+    }
+
+    // Re-valida via buildPreview — se tiver warning, recusa
+    const preview = await this.buildPreview(orgId, listingId, opts)
+    if (!preview.ready) {
+      throw new BadRequestException(
+        `Anúncio com pendências — corrija antes de publicar:\n• ${preview.warnings.join('\n• ')}`,
+      )
+    }
+
+    // Cria row 'pending'
+    const { data: created, error: createErr } = await supabaseAdmin
+      .from('creative_publications')
+      .insert({
+        organization_id:  orgId,
+        listing_id:       listingId,
+        product_id:       (preview.ml_payload.product_id as string) ?? null,
+        user_id:          userId,
+        marketplace:      'mercado_livre',
+        status:           'pending',
+        idempotency_key:  opts.idempotency_key,
+        image_ids:        opts.image_ids ?? [],
+        video_id:         opts.video_id ?? null,
+        category_id:      preview.predicted_category.category_id,
+        listing_type:     opts.listing_type ?? 'free',
+        condition:        opts.condition ?? 'new',
+        price:            opts.price,
+        stock:            opts.stock,
+        attributes:       opts.attributes ?? [],
+        payload_sent:     preview.ml_payload,
+      })
+      .select('*')
+      .single()
+    if (createErr || !created) {
+      // Pode ser race do unique key — tenta achar de novo
+      const fallback = await this.findByIdempotencyKey(orgId, 'mercado_livre', opts.idempotency_key)
+      if (fallback) return fallback
+      throw new BadRequestException(`createPublication: ${createErr?.message ?? 'falhou'}`)
+    }
+
+    const pub = created as CreativePublication
+    // product_id correto (não vem no payload, busco do listing)
+    const listing = await this.creative.getListing(orgId, listingId)
+    if (pub.product_id !== listing.product_id) {
+      await supabaseAdmin
+        .from('creative_publications')
+        .update({ product_id: listing.product_id })
+        .eq('id', pub.id)
+      pub.product_id = listing.product_id
+    }
+
+    // Marca publishing
+    await this.setPublicationStatus(pub.id, 'publishing')
+
+    try {
+      const { token } = await this.ml.getTokenForOrg(orgId)
+
+      // Pictures: passa como source URL — ML baixa sozinho.
+      // Não precisa pre-upload separado pra MVP.
+
+      // Video: SKIP nesta sprint. ML video API requer multipart upload + poll
+      // status, é um sub-projeto à parte. Listing publica sem vídeo.
+      const skippedVideo = !!opts.video_id
+
+      // Monta payload final (já vem em preview.ml_payload, mas ajustes finais aqui)
+      const mlBody: Record<string, unknown> = { ...preview.ml_payload }
+      delete (mlBody as { product_id?: unknown }).product_id // não vai pro ML
+      delete (mlBody as { video_id?: unknown }).video_id     // skipped
+
+      // POST /items — autenticado
+      const res = await axios.post<{
+        id:         string
+        permalink?: string
+        status?:    string
+        pictures?:  Array<{ id: string; url: string }>
+      }>(`${ML_BASE}/items`, mlBody, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeout: 60_000,
+      })
+
+      const item = res.data
+      const externalPictureIds = (item.pictures ?? [])
+        .map(p => p.id)
+        .filter(Boolean)
+
+      // Update success
+      const { data: updated } = await supabaseAdmin
+        .from('creative_publications')
+        .update({
+          status:                'published',
+          external_id:           item.id,
+          external_url:          item.permalink ?? null,
+          external_picture_ids:  externalPictureIds,
+          external_video_id:     null,
+          ml_response:           item as unknown as Record<string, unknown>,
+          published_at:          new Date().toISOString(),
+          updated_at:            new Date().toISOString(),
+          error_message:         skippedVideo
+            ? 'Vídeo não publicado nesta versão (F3.1 vai adicionar upload de vídeo).'
+            : null,
+        })
+        .eq('id', pub.id)
+        .select('*')
+        .single()
+
+      this.logger.log(`[creative.ml.publish] ✓ ${item.id} publicado (status: ${item.status ?? '?'})`)
+      return (updated as CreativePublication) ?? pub
+    } catch (e: unknown) {
+      const errPayload = extractMlError(e)
+      await supabaseAdmin
+        .from('creative_publications')
+        .update({
+          status:        'failed',
+          error_message: errPayload.message,
+          ml_response:   errPayload.body,
+          updated_at:    new Date().toISOString(),
+        })
+        .eq('id', pub.id)
+      this.logger.error(`[creative.ml.publish] ✗ ${errPayload.message}`)
+      throw new HttpException(`ML rejeitou: ${errPayload.message}`, HttpStatus.BAD_GATEWAY)
+    }
+  }
+
+  async getPublication(orgId: string, id: string): Promise<CreativePublication> {
+    const { data, error } = await supabaseAdmin
+      .from('creative_publications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`getPublication: ${error.message}`)
+    if (!data)  throw new NotFoundException('publication não encontrada')
+    return data as CreativePublication
+  }
+
+  async listPublicationsByListing(orgId: string, listingId: string): Promise<CreativePublication[]> {
+    await this.creative.getListing(orgId, listingId) // tenant check
+    const { data, error } = await supabaseAdmin
+      .from('creative_publications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('listing_id', listingId)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new BadRequestException(`listPublicationsByListing: ${error.message}`)
+    return (data ?? []) as CreativePublication[]
+  }
+
+  // ── Internal helpers ──────────────────────────────────────────────────────
+
+  private async findByIdempotencyKey(
+    orgId:           string,
+    marketplace:     'mercado_livre' | 'shopee' | 'amazon' | 'magalu',
+    idempotencyKey:  string,
+  ): Promise<CreativePublication | null> {
+    const { data } = await supabaseAdmin
+      .from('creative_publications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('marketplace', marketplace)
+      .eq('idempotency_key', idempotencyKey)
+      .maybeSingle()
+    return (data as CreativePublication) ?? null
+  }
+
+  private async setPublicationStatus(id: string, status: 'publishing' | 'failed' | 'published'): Promise<void> {
+    await supabaseAdmin
+      .from('creative_publications')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id)
+  }
+}
+
+// ── Helpers de erro ──────────────────────────────────────────────────────
+
+function extractMlError(e: unknown): { message: string; body: Record<string, unknown> | null } {
+  if (axios.isAxiosError(e)) {
+    const ax = e as AxiosError<{
+      message?: string
+      error?:   string
+      cause?:   Array<{ code?: string; message?: string }>
+    }>
+    const data = ax.response?.data
+    const causeMsg = data?.cause?.map(c => c.message).filter(Boolean).join('; ')
+    const msg = data?.message ?? data?.error ?? ax.message ?? 'erro desconhecido'
+    return {
+      message: causeMsg ? `${msg}: ${causeMsg}` : msg,
+      body:    (data as unknown as Record<string, unknown>) ?? null,
+    }
+  }
+  return { message: (e as Error).message ?? 'erro desconhecido', body: null }
 }
