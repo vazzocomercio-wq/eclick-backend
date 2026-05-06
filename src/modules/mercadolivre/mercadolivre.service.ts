@@ -1544,25 +1544,46 @@ export class MercadolivreService {
 
     // shipMap + costsMap ja preenchidos por fetchOneAccount acima (multi-conta).
 
-    // ── Item thumbnails in batch ──────────────────────────────────────────
-    // Usa token de qualquer conta disponivel (items eh public-ish via auth)
-    const firstToken = sellerIdFilter == null
-      ? (await this.getAllTokensForOrg(orgId).catch(() => []))[0]?.token
-      : (await this.getTokenForOrg(orgId, sellerIdFilter)).token
+    // ── Item thumbnails — fan-out cross-conta ─────────────────────────────
+    // Items de cada conta só são acessíveis com o token da própria conta
+    // (ML retorna 403 cross-conta). Pra suportar pedidos de N contas,
+    // chamamos /items com cada token e mergemos os resultados.
     const itemIds = [...new Set(orders.flatMap((o: any) =>
       (o.order_items ?? []).map((i: any) => i.item?.id).filter(Boolean)
     ))] as string[]
+
+    const thumbnailTokens = sellerIdFilter == null
+      ? await this.getAllTokensForOrg(orgId).catch(() => [])
+      : await this.getTokenForOrg(orgId, sellerIdFilter)
+          .then(t => [t])
+          .catch(() => [])
+
     const thumbMap: Record<string, string> = {}
-    if (itemIds.length > 0 && firstToken) {
-      try {
-        const { data: batchItems } = await axios.get(`${ML_BASE}/items`, {
-          headers: { Authorization: `Bearer ${firstToken}` },
-          params: { ids: itemIds.slice(0, 20).join(','), attributes: 'id,thumbnail,available_quantity' },
-        })
-        ;(Array.isArray(batchItems) ? batchItems : [])
-          .filter((r: any) => r.code === 200)
-          .forEach((r: any) => { if (r.body?.id) thumbMap[r.body.id] = r.body.thumbnail ?? '' })
-      } catch { /* non-fatal */ }
+    if (itemIds.length > 0 && thumbnailTokens.length > 0) {
+      const idsToQuery = itemIds.slice(0, 20).join(',')
+      // Fan-out: cada conta tenta o batch. ML retorna code=200 pros items
+      // que ela tem acesso, code=401/403/404 pros outros. Mergemos.
+      const batchResults = await Promise.allSettled(
+        thumbnailTokens.map(tk =>
+          axios.get(`${ML_BASE}/items`, {
+            headers: { Authorization: `Bearer ${tk.token}` },
+            params: { ids: idsToQuery, attributes: 'id,thumbnail,available_quantity' },
+          }),
+        ),
+      )
+      for (const result of batchResults) {
+        if (result.status !== 'fulfilled') continue
+        try {
+          const batchItems = result.value.data
+          ;(Array.isArray(batchItems) ? batchItems : [])
+            .filter((r: any) => r.code === 200)
+            .forEach((r: any) => {
+              if (r.body?.id && !thumbMap[r.body.id]) {
+                thumbMap[r.body.id] = r.body.thumbnail ?? ''
+              }
+            })
+        } catch { /* skip account */ }
+      }
     }
 
     // ── Product cost/tax lookup by SKU ───────────────────────────────────
@@ -2103,50 +2124,77 @@ export class MercadolivreService {
   // ── Create products from listings ─────────────────────────────────────────
 
   async createFromListing(orgId: string | null, listingIds: string[], sellerIdFilter?: number) {
-    // Multi-conta: usa o seller_id passado pelo frontend (conta selecionada
-    // no AccountSelector) pra garantir que o token bate com o anúncio.
-    // Sem isso, com 2+ contas, o backend pegava a default ("updated_at DESC")
-    // e ML retornava 404 quando o anúncio era da outra conta.
-    const { token, sellerId: tokenSellerId } = orgId
-      ? await this.getTokenForOrg(orgId, sellerIdFilter)
-      : await this.getValidToken()
+    // Multi-conta: tenta tokens de TODAS as contas conectadas da org.
+    // Pra cada listing, usa o token da primeira conta que retornar o item
+    // sem 403/404 (ML rejeita se token não é dono do anúncio).
+    //
+    // Quando sellerIdFilter for fornecido, usa só aquela conta. Caso
+    // contrário, varre todas as contas da org — pra suportar lojistas
+    // que tem 2+ contas ML mas não selecionaram nenhuma específica.
+    const tokens = orgId
+      ? (sellerIdFilter
+          ? [await this.getTokenForOrg(orgId, sellerIdFilter)]
+          : await this.getAllTokensForOrg(orgId))
+      : [await this.getValidToken()]
+
+    if (tokens.length === 0) {
+      throw new UnauthorizedException('ML não conectado para esta organização')
+    }
 
     let resolvedOrgId = orgId
     if (!resolvedOrgId) {
       const { data: conn } = await supabaseAdmin
         .from('ml_connections')
         .select('organization_id')
-        .eq('seller_id', tokenSellerId)
+        .eq('seller_id', tokens[0].sellerId)
         .maybeSingle()
       resolvedOrgId = conn?.organization_id ?? null
     }
-    // resolvedOrgId may still be null — products table accepts null organization_id
 
-    // Fetch item details + descriptions in parallel
-    const [itemsRes, descRes] = await Promise.all([
-      Promise.allSettled(
-        listingIds.map(id =>
-          axios.get(`${ML_BASE}/items/${id}`, {
-            headers: { Authorization: `Bearer ${token}` },
-            params: {
-              attributes: [
-                'id','title','price','available_quantity','sold_quantity',
-                'thumbnail','pictures','seller_custom_field','category_id',
-                'listing_type_id','shipping','attributes','catalog_product_id',
-                'permalink','condition',
-              ].join(','),
-            },
-          }),
-        ),
-      ),
-      Promise.allSettled(
-        listingIds.map(id =>
-          axios.get(`${ML_BASE}/items/${id}/description`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-        ),
-      ),
-    ])
+    const ITEM_ATTRS = [
+      'id','title','price','available_quantity','sold_quantity',
+      'thumbnail','pictures','seller_custom_field','category_id',
+      'listing_type_id','shipping','attributes','catalog_product_id',
+      'permalink','condition',
+    ].join(',')
+
+    /** Pra cada listing, tenta cada token até um funcionar (não-403/404).
+     *  Retorna { item, desc, tokenUsed } ou null se nenhum bate. */
+    const fetchWithFallback = async (mlId: string): Promise<{
+      item: any
+      desc: string | null
+      tokenUsed: { token: string; sellerId: number }
+    } | { error: string }> => {
+      let lastErrorMsg = 'Sem tokens disponíveis'
+      for (const tk of tokens) {
+        try {
+          const itemRes = await axios.get(`${ML_BASE}/items/${mlId}`, {
+            headers: { Authorization: `Bearer ${tk.token}` },
+            params: { attributes: ITEM_ATTRS },
+          })
+          // Item achado — busca description (best-effort, pode falhar)
+          let desc: string | null = null
+          try {
+            const descRes = await axios.get(`${ML_BASE}/items/${mlId}/description`, {
+              headers: { Authorization: `Bearer ${tk.token}` },
+            })
+            desc = descRes.data?.plain_text ?? null
+          } catch { /* description é opcional */ }
+          return { item: itemRes.data, desc, tokenUsed: tk }
+        } catch (e: any) {
+          const status = e?.response?.status
+          lastErrorMsg = e?.response?.data?.message ?? e?.message ?? 'erro'
+          // 403/404 = conta errada, tenta próxima. Outros = falhou de vez.
+          if (status !== 403 && status !== 404) break
+        }
+      }
+      return { error: lastErrorMsg }
+    }
+
+    // Resolve em paralelo todos os listings (cada um com seu próprio fallback)
+    const itemResults = await Promise.all(
+      listingIds.map(id => fetchWithFallback(id))
+    )
 
     const results: Array<{
       listing_id: string
@@ -2157,18 +2205,15 @@ export class MercadolivreService {
 
     for (let i = 0; i < listingIds.length; i++) {
       const mlId = listingIds[i]
+      const r = itemResults[i]
 
-      if (itemsRes[i].status === 'rejected') {
-        const reason = (itemsRes[i] as PromiseRejectedResult).reason?.response?.data?.message ?? 'Falha ao buscar anúncio no ML'
-        results.push({ listing_id: mlId, status: 'error', reason })
+      if ('error' in r) {
+        results.push({ listing_id: mlId, status: 'error', reason: r.error })
         continue
       }
 
-      const item = (itemsRes[i] as PromiseFulfilledResult<any>).value.data
-      const desc =
-        descRes[i].status === 'fulfilled'
-          ? ((descRes[i] as PromiseFulfilledResult<any>).value.data?.plain_text ?? null)
-          : null
+      const item = r.item
+      const desc = r.desc
 
       // seller_custom_field is the canonical SKU; fall back to SELLER_SKU attribute
       const sku: string | null =
