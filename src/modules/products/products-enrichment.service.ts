@@ -76,6 +76,28 @@ export class ProductsEnrichmentService {
   constructor(private readonly llm: LlmService) {}
 
   // ════════════════════════════════════════════════════════════════════════
+  // WORKER QUEUE (M2.2)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Lista produtos com ai_enrichment_pending=true. Worker M2.2 chama
+   *  isso a cada tick, processa cada um via enrichProduct(). */
+  async listPendingEnrichment(maxItems = 5): Promise<Array<{ id: string; organization_id: string }>> {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('id, organization_id')
+      .eq('ai_enrichment_pending', true)
+      .not('organization_id', 'is', null)
+      .order('updated_at', { ascending: true })
+      .limit(maxItems)
+    if (error) {
+      this.logger.warn(`[listPendingEnrichment] ${error.message}`)
+      return []
+    }
+    return ((data ?? []) as Array<{ id: string; organization_id: string | null }>)
+      .filter(r => r.organization_id !== null) as Array<{ id: string; organization_id: string }>
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // SCORE
   // ════════════════════════════════════════════════════════════════════════
 
