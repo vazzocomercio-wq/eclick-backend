@@ -93,6 +93,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'openai', model: 'gpt-image-1' },
     fallback:    null,
   },
+  // E3a: pipeline de vídeos
+  creative_video_prompts: {
+    label:       'Prompts de vídeo (Creative)',
+    description: 'Sonnet gera N prompts de cinemagraph/motion em 1 chamada',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

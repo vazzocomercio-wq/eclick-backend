@@ -224,7 +224,73 @@ Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comm
 }
 
 // ============================================================
-// 4. Variante por marketplace (re-aproveita o anúncio base)
+// 4. Pipeline de vídeo — gera N prompts coerentes pra Kling image2video
+// ============================================================
+
+export interface VideoPromptsBuilderInput {
+  product:       ImagePromptsBuilderInput['product']
+  briefing:      ImagePromptsBuilderInput['briefing']
+  count:         number
+  durationSec:   5 | 10
+  aspectRatio:   '1:1' | '16:9' | '9:16'
+}
+
+/**
+ * Pede pro Sonnet gerar N prompts de motion video (1-5) em 1 chamada.
+ * Kling responde melhor a prompts em inglês descrevendo movimento de
+ * câmera + ação + ambiente. Sem texto/logos no vídeo.
+ */
+export function buildVideoPromptsRequest(input: VideoPromptsBuilderInput): string {
+  const p = input.product
+  const b = input.briefing
+  const env = b.environment === 'custom' ? (b.custom_environment ?? 'neutral') : (b.environment ?? 'neutral')
+
+  return `You are a senior motion-graphics director crafting short product videos for marketplace listings.
+
+The product image will be passed as the FIRST FRAME (image2video). Your prompts describe what HAPPENS during the ${input.durationSec}-second clip — camera motion, ambient lighting changes, micro-actions. The product itself does NOT change shape or color.
+
+## PRODUCT
+Name:            ${p.name}
+Category:        ${p.category}
+Color:           ${p.color ?? (p.ai_analysis?.detected_color as string | undefined) ?? 'N/A'}
+Material:        ${p.material ?? (p.ai_analysis?.detected_material as string | undefined) ?? 'N/A'}
+Differentials:   ${(p.differentials ?? []).join(', ') || 'N/A'}
+
+## AI VISUAL ANALYSIS
+${JSON.stringify(p.ai_analysis ?? {}, null, 2)}
+
+## BRIEFING
+Visual style:    ${b.visual_style}
+Environment:     ${env}
+Tone:            ${b.communication_tone}
+Aspect ratio:    ${input.aspectRatio}
+Duration:        ${input.durationSec}s
+
+## VARIATION STRATEGY (cycle through, ${input.count} total)
+1. Cinemagraph hero — subtle motion (dust particles, light shift), product centered, camera barely moves
+2. Slow zoom-in detail — camera slowly approaches, reveals texture/finish
+3. Product rotation — turntable feel, 360° if possible in ${input.durationSec}s
+4. Hands present — hands gently enter frame, lift or rotate the product
+5. Action / use — context of use (cooking, organizing, applying, etc.)
+
+## RULES
+- Each prompt: 1-3 sentences, English, optimized for Kling image2video
+- ALWAYS describe motion explicitly (camera move, lighting shift, action)
+- Specify pace: "slow", "smooth", "gentle" — avoid frenetic motion
+- Match visual_style strictly (premium = elegant slow motion; promocional = bolder energy)
+- DO NOT add text, watermarks, logos, or branding overlays
+- DO NOT change product shape, color, or appearance
+- Avoid generic adjectives — use concrete cinematographic terms
+
+Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comments:
+[
+  "prompt 1",
+  "prompt 2"
+]`
+}
+
+// ============================================================
+// 5. Variante por marketplace (re-aproveita o anúncio base)
 // ============================================================
 
 export function buildVariantPrompt(

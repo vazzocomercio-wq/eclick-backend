@@ -11,6 +11,7 @@ import {
   type CreateBriefingDto,
 } from './creative.service'
 import { CreativeImagePipelineService } from './creative-image-pipeline.service'
+import { CreativeVideoPipelineService } from './creative-video-pipeline.service'
 import type { Marketplace } from './creative.marketplace-rules'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -23,6 +24,7 @@ export class CreativeController {
   constructor(
     private readonly svc:    CreativeService,
     private readonly images: CreativeImagePipelineService,
+    private readonly videos: CreativeVideoPipelineService,
   ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
@@ -198,5 +200,69 @@ export class CreativeController {
     @Body() body: { prompt?: string },
   ) {
     return this.images.regenerateImage(this.orgOrThrow(u), id, body?.prompt)
+  }
+
+  // ── Video pipeline (E3a) ─────────────────────────────────────────────────
+
+  @Post('video-jobs')
+  @HttpCode(HttpStatus.OK)
+  createVideoJob(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      product_id:        string
+      briefing_id:       string
+      listing_id?:       string
+      source_image_id?:  string
+      count?:            number
+      duration_seconds?: 5 | 10
+      aspect_ratio?:     '1:1' | '16:9' | '9:16'
+      model_name?:       'kling-v1-6-std' | 'kling-v1-6-pro' | 'kling-v2-master'
+      max_cost_usd?:     number
+    },
+  ) {
+    return this.videos.createJob(this.orgOrThrow(u), u.id, body)
+  }
+
+  @Get('video-jobs/:id')
+  getVideoJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.getJob(this.orgOrThrow(u), id)
+  }
+
+  @Get('video-jobs/:id/videos')
+  listJobVideos(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.listVideosByJob(this.orgOrThrow(u), id)
+  }
+
+  @Get('products/:id/video-jobs')
+  listProductVideoJobs(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.listJobsByProduct(this.orgOrThrow(u), id)
+  }
+
+  @Post('video-jobs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelVideoJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.cancelJob(this.orgOrThrow(u), id)
+  }
+
+  @Post('videos/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  approveVideo(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.approveVideo(this.orgOrThrow(u), id, u.id)
+  }
+
+  @Post('videos/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  rejectVideo(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.rejectVideo(this.orgOrThrow(u), id, u.id)
+  }
+
+  @Post('videos/:id/regenerate')
+  @HttpCode(HttpStatus.OK)
+  regenerateVideo(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { prompt?: string },
+  ) {
+    return this.videos.regenerateVideo(this.orgOrThrow(u), id, body?.prompt)
   }
 }
