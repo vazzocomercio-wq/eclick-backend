@@ -46,6 +46,7 @@ import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-h
 import { CreativeModule } from './modules/creative/creative.module'
 import { CopilotModule } from './modules/copilot/copilot.module'
 import { SocialContentModule } from './modules/social-content/social-content.module'
+import { SocialCommerceModule } from './modules/social-commerce/social-commerce.module'
 
 @Module({
   imports: [
@@ -94,6 +95,7 @@ import { SocialContentModule } from './modules/social-content/social-content.mod
     CreativeModule,
     CopilotModule,
     SocialContentModule,
+    SocialCommerceModule,
   ],
   controllers: [AppController],
   providers: [AppService],
