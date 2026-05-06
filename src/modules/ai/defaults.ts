@@ -153,6 +153,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Onda 4 A4: Copiloto da Loja (admin assistant)
+  store_copilot: {
+    label:       'Copiloto da Loja (A4)',
+    description: 'Assistente de comando natural que classifica intent + dispara tools (pricing/kits/ads/etc.)',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

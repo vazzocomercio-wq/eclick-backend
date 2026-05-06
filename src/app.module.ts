@@ -53,6 +53,7 @@ import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
 import { StoreAutomationModule } from './modules/store-automation/store-automation.module'
 import { KitsModule } from './modules/kits/kits.module'
 import { StorefrontModule } from './modules/storefront/storefront.module'
+import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 
 @Module({
   imports: [
@@ -108,6 +109,7 @@ import { StorefrontModule } from './modules/storefront/storefront.module'
     StoreAutomationModule,
     KitsModule,
     StorefrontModule,
+    StoreCopilotModule,
   ],
   controllers: [AppController],
   providers: [AppService],
