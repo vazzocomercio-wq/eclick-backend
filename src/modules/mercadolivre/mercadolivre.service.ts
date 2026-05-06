@@ -1465,55 +1465,98 @@ export class MercadolivreService {
   }
 
   async getOrdersEnriched(orgId: string, offset = 0, limit = 20, q?: string, sellerIdFilter?: number) {
-    const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    // Multi-conta: sem sellerIdFilter → fan-out no fetch raw + shipments,
+    // depois enrichment shared (DB lookups). Quando especifico, comporta-se
+    // como antes.
+    type FetchResult = { orders: any[]; total: number; shipMap: Record<number, any>; costsMap: Record<number, number> }
 
-    const params: Record<string, unknown> = { seller: sellerId, sort: 'date_desc', limit, offset }
-    if (q?.trim()) params.q = q.trim()
+    const fetchOneAccount = async (token: string, sellerId: number): Promise<FetchResult> => {
+      const params: Record<string, unknown> = { seller: sellerId, sort: 'date_desc', limit, offset }
+      if (q?.trim()) params.q = q.trim()
+      const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params,
+      }).catch((err: any) => {
+        throw new HttpException(err?.response?.data?.message ?? 'Erro ao buscar pedidos', err?.response?.status ?? 500)
+      })
+      const accOrders: any[] = body.results ?? []
+      const accShipIds = [...new Set(accOrders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
+      const accShipMap: Record<number, any> = {}
+      const accCostsMap: Record<number, number> = {}
+      if (accShipIds.length > 0) {
+        const [shipRes, costsRes] = await Promise.all([
+          Promise.allSettled(
+            accShipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }))
+          ),
+          Promise.allSettled(
+            accShipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}/costs`, {
+              headers: { Authorization: `Bearer ${token}` },
+            }))
+          ),
+        ])
+        accShipIds.forEach((id, i) => {
+          if (shipRes[i].status === 'fulfilled') {
+            accShipMap[id] = (shipRes[i] as PromiseFulfilledResult<any>).value.data
+          }
+          if (costsRes[i].status === 'fulfilled') {
+            const c: any = (costsRes[i] as PromiseFulfilledResult<any>).value.data
+            accCostsMap[id] = c?.gross_amount ?? c?.amount ?? 0
+          }
+        })
+      }
+      return { orders: accOrders, total: body.paging?.total ?? 0, shipMap: accShipMap, costsMap: accCostsMap }
+    }
 
-    const { data: body } = await axios.get(`${ML_BASE}/orders/search`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params,
-    }).catch((err: any) => {
-      throw new HttpException(err?.response?.data?.message ?? 'Erro ao buscar pedidos', err?.response?.status ?? 500)
-    })
-
-    const orders: any[] = body.results ?? []
-
-    // ── Shipping details + real seller costs in parallel ─────────────────
-    const shipIds = [...new Set(orders.map((o: any) => o.shipping?.id).filter(Boolean))] as number[]
+    let orders: any[]
+    let totalCount: number
     const shipMap: Record<number, any> = {}
     const costsMap: Record<number, number> = {}
 
-    if (shipIds.length > 0) {
-      const [shipRes, costsRes] = await Promise.all([
-        Promise.allSettled(
-          shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }))
+    if (sellerIdFilter == null) {
+      const tokens = await this.getAllTokensForOrg(orgId).catch(() => [])
+      if (tokens.length === 0) throw new HttpException('ML não conectado', 401)
+      const perAccount = await Promise.all(
+        tokens.map(t =>
+          fetchOneAccount(t.token, t.sellerId).catch(e => {
+            console.error(`[orders-enriched] account ${t.sellerId} falhou:`, e?.message)
+            return { orders: [], total: 0, shipMap: {}, costsMap: {} } as FetchResult
+          }),
         ),
-        Promise.allSettled(
-          shipIds.map(id => axios.get(`${ML_BASE}/shipments/${id}/costs`, {
-            headers: { Authorization: `Bearer ${token}` },
-          }))
-        ),
-      ])
-
-      shipIds.forEach((id, i) => {
-        if (shipRes[i].status === 'fulfilled')   shipMap[id]  = (shipRes[i]  as any).value.data
-        if (costsRes[i].status === 'fulfilled') costsMap[id] = (costsRes[i] as any).value.data?.senders?.[0]?.cost ?? 0
-      })
-
+      )
+      orders = perAccount.flatMap(r => r.orders)
+      orders.sort((a: any, b: any) => (b.date_created ?? '').localeCompare(a.date_created ?? ''))
+      orders = orders.slice(0, limit) // respeita limit pos-merge
+      totalCount = perAccount.reduce((s, r) => s + r.total, 0)
+      for (const r of perAccount) {
+        Object.assign(shipMap, r.shipMap)
+        Object.assign(costsMap, r.costsMap)
+      }
+    } else {
+      const { token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter)
+      const r = await fetchOneAccount(token, sellerId)
+      orders = r.orders
+      totalCount = r.total
+      Object.assign(shipMap, r.shipMap)
+      Object.assign(costsMap, r.costsMap)
     }
 
+    // shipMap + costsMap ja preenchidos por fetchOneAccount acima (multi-conta).
+
     // ── Item thumbnails in batch ──────────────────────────────────────────
+    // Usa token de qualquer conta disponivel (items eh public-ish via auth)
+    const firstToken = sellerIdFilter == null
+      ? (await this.getAllTokensForOrg(orgId).catch(() => []))[0]?.token
+      : (await this.getTokenForOrg(orgId, sellerIdFilter)).token
     const itemIds = [...new Set(orders.flatMap((o: any) =>
       (o.order_items ?? []).map((i: any) => i.item?.id).filter(Boolean)
     ))] as string[]
     const thumbMap: Record<string, string> = {}
-    if (itemIds.length > 0) {
+    if (itemIds.length > 0 && firstToken) {
       try {
         const { data: batchItems } = await axios.get(`${ML_BASE}/items`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${firstToken}` },
           params: { ids: itemIds.slice(0, 20).join(','), attributes: 'id,thumbnail,available_quantity' },
         })
         ;(Array.isArray(batchItems) ? batchItems : [])
@@ -1691,7 +1734,7 @@ export class MercadolivreService {
       }
     })
 
-    return { orders: enriched, total: body.paging?.total ?? 0 }
+    return { orders: enriched, total: totalCount }
   }
 
   // ── Order Totals (lean aggregation — no orders kept in memory) ───────────────
