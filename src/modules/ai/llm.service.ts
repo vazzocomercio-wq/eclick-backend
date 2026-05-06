@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } fr
 import axios, { AxiosError } from 'axios'
 import * as FormData from 'form-data'
 import { supabaseAdmin } from '../../common/supabase'
+import { retryWithBackoff } from '../../common/retry'
 import { CredentialsService } from '../credentials/credentials.service'
 import { FEATURE_REGISTRY, FeatureKey, Provider } from './defaults'
 import { GenerateTextInput, GenerateTextOutput, GenerateImageInput, GenerateImageOutput, FeatureSettingRow, ImageFormat } from './types'
@@ -589,7 +590,13 @@ export class LlmService {
       return { url: d0.url, b64: d0.b64_json }
     }
 
-    const settled = await Promise.allSettled(Array.from({ length: args.n }, () => callOne()))
+    // Cada callOne ganha retry com backoff exponencial pra absorver
+    // 429/5xx/timeouts transientes (tipico em horários de pico do OpenAI).
+    const settled = await Promise.allSettled(
+      Array.from({ length: args.n }, () =>
+        retryWithBackoff(callOne, { maxRetries: 2, baseMs: 1500, label: 'openai.image' }),
+      ),
+    )
     const images = settled
       .filter((r): r is PromiseFulfilledResult<{ url?: string; b64?: string }> => r.status === 'fulfilled')
       .map(r => r.value)

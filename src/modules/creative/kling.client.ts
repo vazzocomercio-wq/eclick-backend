@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import { createHmac } from 'node:crypto'
 import axios, { AxiosError } from 'axios'
+import { retryWithBackoff } from '../../common/retry'
 
 /**
  * Kling AI client — image-to-video.
@@ -98,17 +99,20 @@ export class KlingClient {
     if (input.negativePrompt) body.negative_prompt = input.negativePrompt
 
     try {
-      const res = await axios.post<{
-        code: number
-        message?: string
-        data?: { task_id: string; task_status: string; created_at: number }
-      }>(
-        `${KLING_BASE}/v1/videos/image2video`,
-        body,
-        {
-          headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-          timeout: 30_000,
-        },
+      const res = await retryWithBackoff(
+        () => axios.post<{
+          code: number
+          message?: string
+          data?: { task_id: string; task_status: string; created_at: number }
+        }>(
+          `${KLING_BASE}/v1/videos/image2video`,
+          body,
+          {
+            headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+            timeout: 30_000,
+          },
+        ),
+        { maxRetries: 2, baseMs: 1500, label: 'kling.submit' },
       )
       if (res.data.code !== 0 || !res.data.data?.task_id) {
         throw new HttpException(
@@ -131,23 +135,26 @@ export class KlingClient {
   async getTaskStatus(taskId: string): Promise<KlingTaskInfo> {
     const jwt = this.signJwt()
     try {
-      const res = await axios.get<{
-        code: number
-        message?: string
-        data?: {
-          task_id: string
-          task_status: 'submitted' | 'processing' | 'succeed' | 'failed'
-          task_status_msg?: string
-          task_result?: {
-            videos?: Array<{ id: string; url: string; duration: string }>
+      const res = await retryWithBackoff(
+        () => axios.get<{
+          code: number
+          message?: string
+          data?: {
+            task_id: string
+            task_status: 'submitted' | 'processing' | 'succeed' | 'failed'
+            task_status_msg?: string
+            task_result?: {
+              videos?: Array<{ id: string; url: string; duration: string }>
+            }
           }
-        }
-      }>(
-        `${KLING_BASE}/v1/videos/image2video/${encodeURIComponent(taskId)}`,
-        {
-          headers: { 'Authorization': `Bearer ${jwt}` },
-          timeout: 15_000,
-        },
+        }>(
+          `${KLING_BASE}/v1/videos/image2video/${encodeURIComponent(taskId)}`,
+          {
+            headers: { 'Authorization': `Bearer ${jwt}` },
+            timeout: 15_000,
+          },
+        ),
+        { maxRetries: 2, baseMs: 1000, label: 'kling.poll' },
       )
       if (res.data.code !== 0 || !res.data.data) {
         throw new HttpException(
