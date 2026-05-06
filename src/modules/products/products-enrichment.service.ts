@@ -109,6 +109,150 @@ export class ProductsEnrichmentService {
   constructor(private readonly llm: LlmService) {}
 
   // ════════════════════════════════════════════════════════════════════════
+  // L3 — Recomendações IA
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Gera lista de "recomendações" — buckets de produtos que precisam de
+   *  atenção. Cada bucket tem count + top 5 produtos pra ação rápida. */
+  async getRecommendations(orgId: string): Promise<{
+    buckets: Array<{
+      key:         string
+      title:       string
+      description: string
+      severity:    'critical' | 'warning' | 'opportunity' | 'success'
+      count:       number
+      action_path: string | null
+      products:    Array<{ id: string; name: string; sku: string | null; ai_score: number | null }>
+    }>
+  }> {
+    const baseSelect = 'id, name, sku, ai_score'
+
+    const [
+      lowScore, missingGtin, missingMlCategory, missingPhotos,
+      enrichedNoLanding, landingNoViews, topPerformers,
+    ] = await Promise.all([
+      // Crítico: score < 40
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .lt('ai_score', 40)
+        .order('ai_score', { ascending: true })
+        .limit(5),
+
+      // Warning: sem GTIN (penaliza no ML)
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .or('gtin.is.null,gtin.eq.')
+        .limit(5),
+
+      // Warning: sem categoria ML (não publica)
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .is('category_ml_id', null)
+        .limit(5),
+
+      // Warning: sem fotos suficientes
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .or('photo_urls.is.null,photo_urls.eq.{}')
+        .limit(5),
+
+      // Opportunity: enriquecido mas landing não publicada
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .not('ai_enriched_at', 'is', null)
+        .eq('landing_published', false)
+        .order('ai_score', { ascending: false })
+        .limit(5),
+
+      // Opportunity: landing publicada mas zero views (>7d)
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .eq('landing_published', true)
+        .eq('landing_views', 0)
+        .lt('landing_published_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+        .limit(5),
+
+      // Success: top performers (enriquecido + landing + score alto)
+      supabaseAdmin.from('products').select(baseSelect, { count: 'exact' })
+        .eq('organization_id', orgId).neq('status', 'archived')
+        .gte('ai_score', 80)
+        .eq('landing_published', true)
+        .order('ai_score', { ascending: false })
+        .limit(5),
+    ])
+
+    type Row = { id: string; name: string; sku: string | null; ai_score: number | null }
+
+    return {
+      buckets: [
+        {
+          key:         'low_score',
+          title:       'Atenção crítica — score < 40',
+          description: 'Produtos com qualidade muito baixa. Revisão manual + re-enriquecimento sugeridos.',
+          severity:    'critical',
+          count:       lowScore.count ?? 0,
+          action_path: '/dashboard/produtos/ai-bulk',
+          products:    (lowScore.data ?? []) as Row[],
+        },
+        {
+          key:         'missing_gtin',
+          title:       'Sem código de barras (GTIN)',
+          description: 'Produtos sem GTIN/EAN são penalizados em ML — visibilidade reduzida.',
+          severity:    'warning',
+          count:       missingGtin.count ?? 0,
+          action_path: null,
+          products:    (missingGtin.data ?? []) as Row[],
+        },
+        {
+          key:         'missing_ml_category',
+          title:       'Sem categoria Mercado Livre',
+          description: 'Sem category_ml_id, o produto não pode ser publicado no ML.',
+          severity:    'warning',
+          count:       missingMlCategory.count ?? 0,
+          action_path: null,
+          products:    (missingMlCategory.data ?? []) as Row[],
+        },
+        {
+          key:         'missing_photos',
+          title:       'Sem fotos',
+          description: 'Produtos sem foto têm conversão muito menor. Adicione pelo menos 3.',
+          severity:    'warning',
+          count:       missingPhotos.count ?? 0,
+          action_path: null,
+          products:    (missingPhotos.data ?? []) as Row[],
+        },
+        {
+          key:         'enriched_no_landing',
+          title:       'Pronto pra publicar landing',
+          description: 'Enriquecidos pela IA mas com landing page despublicada. 1 clique resolve.',
+          severity:    'opportunity',
+          count:       enrichedNoLanding.count ?? 0,
+          action_path: null,
+          products:    (enrichedNoLanding.data ?? []) as Row[],
+        },
+        {
+          key:         'landing_no_views',
+          title:       'Landings sem tráfego (>7d)',
+          description: 'Páginas publicadas mas sem acessos. Considere divulgar nos canais.',
+          severity:    'opportunity',
+          count:       landingNoViews.count ?? 0,
+          action_path: null,
+          products:    (landingNoViews.data ?? []) as Row[],
+        },
+        {
+          key:         'top_performers',
+          title:       'Top performers',
+          description: 'Score ≥ 80 + landing publicada. Use como benchmark pros outros.',
+          severity:    'success',
+          count:       topPerformers.count ?? 0,
+          action_path: null,
+          products:    (topPerformers.data ?? []) as Row[],
+        },
+      ],
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // L2 — Landing page pública
   // ════════════════════════════════════════════════════════════════════════
 

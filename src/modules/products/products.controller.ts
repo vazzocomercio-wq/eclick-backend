@@ -59,6 +59,13 @@ export class ProductsController {
     return this.enrichment.enrichmentSummary(u.orgId)
   }
 
+  /** GET /products/recommendations (L3) — buckets de produtos que precisam atenção. */
+  @Get('recommendations')
+  getRecommendations(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.getRecommendations(u.orgId)
+  }
+
   // ── L2 — Landing page pública ─────────────────────────────────────────────
 
   /** PATCH /products/:id/landing — toggle landing_published. */
