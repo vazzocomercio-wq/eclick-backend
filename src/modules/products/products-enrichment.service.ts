@@ -103,6 +103,14 @@ export interface EnrichmentOutput {
   /** Onda 1 hybrid C — multicanal */
   channel_titles?:          Record<string, string>
   channel_descriptions?:    Record<string, string>
+  /** Delta extra — campos sugeridos + oficiais */
+  ai_suggested_title?:      string
+  ai_suggested_bullets?:    string[]
+  ai_suggested_category?:   string
+  differentials?:           string[]
+  technical_sheet?:         Record<string, string>
+  faq?:                     Array<{ q: string; a: string }>
+  tags?:                    string[]
 }
 
 /** Marketplaces suportados pra channel_titles/descriptions. */
@@ -514,6 +522,68 @@ export class ProductsEnrichmentService {
       .eq('id', jobId)
   }
 
+  /** Aplica sugestões da IA em campos do catálogo (sobrescreve os
+   *  campos "oficiais"). Pattern: user revisa ai_suggested_* + accept.
+   *
+   *  Body controla quais sugestões aplicar:
+   *  - title: copia ai_suggested_title → name
+   *  - description: copia ai_long_description → description
+   *  - bullets: copia ai_suggested_bullets → bullets
+   *  - category: copia ai_suggested_category → category
+   *  - all: aplica todas
+   */
+  async applySuggestions(orgId: string, productId: string, opts: {
+    title?: boolean; description?: boolean; bullets?: boolean; category?: boolean; all?: boolean
+  }): Promise<{ applied: string[] }> {
+    const { data: row, error: fetchErr } = await supabaseAdmin
+      .from('products')
+      .select('ai_suggested_title, ai_suggested_bullets, ai_suggested_category, ai_long_description')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (fetchErr) throw new BadRequestException(`applySuggestions.fetch: ${fetchErr.message}`)
+    if (!row) throw new NotFoundException('produto não encontrado')
+    const r = row as {
+      ai_suggested_title:    string | null
+      ai_suggested_bullets:  string[] | null
+      ai_suggested_category: string | null
+      ai_long_description:   string | null
+    }
+
+    const apply: string[] = []
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
+
+    if ((opts.all || opts.title) && r.ai_suggested_title) {
+      update.name = r.ai_suggested_title
+      apply.push('title')
+    }
+    if ((opts.all || opts.description) && r.ai_long_description) {
+      update.description = r.ai_long_description
+      apply.push('description')
+    }
+    if ((opts.all || opts.bullets) && r.ai_suggested_bullets && r.ai_suggested_bullets.length > 0) {
+      update.bullets = r.ai_suggested_bullets
+      apply.push('bullets')
+    }
+    if ((opts.all || opts.category) && r.ai_suggested_category) {
+      update.category = r.ai_suggested_category
+      apply.push('category')
+    }
+
+    if (apply.length === 0) {
+      return { applied: [] }
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('products')
+      .update(update)
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+    if (updateErr) throw new BadRequestException(`applySuggestions.update: ${updateErr.message}`)
+
+    return { applied: apply }
+  }
+
   /** Setter explícito de catalog_status — usado pra paused/ready manual. */
   async setCatalogStatus(orgId: string, productId: string, status: 'paused' | 'ready' | 'draft'): Promise<{ catalog_status: string }> {
     const { data, error } = await supabaseAdmin
@@ -735,6 +805,13 @@ export class ProductsEnrichmentService {
           ai_seasonality_hint:    parsed.ai_seasonality_hint  ?? null,
           channel_titles:         sanitizeChannels(parsed.channel_titles),
           channel_descriptions:   sanitizeChannels(parsed.channel_descriptions),
+          ai_suggested_title:     parsed.ai_suggested_title    ?? null,
+          ai_suggested_bullets:   parsed.ai_suggested_bullets  ?? [],
+          ai_suggested_category:  parsed.ai_suggested_category ?? null,
+          differentials:          parsed.differentials         ?? [],
+          technical_sheet:        parsed.technical_sheet       ?? {},
+          faq:                    parsed.faq                   ?? [],
+          tags:                   parsed.tags                  ?? [],
           ai_score:               score,
           ai_score_breakdown:     breakdown,
           ai_enriched_at:         new Date().toISOString(),
@@ -826,6 +903,17 @@ Adapte a descrição pra cada canal (use ai_long_description como base):
 - amazon: até 2000 chars, texto puro sem emoji.
 - loja_propria: livre.
 
+## CAMPOS SUGERIDOS (user aplica via "Aplicar Sugestões")
+- ai_suggested_title: título de marketplace otimizado (60-80 chars), formato [Produto] [Característica Principal] [Marca] [Modelo]. Sem CAPS LOCK, sem palavras tipo "promoção".
+- ai_suggested_bullets: 5-7 bullets com emoji ✅ no início, focados em benefícios (ex: "✅ Material premium em ABS — durabilidade garantida").
+- ai_suggested_category: nome de categoria sugerida (texto livre, ex: "Casa, Decoração e Organização > Organizadores").
+
+## CAMPOS DE CATÁLOGO (estruturados)
+- differentials: 3-5 USPs comerciais (Unique Selling Propositions). Diferente de ai_pros: são razões pra comprar de você vs concorrente, não só benefícios do produto. Ex: ["Garantia estendida 12 meses", "Frete grátis acima de R$ 100"].
+- technical_sheet: objeto chave-valor com mínimo 7 campos relevantes (Material, Cor, Dimensões, Peso, Marca, Modelo, Garantia, etc).
+- faq: array de 5 perguntas de comprador real + resposta curta. Formato: [{ "q": "...", "a": "..." }].
+- tags: 10-20 tags pra busca interna (1-2 palavras cada). Diferentes de keywords: tags categorizam, keywords são pra busca.
+
 Retorne APENAS o JSON (sem markdown, sem explicação):
 {
   "ai_short_description": "...",
@@ -849,7 +937,14 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
     "shopee": "...",
     "amazon": "...",
     "loja_propria": "..."
-  }
+  },
+  "ai_suggested_title": "...",
+  "ai_suggested_bullets": ["..."],
+  "ai_suggested_category": "...",
+  "differentials": ["..."],
+  "technical_sheet": { "Material": "...", "Cor": "..." },
+  "faq": [{ "q": "...", "a": "..." }],
+  "tags": ["..."]
 }`
   }
 
@@ -874,6 +969,21 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
         return Object.keys(out).length > 0 ? out : undefined
       }
 
+      // Parser de FAQ: array de { q, a }
+      const faqArr = (v: unknown): Array<{ q: string; a: string }> | undefined => {
+        if (!Array.isArray(v)) return undefined
+        const out = (v as unknown[])
+          .map(item => {
+            if (!item || typeof item !== 'object') return null
+            const o = item as Record<string, unknown>
+            const q = String(o.q ?? o.question ?? '').trim()
+            const a = String(o.a ?? o.answer  ?? '').trim()
+            return q && a ? { q, a } : null
+          })
+          .filter((x): x is { q: string; a: string } => x !== null)
+        return out.length > 0 ? out : undefined
+      }
+
       return {
         ai_short_description: str(parsed.ai_short_description),
         ai_long_description:  str(parsed.ai_long_description),
@@ -886,6 +996,13 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
         ai_seasonality_hint:  str(parsed.ai_seasonality_hint),
         channel_titles:       obj(parsed.channel_titles),
         channel_descriptions: obj(parsed.channel_descriptions),
+        ai_suggested_title:   str(parsed.ai_suggested_title),
+        ai_suggested_bullets: arr(parsed.ai_suggested_bullets),
+        ai_suggested_category: str(parsed.ai_suggested_category),
+        differentials:        arr(parsed.differentials),
+        technical_sheet:      obj(parsed.technical_sheet),
+        faq:                  faqArr(parsed.faq),
+        tags:                 arr(parsed.tags),
       }
     } catch {
       return null

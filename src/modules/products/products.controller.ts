@@ -92,6 +92,19 @@ export class ProductsController {
     return this.enrichment.setCatalogStatus(u.orgId, id, body.status)
   }
 
+  /** POST /products/:id/apply-suggestions — copia ai_suggested_* pros campos
+   *  oficiais (name, description, bullets, category). */
+  @Post(':id/apply-suggestions')
+  @HttpCode(HttpStatus.OK)
+  applySuggestions(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { title?: boolean; description?: boolean; bullets?: boolean; category?: boolean; all?: boolean },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.enrichment.applySuggestions(u.orgId, id, body)
+  }
+
   /** GET /products/recommendations (L3) — buckets de produtos que precisam atenção. */
   @Get('recommendations')
   getRecommendations(@ReqUser() u: ReqUserPayload) {
