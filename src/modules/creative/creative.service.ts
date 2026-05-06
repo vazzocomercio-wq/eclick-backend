@@ -166,16 +166,36 @@ export class CreativeService {
     return data as CreativeProduct
   }
 
-  async listProducts(orgId: string, opts: { status?: string; limit?: number } = {}): Promise<Array<CreativeProduct & { signed_image_url: string | null }>> {
+  async listProducts(orgId: string, opts: {
+    status?:        string
+    search?:        string
+    sort?:          'recent' | 'name'
+    include_archived?: boolean
+    limit?:         number
+  } = {}): Promise<Array<CreativeProduct & { signed_image_url: string | null }>> {
     const limit = Math.max(1, Math.min(200, opts.limit ?? 50))
     let q = supabaseAdmin
       .from('creative_products')
       .select('*')
       .eq('organization_id', orgId)
-      .neq('status', 'archived')
-      .order('created_at', { ascending: false })
       .limit(limit)
-    if (opts.status) q = q.eq('status', opts.status)
+
+    if (!opts.include_archived) q = q.neq('status', 'archived')
+    if (opts.status)            q = q.eq('status', opts.status)
+
+    // Search por name/sku/brand case-insensitive
+    if (opts.search?.trim()) {
+      const s = opts.search.trim().replace(/[,%]/g, ' ')
+      q = q.or(`name.ilike.%${s}%,sku.ilike.%${s}%,brand.ilike.%${s}%`)
+    }
+
+    // Sort
+    if (opts.sort === 'name') {
+      q = q.order('name', { ascending: true })
+    } else {
+      q = q.order('created_at', { ascending: false })
+    }
+
     const { data, error } = await q
     if (error) throw new BadRequestException(`listProducts: ${error.message}`)
     const products = (data ?? []) as CreativeProduct[]

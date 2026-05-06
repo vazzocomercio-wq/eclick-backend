@@ -46,9 +46,15 @@ export class CreativeController {
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
     @Query('limit')  limit?: string,
+    @Query('search') search?: string,
+    @Query('sort')   sort?: 'recent' | 'name',
+    @Query('include_archived') includeArchived?: string,
   ) {
     return this.svc.listProducts(this.orgOrThrow(u), {
       status,
+      search,
+      sort,
+      include_archived: includeArchived === 'true' || includeArchived === '1',
       limit: limit ? Number(limit) : undefined,
     })
   }
