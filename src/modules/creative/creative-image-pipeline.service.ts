@@ -246,6 +246,47 @@ export class CreativeImagePipelineService {
     return data as CreativeImage
   }
 
+  /** Bulk regenerate: cria 1 nova imagem `pending` por imagem rejeitada do job.
+   *  Reusa o prompt original. Respeita cost cap (rejeita se já estourou).
+   *  Re-coloca o job em generating_images pra worker pegar. */
+  async regenerateAllRejected(orgId: string, jobId: string): Promise<{ regenerated: number; skipped_cost_cap: boolean }> {
+    const job = await this.getJob(orgId, jobId)
+    if (job.total_cost_usd >= job.max_cost_usd) {
+      return { regenerated: 0, skipped_cost_cap: true }
+    }
+
+    const { data: rejected, error } = await supabaseAdmin
+      .from('creative_images')
+      .select('id, position, prompt_text, product_id')
+      .eq('organization_id', orgId)
+      .eq('job_id', jobId)
+      .eq('status', 'rejected')
+    if (error) throw new BadRequestException(`regenerateAllRejected.list: ${error.message}`)
+    if (!rejected || rejected.length === 0) return { regenerated: 0, skipped_cost_cap: false }
+
+    const rows = (rejected as Array<{ id: string; position: number; prompt_text: string; product_id: string }>).map(r => ({
+      job_id:              jobId,
+      product_id:          r.product_id,
+      organization_id:     orgId,
+      position:            r.position,
+      prompt_text:         r.prompt_text,
+      status:              'pending' as const,
+      regenerated_from_id: r.id,
+    }))
+
+    const { error: insertErr } = await supabaseAdmin.from('creative_images').insert(rows)
+    if (insertErr) throw new BadRequestException(`regenerateAllRejected.insert: ${insertErr.message}`)
+
+    // Re-coloca job em generating_images se não estiver
+    await supabaseAdmin
+      .from('creative_image_jobs')
+      .update({ status: 'generating_images', completed_at: null, updated_at: new Date().toISOString() })
+      .eq('id', jobId)
+      .in('status', ['completed', 'generating_images', 'failed'])
+
+    return { regenerated: rows.length, skipped_cost_cap: false }
+  }
+
   /** Cria nova imagem na mesma posição com regenerated_from_id apontando pra
    *  original. Worker pega na próxima tick. */
   async regenerateImage(orgId: string, imageId: string, customPrompt?: string): Promise<CreativeImage> {
@@ -580,6 +621,67 @@ export class CreativeImagePipelineService {
         updated_at:    new Date().toISOString(),
       })
       .eq('id', jobId)
+  }
+
+  /** Cleanup: marca jobs zumbis (em 'generating_*' há >jobMaxMinutes) como failed,
+   *  e imagens individuais em 'generating' há >imgMaxMinutes como failed.
+   *  Recupera jobs presos por crash do backend mid-execução. */
+  async cleanupStale(opts: { jobMaxMinutes?: number; imgMaxMinutes?: number } = {}): Promise<{ jobsFailed: number; imagesFailed: number }> {
+    const jobCutoff = new Date(Date.now() - (opts.jobMaxMinutes ?? 60) * 60 * 1000).toISOString()
+    const imgCutoff = new Date(Date.now() - (opts.imgMaxMinutes ?? 30) * 60 * 1000).toISOString()
+
+    // Imagens individuais zumbis
+    const { data: imgs, error: imgErr } = await supabaseAdmin
+      .from('creative_images')
+      .update({
+        status:        'failed',
+        error_message: 'Cleanup automático — imagem ficou em generating por tempo excessivo',
+        updated_at:    new Date().toISOString(),
+      })
+      .eq('status', 'generating')
+      .lt('updated_at', imgCutoff)
+      .select('id, job_id')
+
+    if (imgErr) this.logger.warn(`[cleanup.imagesFailed] ${imgErr.message}`)
+    const imagesFailed = (imgs ?? []).length
+
+    // Bumpa failed_count nos jobs afetados
+    const affectedJobIds = Array.from(new Set((imgs ?? []).map(i => (i as { job_id: string }).job_id)))
+    for (const jobId of affectedJobIds) {
+      const failedInJob = (imgs ?? []).filter(i => (i as { job_id: string }).job_id === jobId).length
+      const { data: job } = await supabaseAdmin
+        .from('creative_image_jobs')
+        .select('failed_count')
+        .eq('id', jobId)
+        .maybeSingle()
+      if (job) {
+        await supabaseAdmin
+          .from('creative_image_jobs')
+          .update({ failed_count: (job as { failed_count: number }).failed_count + failedInJob, updated_at: new Date().toISOString() })
+          .eq('id', jobId)
+      }
+    }
+
+    // Jobs zumbis
+    const { data: jobs, error: jobErr } = await supabaseAdmin
+      .from('creative_image_jobs')
+      .update({
+        status:        'failed',
+        error_message: 'Cleanup automático — job ficou ativo por tempo excessivo (>1h)',
+        completed_at:  new Date().toISOString(),
+        updated_at:    new Date().toISOString(),
+      })
+      .in('status', ['queued', 'generating_prompts', 'generating_images'])
+      .lt('updated_at', jobCutoff)
+      .select('id')
+
+    if (jobErr) this.logger.warn(`[cleanup.jobsFailed] ${jobErr.message}`)
+    const jobsFailed = (jobs ?? []).length
+
+    if (imagesFailed > 0 || jobsFailed > 0) {
+      this.logger.log(`[cleanup.images] ${jobsFailed} jobs + ${imagesFailed} imagens zumbis marcados como failed`)
+    }
+    return { jobsFailed, imagesFailed }
   }
 
   /** Re-conta approved/rejected do job (após user aprovar/rejeitar). */

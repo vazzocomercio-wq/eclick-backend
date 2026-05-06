@@ -182,6 +182,12 @@ export class CreativeController {
     return this.images.cancelJob(this.orgOrThrow(u), id)
   }
 
+  @Post('image-jobs/:id/regenerate-rejected')
+  @HttpCode(HttpStatus.OK)
+  regenerateRejectedImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.regenerateAllRejected(this.orgOrThrow(u), id)
+  }
+
   @Post('images/:id/approve')
   @HttpCode(HttpStatus.OK)
   approveImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
@@ -244,6 +250,12 @@ export class CreativeController {
   @HttpCode(HttpStatus.OK)
   cancelVideoJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.cancelJob(this.orgOrThrow(u), id)
+  }
+
+  @Post('video-jobs/:id/regenerate-rejected')
+  @HttpCode(HttpStatus.OK)
+  regenerateRejectedVideos(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.regenerateAllRejected(this.orgOrThrow(u), id)
   }
 
   @Post('videos/:id/approve')

@@ -265,6 +265,51 @@ export class CreativeVideoPipelineService {
     return data as CreativeVideo
   }
 
+  /** Bulk regenerate: cria 1 novo vídeo `pending` por vídeo rejeitado do job. */
+  async regenerateAllRejected(orgId: string, jobId: string): Promise<{ regenerated: number; skipped_cost_cap: boolean }> {
+    const job = await this.getJob(orgId, jobId)
+    if (job.total_cost_usd >= job.max_cost_usd) {
+      return { regenerated: 0, skipped_cost_cap: true }
+    }
+
+    const { data: rejected, error } = await supabaseAdmin
+      .from('creative_videos')
+      .select('id, position, prompt_text, product_id, duration_seconds, aspect_ratio, model_name, source_image_id')
+      .eq('organization_id', orgId)
+      .eq('job_id', jobId)
+      .eq('status', 'rejected')
+    if (error) throw new BadRequestException(`regenerateAllRejected.list: ${error.message}`)
+    if (!rejected || rejected.length === 0) return { regenerated: 0, skipped_cost_cap: false }
+
+    const rows = (rejected as Array<{
+      id: string; position: number; prompt_text: string; product_id: string;
+      duration_seconds: number; aspect_ratio: string; model_name: string; source_image_id: string | null
+    }>).map(r => ({
+      job_id:              jobId,
+      product_id:          r.product_id,
+      organization_id:     orgId,
+      position:            r.position,
+      prompt_text:         r.prompt_text,
+      status:              'pending' as const,
+      duration_seconds:    r.duration_seconds,
+      aspect_ratio:        r.aspect_ratio,
+      model_name:          r.model_name,
+      source_image_id:     r.source_image_id,
+      regenerated_from_id: r.id,
+    }))
+
+    const { error: insertErr } = await supabaseAdmin.from('creative_videos').insert(rows)
+    if (insertErr) throw new BadRequestException(`regenerateAllRejected.insert: ${insertErr.message}`)
+
+    await supabaseAdmin
+      .from('creative_video_jobs')
+      .update({ status: 'generating_videos', completed_at: null, updated_at: new Date().toISOString() })
+      .eq('id', jobId)
+      .in('status', ['completed', 'generating_videos', 'failed'])
+
+    return { regenerated: rows.length, skipped_cost_cap: false }
+  }
+
   async regenerateVideo(orgId: string, videoId: string, customPrompt?: string): Promise<CreativeVideo> {
     const original = await this.getVideo(orgId, videoId)
     const job = await this.getJob(orgId, original.job_id)
@@ -674,6 +719,64 @@ export class CreativeVideoPipelineService {
         updated_at:    new Date().toISOString(),
       })
       .eq('id', jobId)
+  }
+
+  /** Cleanup: jobs zumbis em 'generating_*' há >jobMaxMinutes vira failed,
+   *  vídeos em 'generating' há >vidMaxMinutes (default 15min — Kling normalmente
+   *  retorna em 1-3min, 15min indica problema) vira failed. */
+  async cleanupStale(opts: { jobMaxMinutes?: number; vidMaxMinutes?: number } = {}): Promise<{ jobsFailed: number; videosFailed: number }> {
+    const jobCutoff = new Date(Date.now() - (opts.jobMaxMinutes ?? 90) * 60 * 1000).toISOString()
+    const vidCutoff = new Date(Date.now() - (opts.vidMaxMinutes ?? 15) * 60 * 1000).toISOString()
+
+    const { data: vids, error: vidErr } = await supabaseAdmin
+      .from('creative_videos')
+      .update({
+        status:        'failed',
+        error_message: 'Cleanup automático — vídeo ficou em generating por tempo excessivo (Kling pode ter falhado silenciosamente)',
+        updated_at:    new Date().toISOString(),
+      })
+      .eq('status', 'generating')
+      .lt('updated_at', vidCutoff)
+      .select('id, job_id')
+
+    if (vidErr) this.logger.warn(`[cleanup.videosFailed] ${vidErr.message}`)
+    const videosFailed = (vids ?? []).length
+
+    const affectedJobIds = Array.from(new Set((vids ?? []).map(v => (v as { job_id: string }).job_id)))
+    for (const jobId of affectedJobIds) {
+      const failedInJob = (vids ?? []).filter(v => (v as { job_id: string }).job_id === jobId).length
+      const { data: job } = await supabaseAdmin
+        .from('creative_video_jobs')
+        .select('failed_count')
+        .eq('id', jobId)
+        .maybeSingle()
+      if (job) {
+        await supabaseAdmin
+          .from('creative_video_jobs')
+          .update({ failed_count: (job as { failed_count: number }).failed_count + failedInJob, updated_at: new Date().toISOString() })
+          .eq('id', jobId)
+      }
+    }
+
+    const { data: jobs, error: jobErr } = await supabaseAdmin
+      .from('creative_video_jobs')
+      .update({
+        status:        'failed',
+        error_message: 'Cleanup automático — job ficou ativo por tempo excessivo (>1h30)',
+        completed_at:  new Date().toISOString(),
+        updated_at:    new Date().toISOString(),
+      })
+      .in('status', ['queued', 'generating_prompts', 'generating_videos'])
+      .lt('updated_at', jobCutoff)
+      .select('id')
+
+    if (jobErr) this.logger.warn(`[cleanup.jobsFailed] ${jobErr.message}`)
+    const jobsFailed = (jobs ?? []).length
+
+    if (videosFailed > 0 || jobsFailed > 0) {
+      this.logger.log(`[cleanup.videos] ${jobsFailed} jobs + ${videosFailed} vídeos zumbis marcados como failed`)
+    }
+    return { jobsFailed, videosFailed }
   }
 
   async recountJob(jobId: string): Promise<void> {
