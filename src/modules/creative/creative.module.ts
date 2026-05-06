@@ -6,6 +6,7 @@ import { CreativeImagePipelineWorker } from './creative-image-pipeline.worker'
 import { CreativeVideoPipelineService } from './creative-video-pipeline.service'
 import { CreativeVideoPipelineWorker } from './creative-video-pipeline.worker'
 import { CreativeMlPublisherService } from './creative-ml-publisher.service'
+import { CreativeMlSyncWorker } from './creative-ml-sync.worker'
 import { KlingClient } from './kling.client'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
@@ -20,6 +21,7 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     CreativeVideoPipelineService,
     CreativeVideoPipelineWorker,
     CreativeMlPublisherService,
+    CreativeMlSyncWorker,
     KlingClient,
   ],
   exports: [

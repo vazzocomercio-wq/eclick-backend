@@ -337,4 +337,10 @@ export class CreativeController {
   getPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.getPublication(this.orgOrThrow(u), id)
   }
+
+  @Post('publications/:id/sync')
+  @HttpCode(HttpStatus.OK)
+  syncPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.syncPublicationStatus(this.orgOrThrow(u), id)
+  }
 }

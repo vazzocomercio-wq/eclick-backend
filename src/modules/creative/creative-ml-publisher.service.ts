@@ -276,14 +276,15 @@ export class CreativeMlPublisherService {
     }
     const pictures = orderedImages.map(i => ({ source: i.signed_image_url }))
 
-    // Resolve vídeo (opcional)
-    let videoPayload: { id: string } | null = null
+    // Resolve vídeo (opcional). No preview, registra a intenção; o upload
+    // real (com video_id retornado pelo ML) só acontece no publishToMl.
+    let videoIntent: { internal_id: string } | null = null
     if (opts.video_id) {
       const video = approved_videos.find(v => v.id === opts.video_id)
       if (!video) {
         warnings.push('Vídeo informado não está aprovado ou não existe.')
       } else {
-        videoPayload = { id: video.id } // F3 fará upload pro ML e pegará o video_id real
+        videoIntent = { internal_id: video.id }
       }
     }
 
@@ -359,7 +360,11 @@ export class CreativeMlPublisherService {
       // F3 vai colocar status=paused; F1+F2 só mostra
       status: 'paused',
     }
-    if (videoPayload) mlPayload.video_id = videoPayload.id
+    if (videoIntent) {
+      // Placeholder no preview — caller deve saber que o video_id real
+      // será atribuído após upload pro ML em publishToMl.
+      mlPayload.video_id = `<será atribuído após upload — creative_video=${videoIntent.internal_id}>`
+    }
 
     const ready = warnings.length === 0
 
@@ -387,6 +392,68 @@ export class CreativeMlPublisherService {
    *  Default desligado pra evitar publicar acidentalmente em conta de prod. */
   isPublishEnabled(): boolean {
     return process.env.CREATIVE_ML_PUBLISH_ENABLED === 'true'
+  }
+
+  /** F3.1 — upload de vídeo pro ML.
+   *
+   *  ML video API mudou várias vezes; current state (2024+):
+   *  - POST /videos com multipart `file` → retorna { id, status }
+   *  - id é usado em items.video_id
+   *
+   *  Como o status real da API varia por região/conta, fazemos
+   *  best-effort: tenta upload, se falhar retorna null e o caller
+   *  publica sem vídeo (não bloqueia). */
+  async uploadVideoToMl(
+    orgId:      string,
+    videoStoragePath: string,
+  ): Promise<{ videoId: string } | null> {
+    try {
+      const { token } = await this.ml.getTokenForOrg(orgId)
+
+      // Baixa do bucket creative
+      const { data: blob, error: dlErr } = await supabaseAdmin
+        .storage
+        .from('creative')
+        .download(videoStoragePath)
+      if (dlErr || !blob) {
+        this.logger.warn(`[ml.video] download falhou: ${dlErr?.message}`)
+        return null
+      }
+      const buffer = Buffer.from(await blob.arrayBuffer())
+
+      // Multipart upload — usa form-data lib (já dep do projeto)
+      const FormData = (await import('form-data')).default
+      const form = new FormData()
+      form.append('file', buffer, {
+        filename:    'creative.mp4',
+        contentType: 'video/mp4',
+      })
+
+      const res = await axios.post<{
+        id?:      string
+        status?:  string
+        message?: string
+      }>(`${ML_BASE}/videos`, form, {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${token}`,
+        },
+        timeout: 120_000,
+        maxContentLength: 200 * 1024 * 1024,
+        maxBodyLength:    200 * 1024 * 1024,
+      })
+
+      if (!res.data?.id) {
+        this.logger.warn(`[ml.video] response sem id: ${JSON.stringify(res.data)}`)
+        return null
+      }
+      this.logger.log(`[ml.video] ✓ upload ${res.data.id} (status=${res.data.status ?? '?'})`)
+      return { videoId: res.data.id }
+    } catch (e: unknown) {
+      const err = extractMlError(e)
+      this.logger.warn(`[ml.video] upload falhou — publicação seguirá sem vídeo: ${err.message}`)
+      return null
+    }
   }
 
   /** Publica de fato no ML. Status final do anúncio = `paused` (default
@@ -471,14 +538,39 @@ export class CreativeMlPublisherService {
       // Pictures: passa como source URL — ML baixa sozinho.
       // Não precisa pre-upload separado pra MVP.
 
-      // Video: SKIP nesta sprint. ML video API requer multipart upload + poll
-      // status, é um sub-projeto à parte. Listing publica sem vídeo.
-      const skippedVideo = !!opts.video_id
+      // Video: F3.1 — best-effort upload pro ML
+      let externalVideoId: string | null = null
+      let videoSkipReason: string | null = null
+      if (opts.video_id) {
+        const { data: vidRow } = await supabaseAdmin
+          .from('creative_videos')
+          .select('storage_path, status')
+          .eq('id', opts.video_id)
+          .eq('organization_id', orgId)
+          .maybeSingle()
+        const vid = vidRow as { storage_path: string | null; status: string } | null
+        if (!vid?.storage_path) {
+          videoSkipReason = 'video sem storage_path'
+        } else if (vid.status !== 'approved') {
+          videoSkipReason = `video status='${vid.status}' (deve ser 'approved')`
+        } else {
+          const upload = await this.uploadVideoToMl(orgId, vid.storage_path)
+          if (upload) {
+            externalVideoId = upload.videoId
+          } else {
+            videoSkipReason = 'upload pro ML falhou — publicação seguirá sem vídeo'
+          }
+        }
+      }
 
       // Monta payload final (já vem em preview.ml_payload, mas ajustes finais aqui)
       const mlBody: Record<string, unknown> = { ...preview.ml_payload }
       delete (mlBody as { product_id?: unknown }).product_id // não vai pro ML
-      delete (mlBody as { video_id?: unknown }).video_id     // skipped
+      if (externalVideoId) {
+        mlBody.video_id = externalVideoId
+      } else {
+        delete (mlBody as { video_id?: unknown }).video_id
+      }
 
       // POST /items — autenticado
       const res = await axios.post<{
@@ -504,13 +596,11 @@ export class CreativeMlPublisherService {
           external_id:           item.id,
           external_url:          item.permalink ?? null,
           external_picture_ids:  externalPictureIds,
-          external_video_id:     null,
+          external_video_id:     externalVideoId,
           ml_response:           item as unknown as Record<string, unknown>,
           published_at:          new Date().toISOString(),
           updated_at:            new Date().toISOString(),
-          error_message:         skippedVideo
-            ? 'Vídeo não publicado nesta versão (F3.1 vai adicionar upload de vídeo).'
-            : null,
+          error_message:         videoSkipReason ? `Vídeo não incluído: ${videoSkipReason}` : null,
         })
         .eq('id', pub.id)
         .select('*')
@@ -544,6 +634,76 @@ export class CreativeMlPublisherService {
     if (error) throw new BadRequestException(`getPublication: ${error.message}`)
     if (!data)  throw new NotFoundException('publication não encontrada')
     return data as CreativePublication
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SYNC (F4 — pollea ML pra atualizar status)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Sincroniza UMA publication: GET /items/{external_id} -> atualiza
+   *  last_synced_status + last_synced_at. Idempotente. */
+  async syncPublicationStatus(orgId: string, publicationId: string): Promise<CreativePublication> {
+    const pub = await this.getPublication(orgId, publicationId)
+    if (pub.status !== 'published') {
+      throw new BadRequestException(`Só publications 'published' podem ser sincronizadas (atual: ${pub.status})`)
+    }
+    if (!pub.external_id) {
+      throw new BadRequestException('publication sem external_id')
+    }
+
+    const { token } = await this.ml.getTokenForOrg(orgId)
+
+    let mlStatus: string | null = null
+    try {
+      const res = await axios.get<{
+        id: string; status?: string; permalink?: string; sold_quantity?: number;
+        available_quantity?: number; health?: number;
+      }>(`${ML_BASE}/items/${encodeURIComponent(pub.external_id)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params:  { attributes: 'id,status,permalink,sold_quantity,available_quantity,health' },
+        timeout: 15_000,
+      })
+      mlStatus = res.data.status ?? null
+
+      const { data: updated } = await supabaseAdmin
+        .from('creative_publications')
+        .update({
+          last_synced_status: mlStatus,
+          last_synced_at:     new Date().toISOString(),
+          external_url:       res.data.permalink ?? pub.external_url,
+          updated_at:         new Date().toISOString(),
+        })
+        .eq('id', pub.id)
+        .select('*')
+        .single()
+      return (updated as CreativePublication) ?? pub
+    } catch (e: unknown) {
+      const err = extractMlError(e)
+      this.logger.warn(`[creative.ml.sync] ${pub.external_id}: ${err.message}`)
+      // Não muda status='published' — só registra falha de sync
+      await supabaseAdmin
+        .from('creative_publications')
+        .update({
+          last_synced_at: new Date().toISOString(),
+          updated_at:     new Date().toISOString(),
+        })
+        .eq('id', pub.id)
+      throw new HttpException(`Sync falhou: ${err.message}`, HttpStatus.BAD_GATEWAY)
+    }
+  }
+
+  /** Lista publications que precisam ser re-sincronizadas (status='published' +
+   *  last_synced_at antigo ou nulo). Usado pelo worker. */
+  async listPublicationsForSync(maxItems = 20, staleMinutes = 30): Promise<CreativePublication[]> {
+    const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString()
+    const { data } = await supabaseAdmin
+      .from('creative_publications')
+      .select('*')
+      .eq('status', 'published')
+      .or(`last_synced_at.is.null,last_synced_at.lt.${cutoff}`)
+      .order('last_synced_at', { ascending: true, nullsFirst: true })
+      .limit(maxItems)
+    return (data ?? []) as CreativePublication[]
   }
 
   async listPublicationsByListing(orgId: string, listingId: string): Promise<CreativePublication[]> {
