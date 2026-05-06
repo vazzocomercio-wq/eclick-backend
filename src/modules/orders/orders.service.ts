@@ -237,6 +237,7 @@ interface DbOrderRow {
   buyer_name:       string | null
   buyer_last_name:  string | null
   buyer_username:   string | null
+  buyer_doc_type:   string | null
   buyer_doc_number: string | null
   buyer_email:      string | null
   buyer_phone:      string | null
@@ -252,44 +253,63 @@ interface DbOrderRow {
 }
 
 /** Converte row da tabela orders pro shape consumido por PedidosTable
- *  (era retornado por /ml/orders/enriched). raw_data já tem buyer/shipping/etc
- *  vindos do ML — só re-empacotamos os campos calculados (margem, custos). */
+ *  / OrderCard. raw_data tem shape simplificado salvo pelo worker
+ *  (item singular, sem array order_items) — re-empacotamos pra
+ *  o shape original retornado por /ml/orders/enriched. */
 function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
-  const raw = row.raw_data ?? {}
-  const buyer = (raw.buyer ?? {}) as Record<string, unknown>
+  const raw      = row.raw_data ?? {}
+  const buyer    = (raw.buyer    ?? {}) as Record<string, unknown>
   const shipping = (raw.shipping ?? {}) as Record<string, unknown>
-  const items = (raw.order_items ?? []) as Array<Record<string, unknown>>
+  const itemRaw  = (raw.item     ?? {}) as Record<string, unknown>
+
+  // Worker salva item SINGULAR. Frontend espera order_items[].
+  // Reconstruímos um order_item com a mesma shape de /orders/search.
+  const orderItem = {
+    item: {
+      id:           itemRaw.id           ?? row.marketplace_listing_id ?? null,
+      title:        itemRaw.title        ?? row.product_title          ?? null,
+      seller_sku:   itemRaw.seller_sku   ?? row.sku                    ?? null,
+      thumbnail:    itemRaw.thumbnail    ?? null,
+      variation_id: itemRaw.variation_id ?? row.variation_id           ?? null,
+      variation_attributes: itemRaw.variation_attributes ?? [],
+    },
+    quantity:    itemRaw.quantity   ?? row.quantity   ?? 1,
+    unit_price:  itemRaw.unit_price ?? row.sale_price ?? 0,
+    sale_fee:    itemRaw.sale_fee   ?? row.platform_fee ?? 0,
+  }
 
   return {
-    order_id:      Number(row.external_order_id),
+    order_id:      Number(row.external_order_id) || row.external_order_id,
     status:        row.status,
     status_detail: raw.status_detail ?? null,
     date_created:  raw.date_created ?? row.sold_at ?? row.created_at,
     date_closed:   raw.date_closed ?? null,
-    total_amount:  (row.sale_price ?? 0) * (row.quantity ?? 1),
+    total_amount:  Number(raw.total_amount ?? ((row.sale_price ?? 0) * (row.quantity ?? 1))),
     paid_amount:   raw.paid_amount ?? null,
     payments:      raw.payments ?? [],
     mediations:    raw.mediations ?? [],
     tags:          raw.tags ?? [],
     buyer: {
       ...buyer,
-      doc_number:  row.buyer_doc_number ?? (buyer.doc_number ?? null),
-      doc_type:    (buyer as { doc_type?: string }).doc_type ?? null,
-      email:       row.buyer_email ?? (buyer as { email?: string }).email ?? null,
-      phone_full:  row.buyer_phone ?? null,
-      first_name:  row.buyer_name?.split(' ')[0] ?? (buyer as { first_name?: string }).first_name ?? null,
-      last_name:   row.buyer_last_name ?? (buyer as { last_name?: string }).last_name ?? null,
-      nickname:    row.buyer_username ?? (buyer as { nickname?: string }).nickname ?? null,
+      doc_number: row.buyer_doc_number ?? (buyer as { doc_number?: string }).doc_number ?? null,
+      doc_type:   row.buyer_doc_type   ?? (buyer as { doc_type?: string }).doc_type     ?? null,
+      email:      row.buyer_email      ?? (buyer as { email?: string }).email           ?? null,
+      phone_full: row.buyer_phone      ?? null,
+      first_name: row.buyer_name?.split(' ')[0] ?? (buyer as { first_name?: string }).first_name ?? null,
+      last_name:  row.buyer_last_name  ?? (buyer as { last_name?: string }).last_name   ?? null,
+      nickname:   row.buyer_username   ?? (buyer as { nickname?: string }).nickname     ?? null,
     },
     shipping: {
       ...shipping,
-      id:                 row.shipping_id ?? (shipping as { id?: number }).id ?? null,
-      status:             row.shipping_status ?? (shipping as { status?: string }).status ?? null,
-      logistic_type:      (shipping as { logistic_type?: string }).logistic_type ?? null,
-      receiver_address:   (shipping as { receiver_address?: unknown }).receiver_address ?? null,
+      id:                row.shipping_id     ?? (shipping as { id?: number }).id            ?? null,
+      status:            row.shipping_status ?? (shipping as { status?: string }).status    ?? null,
+      logistic_type:     (shipping as { logistic_type?: string }).logistic_type             ?? null,
+      // OrderCard acessa receiver_address.zip_code sem optional chaining —
+      // mantém objeto vazio em vez de null pra não quebrar a UI.
+      receiver_address:  (shipping as { receiver_address?: Record<string, unknown> }).receiver_address ?? {},
+      estimated_delivery_date: (shipping as { estimated_delivery_date?: string }).estimated_delivery_date ?? null,
     },
-    order_items:   items,
-    // Custos calculados pelo worker (líquidos, corretos)
+    order_items:   [orderItem],
     cost_price:    row.cost_price,
     platform_fee:  row.platform_fee,
     shipping_cost: row.shipping_cost,
@@ -297,7 +317,6 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     gross_profit:  row.gross_profit,
     contribution_margin:     row.contribution_margin,
     contribution_margin_pct: row.contribution_margin_pct,
-    // Flags adicionais
     has_problem:      row.has_problem,
     problem_note:     row.problem_note,
     problem_severity: row.problem_severity,
