@@ -186,6 +186,16 @@ Lojista habilita por trigger em `/dashboard/automation/config`.
 
 - **Migrations:** date-based `YYYYMMDD_name.sql` em `supabase/migrations/`
 - **Aplicar SQL:** sempre via `node scripts/apply-migration.mjs <file>` (NUNCA pedir pra colar no Studio — user já configurou _admin_exec_sql RPC)
+- ⚠️ **GRANTs explícitos obrigatórios** em toda migration de CREATE TABLE
+  (default privileges do Supabase NÃO disparam quando a tabela é criada via
+  `_admin_exec_sql` RPC). Padrão a incluir:
+  ```sql
+  GRANT ALL ON TABLE public.X TO service_role;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.X TO authenticated;
+  -- + GRANT SELECT TO anon SE houver rota pública
+  ```
+  Sintoma se esquecer: API retorna 400 "permission denied for table X".
+  Hotfix histórico: `20260527_fix_grants_ondas_3_4.sql`.
 - **TSC:** rodar `npx tsc --noEmit` (ou `node node_modules/typescript/bin/tsc --noEmit` no Windows) ao fim de cada sprint, zero erros
 - **Commits:** mensagens em português, seguindo formato `feat(módulo): descrição` com `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` no rodapé
 - **Responsividade:** todas as UIs precisam funcionar em mobile/tablet/desktop (não opcional)
