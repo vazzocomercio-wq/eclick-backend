@@ -61,6 +61,9 @@ export interface GenerateImageInput {
    * faz N chamadas em paralelo. */
   n:               number
   override?:       { provider: Provider; model: string }
+  /** F6 Creative E2 — ai_usage_log recebe creative_product_id +
+   *  creative_image_id + creative_operation pra rastreio por imagem. */
+  creative?:       { productId: string; imageId?: string; operation: string }
 }
 
 export interface GenerateImageOutput {

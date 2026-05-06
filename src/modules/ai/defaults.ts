@@ -80,6 +80,19 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // E2: pipeline de imagens
+  creative_image_prompts: {
+    label:       'Prompts de imagem (Creative)',
+    description: 'Sonnet gera N prompts de imagem coerentes em 1 chamada',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
+  creative_image: {
+    label:       'Geração de imagem (Creative)',
+    description: 'gpt-image-1 com sourceImageUrl da imagem do produto',
+    primary:     { provider: 'openai', model: 'gpt-image-1' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

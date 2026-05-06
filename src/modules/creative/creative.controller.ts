@@ -10,6 +10,7 @@ import {
   type UpdateProductDto,
   type CreateBriefingDto,
 } from './creative.service'
+import { CreativeImagePipelineService } from './creative-image-pipeline.service'
 import type { Marketplace } from './creative.marketplace-rules'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -19,7 +20,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 export class CreativeController {
   private readonly logger = new Logger(CreativeController.name)
 
-  constructor(private readonly svc: CreativeService) {}
+  constructor(
+    private readonly svc:    CreativeService,
+    private readonly images: CreativeImagePipelineService,
+  ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
     if (!u.orgId) throw new BadRequestException('usuário sem organização ativa')
@@ -140,5 +144,59 @@ export class CreativeController {
     return this.svc.getUsage(this.orgOrThrow(u), {
       sinceDays: days ? Math.max(1, Math.min(365, Number(days))) : undefined,
     })
+  }
+
+  // ── Image pipeline (E2) ──────────────────────────────────────────────────
+
+  @Post('image-jobs')
+  @HttpCode(HttpStatus.OK)
+  createImageJob(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { product_id: string; briefing_id: string; listing_id?: string; count?: number; max_cost_usd?: number },
+  ) {
+    return this.images.createJob(this.orgOrThrow(u), u.id, body)
+  }
+
+  @Get('image-jobs/:id')
+  getImageJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.getJob(this.orgOrThrow(u), id)
+  }
+
+  @Get('image-jobs/:id/images')
+  listJobImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.listImagesByJob(this.orgOrThrow(u), id)
+  }
+
+  @Get('products/:id/image-jobs')
+  listProductImageJobs(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.listJobsByProduct(this.orgOrThrow(u), id)
+  }
+
+  @Post('image-jobs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelImageJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.cancelJob(this.orgOrThrow(u), id)
+  }
+
+  @Post('images/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  approveImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.approveImage(this.orgOrThrow(u), id, u.id)
+  }
+
+  @Post('images/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  rejectImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.rejectImage(this.orgOrThrow(u), id, u.id)
+  }
+
+  @Post('images/:id/regenerate')
+  @HttpCode(HttpStatus.OK)
+  regenerateImage(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { prompt?: string },
+  ) {
+    return this.images.regenerateImage(this.orgOrThrow(u), id, body?.prompt)
   }
 }

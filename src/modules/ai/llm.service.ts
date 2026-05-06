@@ -529,7 +529,7 @@ export class LlmService {
         latencyMs:    Date.now() - t0,
         fallbackUsed: false,
       }
-      await this.logImageUsage(finalOut, input.feature, input.orgId, n, !!input.sourceImageUrl, input.format, errorMessage)
+      await this.logImageUsage(finalOut, input.feature, input.orgId, n, !!input.sourceImageUrl, input.format, errorMessage, input.creative)
     }
   }
 
@@ -621,20 +621,24 @@ export class LlmService {
     hasSource:     boolean,
     format:        ImageFormat,
     errorMessage:  string | null,
+    creative?:     { productId: string; imageId?: string; operation: string },
   ): Promise<void> {
     try {
       await supabaseAdmin.from('ai_usage_log').insert({
-        organization_id: orgId,
-        provider:        out.provider,
-        model:           out.model,
+        organization_id:     orgId,
+        provider:            out.provider,
+        model:               out.model,
         feature,
-        tokens_input:    0,
-        tokens_output:   0,
-        tokens_total:    0,
-        cost_usd:        out.costUsd,
-        latency_ms:      out.latencyMs,
-        fallback_used:   false,
-        error_message:   errorMessage,
+        tokens_input:        0,
+        tokens_output:       0,
+        tokens_total:        0,
+        cost_usd:            out.costUsd,
+        latency_ms:          out.latencyMs,
+        fallback_used:       false,
+        error_message:       errorMessage,
+        creative_product_id: creative?.productId ?? null,
+        creative_image_id:   creative?.imageId   ?? null,
+        creative_operation:  creative?.operation ?? null,
         // metadata seria ideal mas a coluna não existe; serializa em error_message
         // quando útil pra debug. Schema simples por ora.
       })

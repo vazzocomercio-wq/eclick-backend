@@ -129,7 +129,102 @@ function describeBulletStyle(style: 'emoji_prefix' | 'dash_prefix' | 'plain'): s
 }
 
 // ============================================================
-// 3. Variante por marketplace (re-aproveita o anúncio base)
+// 3. Pipeline de N imagens — gera N prompts coerentes em 1 chamada
+// ============================================================
+
+export interface ImagePromptsBuilderInput {
+  product: {
+    name:             string
+    category:         string
+    brand?:           string | null
+    color?:           string | null
+    material?:        string | null
+    dimensions?:      Record<string, unknown>
+    differentials?:   string[]
+    target_audience?: string | null
+    ai_analysis?:     Record<string, unknown>
+  }
+  briefing: {
+    target_marketplace: Marketplace
+    visual_style:       string
+    environment:        string | null
+    custom_environment: string | null
+    background_color:   string
+    use_logo:           boolean
+    communication_tone: string
+    image_count:        number
+  }
+  count: number
+}
+
+/**
+ * Pede pro Sonnet gerar N prompts em 1 chamada — preserva contexto entre as
+ * posições (hero → lifestyle → close-up → in-use → packaging → infographic
+ * → scale → multi-angle → top-down → 3/4 view, ajustado por count).
+ * Retorna array de strings em inglês (gpt-image-1 funciona melhor em EN).
+ */
+export function buildImagePromptsRequest(input: ImagePromptsBuilderInput): string {
+  const p = input.product
+  const b = input.briefing
+  const env = b.environment === 'custom' ? (b.custom_environment ?? 'neutral') : (b.environment ?? 'neutral')
+
+  return `You are a senior product photographer + e-commerce art director.
+
+Generate ${input.count} distinct image prompts for the product below, designed for a ${b.target_marketplace} listing. The product image will be passed as REFERENCE to the image model — do NOT change the product itself, only the angle, framing, environment, and lighting.
+
+## PRODUCT
+Name:            ${p.name}
+Category:        ${p.category}
+Brand:           ${p.brand ?? 'N/A'}
+Color:           ${p.color ?? (p.ai_analysis?.detected_color as string | undefined) ?? 'N/A'}
+Material:        ${p.material ?? (p.ai_analysis?.detected_material as string | undefined) ?? 'N/A'}
+Dimensions:      ${JSON.stringify(p.dimensions ?? {})}
+Differentials:   ${(p.differentials ?? []).join(', ') || 'N/A'}
+Target audience: ${p.target_audience ?? 'general'}
+
+## AI VISUAL ANALYSIS
+${JSON.stringify(p.ai_analysis ?? {}, null, 2)}
+
+## BRIEFING
+Visual style:    ${b.visual_style}
+Environment:     ${env}
+Background:      ${b.background_color}
+Logo allowed:    ${b.use_logo ? 'yes — discreet, brand-consistent' : 'no — strictly no text/logos/watermarks'}
+Tone:            ${b.communication_tone}
+
+## VARIATION STRATEGY (cycle through, adjust to count=${input.count})
+1. Hero shot — clean, centered, marketplace-cover quality
+2. Lifestyle — product in real-world use, in the briefing environment
+3. Detail close-up — texture, finish, premium feel
+4. In-use — hands or context interacting with the product
+5. Multi-angle composite — front + side or front + 3/4
+6. Top-down flat lay — overhead view, organized
+7. Scale reference — product next to common object for size feel
+8. Packaging or unboxing scene
+9. Infographic-style — empty space for text overlays (don't add text)
+10. Side or 3/4 view with depth — soft shadows, dimensional
+
+If count < 10, prioritize positions 1-3-2-4-5 in that order (most impactful first).
+If count > 10, repeat with style/lighting variations.
+
+## RULES
+- Each prompt: 1-3 sentences, English, optimized for gpt-image-1 image-edit mode
+- ALWAYS reference the product positively (e.g., "the product shown in the reference image")
+- Specify lighting (e.g., "soft natural daylight", "studio softbox")
+- Specify camera angle (e.g., "eye-level", "45-degree top-down", "macro 50mm")
+- Match the visual_style strictly (premium ≠ promocional)
+- Background color guideline: ${b.background_color}${b.use_logo ? '' : '\n- DO NOT add text, watermarks, logos, or branding overlays'}
+- Avoid generic adjectives ("beautiful", "amazing") — use concrete photographic terms
+
+Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comments:
+[
+  "prompt 1",
+  "prompt 2"
+]`
+}
+
+// ============================================================
+// 4. Variante por marketplace (re-aproveita o anúncio base)
 // ============================================================
 
 export function buildVariantPrompt(
