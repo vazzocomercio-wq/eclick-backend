@@ -269,6 +269,12 @@ export class MercadolivreService {
     }
   }
 
+  /**
+   * @deprecated INSEGURO em multi-tenant — pega 1 conta arbitraria de
+   * QUALQUER org no banco. Use `getTokenForOrg(orgId, sellerId?)` em
+   * codigo novo. Os ~20 calls existentes desse metodo precisam migrar
+   * (rastreio: bloco E do refactor multi-conta).
+   */
   async getValidToken(): Promise<{ token: string; sellerId: number }> {
     const connections = await this.getAllConnections()
     if (!connections.length) {
@@ -999,10 +1005,10 @@ export class MercadolivreService {
     return { questions: fb?.questions ?? [], total: fb?.total ?? 0 }
   }
 
-  async getQuestions(orgId: string, status = 'UNANSWERED') {
+  async getQuestions(orgId: string, status = 'UNANSWERED', sellerId?: number) {
     try {
-      const { token, sellerId } = await this.getValidToken()
-      const { questions, total } = await this.fetchQuestionsRaw(token, sellerId, status)
+      const { token, sellerId: resolvedSellerId } = await this.getTokenForOrg(orgId, sellerId)
+      const { questions, total } = await this.fetchQuestionsRaw(token, resolvedSellerId, status)
 
       // Enrich with item data (batch up to 20 IDs per request)
       const itemIds = [...new Set(questions.map((q: any) => q.item_id).filter(Boolean))] as string[]
@@ -1036,7 +1042,7 @@ export class MercadolivreService {
         item: itemMap[q.item_id] ?? null,
       }))
 
-      return { questions: enriched, total, sellerId }
+      return { questions: enriched, total, sellerId: resolvedSellerId }
     } catch (err: any) {
       const httpStatus = err?.response?.status ?? 500
       console.error('[questions] ML error:', httpStatus, err?.response?.data?.message ?? err?.message)

@@ -331,9 +331,11 @@ export class MercadolivreController {
   async getQuestions(
     @ReqUser() user: ReqUserPayload,
     @Query('status') status?: string,
+    @Query('seller_id') sellerIdParam?: string,
   ) {
     try {
-      return await this.ml.getQuestions(user.orgId!, status?.toUpperCase() ?? 'UNANSWERED')
+      const sellerId = sellerIdParam ? Number(sellerIdParam) : undefined
+      return await this.ml.getQuestions(user.orgId!, status?.toUpperCase() ?? 'UNANSWERED', sellerId)
     } catch (e: unknown) {
       const err = e as { message?: string }
       console.error('[ml.questions] erro:', err?.message)
