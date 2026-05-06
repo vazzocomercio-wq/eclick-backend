@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { PricingAiService } from '../pricing-ai/pricing-ai.service'
 import { AdsCampaignsService } from '../ads-campaigns/ads-campaigns.service'
 import { SocialContentService } from '../social-content/social-content.service'
-import { ActiveBridgeClient } from './active-bridge.client'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import type {
   StoreAutomationAction,
   ProposedAction,

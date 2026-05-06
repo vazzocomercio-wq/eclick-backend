@@ -3,7 +3,7 @@ import {
   UseGuards, BadRequestException, HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { StoreAutomationService } from './store-automation.service'
-import { ActiveBridgeClient } from './active-bridge.client'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import type {

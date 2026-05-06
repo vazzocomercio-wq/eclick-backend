@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { LlmService } from '../ai/llm.service'
+import { ActiveBridgeClient, type BroadcastSegment } from '../active-bridge/active-bridge.client'
 import { supabaseAdmin } from '../../common/supabase'
 import {
   buildSocialContentPrompt,
@@ -41,7 +42,10 @@ interface ListInput {
 export class SocialContentService {
   private readonly logger = new Logger(SocialContentService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm:    LlmService,
+    private readonly bridge: ActiveBridgeClient,
+  ) {}
 
   // ─────────────────────────────────────────────────────────────────
   // GERAÇÃO
@@ -403,5 +407,125 @@ export class SocialContentService {
       tags:               string[] | null
       ai_analysis:        Record<string, unknown> | null
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PUBLISH (dispatch real pra canal — bridge SaaS↔Active)
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Publica peça no canal apropriado. Hoje só `whatsapp_broadcast` está
+   *  conectado (via Active bridge). Outros canais ainda dependem de
+   *  integrações específicas (IG Graph publish, TikTok, email, etc.). */
+  async publishContent(id: string, orgId: string): Promise<{
+    item:    SocialContent
+    result:  Record<string, unknown>
+  }> {
+    const item = await this.get(id, orgId)
+    if (item.status === 'published') {
+      throw new BadRequestException('Peça já está publicada')
+    }
+    if (item.status === 'archived') {
+      throw new BadRequestException('Peça arquivada não pode ser publicada')
+    }
+
+    // Roteamento por canal
+    if (item.channel === 'whatsapp_broadcast') {
+      return this.publishWhatsAppBroadcast(item)
+    }
+
+    throw new BadRequestException(
+      `Publicação automática para canal '${item.channel}' ainda não disponível. ` +
+      `Atualmente só whatsapp_broadcast está conectado via bridge Active.`,
+    )
+  }
+
+  private async publishWhatsAppBroadcast(item: SocialContent): Promise<{
+    item:   SocialContent
+    result: Record<string, unknown>
+  }> {
+    const c = item.content as {
+      message?:        string
+      include_image?:  boolean
+      include_link?:   boolean
+      target_segment?: string
+    }
+    if (!c.message?.trim()) {
+      throw new BadRequestException('Conteúdo sem campo `message` — não pode publicar')
+    }
+    const segment: BroadcastSegment =
+      c.target_segment === 'compradores' || c.target_segment === 'interessados' || c.target_segment === 'inativos'
+        ? c.target_segment
+        : 'todos'
+
+    // Resolve image_url e link_url best-effort
+    let imageUrl: string | undefined
+    let linkUrl:  string | undefined
+    if (c.include_image || c.include_link) {
+      const { data: prod } = await supabaseAdmin
+        .from('products')
+        .select('id, photo_urls, ml_permalink, landing_page_enabled, landing_page_slug, organization_id')
+        .eq('id', item.product_id)
+        .eq('organization_id', item.organization_id)
+        .maybeSingle()
+      if (prod) {
+        const p = prod as {
+          photo_urls: string[] | null
+          ml_permalink: string | null
+          landing_page_enabled: boolean | null
+          landing_page_slug: string | null
+        }
+        if (c.include_image) imageUrl = p.photo_urls?.[0] ?? undefined
+        if (c.include_link)  linkUrl  = p.landing_page_enabled && p.landing_page_slug
+          ? `${process.env.FRONTEND_URL ?? 'https://eclick.app.br'}/loja/${item.organization_id}/${p.landing_page_slug}`
+          : (p.ml_permalink ?? undefined)
+      }
+    }
+
+    const result = await this.bridge.sendBroadcast({
+      organization_id:   item.organization_id,
+      message:           c.message,
+      target_segment:    segment,
+      include_image:     Boolean(c.include_image),
+      image_url:         imageUrl,
+      include_link:      Boolean(c.include_link),
+      link_url:          linkUrl,
+      source_content_id: item.id,
+    })
+
+    // Marca como publicado
+    const { data: updated } = await supabaseAdmin
+      .from('social_content')
+      .update({
+        status:        'published' as SocialContentStatus,
+        published_at:  new Date().toISOString(),
+        published_url: null,  // WhatsApp não tem URL pública
+      })
+      .eq('id', item.id)
+      .eq('organization_id', item.organization_id)
+      .select('*')
+      .maybeSingle()
+
+    return {
+      item:   (updated ?? item) as SocialContent,
+      result: result as Record<string, unknown>,
+    }
+  }
+
+  /** Worker helper — lista peças com status='scheduled' cujo scheduled_at
+   *  já passou, limitado por canais publicáveis hoje. */
+  async listDueScheduled(limit = 20): Promise<SocialContent[]> {
+    const { data, error } = await supabaseAdmin
+      .from('social_content')
+      .select('*')
+      .eq('status', 'scheduled')
+      .eq('channel', 'whatsapp_broadcast')   // só canal publicável hoje
+      .lte('scheduled_at', new Date().toISOString())
+      .order('scheduled_at', { ascending: true })
+      .limit(limit)
+    if (error) {
+      this.logger.warn(`[social-content] listDueScheduled: ${error.message}`)
+      return []
+    }
+    return (data ?? []) as SocialContent[]
   }
 }

@@ -27,6 +27,20 @@ interface TriggerCartRecoveryInput {
   rate_limit_ms?:  number
 }
 
+export type BroadcastSegment = 'todos' | 'compradores' | 'interessados' | 'inativos'
+
+interface SendBroadcastInput {
+  organization_id:   string
+  message:           string
+  target_segment:    BroadcastSegment
+  include_image?:    boolean
+  image_url?:        string
+  include_link?:     boolean
+  link_url?:         string
+  source_content_id?: string   // social_content.id pra rastreio
+  rate_limit_ms?:    number    // delay entre mensagens (default 3000)
+}
+
 @Injectable()
 export class ActiveBridgeClient {
   private readonly logger = new Logger(ActiveBridgeClient.name)
@@ -124,6 +138,41 @@ export class ActiveBridgeClient {
       return { configured: true, reachable: true, authenticated: true, response: parsed }
     } catch (e) {
       return { configured: true, reachable: false, authenticated: false, error: (e as Error).message }
+    }
+  }
+
+  /** Dispara WhatsApp broadcast pra um segmento (ou lista de contatos)
+   *  via Active. Texto vem pronto do SaaS (Conteúdo Social), Active só
+   *  resolve audiência e usa WhatsAppService.sendText com rate limit. */
+  async sendBroadcast(input: SendBroadcastInput): Promise<{
+    dispatched?: number
+    skipped?:    number
+    errors?:     number
+    skipped_no_bridge?: boolean
+  }> {
+    if (!this.isConfigured()) {
+      this.logger.warn('[active-bridge] sendBroadcast no-op (bridge não configurado)')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/send-broadcast`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw new BadRequestException(`Active responded ${res.status}: ${body.slice(0, 200)}`)
+      }
+      return await res.json() as { dispatched: number; skipped: number; errors: number }
+    } catch (e) {
+      this.logger.error(`[active-bridge] sendBroadcast falhou: ${(e as Error).message}`)
+      throw e
     }
   }
 

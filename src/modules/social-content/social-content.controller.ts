@@ -147,4 +147,13 @@ export class SocialContentController {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.archive(id, u.orgId)
   }
+
+  /** POST /social/content/:id/publish-now — dispara publicação real
+   *  no canal (hoje só whatsapp_broadcast via Active bridge). */
+  @Post('content/:id/publish-now')
+  @HttpCode(HttpStatus.OK)
+  publishNow(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.publishContent(id, u.orgId)
+  }
 }
