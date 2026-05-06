@@ -1039,11 +1039,55 @@ export class MercadolivreService {
   }
 
   async getQuestions(orgId: string, status = 'UNANSWERED', sellerId?: number) {
+    // Multi-conta: sem sellerId → fan-out + concatena perguntas de todas as contas.
+    if (sellerId == null) {
+      try {
+        const tokens = await this.getAllTokensForOrg(orgId).catch(() => [])
+        if (tokens.length === 0) return { questions: [], total: 0, sellerId: null }
+        if (tokens.length === 1) {
+          return this._getQuestionsForSeller(tokens[0].token, tokens[0].sellerId, status)
+        }
+        const perAccount = await Promise.all(
+          tokens.map(t =>
+            this._getQuestionsForSeller(t.token, t.sellerId, status)
+              .catch(e => {
+                console.error(`[questions] account ${t.sellerId} falhou:`, e?.message)
+                return { questions: [], total: 0, sellerId: t.sellerId }
+              }),
+          ),
+        )
+        // Concatena + ordena por date_created desc
+        const all = perAccount.flatMap(r => r.questions.map((q: any) => ({ ...q, _seller_id: r.sellerId })))
+        all.sort((a: any, b: any) => (b.date_created ?? '').localeCompare(a.date_created ?? ''))
+        return {
+          questions: all,
+          total:     perAccount.reduce((s, r) => s + r.total, 0),
+          sellerId:  null, // multi-conta → null pra UI saber que e agregado
+        }
+      } catch (err: any) {
+        console.error('[questions] fan-out error:', err?.message)
+        return { questions: [], total: 0, sellerId: null }
+      }
+    }
+
+    // Conta especifica
     try {
       const { token, sellerId: resolvedSellerId } = await this.getTokenForOrg(orgId, sellerId)
-      const { questions, total } = await this.fetchQuestionsRaw(token, resolvedSellerId, status)
+      return this._getQuestionsForSeller(token, resolvedSellerId, status)
+    } catch (err: any) {
+      const httpStatus = err?.response?.status ?? 500
+      console.error('[questions] ML error:', httpStatus, err?.response?.data?.message ?? err?.message)
+      if (httpStatus === 403 || httpStatus === 404 || httpStatus === 401) return { questions: [], total: 0, sellerId: null }
+      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', httpStatus)
+    }
+  }
 
-      // Enrich with item data (batch up to 20 IDs per request)
+  /** Helper interno — busca perguntas de 1 conta especifica + enriquece
+   *  com item data. Reutilizado pelo fan-out de getQuestions. */
+  private async _getQuestionsForSeller(token: string, sellerId: number, status: string): Promise<{ questions: any[]; total: number; sellerId: number }> {
+    try {
+      const { questions, total } = await this.fetchQuestionsRaw(token, sellerId, status)
+
       const itemIds = [...new Set(questions.map((q: any) => q.item_id).filter(Boolean))] as string[]
       const itemMap: Record<string, any> = {}
       for (let i = 0; i < itemIds.length; i += 20) {
@@ -1075,12 +1119,11 @@ export class MercadolivreService {
         item: itemMap[q.item_id] ?? null,
       }))
 
-      return { questions: enriched, total, sellerId: resolvedSellerId }
+      return { questions: enriched, total, sellerId }
     } catch (err: any) {
       const httpStatus = err?.response?.status ?? 500
-      console.error('[questions] ML error:', httpStatus, err?.response?.data?.message ?? err?.message)
-      if (httpStatus === 403 || httpStatus === 404 || httpStatus === 401) return { questions: [], total: 0, sellerId: null }
-      throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', httpStatus)
+      if (httpStatus === 403 || httpStatus === 404 || httpStatus === 401) return { questions: [], total: 0, sellerId }
+      throw err
     }
   }
 
