@@ -419,8 +419,9 @@ export class CreativeImagePipelineService {
         briefing: {
           target_marketplace: briefing.target_marketplace as Marketplace,
           visual_style:       briefing.visual_style,
-          environment:        briefing.environment,
+          environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
           custom_environment: briefing.custom_environment,
+          custom_prompt:      briefing.custom_prompt,
           background_color:   briefing.background_color,
           use_logo:           briefing.use_logo,
           communication_tone: briefing.communication_tone,
@@ -503,6 +504,9 @@ export class CreativeImagePipelineService {
   /** Gera 1 imagem: signed URL → gpt-image-1 → upload Storage → update row. */
   private async generateOneImage(img: CreativeImage): Promise<void> {
     const product = await this.creative.getProduct(img.organization_id, img.product_id)
+    // Carrega briefing pra pegar logo (se use_logo+logo_storage_path)
+    const job = await this.getJobById(img.job_id)
+    const briefing = job ? await this.creative.getBriefing(img.organization_id, job.briefing_id) : null
 
     await supabaseAdmin
       .from('creative_images')
@@ -511,16 +515,21 @@ export class CreativeImagePipelineService {
 
     try {
       // Signed URL pra OpenAI fetchar a imagem do produto (10min TTL — passa por edits)
-      const sourceUrl = await this.creative.signImage(product.main_image_storage_path, 600)
+      const sourceUrls: string[] = [
+        await this.creative.signImage(product.main_image_storage_path, 600),
+      ]
+      if (briefing?.use_logo && briefing.logo_storage_path) {
+        sourceUrls.push(await this.creative.signImage(briefing.logo_storage_path, 600))
+      }
 
       const out = await this.llm.generateImage({
-        orgId:          img.organization_id,
-        feature:        'creative_image',
-        prompt:         img.prompt_text,
-        sourceImageUrl: sourceUrl,
-        format:         'square', // 1024x1024 — marketplace-safe; resize no front se precisar
-        n:              1,
-        creative:       { productId: img.product_id, imageId: img.id, operation: 'image_generation' },
+        orgId:           img.organization_id,
+        feature:         'creative_image',
+        prompt:          img.prompt_text,
+        sourceImageUrls: sourceUrls,
+        format:          'square', // 1024x1024 — marketplace-safe; resize no front se precisar
+        n:               1,
+        creative:        { productId: img.product_id, imageId: img.id, operation: 'image_generation' },
       })
 
       const first = out.images[0]

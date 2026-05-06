@@ -147,8 +147,9 @@ export interface ImagePromptsBuilderInput {
   briefing: {
     target_marketplace: Marketplace
     visual_style:       string
-    environment:        string | null
+    environments:       string[]
     custom_environment: string | null
+    custom_prompt:      string | null
     background_color:   string
     use_logo:           boolean
     communication_tone: string
@@ -157,16 +158,33 @@ export interface ImagePromptsBuilderInput {
   count: number
 }
 
+/** Distribui N posições entre M ambientes em round-robin. Retorna array de
+ *  strings (1 ambiente por posição). Vazio → ['neutral'] de fallback. */
+function distributeEnvironments(envs: string[], customEnv: string | null, count: number): string[] {
+  const resolved = envs.length === 0
+    ? ['neutral']
+    : envs.map(e => e === 'custom' ? (customEnv ?? 'neutral') : e)
+  return Array.from({ length: count }, (_, i) => resolved[i % resolved.length])
+}
+
 /**
  * Pede pro Sonnet gerar N prompts em 1 chamada — preserva contexto entre as
  * posições (hero → lifestyle → close-up → in-use → packaging → infographic
  * → scale → multi-angle → top-down → 3/4 view, ajustado por count).
+ * Distribui as N posições entre os M ambientes selecionados (round-robin).
  * Retorna array de strings em inglês (gpt-image-1 funciona melhor em EN).
  */
 export function buildImagePromptsRequest(input: ImagePromptsBuilderInput): string {
   const p = input.product
   const b = input.briefing
-  const env = b.environment === 'custom' ? (b.custom_environment ?? 'neutral') : (b.environment ?? 'neutral')
+  const envByPosition = distributeEnvironments(b.environments, b.custom_environment, input.count)
+  const envSummary = b.environments.length === 0
+    ? 'neutral (default)'
+    : b.environments.map(e => e === 'custom' ? (b.custom_environment ?? 'neutral') : e).join(', ')
+
+  const positionList = envByPosition
+    .map((e, i) => `${i + 1}. environment="${e}"`)
+    .join('\n')
 
   return `You are a senior product photographer + e-commerce art director.
 
@@ -187,14 +205,17 @@ ${JSON.stringify(p.ai_analysis ?? {}, null, 2)}
 
 ## BRIEFING
 Visual style:    ${b.visual_style}
-Environment:     ${env}
+Environments:    ${envSummary}
 Background:      ${b.background_color}
-Logo allowed:    ${b.use_logo ? 'yes — discreet, brand-consistent' : 'no — strictly no text/logos/watermarks'}
+Logo allowed:    ${b.use_logo ? 'yes — a SECOND reference image (the brand logo) is provided alongside the product. Apply the logo discreetly (small, corner placement, ~8% of frame) without distorting it.' : 'no — strictly no text/logos/watermarks'}
 Tone:            ${b.communication_tone}
+${b.custom_prompt ? `\n## ADDITIONAL USER INSTRUCTION\n${b.custom_prompt.slice(0, 1500)}\n` : ''}
+## ENVIRONMENT ASSIGNMENT (1 environment per position)
+${positionList}
 
 ## VARIATION STRATEGY (cycle through, adjust to count=${input.count})
 1. Hero shot — clean, centered, marketplace-cover quality
-2. Lifestyle — product in real-world use, in the briefing environment
+2. Lifestyle — product in real-world use, in the assigned environment
 3. Detail close-up — texture, finish, premium feel
 4. In-use — hands or context interacting with the product
 5. Multi-angle composite — front + side or front + 3/4
@@ -209,11 +230,12 @@ If count > 10, repeat with style/lighting variations.
 
 ## RULES
 - Each prompt: 1-3 sentences, English, optimized for gpt-image-1 image-edit mode
-- ALWAYS reference the product positively (e.g., "the product shown in the reference image")
+- ALWAYS reference the product positively (e.g., "the product shown in the first reference image")
+- Match each position to its assigned environment from the list above
 - Specify lighting (e.g., "soft natural daylight", "studio softbox")
 - Specify camera angle (e.g., "eye-level", "45-degree top-down", "macro 50mm")
 - Match the visual_style strictly (premium ≠ promocional)
-- Background color guideline: ${b.background_color}${b.use_logo ? '' : '\n- DO NOT add text, watermarks, logos, or branding overlays'}
+- Background color guideline: ${b.background_color}${b.use_logo ? '\n- The second reference image is the brand logo — place it discreetly without distorting it' : '\n- DO NOT add text, watermarks, logos, or branding overlays'}
 - Avoid generic adjectives ("beautiful", "amazing") — use concrete photographic terms
 
 Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comments:
@@ -243,7 +265,9 @@ export interface VideoPromptsBuilderInput {
 export function buildVideoPromptsRequest(input: VideoPromptsBuilderInput): string {
   const p = input.product
   const b = input.briefing
-  const env = b.environment === 'custom' ? (b.custom_environment ?? 'neutral') : (b.environment ?? 'neutral')
+  const envSummary = b.environments.length === 0
+    ? 'neutral (default)'
+    : b.environments.map(e => e === 'custom' ? (b.custom_environment ?? 'neutral') : e).join(', ')
 
   return `You are a senior motion-graphics director crafting short product videos for marketplace listings.
 
@@ -261,10 +285,11 @@ ${JSON.stringify(p.ai_analysis ?? {}, null, 2)}
 
 ## BRIEFING
 Visual style:    ${b.visual_style}
-Environment:     ${env}
+Environments:    ${envSummary}
 Tone:            ${b.communication_tone}
 Aspect ratio:    ${input.aspectRatio}
 Duration:        ${input.durationSec}s
+${b.custom_prompt ? `\n## ADDITIONAL USER INSTRUCTION\n${b.custom_prompt.slice(0, 1500)}\n` : ''}
 
 ## VARIATION STRATEGY (cycle through, ${input.count} total)
 1. Cinemagraph hero — subtle motion (dust particles, light shift), product centered, camera barely moves

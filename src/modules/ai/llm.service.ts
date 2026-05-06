@@ -506,11 +506,14 @@ export class LlmService {
         )
       }
       if (config.primary.provider === 'openai') {
+        const sourceUrls = input.sourceImageUrls?.length
+          ? input.sourceImageUrls
+          : (input.sourceImageUrl ? [input.sourceImageUrl] : [])
         result = await this.callOpenAIImage({
           model:           config.primary.model,
           orgId:           input.orgId,
           prompt:          input.prompt,
-          sourceImageUrl:  input.sourceImageUrl,
+          sourceImageUrls: sourceUrls,
           format:          input.format,
           customSize:      input.customSize,
           n,
@@ -532,7 +535,8 @@ export class LlmService {
         latencyMs:    Date.now() - t0,
         fallbackUsed: false,
       }
-      await this.logImageUsage(finalOut, input.feature, input.orgId, n, !!input.sourceImageUrl, input.format, errorMessage, input.creative)
+      const hasSource = !!(input.sourceImageUrls?.length || input.sourceImageUrl)
+      await this.logImageUsage(finalOut, input.feature, input.orgId, n, hasSource, input.format, errorMessage, input.creative)
     }
   }
 
@@ -540,7 +544,7 @@ export class LlmService {
     model:           string
     orgId:           string
     prompt:          string
-    sourceImageUrl?: string
+    sourceImageUrls: string[]
     format:          ImageFormat
     customSize?:     { width: number; height: number }
     n:               number
@@ -557,16 +561,23 @@ export class LlmService {
 
     // gpt-image-1 não aceita n>1 — paralelizamos
     const callOne = async (): Promise<{ url?: string; b64?: string }> => {
-      if (args.sourceImageUrl) {
-        // Modo edit: precisa download da source primeiro
-        const imgRes = await axios.get<ArrayBuffer>(args.sourceImageUrl, {
-          responseType: 'arraybuffer', timeout: 30_000,
-        })
+      if (args.sourceImageUrls.length > 0) {
+        // Modo edit: download de todas as sources em paralelo. gpt-image-1
+        // aceita até 16 imagens por chamada — usamos pra passar produto +
+        // logo (e referências futuras).
+        const buffers = await Promise.all(
+          args.sourceImageUrls.map(async (url, idx) => {
+            const r = await axios.get<ArrayBuffer>(url, { responseType: 'arraybuffer', timeout: 30_000 })
+            return { idx, buf: Buffer.from(r.data) }
+          }),
+        )
         const form = new FormData()
         form.append('model',  args.model)
         form.append('prompt', args.prompt.slice(0, 32_000))
         form.append('size',   size)
-        form.append('image',  Buffer.from(imgRes.data), { filename: 'source.png', contentType: 'image/png' })
+        for (const b of buffers) {
+          form.append('image', b.buf, { filename: `source_${b.idx}.png`, contentType: 'image/png' })
+        }
         const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
           OPENAI_IMG_EDT, form,
           {

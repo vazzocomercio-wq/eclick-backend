@@ -55,8 +55,13 @@ export interface GenerateImageInput {
   orgId:           string
   feature:         FeatureKey
   prompt:          string
-  /** Quando presente, usa modo "edit" do gpt-image-1 (image-to-image). */
+  /** Quando presente, usa modo "edit" do gpt-image-1 (image-to-image).
+   * @deprecated use sourceImageUrls[] (suporta multi-ref pra logo+produto). */
   sourceImageUrl?: string
+  /** Quando presente, usa modo "edit" do gpt-image-1 com múltiplas refs.
+   * gpt-image-1 aceita até 16 imagens; tipicamente passamos [productUrl,
+   * logoUrl] pra IA renderizar produto preservando logo. */
+  sourceImageUrls?: string[]
   format:          ImageFormat
   /** Para format='custom', obrigatório. */
   customSize?:     { width: number; height: number }

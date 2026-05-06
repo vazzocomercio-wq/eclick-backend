@@ -448,8 +448,9 @@ export class CreativeVideoPipelineService {
         briefing: {
           target_marketplace: briefing.target_marketplace as Marketplace,
           visual_style:       briefing.visual_style,
-          environment:        briefing.environment,
+          environments:       briefing.environments ?? (briefing.environment ? [briefing.environment] : []),
           custom_environment: briefing.custom_environment,
+          custom_prompt:      briefing.custom_prompt,
           background_color:   briefing.background_color,
           use_logo:           briefing.use_logo,
           communication_tone: briefing.communication_tone,
