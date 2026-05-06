@@ -400,4 +400,15 @@ export class CreativeController {
   syncPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.syncPublicationStatus(this.orgOrThrow(u), id)
   }
+
+  @Get('publications/degraded')
+  listDegradedPublications(@ReqUser() u: ReqUserPayload) {
+    return this.mlPub.listDegradedPublications(this.orgOrThrow(u))
+  }
+
+  @Post('publications/:id/acknowledge-degradation')
+  @HttpCode(HttpStatus.OK)
+  acknowledgeDegradation(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.acknowledgeDegradation(this.orgOrThrow(u), id, u.id)
+  }
 }

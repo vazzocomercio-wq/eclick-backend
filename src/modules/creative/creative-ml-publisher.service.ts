@@ -94,34 +94,41 @@ export interface PublishMlOpts extends PreviewBuildOpts {
 }
 
 export interface CreativePublication {
-  id:                     string
-  organization_id:        string
-  listing_id:             string
-  product_id:             string
-  user_id:                string | null
-  marketplace:            'mercado_livre' | 'shopee' | 'amazon' | 'magalu'
-  status:                 'pending' | 'publishing' | 'published' | 'failed'
-  idempotency_key:        string
-  image_ids:              string[]
-  video_id:               string | null
-  category_id:            string | null
-  listing_type:           string | null
-  condition:              string | null
-  price:                  number | null
-  stock:                  number | null
-  attributes:             unknown[]
-  payload_sent:           Record<string, unknown> | null
-  external_id:            string | null
-  external_url:           string | null
-  external_picture_ids:   string[]
-  external_video_id:      string | null
-  ml_response:            Record<string, unknown> | null
-  last_synced_status:     string | null
-  last_synced_at:         string | null
-  error_message:          string | null
-  published_at:           string | null
-  created_at:             string
-  updated_at:             string
+  id:                            string
+  organization_id:               string
+  listing_id:                    string
+  product_id:                    string
+  user_id:                       string | null
+  marketplace:                   'mercado_livre' | 'shopee' | 'amazon' | 'magalu'
+  status:                        'pending' | 'publishing' | 'published' | 'failed'
+  idempotency_key:               string
+  image_ids:                     string[]
+  video_id:                      string | null
+  category_id:                   string | null
+  listing_type:                  string | null
+  condition:                     string | null
+  price:                         number | null
+  stock:                         number | null
+  attributes:                    unknown[]
+  payload_sent:                  Record<string, unknown> | null
+  external_id:                   string | null
+  external_url:                  string | null
+  external_picture_ids:          string[]
+  external_video_id:             string | null
+  ml_response:                   Record<string, unknown> | null
+  last_synced_status:            string | null
+  last_synced_at:                string | null
+  /** F4 + #8: setado quando sync detecta active → degraded.
+   *  Limpado quando user dá ack via dismissDegradation. */
+  degraded_at:                   string | null
+  degraded_from_status:          string | null
+  degraded_to_status:            string | null
+  degradation_acknowledged_at:   string | null
+  degradation_acknowledged_by:   string | null
+  error_message:                 string | null
+  published_at:                  string | null
+  created_at:                    string
+  updated_at:                    string
 }
 
 @Injectable()
@@ -665,14 +672,39 @@ export class CreativeMlPublisherService {
       })
       mlStatus = res.data.status ?? null
 
+      // Detecta degradação: estava active, agora está em estado problemático.
+      // Marca degraded_at SE não havia degradação previa (não-ack).
+      const DEGRADED_STATUSES = ['inactive', 'closed', 'under_review', 'payment_required']
+      const previousStatus = pub.last_synced_status
+      const wasActive      = previousStatus === 'active'
+      const isDegraded     = mlStatus !== null && DEGRADED_STATUSES.includes(mlStatus)
+      const newDegradation = wasActive && isDegraded && !pub.degraded_at
+      // Se voltou pra active depois de degraded, limpa o flag (acknowledged auto)
+      const recovered      = pub.degraded_at && !pub.degradation_acknowledged_at && mlStatus === 'active'
+
+      const update: Record<string, unknown> = {
+        last_synced_status: mlStatus,
+        last_synced_at:     new Date().toISOString(),
+        external_url:       res.data.permalink ?? pub.external_url,
+        updated_at:         new Date().toISOString(),
+      }
+      if (newDegradation) {
+        update.degraded_at          = new Date().toISOString()
+        update.degraded_from_status = previousStatus
+        update.degraded_to_status   = mlStatus
+        this.logger.warn(`[creative.ml.sync] DEGRADAÇÃO detectada: ${pub.external_id} ${previousStatus} → ${mlStatus}`)
+      } else if (recovered) {
+        update.degraded_at                 = null
+        update.degraded_from_status        = null
+        update.degraded_to_status          = null
+        update.degradation_acknowledged_at = null
+        update.degradation_acknowledged_by = null
+        this.logger.log(`[creative.ml.sync] recuperação: ${pub.external_id} voltou pra active`)
+      }
+
       const { data: updated } = await supabaseAdmin
         .from('creative_publications')
-        .update({
-          last_synced_status: mlStatus,
-          last_synced_at:     new Date().toISOString(),
-          external_url:       res.data.permalink ?? pub.external_url,
-          updated_at:         new Date().toISOString(),
-        })
+        .update(update)
         .eq('id', pub.id)
         .select('*')
         .single()
@@ -690,6 +722,41 @@ export class CreativeMlPublisherService {
         .eq('id', pub.id)
       throw new HttpException(`Sync falhou: ${err.message}`, HttpStatus.BAD_GATEWAY)
     }
+  }
+
+  /** Lista publications atualmente degradadas (não-ack) — usado pela UI
+   *  pra mostrar painel de alertas / dashboard. */
+  async listDegradedPublications(orgId: string): Promise<CreativePublication[]> {
+    const { data, error } = await supabaseAdmin
+      .from('creative_publications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .not('degraded_at', 'is', null)
+      .is('degradation_acknowledged_at', null)
+      .order('degraded_at', { ascending: false })
+      .limit(100)
+    if (error) throw new BadRequestException(`listDegradedPublications: ${error.message}`)
+    return (data ?? []) as CreativePublication[]
+  }
+
+  /** Marca a degradação como reconhecida (user clicou dismiss/resolveu). */
+  async acknowledgeDegradation(orgId: string, publicationId: string, userId: string): Promise<CreativePublication> {
+    const pub = await this.getPublication(orgId, publicationId)
+    if (!pub.degraded_at) {
+      throw new BadRequestException('publication não está degradada')
+    }
+    const { data, error } = await supabaseAdmin
+      .from('creative_publications')
+      .update({
+        degradation_acknowledged_at: new Date().toISOString(),
+        degradation_acknowledged_by: userId,
+        updated_at:                  new Date().toISOString(),
+      })
+      .eq('id', pub.id)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`acknowledgeDegradation: ${error.message}`)
+    return data as CreativePublication
   }
 
   /** Lista publications que precisam ser re-sincronizadas (status='published' +
