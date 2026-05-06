@@ -48,6 +48,7 @@ import { CopilotModule } from './modules/copilot/copilot.module'
 import { SocialContentModule } from './modules/social-content/social-content.module'
 import { SocialCommerceModule } from './modules/social-commerce/social-commerce.module'
 import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module'
+import { ProductsAnalyticsModule } from './modules/products-analytics/products-analytics.module'
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { AdsCampaignsModule } from './modules/ads-campaigns/ads-campaigns.module
     SocialContentModule,
     SocialCommerceModule,
     AdsCampaignsModule,
+    ProductsAnalyticsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
