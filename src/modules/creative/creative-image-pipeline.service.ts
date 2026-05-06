@@ -167,6 +167,28 @@ export class CreativeImagePipelineService {
     })))
   }
 
+  /** Lista imagens approved/ready de um produto (todas elegiveis pra
+   *  source de video). Inclui signed_image_url pra preview. */
+  async listImagesByProduct(orgId: string, productId: string): Promise<CreativeImage[]> {
+    await this.creative.getProduct(orgId, productId) // tenant check
+    const { data, error } = await supabaseAdmin
+      .from('creative_images')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('product_id', productId)
+      .in('status', ['ready', 'approved'])
+      .order('created_at', { ascending: false })
+      .limit(60)
+    if (error) throw new BadRequestException(`listImagesByProduct: ${error.message}`)
+    const images = (data ?? []) as CreativeImage[]
+    return Promise.all(images.map(async img => ({
+      ...img,
+      signed_image_url: img.storage_path
+        ? await this.creative.signImage(img.storage_path, 3600).catch(() => null)
+        : null,
+    })))
+  }
+
   async cancelJob(orgId: string, jobId: string): Promise<CreativeImageJob> {
     const job = await this.getJob(orgId, jobId)
     if (job.status === 'completed' || job.status === 'cancelled' || job.status === 'failed') {

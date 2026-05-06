@@ -262,6 +262,11 @@ export class CreativeController {
     return this.images.listJobsByProduct(this.orgOrThrow(u), id)
   }
 
+  @Get('products/:id/images')
+  listProductImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.images.listImagesByProduct(this.orgOrThrow(u), id)
+  }
+
   @Post('image-jobs/:id/cancel')
   @HttpCode(HttpStatus.OK)
   cancelImageJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
