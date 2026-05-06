@@ -45,6 +45,7 @@ import { CanvaModule } from './modules/canva/canva.module'
 import { IntelligenceHubModule } from './modules/intelligence-hub/intelligence-hub.module'
 import { CreativeModule } from './modules/creative/creative.module'
 import { CopilotModule } from './modules/copilot/copilot.module'
+import { SocialContentModule } from './modules/social-content/social-content.module'
 
 @Module({
   imports: [
@@ -92,6 +93,7 @@ import { CopilotModule } from './modules/copilot/copilot.module'
     IntelligenceHubModule,
     CreativeModule,
     CopilotModule,
+    SocialContentModule,
   ],
   controllers: [AppController],
   providers: [AppService],

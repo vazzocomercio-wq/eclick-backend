@@ -114,6 +114,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    null,
   },
+  // Onda 3 S1: Social Content Generator — gera posts/reels/ads copy
+  // por canal a partir de produto enriquecido. Sonnet: precisa de criatividade
+  // + estrutura JSON estrita (jsonMode). Fallback OpenAI mini pra resiliência.
+  social_content_gen: {
+    label:       'Conteúdo social (S1)',
+    description: 'Gera caption/script/ad copy por canal (IG, TikTok, Meta Ads, Google Ads, etc.) a partir do produto',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
