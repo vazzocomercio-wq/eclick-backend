@@ -521,15 +521,54 @@ const SALES_ENTRIES: KbEntry[] = [
   {
     routes:   ['/dashboard/pedidos'],
     category: 'vendas',
-    title:    'Pedidos',
-    content: `**Lista de pedidos consolidada** de todos canais.
+    title:    'Pedidos — visão consolidada multi-canal',
+    content: `**Lista de pedidos consolidada** de todas as suas contas ML.
 
-**Filtros**: canal, status, data, valor.
+**Abas (tabs)** — filtro server-side:
+- **Abertas** — pedidos ativos sem envio terminal
+- **Em preparação** — \`shipping_status in (handling, ready_to_ship)\`
+- **Despachadas** — \`shipped\` ou \`in_transit\`
+- **Pgto pendente** — \`payment_required / in_process\`
+- **Flex** — só logística \`self_service\`
+- **Encerradas** — \`delivered / not_delivered / cancelled\`
+- **Mediação** — pedidos com \`mediations\` ou tag \`mediation_in_progress\`
 
-**Atrasados** (sem update X dias) ficam em vermelho.
+**Cada card mostra**:
+- 📦 Foto do produto + título + 1x quantidade + preço unitário
+- 🏷️ SKU + MLB# + variações ("Cor: Branco · Voltagem: 127/220V")
+- 📊 "X disponíveis após esta venda"
+- 🛒 **Carrinho #pack_id** quando ML agrupou
+- 🎟️ Badge **Cupom** quando teve estorno de campanha
+- 📣 Badge **Publicidade** (Mercado Ads)
+- ⏱ Limite postagem + Estimativa entrega
+- 💰 Valor pago / Frete vendedor / Tarifa ML / Lucro bruto / Custo + Imposto / Margem
 
-**Ações**: ver detalhe, marcar problema, vincular a conversa do CRM.`,
-    tags: ['pedidos', 'orders'],
+**"Mais detalhes" expande** 4 blocos:
+- **Comprador**: nome, CPF (quando ML libera), endereço fiscal, email, @username, ID
+- **Pagamento**: cartão/parcelas/valor, vários payments se aplicável
+- **Endereço de entrega**: rua/número/complemento/bairro/cidade/CEP (com fallback do billing_address quando ML não devolveu receiver_address)
+- **Envio**: ID, Logística, Status, Substatus, Pr. postagem, Prev. entrega, **Quem recebe**, **Rastreio**, Tipo entrega
+
+**Carregamento**:
+- Lista vem do DB (\`/orders/list\` — instantâneo)
+- 1ª visita ao card detalhado faz enrichment ML (~2-3s) → busca thumbnail + payments + receiver_address + tracking
+- 2ª visita é instantânea (dados persistem em \`raw_data\`)
+- Cap de 8 enrichment fetches/page pra não estourar quota — backlog processa progressivamente
+
+**Multi-conta cross-conta** (fan-out):
+- Org com várias contas ML conectadas: thumbnails + billing-info varrem todos os tokens até resolver
+- Botão 🔄 no card do comprador faz refetch com fan-out (até achar CPF em alguma conta)
+- Ainda assim alguns pedidos não terão CPF (LGPD ML, ou pedido fora da janela 90 dias)
+
+**Bulk Excel CMV/Imposto**: botão "Subir planilha" no \`/produtos\` aceita .xlsx/.csv com colunas SKU, PREÇO (CMV), IMPOSTO (%) — atualiza catalogo em massa.
+
+**Cálculo financeiro correto**:
+- Frete vendedor vem de \`/shipments/{id}/costs\` campo \`senders[0].cost\` (cost real do vendedor)
+- NÃO usa \`gross_amount\` (frete bruto antes de descontos) — isso era um bug antigo já corrigido
+- Tarifa ML = \`sale_fee\` por item
+- Lucro bruto = total − tarifa − frete vendedor
+- Margem contribuição = lucro bruto − custo (CMV) − imposto`,
+    tags: ['pedidos', 'orders', 'multi-conta', 'enrichment', 'cpf', 'rastreio'],
   },
   {
     routes:   ['/dashboard/atendimento/perguntas'],
@@ -648,6 +687,99 @@ const OPS_ENTRIES: KbEntry[] = [
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// Copiloto da Loja (full-page) + UX recente
+// ════════════════════════════════════════════════════════════════════════
+
+const COPILOT_PAGE_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/store-copilot'],
+    category: 'copiloto',
+    title:    'Copiloto da Loja — comandos em linguagem natural',
+    content: `**Tela de copiloto full-page** que executa ações via tools (não só responde — faz).
+
+**Empty state animado** (sem turns ainda):
+- Brain ícone centralizado + "Como posso ajudar?"
+- 3 fileiras de chips fluindo em direções alternadas (carrossel)
+- Hover pausa todas as fileiras simultaneamente
+- 14 sugestões cobrindo: kits, coleções, preços, ações pendentes, top produtos,
+  vendas 7d, estoque baixo, otimizar títulos, clientes recorrentes, capas de
+  campanha, tendência, perguntas ML, descrição IA, calendário ideal
+
+**Modo conversa** (após 1ª mensagem):
+- Header padrão volta com Brain ícone
+- Lista de turns scrollável
+- Cada turn pode ter intent (ex: \`create_kits\`), params, requires_confirmation
+- Confirmação explícita antes de executar ações destrutivas
+- Card verde "Executado" com JSON de retorno
+
+**Diferença vs Copiloto flutuante** (sininho):
+- **Flutuante** (este aqui) = Q&A sobre uso do sistema, KB de docs
+- **Copiloto da Loja** = ações reais (criar kit, gerar coleção, analisar preços)
+
+**Atalho**: \`Cmd/Ctrl+K\` em qualquer tela abre o flutuante.`,
+    tags: ['copiloto', 'store-copilot', 'tools'],
+  },
+  {
+    routes:   ['/dashboard/*'], // tema funciona em todas as rotas
+    category: 'config',
+    title:    'Tema claro / escuro',
+    content: `**Toggle Sun/Moon no Header** (canto superior direito, entre Buscar e sino).
+
+- Click muda entre claro e escuro instantaneamente
+- Persiste em localStorage (chave \`eclick-theme\`)
+- Inline script aplica no \`<head>\` antes do React hydratar — sem flash
+- Atalho: nenhum (clicar mesmo)
+
+**Cobertura atual**: chrome do app reage (Header, Sidebar, body bg, scrollbar).
+Conteúdo das páginas internas ainda é dark (cores hardcoded em centenas de
+componentes). Migração incremental — \`/pedidos\` é prioridade (mais usado).
+
+**Ícone indica destino, não estado atual**:
+- Sun visível = você está no escuro, click vai pra claro
+- Moon visível = você está no claro, click vai pra escuro
+
+Padrão consagrado VS Code/GitHub.`,
+    tags: ['tema', 'theme', 'dark', 'light', 'config'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Multi-conta ML (cross-conta) — arquitetura transversal
+// ════════════════════════════════════════════════════════════════════════
+
+const MULTI_ACCOUNT_ENTRIES: KbEntry[] = [
+  {
+    routes:   [
+      '/dashboard/configuracoes/integracoes',
+      '/dashboard/integracoes',
+      '/dashboard/pedidos',
+      '/dashboard/atendimento/perguntas',
+    ],
+    category: 'multi-conta',
+    title:    'Multi-conta Mercado Livre — fan-out cross-conta',
+    content: `**Org pode conectar várias contas ML.** Cada conexão tem seu próprio token, seller_id e nickname.
+
+**Fan-out** = quando o backend não sabe a qual conta um recurso pertence, ele tenta TODOS os tokens da org até um responder. Ativo em:
+
+- **Lista de pedidos** (thumbnails + detalhe enriquecido)
+- **Criar produto a partir de listagem** (\`createFromListing\`)
+- **Refetch billing/CPF** (botão 🔄 no card do comprador)
+- **Cron horário de billing** (\`MlBillingFetcherService.fetchBatch\`)
+
+**Por que importa**: ML retorna \`401/403\` quando você tenta acessar pedido/anúncio de outra conta com token errado. Sem fan-out, recursos cross-conta sumiam ou apagavam dados bons (CPF wiped por refetch falho — bug já corrigido).
+
+**Trocador de conta** no header da tela (\`AccountSelector\`):
+- "Todas" agrega
+- Por nickname filtra resultados pra aquela conta
+
+**Limitação atual**: o worker de ingestão (\`OrdersIngestionService.ingestDateRange\`) ainda usa um único token por execução. Pedidos cross-conta importados pela 1ª vez ainda sem CPF até user clicar 🔄. Refactor maior pendente — fan-out por seller_id no nível de ingestão.
+
+**Defensive guards** garantem que CPF/phone bom NUNCA é sobrescrito por null em re-fetches falhos (worker e refetchOne ambos fazem merge: existing data é fallback do que o ML novo não devolveu).`,
+    tags: ['multi-conta', 'fan-out', 'cross-conta', 'cpf', 'token'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Configurações & Integrações
 // ════════════════════════════════════════════════════════════════════════
 
@@ -710,6 +842,81 @@ Use o copiloto flutuante (canto inferior direito) pra dúvidas sobre qualquer te
   },
 ]
 
+// Catch-all entries — adicionadas POR ÚLTIMO no KB pra não drenar o
+// budget de 3000 chars do excerpt. Entries route-específicas vencem.
+const CATCHALL_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard', '/dashboard/[...rest]'],
+    category: 'general',
+    title:    'Novidades recentes do sistema',
+    content: `**Capacidades novas que talvez você não conheça** (atualizado 2026-05):
+
+🎨 **Tema claro/escuro**
+- Botão Sun/Moon no Header (canto sup direito)
+- Persiste por device. Cobertura inicial: chrome do app
+
+📦 **Pedidos enriquecidos** (\`/dashboard/pedidos\`)
+- Card mostra: thumbnail real, "X disponíveis após esta venda", Carrinho# (pack_id),
+  Quem recebe, Rastreio, Tipo entrega, badges Cupom/Publicidade
+- Lista carrega instantânea do DB; 1ª expansão do card faz enrichment ML (~3s)
+- Próximas visitas instantâneas — dados persistem
+
+🛒 **Bulk Excel CMV/Imposto**
+- Em \`/dashboard/produtos\`, botão "Subir planilha"
+- Aceita .xlsx/.csv com colunas SKU, PREÇO (CMV), IMPOSTO (%)
+- Atualiza catálogo em massa (~50 produtos/segundo)
+
+🔗 **"Vincular Produto"** (popup nos cards de pedido)
+- Aparece quando há match de SKU entre listing ML e catálogo
+- Permite vincular múltiplos anúncios ao mesmo produto em batch
+- Habilita CMV + Imposto naquele pedido + futuros do mesmo SKU
+
+🔄 **Multi-conta ML com fan-out**
+- Org pode ter várias contas ML conectadas
+- Sistema varre todos os tokens automaticamente pra resolver thumbnails,
+  detalhe de pedido, criar produto a partir de listing
+- Botão 🔄 no card do comprador refaz busca de CPF cross-conta
+
+🧠 **Copiloto da Loja** (\`/dashboard/store-copilot\`)
+- Chat full-page que EXECUTA ações via tools
+- Empty state com carrossel de 14 sugestões fluindo
+- Diferente deste copiloto flutuante (que só ensina)
+
+⚡ **Atalho \`Cmd/Ctrl+K\`** abre este copiloto flutuante em qualquer tela.
+
+Pergunta "como funciona X?" pra qualquer feature acima ou navegue pra
+tela específica e abra o copiloto novamente — a KB tem detalhes
+contextuais por rota.`,
+    tags: ['novidades', 'changelog', 'features', 'tema', 'pedidos', 'multi-conta', 'copiloto'],
+  },
+  {
+    routes:   ['/dashboard', '/dashboard/[...rest]'],
+    category: 'general',
+    title:    'Como pedir ajuda neste copiloto',
+    content: `**Sou o copiloto/professor do e-Click.** Posso explicar features, melhores práticas e como extrair valor.
+
+**Atalhos**:
+- \`Cmd/Ctrl+K\` em qualquer tela me abre/fecha
+- Ou clique no botão flutuante (cyan, canto inf direito)
+
+**Tipos de pergunta que respondo bem**:
+- "O que essa tela faz?" / "Como uso X?"
+- "Qual a diferença entre A e B?"
+- "Quais melhores práticas pra Y?"
+- "Onde mudo a configuração de Z?"
+- "O que mudou recentemente?"
+
+**O que NÃO faço** (esse é o **Copiloto da Loja** em \`/dashboard/store-copilot\`):
+- Executar ações (criar produto, gerar conteúdo, atualizar preço)
+- Acessar dados em tempo real (vendas hoje, KPIs específicos)
+
+**Feedback**: thumbs up/down depois da minha resposta — isso treina prompts/KB futuros.
+
+**Limpar conversa**: ícone de lixeira no header.`,
+    tags: ['ajuda', 'help', 'meta', 'copiloto'],
+  },
+]
+
 // ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
@@ -725,7 +932,12 @@ export const KB: KbEntry[] = [
   ...SALES_ENTRIES,
   ...ADS_ENTRIES,
   ...OPS_ENTRIES,
+  ...COPILOT_PAGE_ENTRIES,
+  ...MULTI_ACCOUNT_ENTRIES,
   ...CONFIG_ENTRIES,
+  // Catch-all sempre por último — só preenche o que sobrou do budget
+  // após entries route-específicas
+  ...CATCHALL_ENTRIES,
 ]
 
 /** Match Next.js route patterns ('/x/[id]') contra pathname real ('/x/abc-123'). */
@@ -744,7 +956,31 @@ export function matchKbEntries(pathname: string): KbEntry[] {
 }
 
 function matchRoute(pattern: string, pathname: string): boolean {
-  // Converte '/x/[id]/y' → regex '^/x/[^/]+/y$'
-  const regexStr = '^' + pattern.replace(/\[[^\]]+\]/g, '[^/]+').replace(/\//g, '\\/') + '$'
+  // Suporta:
+  //   '/x/[id]/y'     → '^/x/[^/]+/y$'           (segmento simples)
+  //   '/x/[...rest]'  → '^/x(/.*)?$'              (catch-all, opcional)
+  //   '/dashboard/*'  → '^/dashboard/[^/]+$'      (wildcard de 1 segmento)
+  // Catch-all matchea o próprio prefixo + qualquer subpath. Útil pra
+  // entries "globais" dentro do dashboard.
+  let regexStr = '^'
+  const segments = pattern.split('/')
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]
+    if (i > 0) regexStr += '\\/' // separador (não para o 1º vazio)
+    if (/^\[\.\.\.[^\]]+\]$/.test(seg)) {
+      // catch-all: matchea zero+ segmentos. Reescreve o último '\\/'
+      // pra ficar opcional (matcha tanto '/dashboard' quanto '/dashboard/x/y').
+      regexStr = regexStr.slice(0, -2) + '(?:\\/.*)?'
+      return new RegExp(regexStr + '$').test(pathname)
+    }
+    if (/^\[[^\]]+\]$/.test(seg)) {
+      regexStr += '[^/]+'
+    } else if (seg === '*') {
+      regexStr += '[^/]+'
+    } else {
+      regexStr += seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    }
+  }
+  regexStr += '$'
   return new RegExp(regexStr).test(pathname)
 }
