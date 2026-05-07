@@ -28,22 +28,36 @@ interface ListItemsInput {
 
 @Injectable()
 export class MlCampaignsService {
-  /** Dashboard executivo — agrega summary multi-conta. */
+  /** Dashboard executivo — agrega summary multi-conta.
+   *  GRACEFUL DEGRADATION: erro nunca propaga 500. Loga e retorna
+   *  emptyDashboard() pra UI carregar mostrando "nenhuma campanha". */
   async getDashboard(orgId: string, sellerId?: number) {
-    let q = supabaseAdmin
-      .from('ml_campaigns_summary')
-      .select('*')
-      .eq('organization_id', orgId)
-    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    try {
+      let q = supabaseAdmin
+        .from('ml_campaigns_summary')
+        .select('*')
+        .eq('organization_id', orgId)
+      if (sellerId != null) q = q.eq('seller_id', sellerId)
 
-    const { data, error } = await q
-    if (error) throw new BadRequestException(`dashboard: ${error.message}`)
-    if (!data || data.length === 0) {
+      const { data, error } = await q
+      if (error) {
+        console.error('[ml-campaigns:dashboard] query error:', error)
+        return this.emptyDashboard()
+      }
+      if (!data || data.length === 0) {
+        return this.emptyDashboard()
+      }
+      if (sellerId != null) return data[0]
+
+      return this.aggregate(data)
+    } catch (e) {
+      console.error('[ml-campaigns:dashboard] unhandled:', e)
       return this.emptyDashboard()
     }
-    if (sellerId != null) return data[0]
+  }
 
-    // Agrega multi-conta
+  private aggregate(data: any[]) {
+
     const sum = (k: string) => data.reduce((s: number, d: any) => s + (Number(d[k]) || 0), 0)
     return {
       total_active_campaigns:        sum('total_active_campaigns'),
