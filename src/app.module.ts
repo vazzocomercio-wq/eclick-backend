@@ -3,6 +3,7 @@ import { ScheduleModule } from '@nestjs/schedule'
 import { AppController } from './app.controller'
 import { AppService } from './app.service'
 import { MercadolivreModule } from './modules/mercadolivre/mercadolivre.module'
+import { MlQualityModule } from './modules/ml-quality/ml-quality.module'
 import { OrdersModule } from './modules/orders/orders.module'
 import { ProductsModule } from './modules/products/products.module'
 import { SalesAggregatorModule } from './modules/sales-aggregator/sales-aggregator.module'
@@ -64,6 +65,7 @@ import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
   imports: [
     ScheduleModule.forRoot(),
     MercadolivreModule,
+    MlQualityModule,
     OrdersModule,
     ProductsModule,
     SalesAggregatorModule,
