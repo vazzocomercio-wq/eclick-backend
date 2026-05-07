@@ -1,5 +1,9 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+
+const ML_BASE = 'https://api.mercadolibre.com'
 
 export interface CreateManualOrderDto {
   platform: string
@@ -17,6 +21,10 @@ export interface CreateManualOrderDto {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name)
+
+  constructor(private readonly ml: MercadolivreService) {}
+
   async createManualOrder(orgId: string, dto: CreateManualOrderDto) {
     const platformFee = dto.platform === 'ml' ? dto.sale_price * 0.115 : 0
     const shippingCost = 0
@@ -148,7 +156,172 @@ export class OrdersService {
     // Mapeia rows do DB pro shape consumido pelo PedidosTable / OrderCard
     // (espelha o que /ml/orders/enriched retornava).
     const orders = (data ?? []).map(row => mapRowToFrontend(row as DbOrderRow))
+
+    // Enriquecimento on-demand pra preencher dados que o worker antigo não
+    // salvava (thumbnail, payments, shipping detalhado). Roda APENAS na
+    // página retornada (≤200 orders), com fan-out cross-conta.
+    if (orgId && orders.length > 0) {
+      try {
+        await this.enrichOrdersForUI(orgId, orders, options.seller_id)
+      } catch (err) {
+        this.logger.warn(`[orders.list.enrich] falhou — seguindo sem enrich: ${(err as Error).message}`)
+      }
+    }
+
     return { orders, total: count ?? 0 }
+  }
+
+  /** Buscar thumbnails (fan-out cross-conta) + payments/shipping on-demand
+   *  pra pedidos cujo raw_data não tem esses campos (worker rodou em código
+   *  antigo). Não falha a listagem em caso de erro — log + skip.
+   *
+   *  - Thumbnails: 1 batch /items?ids=… por token. Barato.
+   *  - Payments + shipping: GET /orders/{id} por pedido faltante.
+   *    Limite duro de 8 orders/request pra não estourar quota.
+   */
+  private async enrichOrdersForUI(
+    orgId: string,
+    orders: Array<Record<string, unknown>>,
+    sellerIdFilter?: number,
+  ): Promise<void> {
+    const tokens = sellerIdFilter == null
+      ? await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+      : await this.ml.getTokenForOrg(orgId, sellerIdFilter).then(t => [t]).catch(() => [])
+
+    if (tokens.length === 0) return
+
+    // ── 1. Thumbnails — fan-out batch /items ────────────────────────────
+    const itemIds = [...new Set(
+      orders
+        .flatMap(o => ((o.order_items as Array<Record<string, unknown>>) ?? []))
+        .map(it => ((it.item as { id?: string } | undefined)?.id))
+        .filter((id): id is string => !!id),
+    )]
+    const missingThumb = orders.some(o => {
+      const items = (o.order_items as Array<{ item?: { thumbnail?: string | null } }>) ?? []
+      return items.some(it => !it.item?.thumbnail)
+    })
+
+    const thumbMap: Record<string, string> = {}
+    if (itemIds.length > 0 && missingThumb) {
+      const idsToQuery = itemIds.slice(0, 50).join(',')
+      const results = await Promise.allSettled(
+        tokens.map(tk =>
+          axios.get(`${ML_BASE}/items`, {
+            headers: { Authorization: `Bearer ${tk.token}` },
+            params:  { ids: idsToQuery, attributes: 'id,thumbnail' },
+            timeout: 6000,
+          }),
+        ),
+      )
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue
+        const batch = r.value.data
+        ;(Array.isArray(batch) ? batch : [])
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((b: any) => b.code === 200)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .forEach((b: any) => {
+            if (b.body?.id && !thumbMap[b.body.id]) {
+              thumbMap[b.body.id] = b.body.thumbnail ?? ''
+            }
+          })
+      }
+
+      // Inject thumbs no order_items
+      for (const o of orders) {
+        const items = (o.order_items as Array<{ item?: { id?: string; thumbnail?: string | null } }>) ?? []
+        for (const it of items) {
+          if (it.item?.id && !it.item.thumbnail && thumbMap[it.item.id]) {
+            it.item.thumbnail = thumbMap[it.item.id]
+          }
+        }
+      }
+    }
+
+    // ── 2. Payments + shipping detail — só pra orders sem payments ──────
+    // Pedidos antigos têm payments=[]. Buscamos GET /orders/{id} pra
+    // popular payments[], paid_amount, status_detail e shipping detalhado.
+    // Cap em 8 pra não fazer 20 chamadas por pageload.
+    const needsDetail = orders.filter(o => {
+      const payments = (o.payments as unknown[] | undefined) ?? []
+      return payments.length === 0
+    }).slice(0, 8)
+
+    if (needsDetail.length > 0) {
+      // Acumula updates pra escrever em batch ao final (1 statement)
+      const persistBuf: Array<{ external_order_id: string; raw_patch: Record<string, unknown> }> = []
+
+      await Promise.allSettled(needsDetail.map(async (o) => {
+        const orderId = o.order_id as number | string
+        for (const tk of tokens) {
+          try {
+            const { data } = await axios.get<Record<string, unknown>>(
+              `${ML_BASE}/orders/${orderId}`,
+              {
+                headers: { Authorization: `Bearer ${tk.token}`, 'x-version': '2' },
+                timeout: 6000,
+              },
+            )
+            // Sucesso (token tem acesso ao pedido): mescla campos faltantes
+            const payments       = (data.payments       as unknown[]) ?? []
+            const paidAmount     = data.paid_amount     as number | undefined
+            const statusDetail   = data.status_detail   as unknown
+            const shippingFull   = (data.shipping       as Record<string, unknown> | undefined) ?? {}
+
+            if (payments.length > 0) o.payments = payments
+            if (paidAmount != null)  o.paid_amount = paidAmount
+            if (statusDetail != null) o.status_detail = statusDetail
+            if (Object.keys(shippingFull).length > 0) {
+              const cur = (o.shipping as Record<string, unknown>) ?? {}
+              o.shipping = { ...cur, ...shippingFull, ...{
+                receiver_address: shippingFull.receiver_address ?? cur.receiver_address,
+              } }
+            }
+
+            // Persiste no raw_data pra próxima página não re-buscar
+            persistBuf.push({
+              external_order_id: String(orderId),
+              raw_patch: {
+                payments,
+                paid_amount:   paidAmount ?? null,
+                status_detail: statusDetail ?? null,
+                shipping:      Object.keys(shippingFull).length > 0 ? shippingFull : null,
+              },
+            })
+            return // sucesso, não tenta outros tokens
+          } catch {
+            // 401/403 → token errado, tenta próximo. 404 → pedido fora de janela.
+            continue
+          }
+        }
+      }))
+
+      // Persiste enrichments — usa raw_data jsonb merge via SQL.
+      // Não bloqueia retorno se falhar (logger.warn).
+      if (persistBuf.length > 0) {
+        await Promise.allSettled(persistBuf.map(async ({ external_order_id, raw_patch }) => {
+          // Lê raw_data atual e mescla — Supabase não tem `||` operator no client
+          const { data: current } = await supabaseAdmin
+            .from('orders')
+            .select('raw_data')
+            .eq('external_order_id', external_order_id)
+            .eq('organization_id', orgId)
+            .maybeSingle()
+
+          const merged = {
+            ...((current?.raw_data as Record<string, unknown>) ?? {}),
+            ...raw_patch,
+          }
+
+          await supabaseAdmin
+            .from('orders')
+            .update({ raw_data: merged })
+            .eq('external_order_id', external_order_id)
+            .eq('organization_id', orgId)
+        })).catch(err => this.logger.warn(`[orders.list.enrich.persist] ${(err as Error).message}`))
+      }
+    }
   }
 
   /** KPIs agregados pra header da tela de pedidos.
