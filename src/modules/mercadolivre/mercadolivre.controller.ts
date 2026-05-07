@@ -410,6 +410,18 @@ export class MercadolivreController {
     return this.ml.answerQuestion(user.orgId!, Number(id), body.text, sellerId)
   }
 
+  // DELETE /ml/questions/:id?seller_id=...  — exclui no ML
+  @Delete('questions/:id')
+  @HttpCode(HttpStatus.OK)
+  deleteQuestion(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    const sid = sellerId != null ? Number(sellerId) : undefined
+    return this.ml.deleteQuestion(user.orgId!, Number(id), sid)
+  }
+
   // POST /ml/questions/:id/suggest-answer
   @Post('questions/:id/suggest-answer')
   @HttpCode(HttpStatus.OK)

@@ -1156,6 +1156,42 @@ export class MercadolivreService {
     }
   }
 
+  /** Exclui pergunta no ML (DELETE /questions/:id).
+   *  - Multi-conta: sellerId obrigatorio (perguntas pertencem a UMA conta)
+   *  - ML so permite excluir perguntas nao respondidas pelo seller dono
+   *  - Apos excluir, sumir local nao precisa: a proxima listagem ja nao
+   *    retorna a pergunta deletada
+   */
+  async deleteQuestion(orgId: string | null, questionId: number, sellerId?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerId)
+    try {
+      const { data } = await axios.delete(
+        `${ML_BASE}/questions/${questionId}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      return data
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      const mlMsg: string = err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? ''
+      console.error('[delete-question] ML error:', status, mlMsg)
+
+      if (status === 400) {
+        const lower = mlMsg.toLowerCase()
+        if (lower.includes('already answered') || lower.includes('answered')) {
+          throw new HttpException('Pergunta ja foi respondida e nao pode ser excluida', 400)
+        }
+        throw new HttpException(mlMsg || 'Dados invalidos', 400)
+      }
+      if (status === 403) {
+        throw new HttpException('Sem permissao pra excluir essa pergunta (talvez seja de outra conta)', 403)
+      }
+      if (status === 404) {
+        throw new HttpException('Pergunta nao encontrada (talvez ja excluida)', 404)
+      }
+      throw new HttpException(mlMsg || 'Erro ao excluir pergunta', status)
+    }
+  }
+
   async getClaims(orgId: string, sellerIdFilter?: number) {
     try {
       const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
