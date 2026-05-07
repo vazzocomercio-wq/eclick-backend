@@ -259,7 +259,9 @@ export class MlCampaignsSyncService {
     return stats
   }
 
-  /** Sync items de 1 campanha em 1 status, com paginacao search_after. */
+  /** Sync items de 1 campanha em 1 status, com paginacao search_after.
+   *  DEFENSIVO: ML retorna shapes diferentes — { results: [...] }, array
+   *  direto, ou nada. Falhas em items individuais nao param a paginacao. */
   private async syncCampaignItemsByStatus(
     orgId:         string,
     sellerId:      number,
@@ -274,7 +276,7 @@ export class MlCampaignsSyncService {
     const MAX_PAGES = 100  // safety
 
     do {
-      let resp
+      let resp: any
       try {
         resp = await this.client.listCampaignItems(token, sellerId, mlCampaignId, promotionType, {
           status, searchAfter, limit: 50,
@@ -286,13 +288,25 @@ export class MlCampaignsSyncService {
         break
       }
 
-      for (const item of resp.results) {
-        await this.upsertItem(orgId, sellerId, campaignRowId, mlCampaignId, promotionType, item, status)
-        items++
+      // Normaliza shape: ML as vezes retorna { results: [...] }, as vezes
+      // array direto, as vezes null. Tudo isso vira [] vazio.
+      const results: MlPromotionItem[] = Array.isArray(resp?.results)
+        ? resp.results
+        : Array.isArray(resp)
+          ? resp
+          : []
+
+      for (const item of results) {
+        try {
+          await this.upsertItem(orgId, sellerId, campaignRowId, mlCampaignId, promotionType, item, status)
+          items++
+        } catch (e) {
+          this.logger.warn(`[campaigns] upsert item ${(item as any)?.id} falhou: ${(e as Error).message}`)
+        }
       }
 
-      searchAfter = resp.paging?.searchAfter
-      if (!searchAfter) break
+      searchAfter = resp?.paging?.searchAfter ?? resp?.paging?.search_after
+      if (!searchAfter || results.length === 0) break
       if (pages >= MAX_PAGES) {
         this.logger.warn(`[campaigns] MAX_PAGES atingido pra ${mlCampaignId}/${status}`)
         break
