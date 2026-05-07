@@ -31,6 +31,11 @@ import {
   buildTransformToneUserPrompt,
   type ToneVariant,
 } from './prompts/transform-tone.prompt'
+import {
+  CLAIM_REMOVAL_SYSTEM_PROMPT,
+  buildClaimRemovalUserPrompt,
+  type ClaimRemovalPromptContext,
+} from './prompts/claim-removal.prompt'
 
 /**
  * Núcleo compartilhado de IA pros módulos de Mercado Livre (perguntas pré-venda
@@ -154,6 +159,45 @@ export class MlAiCoreService {
     }
   }
 
+  // ── Detector híbrido de exclusão de reclamação (Haiku, JSON) ───────────
+
+  /**
+   * Analisa se uma mensagem do comprador (já filtrada por regex match +
+   * claim aberto) é candidata a exclusão de reclamação. Retorna estrutura
+   * com confidence + sugestão de ação + texto pra solicitar ao ML.
+   *
+   * Caller responsabilidade: chamar SOMENTE depois de confirmar que existe
+   * claim aberto pra essa conversa (evita custo desnecessário).
+   */
+  async analyzeClaimRemoval(orgId: string, ctx: ClaimRemovalPromptContext): Promise<ClaimRemovalAnalysisResult> {
+    if (!ctx.message?.trim()) throw new BadRequestException('message obrigatório')
+    if (ctx.matchedKeywords.length === 0) {
+      throw new BadRequestException('matchedKeywords obrigatório (deve passar pelo regex antes)')
+    }
+
+    const out = await this.llm.generateText({
+      orgId,
+      feature:      'ml_claim_removal',
+      systemPrompt: CLAIM_REMOVAL_SYSTEM_PROMPT,
+      userPrompt:   buildClaimRemovalUserPrompt(ctx),
+      maxTokens:    600,
+      jsonMode:     true,
+    })
+
+    const parsed = parseClaimRemovalJson(out.text)
+
+    // Salvaguarda: spec não permite isCandidate=true com confidence=low
+    if (parsed.isCandidate && parsed.confidence === 'low') {
+      this.logger.warn('[ml-claim-removal] LLM retornou isCandidate=true + confidence=low, forçando isCandidate=false')
+      parsed.isCandidate = false
+    }
+
+    return {
+      ...parsed,
+      llm: pickLlmMeta(out),
+    }
+  }
+
   // ── Transformação de tom (Haiku) ────────────────────────────────────────
 
   /**
@@ -217,6 +261,15 @@ export interface SuggestionResult {
   llm:         LlmMeta
 }
 
+export interface ClaimRemovalAnalysisResult {
+  isCandidate:           boolean
+  confidence:            'low' | 'medium' | 'high'
+  reason:                string
+  suggestedAction:       string
+  suggestedRequestText:  string | null
+  llm:                   LlmMeta
+}
+
 export interface QuestionSuggestionResult {
   text: string
   llm:  LlmMeta
@@ -254,6 +307,30 @@ function sanitizePostsale(raw: string): string {
   // Compress whitespace múltiplo em 1 espaço (mas mantém \n)
   text = text.split('\n').map(line => line.replace(/[ \t]+/g, ' ').trim()).join('\n')
   return text.trim()
+}
+
+/** Parse + valida JSON da análise de exclusão de reclamação. */
+function parseClaimRemovalJson(raw: string): Omit<ClaimRemovalAnalysisResult, 'llm'> {
+  let parsed: Record<string, unknown>
+  try {
+    let cleaned = raw.trim()
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
+    }
+    parsed = JSON.parse(cleaned)
+  } catch (e) {
+    throw new BadRequestException(`Análise de exclusão retornou JSON inválido: ${(e as Error).message} | raw=${raw.slice(0, 200)}`)
+  }
+  const isCandidate          = parsed.isCandidate === true
+  const confRaw              = String(parsed.confidence ?? 'low').toLowerCase()
+  const confidence           = (['low', 'medium', 'high'].includes(confRaw)
+    ? confRaw : 'low') as 'low' | 'medium' | 'high'
+  const reason               = String(parsed.reason ?? '').slice(0, 500)
+  const suggestedAction      = String(parsed.suggestedAction ?? '').slice(0, 500)
+  const suggestedRequestText = parsed.suggestedRequestText
+    ? String(parsed.suggestedRequestText).slice(0, 350)
+    : null
+  return { isCandidate, confidence, reason, suggestedAction, suggestedRequestText }
 }
 
 /** Parse + valida JSON do classificador. Lança erro se shape errada. */

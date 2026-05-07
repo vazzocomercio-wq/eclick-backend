@@ -174,6 +174,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Intelligence Hub MVP 2 — detector híbrido de exclusão de reclamação ML.
+  // Haiku é suficiente: input curto + JSON estruturado.
+  ml_claim_removal: {
+    label:       'Exclusão de reclamação (ML pós-venda)',
+    description: 'Analisa se mensagem do comprador indica que reclamação pode ser excluída',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
   // Onda 4 A4: Copiloto da Loja (admin assistant)
   store_copilot: {
     label:       'Copiloto da Loja (A4)',

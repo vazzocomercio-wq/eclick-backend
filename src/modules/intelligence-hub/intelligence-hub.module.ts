@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { ChannelsModule } from '../channels/channels.module'
+import { EventsModule } from '../events/events.module'
 import { AlertManagersController } from './alert-managers.controller'
 import { AlertManagersService } from './alert-managers.service'
 import { AlertHubController } from './alert-hub.controller'
@@ -42,7 +43,7 @@ import { AlertResponseService } from './delivery/alert-response.service'
  * mitigado lá).
  */
 @Module({
-  imports:     [ChannelsModule],
+  imports:     [ChannelsModule, EventsModule],
   controllers: [AlertManagersController, AlertHubController, AnalyzersController],
   providers:   [
     AlertManagersService,

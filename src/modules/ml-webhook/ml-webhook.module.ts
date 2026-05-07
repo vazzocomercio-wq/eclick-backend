@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { MlPostsaleModule } from '../ml-postsale/ml-postsale.module'
+import { MlVerticalModule } from '../ml-vertical/ml-vertical.module'
 import { MlWebhookController } from './ml-webhook.controller'
 import { MlWebhookDispatcherService } from './ml-webhook-dispatcher.service'
 
@@ -14,7 +15,7 @@ import { MlWebhookDispatcherService } from './ml-webhook-dispatcher.service'
  *   - outros    → log e ignora
  */
 @Module({
-  imports:     [MercadolivreModule, MlPostsaleModule],
+  imports:     [MercadolivreModule, MlPostsaleModule, MlVerticalModule],
   controllers: [MlWebhookController],
   providers:   [MlWebhookDispatcherService],
 })

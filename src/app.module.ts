@@ -58,6 +58,7 @@ import { StoreConfigModule } from './modules/store-config/store-config.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
 import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
 import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
+import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
 
 @Module({
   imports: [
@@ -116,6 +117,7 @@ import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
     StoreCopilotModule,
     StoreConfigModule,
     MlAiCoreModule,
+    MlVerticalModule,
     MlPostsaleModule,
     MlWebhookModule,
   ],

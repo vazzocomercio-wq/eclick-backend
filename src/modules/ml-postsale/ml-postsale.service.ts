@@ -1,9 +1,11 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, Optional } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { MlAiCoreService } from '../ml-ai-core/ml-ai-core.service'
 import { EventsGateway } from '../events/events.gateway'
+import { AlertSignalsService } from '../intelligence-hub/alert-signals.service'
+import { MlClaimRemovalService } from '../ml-vertical/services/ml-claim-removal.service'
 import { businessHoursElapsed } from './helpers/business-hours'
 import { slaState, type SlaState } from './helpers/sla-state'
 import type {
@@ -48,6 +50,13 @@ export class MlPostsaleService {
     private readonly ml:     MercadolivreService,
     private readonly aiCore: MlAiCoreService,
     private readonly events: EventsGateway,
+    /**
+     * Intelligence Hub MVP 2 hooks — opcionais pra que o módulo continue
+     * funcionando se MlVerticalModule/IntelligenceHubModule não estiverem
+     * carregados (ex: ambiente de teste).
+     */
+    @Optional() private readonly alertSignals?: AlertSignalsService,
+    @Optional() private readonly claimRemoval?: MlClaimRemovalService,
   ) {}
 
   // ════════════════════════════════════════════════════════════════════════
@@ -357,6 +366,57 @@ export class MlPostsaleService {
       intent:         classification.intent,
       risk:           classification.risk,
     })
+
+    // ── Intelligence Hub MVP 2 hooks ──────────────────────────────────────
+
+    // Hook 1: critical_message — dispara signal pro Intelligence Hub
+    if (classification.risk === 'critico' && this.alertSignals) {
+      try {
+        const buyerLabel = conv.buyer_nickname ?? `comprador #${conv.buyer_id}`
+        const truncated = text.length > 200 ? `${text.slice(0, 200)}…` : text
+        await this.alertSignals.insertMany(orgId, [{
+          analyzer:    'ml',
+          category:    'critical_message',
+          severity:    'critical',
+          score:       80,
+          entity_type: null,
+          entity_id:   conv.id,
+          entity_name: buyerLabel,
+          data: {
+            conversation_id: conv.id,
+            message_id:      messageId,
+            buyer_nickname:  conv.buyer_nickname,
+            intent:          classification.intent,
+            sentiment:       classification.sentiment,
+            urgency:         classification.urgency,
+          },
+          summary_pt:
+            `🚨 Mensagem crítica de ${buyerLabel}\n` +
+            `Risco: ${classification.intent} | Sentimento: ${classification.sentiment}\n\n` +
+            `"${truncated}"`,
+          suggestion_pt: 'Abra a inbox de pós-venda e responda imediatamente — preserve SLA + reputação.',
+        }])
+      } catch (e) {
+        this.logger.warn(`[postsale.critical_message] emit falhou msg=${messageId}: ${(e as Error).message}`)
+      }
+    }
+
+    // Hook 2: claim_removal — só roda se Intelligence Hub vertical ativo
+    if (this.claimRemoval) {
+      try {
+        await this.claimRemoval.analyzeMessage(orgId, {
+          id:              messageId,
+          text,
+          conversation_id: conv.id,
+        }, {
+          id:              conv.id,
+          organization_id: orgId,
+          buyer_nickname:  conv.buyer_nickname,
+        })
+      } catch (e) {
+        this.logger.warn(`[postsale.claim_removal] analyze falhou msg=${messageId}: ${(e as Error).message}`)
+      }
+    }
   }
 
   private async buildContextSnapshot(orgId: string, conv: ConversationRow): Promise<ConversationContextSnapshot> {

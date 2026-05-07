@@ -106,12 +106,17 @@ export class AnalyzersSchedulerService {
    */
   private registry(): Record<AnalyzerName, BaseAnalyzer | undefined> {
     return {
-      estoque:     this.estoque,
-      compras:     this.compras,
-      preco:       undefined,        // PRC-2: PricingIntelligence é fonte
-      margem:      this.margem,
-      ads:         this.ads,
-      cross_intel: undefined,
+      estoque:      this.estoque,
+      compras:      this.compras,
+      preco:        undefined,        // PRC-2: PricingIntelligence é fonte
+      margem:       this.margem,
+      ads:          this.ads,
+      cross_intel:  undefined,
+      atendente_ia: undefined,        // AI-5: bridge inline em AiResponderService
+      ml:           undefined,        // ML vertical (MVP 2 do Pós-venda) usa
+                                       // services próprios (MlClaimsService,
+                                       // MlReputationService, etc.) com cron
+                                       // específico, não BaseAnalyzer scan-style.
     } as Record<AnalyzerName, BaseAnalyzer | undefined>
   }
 }

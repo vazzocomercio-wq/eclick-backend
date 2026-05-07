@@ -7,7 +7,21 @@
  */
 
 export type AnalyzerName =
-  | 'compras' | 'preco' | 'estoque' | 'margem' | 'ads' | 'cross_intel'
+  | 'compras' | 'preco' | 'estoque' | 'margem' | 'ads' | 'cross_intel' | 'atendente_ia'
+  | 'ml'
+
+/**
+ * Categorias da vertical ML (MVP 2 do Pós-venda — sprint Intelligence Hub
+ * vertical ML). Usados como `category` em SignalDraft + match em
+ * alert_routing_rules.categories.
+ */
+export type MlSignalCategory =
+  | 'claim_opened'
+  | 'mediation_started'
+  | 'shipping_delayed'
+  | 'reputation_dropped'
+  | 'critical_message'
+  | 'claim_removal_candidate'
 
 export type AlertSeverity = 'critical' | 'warning' | 'info'
 

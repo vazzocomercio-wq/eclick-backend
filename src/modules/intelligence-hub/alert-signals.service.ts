@@ -1,5 +1,6 @@
-import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException, Logger, Optional } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { EventsGateway } from '../events/events.gateway'
 import {
   type AlertSignal, type AlertSignalStatus, type AnalyzerName, type SignalDraft,
   severityFromScore,
@@ -16,6 +17,13 @@ import {
 @Injectable()
 export class AlertSignalsService {
   private readonly logger = new Logger(AlertSignalsService.name)
+
+  /**
+   * EventsGateway é opcional pra evitar dependência circular com módulos
+   * que ainda não importam EventsModule. Quando presente, emite
+   * `intelligence:alert` em real-time além da persistência.
+   */
+  constructor(@Optional() private readonly events?: EventsGateway) {}
 
   async insertMany(orgId: string, drafts: SignalDraft[]): Promise<AlertSignal[]> {
     if (drafts.length === 0) return []
@@ -44,6 +52,32 @@ export class AlertSignalsService {
     if (error) throw new BadRequestException(error.message)
 
     this.logger.log(`[insertMany] org=${orgId} analyzer=${drafts[0]?.analyzer} count=${data?.length ?? 0}`)
+
+    // Emite Socket.IO `intelligence:alert` por signal — UI faz toast persistente
+    // + atualiza badge de alertas no menu lateral.
+    if (this.events) {
+      for (const sig of (data ?? []) as AlertSignal[]) {
+        try {
+          this.events.emitToOrg(orgId, 'intelligence:alert', {
+            id:         sig.id,
+            analyzer:   sig.analyzer,
+            category:   sig.category,
+            severity:   sig.severity,
+            score:      sig.score,
+            entity_type: sig.entity_type,
+            entity_id:  sig.entity_id,
+            entity_name: sig.entity_name,
+            summary:    sig.summary_pt,
+            suggestion: sig.suggestion_pt,
+            data:       sig.data,
+            created_at: sig.created_at,
+          })
+        } catch (e) {
+          this.logger.warn(`[insertMany.emit] sig=${sig.id}: ${(e as Error).message}`)
+        }
+      }
+    }
+
     return (data ?? []) as AlertSignal[]
   }
 

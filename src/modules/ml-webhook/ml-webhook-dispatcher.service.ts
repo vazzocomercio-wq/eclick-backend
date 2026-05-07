@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MlPostsaleService } from '../ml-postsale/ml-postsale.service'
 import { MlQuestionsAiService } from '../mercadolivre/ml-questions-ai.service'
+import { MlClaimsService } from '../ml-vertical/services/ml-claims.service'
 import type { MlWebhookPayload } from './ml-webhook.types'
 
 /**
@@ -17,6 +18,7 @@ export class MlWebhookDispatcherService {
   constructor(
     private readonly postsale:  MlPostsaleService,
     private readonly questions: MlQuestionsAiService,
+    private readonly claims:    MlClaimsService,
   ) {}
 
   async dispatch(payload: MlWebhookPayload): Promise<void> {
@@ -48,6 +50,11 @@ export class MlWebhookDispatcherService {
           } else {
             this.logger.warn(`[ml-webhook] questions resource sem id: ${payload.resource}`)
           }
+          break
+        }
+        case 'claims': {
+          // resource: /post-purchase/v1/claims/{id} ou /claims/{id}
+          await this.claims.handleClaimWebhook(orgId, payload.user_id, payload.resource)
           break
         }
         default:
