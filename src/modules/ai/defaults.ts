@@ -67,6 +67,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    null,
   },
+  // F8 Campaign Center — reasoning enriquecido por LLM em recomendacoes de
+  // campanha. Sonnet pra qualidade analitica. Cap diario configuravel
+  // por org via ml_campaigns_config.ai_daily_cap_usd.
+  ml_campaign_reasoning: {
+    label:       'Reasoning de recomendacao (Campaign Center)',
+    description: 'Gera analise textual de recomendacao IA pra campanha ML',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+  },
+
   // Sprint F6 IA Criativo — Vision + listing generation
   creative_vision: {
     label:       'Análise visual de produto (Creative)',

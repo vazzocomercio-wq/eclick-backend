@@ -16,6 +16,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { MlCampaignsCostService } from './ml-campaigns-cost.service'
+import { MlCampaignsReasoningService } from './ml-campaigns-reasoning.service'
 import type {
   CostBreakdown,
   PriceScenario,
@@ -55,8 +56,9 @@ export class MlCampaignsDecisionService {
   private readonly logger = new Logger(MlCampaignsDecisionService.name)
 
   constructor(
-    private readonly ml:    MercadolivreService,
-    private readonly costs: MlCampaignsCostService,
+    private readonly ml:        MercadolivreService,
+    private readonly costs:     MlCampaignsCostService,
+    private readonly reasoning: MlCampaignsReasoningService,
   ) {}
 
   // ── Geracao em lote ─────────────────────────────────────────────
@@ -168,10 +170,54 @@ export class MlCampaignsDecisionService {
     // 8. Classifica
     const classification = this.classify(score, scenarios, qtyRec, config, salesData)
 
-    // 9. Texto explicativo via template (deterministico)
-    const reasoning = this.buildDeterministicReasoning({
+    // 9. Texto explicativo: tenta IA primeiro (respeita cap), fallback template
+    const deterministicReasoning = this.buildDeterministicReasoning({
       item, campaign: campaignRow, scenarios, qtyRec, score, classification, salesData,
     })
+
+    let reasoning = deterministicReasoning
+    let aiUsed = false
+    let aiCost = 0
+    if (classification.type !== 'review_costs' && classification.type !== 'low_quality_listing') {
+      // Tenta IA so pra casos onde reasoning enriquecido faz diferenca
+      const aiOutput = await this.reasoning.generateReasoning({
+        orgId:    item.organization_id,
+        sellerId: item.seller_id,
+        campaign: {
+          name:                campaignRow.name,
+          promotion_type:      campaignRow.ml_promotion_type,
+          deadline_date:       campaignRow.deadline_date,
+          has_subsidy_items:   campaignRow.has_subsidy_items ?? false,
+          avg_meli_subsidy_pct:campaignRow.avg_meli_subsidy_pct,
+        },
+        item: {
+          ml_item_id:       item.ml_item_id,
+          original_price:   item.original_price,
+          has_meli_subsidy: item.has_meli_subsidy,
+          meli_percentage:  item.meli_percentage,
+        },
+        cost_breakdown: costBreakdown as unknown as Record<string, number>,
+        scenarios:      scenarios as unknown as Parameters<typeof this.reasoning.generateReasoning>[0]['scenarios'],
+        quantity_recommendation: {
+          current_stock:       qtyRec.current_stock,
+          avg_daily_sales:     qtyRec.avg_daily_sales,
+          recommended_max_qty: qtyRec.recommended_max_qty,
+          rupture_risk:        qtyRec.rupture_risk,
+        },
+        score:          { total: score.total, breakdown: score as unknown as Record<string, number> },
+        classification: {
+          type:     classification.type,
+          strategy: classification.strategy,
+          price:    classification.price,
+        },
+        sales_30d: salesData.last_30d,
+      })
+      if (aiOutput) {
+        reasoning = aiOutput.text
+        aiUsed = true
+        aiCost = aiOutput.cost_usd
+      }
+    }
 
     // 10. Warnings
     const warnings = this.identifyWarnings({ item, scenarios, qtyRec })
@@ -183,9 +229,9 @@ export class MlCampaignsDecisionService {
       scenarios, qtyRec, score,
       classification, reasoning, warnings,
       generation_metadata: {
-        engine_version:   'deterministic-v1',
-        ai_reasoning_used: false,
-        ai_cost_usd:       0,
+        engine_version:    'deterministic-v1',
+        ai_reasoning_used: aiUsed,
+        ai_cost_usd:       aiCost,
         generated_in_ms:   Date.now() - t0,
       },
     })
