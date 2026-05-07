@@ -55,6 +55,9 @@ import { KitsModule } from './modules/kits/kits.module'
 import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 import { StoreConfigModule } from './modules/store-config/store-config.module'
+import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
+import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
+import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
 
 @Module({
   imports: [
@@ -112,6 +115,9 @@ import { StoreConfigModule } from './modules/store-config/store-config.module'
     StorefrontModule,
     StoreCopilotModule,
     StoreConfigModule,
+    MlAiCoreModule,
+    MlPostsaleModule,
+    MlWebhookModule,
   ],
   controllers: [AppController],
   providers: [AppService],

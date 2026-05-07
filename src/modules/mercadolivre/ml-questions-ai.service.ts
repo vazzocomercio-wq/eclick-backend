@@ -1,8 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
-import { Cron } from '@nestjs/schedule'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from './mercadolivre.service'
+import { MlAiCoreService } from '../ml-ai-core/ml-ai-core.service'
 import { LlmService } from '../ai/llm.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
@@ -18,27 +18,27 @@ const TRANSFORM_PROMPTS: Record<TransformAction, string> = {
 
 const AUTO_SEND_FEATURE_KEY = 'ml_question_auto_send'
 
-function stripMarkdownHeader(raw: string): string {
-  let text = raw.trim()
-  // Remove TODAS as linhas iniciais que sao headers markdown (#, ##, ###...)
-  // Loop pra cobrir multiplos headers em sequencia.
-  while (/^\s*#{1,6}\s+/.test(text)) {
-    text = text.replace(/^\s*#{1,6}\s+[^\n]*\n*/, '').trim()
-  }
-  // Remove "Resposta:" / "Resposta ao Cliente:" no inicio (com ou sem #)
-  text = text.replace(/^(?:#+\s*)?Resposta(\s+ao\s+Cliente)?\s*:?\s*/i, '').trim()
-  // Remove **negrito** mantendo conteudo (texto plano)
-  text = text.replace(/\*\*([^*]+)\*\*/g, '$1')
-  return text
-}
-
+/**
+ * Atendente IA pra perguntas pré-venda do Mercado Livre.
+ *
+ * REFATOR (Sprint ML Pós-venda MVP 1):
+ *   - Cron @5min REMOVIDO. Eventos chegam via webhook (MlWebhookDispatcher).
+ *   - Prompt inline da sugestão MIGRADO pra MlAiCoreService.suggestQuestion.
+ *   - Transformações (shorten/humanize/add_warranty/ready_response) continuam
+ *     aqui porque são específicas de perguntas + texto editado pelo user;
+ *     consumem LlmService direto via MlAiCoreService NÃO faz sentido (não tem
+ *     método transformQuestion separado e os prompts são curtos).
+ *   - O método pollAndSuggest fica disponível pra trigger manual e migração
+ *     gradual; o cron some.
+ */
 @Injectable()
 export class MlQuestionsAiService {
   private readonly logger = new Logger(MlQuestionsAiService.name)
 
   constructor(
-    private readonly ml: MercadolivreService,
-    private readonly llm: LlmService,
+    private readonly ml:   MercadolivreService,
+    private readonly core: MlAiCoreService,
+    private readonly llm:  LlmService,
   ) {}
 
   // ── Parte A — Transformações sobre texto editado ────────────────────────
@@ -47,6 +47,8 @@ export class MlQuestionsAiService {
     if (!text?.trim()) throw new BadRequestException('text obrigatório')
     if (!TRANSFORM_PROMPTS[action]) throw new BadRequestException(`action inválida: ${action}`)
 
+    // Prompt inline curto (não vale modularizar 4 string templates que vivem
+    // só aqui). LlmService já roteia provider/modelo per-org.
     const result = await this.llm.generateText({
       orgId,
       feature:      'ml_question_transform',
@@ -55,7 +57,17 @@ export class MlQuestionsAiService {
       maxTokens:    400,
     })
 
-    return { transformed: stripMarkdownHeader(result.text) }
+    // Reusa o sanitizer do core indiretamente: stripQuestionMarkdownHeader
+    // está exportado no prompt de pergunta. Importar duplicaria; replicamos
+    // o trim básico aqui.
+    let cleaned = result.text.trim()
+    while (/^\s*#{1,6}\s+/.test(cleaned)) {
+      cleaned = cleaned.replace(/^\s*#{1,6}\s+[^\n]*\n*/, '').trim()
+    }
+    cleaned = cleaned.replace(/^(?:#+\s*)?Resposta(\s+ao\s+Cliente)?\s*:?\s*/i, '').trim()
+    cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, '$1')
+
+    return { transformed: cleaned }
   }
 
   // ── Parte B — Sugestão + envio aprovado ─────────────────────────────────
@@ -102,34 +114,17 @@ export class MlQuestionsAiService {
       .limit(1)
       .maybeSingle()
 
-    const systemPrompt =
-      `Você é assistente de vendas do Mercado Livre.\n` +
-      `${agent?.system_prompt ?? 'Seja objetivo e profissional.'}\n` +
-      `REGRAS:\n` +
-      `- Responda só sobre o produto, máx 3 linhas, português brasileiro, sem mencionar concorrentes.\n` +
-      `- NUNCA use markdown: nada de #, ##, ###, **negrito**, _itálico_, listas com - ou *.\n` +
-      `- NUNCA inicie com título/header tipo "# Resposta ao Cliente", "## Resposta", "Resposta:" ou similar.\n` +
-      `- Comece DIRETO com a saudação ao cliente (ex: "Olá! Obrigado pela pergunta..." ou "Oi! ...").`
-
-    const historyBlock = history.length > 0
-      ? 'HISTÓRICO P&R:\n' + history.map(h => `P:${h.question}\nR:${h.answer}`).join('\n')
-      : 'HISTÓRICO P&R: (sem histórico)'
-
-    const userPrompt =
-      `PRODUTO: ${item?.title ?? '?'} | R$${item?.price ?? '?'} | ${item?.condition ?? 'novo'} | ${item?.available_quantity ?? 0} em estoque\n` +
-      `${historyBlock}\n` +
-      `PERGUNTA: ${question.text}\n` +
-      `Responda de forma direta e precisa.`
-
-    const llmOut = await this.llm.generateText({
-      orgId,
-      feature:      'ml_question_suggest',
-      systemPrompt,
-      userPrompt,
-      maxTokens:    300,
+    // Núcleo compartilhado: prompt + chamada LLM + sanitização
+    const suggestion = await this.core.suggestQuestion(orgId, {
+      agentSystemPrompt: agent?.system_prompt ?? undefined,
+      productTitle:      item?.title,
+      productPrice:      item?.price,
+      productCondition:  item?.condition,
+      availableQuantity: item?.available_quantity,
+      history,
+      questionText:      question.text,
     })
-
-    const suggestedAnswer = stripMarkdownHeader(llmOut.text)
+    const suggestedAnswer = suggestion.text
 
     const lower = suggestedAnswer.toLowerCase()
     let confidence = 0.9
@@ -184,6 +179,11 @@ export class MlQuestionsAiService {
     return { ok: true }
   }
 
+  /**
+   * Processa todas as UNANSWERED do org e gera sugestão pra cada uma nova.
+   * Continua disponível pra trigger manual ou migração gradual; NÃO roda
+   * mais via @Cron (Sprint ML Pós-venda MVP 1 migra pra webhook).
+   */
   async pollAndSuggest(orgId: string): Promise<{ processed: number; auto_sent: number }> {
     let processed = 0
     let autoSent  = 0
@@ -243,31 +243,59 @@ export class MlQuestionsAiService {
     return { processed, auto_sent: autoSent }
   }
 
-  @Cron('*/5 * * * *', { name: 'ml-questions-ai-poll' })
-  async pollAllOrgs() {
+  /**
+   * Trata um evento de pergunta vindo do webhook ML.
+   * topic: questions, resource: /questions/{id}.
+   *
+   * Sprint ML Pós-venda MVP 1 — substitui o cron @5min.
+   */
+  async handleQuestionWebhook(orgId: string, questionId: string): Promise<void> {
     try {
-      const { data: rows } = await supabaseAdmin
-        .from('ml_connections')
-        .select('organization_id')
+      const { data: existing } = await supabaseAdmin
+        .from('ml_question_suggestions')
+        .select('question_id, status')
+        .eq('organization_id', orgId)
+        .eq('question_id', questionId)
+        .maybeSingle()
 
-      const orgs = [...new Set(
-        ((rows ?? []) as Array<{ organization_id: string | null }>)
-          .map(r => r.organization_id)
-          .filter((x): x is string => !!x),
-      )]
-
-      let totalProc = 0, totalSent = 0
-      for (const orgId of orgs) {
-        const { processed, auto_sent } = await this.pollAndSuggest(orgId)
-        totalProc += processed
-        totalSent += auto_sent
+      if (existing && existing.status !== 'pending') {
+        // Já temos sugestão e usuário/auto-send agiu — ignora.
+        return
       }
-      if (totalProc > 0 || totalSent > 0) {
-        this.logger.log(`[ml-questions-ai-poll] orgs=${orgs.length} processed=${totalProc} auto_sent=${totalSent}`)
+      // Gera sugestão (idempotente via upsert na suggestAnswer).
+      await this.suggestAnswer(orgId, questionId)
+
+      // Aplica auto-send se ligado e elegível.
+      const autoSendOn = await this.getAutoSendEnabled(orgId)
+      if (!autoSendOn) return
+
+      const { data: row } = await supabaseAdmin
+        .from('ml_question_suggestions')
+        .select('suggested_answer, auto_send_eligible')
+        .eq('organization_id', orgId)
+        .eq('question_id', questionId)
+        .maybeSingle()
+      if (!row?.auto_send_eligible || !row.suggested_answer) return
+
+      try {
+        await this.ml.answerQuestion(orgId, Number(questionId), row.suggested_answer)
+        await supabaseAdmin
+          .from('ml_question_suggestions')
+          .update({
+            status:       'auto_sent',
+            final_answer: row.suggested_answer,
+            used_as_is:   true,
+            updated_at:   new Date().toISOString(),
+          })
+          .eq('organization_id', orgId)
+          .eq('question_id', questionId)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        this.logger.warn(`[webhook auto-send] q=${questionId} falhou: ${msg}`)
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      this.logger.error(`[ml-questions-ai-poll] erro: ${msg}`)
+      this.logger.warn(`[webhook] org=${orgId} q=${questionId} falhou: ${msg}`)
     }
   }
 

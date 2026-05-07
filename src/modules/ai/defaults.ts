@@ -153,6 +153,27 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // ML Pós-venda MVP 1 — classifier roda Haiku (rápido + barato),
+  // suggest roda Sonnet (qualidade + adesão a regras de marketplace),
+  // transform usa Haiku.
+  ml_postsale_classify: {
+    label:       'Classificador pós-venda (ML)',
+    description: 'Classifica intent/sentiment/urgency/risk de mensagem pós-venda do ML',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
+  ml_postsale_suggest: {
+    label:       'Sugestão de resposta pós-venda (ML)',
+    description: 'Gera resposta sugerida ≤350 chars para mensagem pós-venda do ML',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  ml_postsale_transform: {
+    label:       'Transformar tom (ML pós-venda)',
+    description: 'Reescreve resposta com tom mais empático ou mais objetivo, mantendo ≤350 chars',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
   // Onda 4 A4: Copiloto da Loja (admin assistant)
   store_copilot: {
     label:       'Copiloto da Loja (A4)',
