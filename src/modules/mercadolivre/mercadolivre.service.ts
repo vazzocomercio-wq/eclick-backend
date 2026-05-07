@@ -24,6 +24,119 @@ interface MlConnection {
   created_at?: string
 }
 
+// ── Tipos de perf stats de perguntas (espelha tela ML nativa) ──────────
+export interface QuestionsPerfPeriod {
+  count:         number
+  avg_min:       number | null
+  sla_pct:       number | null    // % respondidas em <60min
+  status:        'good' | 'warn' | 'bad'  // good <30min, warn <60min, bad >60min
+}
+export interface QuestionsPerfStats {
+  total_answered:        number
+  avg_response_min:      number | null
+  median_response_min:   number | null
+  sla_under_1h_pct:      number | null
+  by_period: {
+    weekday_business: QuestionsPerfPeriod   // Seg-Sex 9-18h
+    weekday_evening:  QuestionsPerfPeriod   // Seg-Sex 18-00h
+    weekend:          QuestionsPerfPeriod   // Sáb-Dom
+  }
+  impact_msg:           string | null
+  /** Internal: deltas em min de cada pergunta — usado pra agregação. */
+  _raw_deltas?:         number[]
+}
+
+function emptyPeriod(): QuestionsPerfPeriod {
+  return { count: 0, avg_min: null, sla_pct: null, status: 'good' }
+}
+
+function emptyPerfStats(): QuestionsPerfStats {
+  return {
+    total_answered:      0,
+    avg_response_min:    null,
+    median_response_min: null,
+    sla_under_1h_pct:    null,
+    by_period: {
+      weekday_business: emptyPeriod(),
+      weekday_evening:  emptyPeriod(),
+      weekend:          emptyPeriod(),
+    },
+    impact_msg: null,
+  }
+}
+
+/** Recebe lista com { date_created, answer_date } OU lista de deltas
+ *  flat ({ delta_min, weekday, hour }). Calcula stats. */
+function computePerfStats(
+  data: Array<{ date_created?: string; answer_date?: string; delta_min?: number; weekday?: number; hour?: number }>,
+  isFlat = false,
+): QuestionsPerfStats {
+  if (data.length === 0) return emptyPerfStats()
+
+  // Normaliza pra { delta_min, weekday, hour }
+  const items = data.map(d => {
+    if (isFlat || d.delta_min != null) {
+      return { delta_min: d.delta_min!, weekday: d.weekday ?? 0, hour: d.hour ?? 0 }
+    }
+    const created = new Date(d.date_created!)
+    const answered = new Date(d.answer_date!)
+    return {
+      delta_min: (answered.getTime() - created.getTime()) / 60000,
+      weekday:   created.getDay(), // 0 dom, 6 sáb
+      hour:      created.getHours(),
+    }
+  }).filter(x => x.delta_min >= 0)
+
+  if (items.length === 0) return emptyPerfStats()
+
+  const avg = items.reduce((s, x) => s + x.delta_min, 0) / items.length
+  const sorted = [...items].map(x => x.delta_min).sort((a, b) => a - b)
+  const median = sorted[Math.floor(sorted.length / 2)]
+  const slaPct = items.filter(x => x.delta_min < 60).length / items.length * 100
+
+  // Agrupa por período
+  const groupBusiness: number[] = []
+  const groupEvening:  number[] = []
+  const groupWeekend:  number[] = []
+  for (const x of items) {
+    const isWeekend = x.weekday === 0 || x.weekday === 6
+    if (isWeekend) groupWeekend.push(x.delta_min)
+    else if (x.hour >= 9 && x.hour < 18) groupBusiness.push(x.delta_min)
+    else groupEvening.push(x.delta_min)
+  }
+
+  const periodStats = (deltas: number[]): QuestionsPerfPeriod => {
+    if (deltas.length === 0) return emptyPeriod()
+    const a = deltas.reduce((s, d) => s + d, 0) / deltas.length
+    const sla = deltas.filter(d => d < 60).length / deltas.length * 100
+    const status: QuestionsPerfPeriod['status'] = a < 30 ? 'good' : a < 60 ? 'warn' : 'bad'
+    return {
+      count:   deltas.length,
+      avg_min: Math.round(a),
+      sla_pct: Math.round(sla),
+      status,
+    }
+  }
+
+  const impactMsg = avg > 60
+    ? 'Você pode vender até 10% mais respondendo em até 1 hora.'
+    : null
+
+  return {
+    total_answered:      items.length,
+    avg_response_min:    Math.round(avg),
+    median_response_min: Math.round(median),
+    sla_under_1h_pct:    Math.round(slaPct),
+    by_period: {
+      weekday_business: periodStats(groupBusiness),
+      weekday_evening:  periodStats(groupEvening),
+      weekend:          periodStats(groupWeekend),
+    },
+    impact_msg:          impactMsg,
+    _raw_deltas:         items.map(x => x.delta_min),
+  }
+}
+
 @Injectable()
 export class MercadolivreService {
   // ── OAuth ────────────────────────────────────────────────────────────────
@@ -1080,6 +1193,112 @@ export class MercadolivreService {
       if (httpStatus === 403 || httpStatus === 404 || httpStatus === 401) return { questions: [], total: 0, sellerId: null }
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar perguntas', httpStatus)
     }
+  }
+
+  // ── Perguntas: estatísticas de performance (últimos 14 dias) ────────
+  /**
+   * Métricas avançadas de tempo de resposta — espelha a tela de "Prazo
+   * de resposta" do ML nativo. Multi-conta com fan-out: cada conta puxa
+   * suas próprias perguntas e o agregado é a soma.
+   *
+   * Retorna por-conta + agregado:
+   *  - total_answered (últimos 14d)
+   *  - avg_response_min, median_response_min
+   *  - sla_under_1h_pct (% respondidas em <1h)
+   *  - by_period: { weekday_business, weekday_evening, weekend }
+   *      cada um com count + avg_min + sla_pct + status (good/warn/bad)
+   *  - impact_msg quando avg > 60min ("você pode vender até 10% mais...")
+   */
+  async getQuestionsPerfStats(orgId: string, sellerIdFilter?: number): Promise<{
+    aggregate:    QuestionsPerfStats
+    per_account:  Array<QuestionsPerfStats & { seller_id: number; nickname: string | null }>
+  }> {
+    const tokens = sellerIdFilter != null
+      ? [await this.getTokenForOrg(orgId, sellerIdFilter)]
+      : await this.getAllTokensForOrg(orgId).catch(() => [])
+
+    if (tokens.length === 0) {
+      return { aggregate: emptyPerfStats(), per_account: [] }
+    }
+
+    // Cutoff 14 dias atrás
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000
+
+    // Cada account: pull raw + computa stats próprios. Salvamos os raw
+    // pairs num staging pra agregação correta de by_period (weekday/hour).
+    const accountResults = await Promise.all(tokens.map(async (tk) => {
+      const rawPairs = await this.fetchAnsweredQuestionsLast14d(tk.token, tk.sellerId, cutoff)
+        .catch(() => [] as Array<{ date_created: string; answer_date: string }>)
+
+      // Resolve nickname (best-effort)
+      let nickname: string | null = null
+      try {
+        const { data } = await axios.get(`${ML_BASE}/users/${tk.sellerId}`, {
+          headers: { Authorization: `Bearer ${tk.token}` },
+        })
+        nickname = data?.nickname ?? null
+      } catch { /* skip */ }
+
+      const stats = computePerfStats(rawPairs)
+      return { seller_id: tk.sellerId, nickname, rawPairs, stats }
+    }))
+
+    // Agregado: flat de TODOS os pairs raw — preserva weekday/hour pro
+    // by_period funcionar corretamente.
+    const allRaw = accountResults.flatMap(a => a.rawPairs)
+    const aggregate = computePerfStats(allRaw)
+    delete aggregate._raw_deltas // não precisa expor
+
+    return {
+      aggregate,
+      per_account: accountResults.map(a => {
+        const { _raw_deltas: _, ...statsClean } = a.stats
+        return { seller_id: a.seller_id, nickname: a.nickname, ...statsClean }
+      }),
+    }
+  }
+
+  /** Pagina /questions/search com status=ANSWERED até trazer 14 dias.
+   *  Retorna lista de { date_created, answer_date } pra cálculo de delta. */
+  private async fetchAnsweredQuestionsLast14d(
+    token: string,
+    sellerId: number,
+    cutoffMs: number,
+  ): Promise<Array<{ date_created: string; answer_date: string }>> {
+    const out: Array<{ date_created: string; answer_date: string }> = []
+    let offset = 0
+    const PAGE = 50
+    const MAX_PAGES = 6 // até 300 perguntas (suficiente pra 14 dias na maioria das contas)
+
+    for (let p = 0; p < MAX_PAGES; p++) {
+      const url = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=ANSWERED&limit=${PAGE}&offset=${offset}`
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data } = await axios.get<any>(url, { headers: { Authorization: `Bearer ${token}` } })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const qs = (data?.questions ?? []) as any[]
+        if (qs.length === 0) break
+
+        let oldestInPage = Infinity
+        for (const q of qs) {
+          const created = q.date_created
+          const answer  = q.answer?.date_created
+          if (!created || !answer) continue
+          const createdMs = new Date(created).getTime()
+          oldestInPage = Math.min(oldestInPage, createdMs)
+          if (createdMs >= cutoffMs) {
+            out.push({ date_created: created, answer_date: answer })
+          }
+        }
+
+        // Para paginação: se todas as desta página são MAIS VELHAS que cutoff, sai
+        if (oldestInPage < cutoffMs) break
+        offset += PAGE
+      } catch {
+        break
+      }
+    }
+    return out
   }
 
   /** Helper interno — busca perguntas de 1 conta especifica + enriquece

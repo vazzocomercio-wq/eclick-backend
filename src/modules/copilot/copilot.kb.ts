@@ -576,24 +576,35 @@ const SALES_ENTRIES: KbEntry[] = [
     title:    'Perguntas do Mercado Livre (pré-venda)',
     content: `**Inbox de perguntas pré-venda** dos compradores ML — antes do pedido.
 
-**Como chega cada pergunta** (atualizado 2026-05-07 / sprint MVP 1 ML Pós-venda):
+**Card "Prazo de resposta"** no topo (NOVO em 2026-05-07, espelha tela ML nativa):
+- Tempo médio últimos 14 dias com badge: 🟢 verde (<1h) ou 🔴 vermelho (>1h)
+- Mensagem de impacto: "Você pode vender até 10% mais respondendo em até 1h" (só aparece se média >1h)
+- **Bar chart por período** com 3 barras: Seg-Sex 9-18h, Seg-Sex 18-00h, Sáb-Dom
+  - Verde <30min, amarelo <60min, vermelho >60min
+  - Linha cinza vertical na barra marca o cutoff de 60min (SLA ML)
+- **Multi-conta**: breakdown por conta abaixo do agregado quando 2+ contas. Cada conta tem nickname + total respostas + média
+- Endpoint: \`GET /ml/questions/perf-stats\` com fan-out cross-conta. Cada conta puxa /questions/search?status=ANSWERED limit=50 paginado até 14d (até 6 páginas/conta)
+
+**Como chega cada pergunta** (sprint MVP 1 ML Pós-venda):
 - ML envia webhook em segundos pra \`POST /ml/webhook\` (topic=questions)
 - Backend identifica seller_id → org → roda \`MlAiCoreService.suggestQuestion\`
 - Sonnet 4.6 lê pergunta + título/preço/estoque + histórico P&R + persona → gera resposta
 - Sugestão fica em \`ml_question_suggestions\` (status=pending)
 - **Não há mais cron de polling** — webhook é fonte única (política realtime-first)
 
-**3 colunas na UI**:
-1. Pergunta + produto + comprador
-2. Sugestão IA editável
-3. Ações: editar, encurtar, humanizar, add garantia, resposta pronta
+**6 KPI cards**: Sem resposta, Respondidas hoje, Tempo médio, SLA <1h, Resp. automáticas (24h), Aprovação IA (30d).
+
+**3 colunas workspace**:
+1. Lista de perguntas + busca
+2. Detalhe + textarea + Enviar (Cmd+Enter)
+3. Painel IA: sugestão + 4 transformações (Encurtar / Humanizar / Add garantia / Resp. pronta)
 
 **Auto-resposta**: confidence ≥ 0.70 → envia automático sem revisão humana
 - Configurar em \`/dashboard/configuracoes/ia\` (toggle \`ml_question_auto_send\`)
 - Recomendação: revisar primeiras 50 antes de ligar auto-send
 
 **Pós-venda é outra tela**: questões de COMPRADORES JÁ COMPRARAM (envio, defeito, NF) ficam em \`/dashboard/ml-postsale\`, não aqui.`,
-    tags: ['atendimento', 'ml', 'perguntas', 'pre-venda', 'webhook', 'realtime'],
+    tags: ['atendimento', 'ml', 'perguntas', 'pre-venda', 'webhook', 'realtime', 'sla', 'multi-conta'],
   },
   {
     routes:   ['/dashboard/atendimento/reclamacoes'],

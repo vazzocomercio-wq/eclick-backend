@@ -397,6 +397,39 @@ export class MercadolivreController {
     return this.questionsAi.getAiStats(user.orgId!)
   }
 
+  // GET /ml/questions/perf-stats — espelha a tela "Prazo de resposta"
+  // do ML nativo. Multi-conta com fan-out: traz métricas agregadas +
+  // por-conta. Períodos: Seg-Sex 9-18h, Seg-Sex 18-00h, Sáb/Dom.
+  // 14 dias.
+  @Get('questions/perf-stats')
+  async getQuestionsPerfStats(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerIdParam?: string,
+  ) {
+    try {
+      const sellerId = sellerIdParam ? Number(sellerIdParam) : undefined
+      return await this.ml.getQuestionsPerfStats(user.orgId!, sellerId)
+    } catch (e: unknown) {
+      const err = e as { message?: string }
+      console.error('[ml.questions.perf-stats] erro:', err?.message)
+      return {
+        aggregate: {
+          total_answered: 0,
+          avg_response_min: null,
+          median_response_min: null,
+          sla_under_1h_pct: null,
+          by_period: {
+            weekday_business: { count: 0, avg_min: null, sla_pct: null, status: 'good' },
+            weekday_evening:  { count: 0, avg_min: null, sla_pct: null, status: 'good' },
+            weekend:          { count: 0, avg_min: null, sla_pct: null, status: 'good' },
+          },
+          impact_msg: null,
+        },
+        per_account: [],
+      }
+    }
+  }
+
   // POST /ml/questions/:id/answer  { text: string, seller_id?: number }
   @Post('questions/:id/answer')
   @HttpCode(HttpStatus.OK)
