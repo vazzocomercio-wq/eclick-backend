@@ -175,6 +175,154 @@ export class MlCampaignsService {
     return data ?? []
   }
 
+  // ═══ Camada 2: Recommendations + Config ═════════════════════════
+
+  async listRecommendations(input: {
+    orgId:           string
+    sellerId?:       number
+    classification?: string
+    status?:         string
+    minScore?:       number
+    campaignId?:     string
+    limit?:          number
+    offset?:         number
+  }) {
+    const limit  = Math.min(Math.max(input.limit ?? 50, 1), 500)
+    const offset = Math.max(input.offset ?? 0, 0)
+
+    let q = supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*, ml_campaign_items!inner(ml_item_id, ml_campaign_id, original_price, current_price, status), ml_campaigns(name, ml_promotion_type, deadline_date, has_subsidy_items)', { count: 'exact' })
+      .eq('organization_id', input.orgId)
+      .range(offset, offset + limit - 1)
+      .order('opportunity_score', { ascending: false })
+
+    if (input.sellerId       != null) q = q.eq('seller_id', input.sellerId)
+    if (input.classification)         q = q.eq('recommendation', input.classification)
+    if (input.status)                 q = q.eq('status', input.status)
+    if (input.minScore       != null) q = q.gte('opportunity_score', input.minScore)
+    if (input.campaignId)             q = q.eq('ml_campaign_items.campaign_id', input.campaignId)
+
+    const { data, count, error } = await q
+    if (error) throw new BadRequestException(`listRecommendations: ${error.message}`)
+    return { recommendations: data ?? [], total: count ?? 0 }
+  }
+
+  async getRecommendation(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*, ml_campaign_items(*, ml_campaigns(*))')
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`getRecommendation: ${error.message}`)
+    return data
+  }
+
+  async approveRecommendation(orgId: string, id: string, userId: string, edited?: { price?: number; quantity?: number }) {
+    const update: Record<string, unknown> = {
+      status:      edited ? 'edited' : 'approved',
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: userId,
+    }
+    if (edited?.price    != null) update.recommended_price    = edited.price
+    if (edited?.quantity != null) update.recommended_quantity = edited.quantity
+
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .update(update)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`approve: ${error.message}`)
+    return data
+  }
+
+  async rejectRecommendation(orgId: string, id: string, userId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .update({ status: 'rejected', reviewed_at: new Date().toISOString(), reviewed_by: userId })
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`reject: ${error.message}`)
+    return data
+  }
+
+  // ── Config ──────────────────────────────────────────────────────
+
+  async getConfig(orgId: string, sellerId: number) {
+    const { data } = await supabaseAdmin
+      .from('ml_campaigns_config')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('seller_id',       sellerId)
+      .maybeSingle()
+    if (data) return data
+    // Cria default se nao existe
+    const { data: created, error } = await supabaseAdmin
+      .from('ml_campaigns_config')
+      .insert({ organization_id: orgId, seller_id: sellerId })
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`getConfig: ${error.message}`)
+    return created
+  }
+
+  async updateConfig(orgId: string, sellerId: number, patch: Record<string, unknown>) {
+    // Defensive: rejeitar campos nao permitidos
+    const allowed = [
+      'min_acceptable_margin_pct', 'target_margin_pct', 'clearance_min_margin_pct',
+      'safety_stock_days', 'high_stock_threshold_days', 'min_stock_to_participate',
+      'quality_gate_enabled', 'quality_gate_min_score',
+      'default_packaging_cost', 'default_operational_cost_pct',
+      'ai_daily_cap_usd', 'ai_alert_at_pct', 'ai_reasoning_enabled',
+      'auto_suggest_on_new_candidate', 'daily_analysis_enabled',
+      'auto_approve_enabled', 'auto_approve_score_above',
+    ]
+    const safe: Record<string, unknown> = {}
+    for (const k of allowed) if (k in patch) safe[k] = patch[k]
+
+    // Upsert (cria se nao existe)
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaigns_config')
+      .upsert({ organization_id: orgId, seller_id: sellerId, ...safe }, { onConflict: 'organization_id,seller_id' })
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`updateConfig: ${error.message}`)
+    return data
+  }
+
+  // ── AI usage (cap diario) ──────────────────────────────────────
+
+  async getAiUsageToday(orgId: string): Promise<{ cost_usd: number; calls: number; cap_usd: number; pct_used: number }> {
+    // Cap atual da org (qualquer config — usa o maior cap entre sellers)
+    const { data: configs } = await supabaseAdmin
+      .from('ml_campaigns_config')
+      .select('ai_daily_cap_usd')
+      .eq('organization_id', orgId)
+    const cap = Math.max(10, ...((configs ?? []) as Array<{ ai_daily_cap_usd: number }>).map(c => c.ai_daily_cap_usd))
+
+    // Total gasto hoje (00:00 UTC ate agora)
+    const todayStart = new Date()
+    todayStart.setUTCHours(0, 0, 0, 0)
+    const { data: logs } = await supabaseAdmin
+      .from('ml_campaigns_ai_usage_log')
+      .select('cost_usd')
+      .eq('organization_id', orgId)
+      .gte('created_at', todayStart.toISOString())
+    const totalCost = ((logs ?? []) as Array<{ cost_usd: number }>).reduce((s, l) => s + (l.cost_usd ?? 0), 0)
+    const calls = (logs ?? []).length
+    return {
+      cost_usd:  Number(totalCost.toFixed(4)),
+      calls,
+      cap_usd:   cap,
+      pct_used:  cap > 0 ? Math.round((totalCost / cap) * 100) : 0,
+    }
+  }
+
   /** Logs de sync pra debug. */
   async getSyncLogs(orgId: string, limit = 20) {
     const { data, error } = await supabaseAdmin

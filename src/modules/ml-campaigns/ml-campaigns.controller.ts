@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Query, Param, UseGuards, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { MlCampaignsService } from './ml-campaigns.service'
 import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
+import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
 
 interface ReqUserPayload {
   id: string
@@ -13,8 +14,9 @@ interface ReqUserPayload {
 @UseGuards(SupabaseAuthGuard)
 export class MlCampaignsController {
   constructor(
-    private readonly svc:  MlCampaignsService,
-    private readonly sync: MlCampaignsSyncService,
+    private readonly svc:      MlCampaignsService,
+    private readonly sync:     MlCampaignsSyncService,
+    private readonly decision: MlCampaignsDecisionService,
   ) {}
 
   // ── Dashboard ──────────────────────────────────────────────────
@@ -160,5 +162,109 @@ export class MlCampaignsController {
   syncLogs(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)
+  }
+
+  // ═══ Camada 2: Recommendations + Config ═══════════════════════════
+
+  @Post('recommendations/generate')
+  generateAll(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.decision.generateForOrg(u.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
+  @Post('recommendations/generate-item/:campaignItemId')
+  generateForItem(
+    @ReqUser() u: ReqUserPayload,
+    @Param('campaignItemId') campaignItemId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.decision.generateForItem(campaignItemId)
+  }
+
+  @Get('recommendations')
+  listRecommendations(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id')      sellerId?:       string,
+    @Query('classification') classification?: string,
+    @Query('status')         status?:         string,
+    @Query('min_score')      minScore?:       string,
+    @Query('campaign_id')    campaignId?:     string,
+    @Query('limit')          limit?:          string,
+    @Query('offset')         offset?:         string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listRecommendations({
+      orgId:           u.orgId,
+      sellerId:        sellerId ? Number(sellerId) : undefined,
+      classification,
+      status:          status ?? 'pending',
+      minScore:        minScore ? Number(minScore) : undefined,
+      campaignId,
+      limit:           limit  ? Number(limit)  : 50,
+      offset:          offset ? Number(offset) : 0,
+    })
+  }
+
+  @Get('recommendations/:id')
+  getRecommendation(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getRecommendation(u.orgId, id)
+  }
+
+  @Post('recommendations/:id/approve')
+  approveRecommendation(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { price?: number; quantity?: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const edited = (body?.price != null || body?.quantity != null)
+      ? { price: body.price, quantity: body.quantity }
+      : undefined
+    return this.svc.approveRecommendation(u.orgId, id, u.id, edited)
+  }
+
+  @Post('recommendations/:id/reject')
+  rejectRecommendation(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.rejectRecommendation(u.orgId, id, u.id)
+  }
+
+  // ── Config ─────────────────────────────────────────────────────────
+
+  @Get('config')
+  getConfig(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!sellerId)  throw new BadRequestException('seller_id obrigatorio')
+    return this.svc.getConfig(u.orgId, Number(sellerId))
+  }
+
+  @Patch('config')
+  updateConfig(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId: string,
+    @Body() patch: Record<string, unknown>,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!sellerId)  throw new BadRequestException('seller_id obrigatorio')
+    return this.svc.updateConfig(u.orgId, Number(sellerId), patch)
+  }
+
+  @Get('ai-usage')
+  aiUsage(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getAiUsageToday(u.orgId)
   }
 }
