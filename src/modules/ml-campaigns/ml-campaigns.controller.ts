@@ -161,7 +161,9 @@ export class MlCampaignsController {
     @Query('seller_id') sellerId?: string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.sync.syncOrg(u.orgId, { sellerId: sellerId ? Number(sellerId) : undefined })
+    // Fire-and-forget — sync demora 5+min, Railway tem timeout de HTTP.
+    // Retorna log_id imediatamente, frontend polla /sync/logs pra status.
+    return this.sync.syncOrgAsync(u.orgId, { sellerId: sellerId ? Number(sellerId) : undefined })
   }
 
   @Get('sync/logs')

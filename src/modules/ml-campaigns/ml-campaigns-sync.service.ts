@@ -47,7 +47,9 @@ export class MlCampaignsSyncService {
     private readonly client: MlCampaignsApiClient,
   ) {}
 
-  /** Sync principal — fan-out se sellerId omitido. */
+  /** Sync principal — fan-out se sellerId omitido.
+   *  Pode demorar ~5min com 1500+ items + Fase B de subsidio.
+   *  Por isso usa fire-and-forget quando chamado via syncOrgAsync(). */
   async syncOrg(orgId: string, opts: SyncOpts = {}): Promise<MlCampaignsSyncResult> {
     const t0 = Date.now()
     const tokens = opts.sellerId != null
@@ -116,6 +118,99 @@ export class MlCampaignsSyncService {
         })
         .eq('id', log.id)
       throw e
+    }
+  }
+
+  /** Kick off sync em background — retorna o log_id imediatamente.
+   *  Resolve o problema de Railway HTTP timeout em syncs longos (5min+).
+   *  Frontend polla /sync/logs pra ver progresso. */
+  async syncOrgAsync(orgId: string, opts: SyncOpts = {}): Promise<{ log_id: string; status: string }> {
+    // Cria o log primeiro pra ter ID. Status 'running' (constraint nao
+    // permite 'pending'). Background atualiza pra completed/failed.
+    const { data: log, error: logErr } = await supabaseAdmin
+      .from('ml_campaigns_sync_logs')
+      .insert({
+        organization_id: orgId,
+        seller_id:       opts.sellerId ?? null,
+        sync_type:       'full',
+        status:          'running',
+        started_at:      new Date().toISOString(),
+      })
+      .select('id')
+      .single()
+    if (logErr || !log) throw new BadRequestException(`falha ao criar sync log: ${logErr?.message}`)
+    const logId = (log as { id: string }).id
+
+    // Disparar sync em background — NAO await
+    setImmediate(() => {
+      void this.runBackgroundSync(orgId, opts, logId).catch(e => {
+        this.logger.error(`[sync] background falhou log=${logId}: ${(e as Error).message}`)
+      })
+    })
+
+    return { log_id: logId, status: 'running' }
+  }
+
+  /** Wrapper que atualiza o log existente em vez de criar novo. */
+  private async runBackgroundSync(orgId: string, opts: SyncOpts, logId: string): Promise<void> {
+    const t0 = Date.now()
+    const tokens = opts.sellerId != null
+      ? [await this.ml.getTokenForOrg(orgId, opts.sellerId).catch(() => null)].filter(Boolean) as Array<{ token: string; sellerId: number }>
+      : await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+
+    if (tokens.length === 0) {
+      await supabaseAdmin
+        .from('ml_campaigns_sync_logs')
+        .update({ status: 'failed', error_message: 'ML nao conectado', completed_at: new Date().toISOString() })
+        .eq('id', logId)
+      return
+    }
+
+    const stats = {
+      campaigns_processed:    0,
+      items_processed:        0,
+      items_subsidy_enriched: 0,
+      api_calls_count:        0,
+      pages_fetched:          0,
+    }
+
+    try {
+      for (const t of tokens) {
+        const r = await this.syncSeller(orgId, t.token, t.sellerId)
+        stats.campaigns_processed    += r.campaigns
+        stats.items_processed        += r.items
+        stats.items_subsidy_enriched += r.enriched
+        stats.api_calls_count        += r.calls
+        stats.pages_fetched          += r.pages
+      }
+
+      for (const t of tokens) {
+        await this.recomputeSummary(orgId, t.sellerId)
+      }
+
+      const duration = Math.round((Date.now() - t0) / 1000)
+      await supabaseAdmin
+        .from('ml_campaigns_sync_logs')
+        .update({
+          ...stats,
+          status:           'completed',
+          duration_seconds: duration,
+          completed_at:     new Date().toISOString(),
+        })
+        .eq('id', logId)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      this.logger.error(`[sync] erro background ${logId}: ${msg}`)
+      await supabaseAdmin
+        .from('ml_campaigns_sync_logs')
+        .update({
+          status:           e instanceof CampaignsRateLimitedException ? 'partial' : 'failed',
+          error_message:    msg,
+          duration_seconds: Math.round((Date.now() - t0) / 1000),
+          completed_at:     new Date().toISOString(),
+          ...stats,
+        })
+        .eq('id', logId)
     }
   }
 
