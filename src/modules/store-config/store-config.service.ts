@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import * as dns from 'node:dns/promises'
+import axios from 'axios'
 
 /** Onda 4 / A6 — Store Config (white-label). */
 
@@ -163,17 +164,66 @@ export class StoreConfigService {
     const expectedTarget = process.env.STORE_DOMAIN_TARGET ?? 'storefront.eclick.app.br'
 
     try {
+      // 1) Caso ideal — CNAME literal aponta pra expectedTarget (DNS only/cinza)
       const records = await dns.resolveCname(c.custom_domain).catch(() => [] as string[])
-      const verified = records.some(r => r.toLowerCase() === expectedTarget.toLowerCase())
+      let verified = records.some(r => r.toLowerCase() === expectedTarget.toLowerCase())
+      let resolvedVia: 'cname' | 'cf-proxy' | 'origin-ip' | null = verified ? 'cname' : null
+
+      // 2) Quando ha Cloudflare proxy laranja, o CNAME e flattened pelo CF —
+      //    DNS publico retorna IPs do Cloudflare (104.21.x.x, 172.67.x.x),
+      //    nao o CNAME real. Verifica se o dominio resolve pra IPs CF E se
+      //    o expectedTarget tambem resolve no fim da cadeia (sanidade).
+      if (!verified) {
+        const ips = await dns.resolve4(c.custom_domain).catch(() => [] as string[])
+        const isCloudflare = ips.some(ip => ip.startsWith('104.21.') || ip.startsWith('172.67.'))
+        if (isCloudflare) {
+          // Faz HTTP HEAD pra checar que o dominio chega no Netlify (header
+          // x-nf-request-id). Se chegou, OK — Cloudflare esta proxy-ando
+          // pro nosso storefront.
+          try {
+            const r = await axios.head(`https://${c.custom_domain}/`, {
+              timeout:   10_000,
+              maxRedirects: 0,
+              validateStatus: () => true, // qualquer status conta
+            })
+            if (r.headers['x-nf-request-id']) {
+              verified = true
+              resolvedVia = 'cf-proxy'
+            }
+          } catch { /* ignora */ }
+        }
+      }
+
+      // 3) Fallback final — algumas configuracoes apontam direto IP do
+      //    Netlify (75.2.60.5 etc) sem CNAME. Aceita se HTTP retorna header
+      //    x-nf-request-id.
+      if (!verified) {
+        try {
+          const r = await axios.head(`https://${c.custom_domain}/`, {
+            timeout:   10_000,
+            maxRedirects: 0,
+            validateStatus: () => true,
+          })
+          if (r.headers['x-nf-request-id']) {
+            verified = true
+            resolvedVia = 'origin-ip'
+          }
+        } catch { /* ignora */ }
+      }
 
       await supabaseAdmin
         .from('store_config')
         .update({ domain_verified: verified, ssl_status: verified ? 'active' : 'pending' })
         .eq('organization_id', orgId)
 
-      return verified
-        ? { verified: true, expected_target: expectedTarget }
-        : { verified: false, reason: `CNAME não aponta pra ${expectedTarget}`, expected_target: expectedTarget }
+      if (verified) {
+        return { verified: true, expected_target: expectedTarget }
+      }
+      return {
+        verified: false,
+        reason:   `Dominio nao aponta pra ${expectedTarget}. Detectado: CNAME=[${records.join(',') || 'nenhum'}].`,
+        expected_target: expectedTarget,
+      }
     } catch (e) {
       return { verified: false, reason: (e as Error).message, expected_target: expectedTarget }
     }
