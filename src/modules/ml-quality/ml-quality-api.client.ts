@@ -79,15 +79,44 @@ export class MlQualityApiClient {
     }, 0) // categoryId nao tem seller, usa 0 pro counter
   }
 
-  /** GET /domains/:id — retorna { id, name } com nome localizado PT-BR
-   *  pra dominios tipo MLB-LIGHT_BULBS → "Lampadas". Usado pra cache de
-   *  labels (ml_labels). Endpoint nao precisa de auth especifica de seller. */
-  async getDomain(token: string, domainId: string): Promise<{ id: string; name: string }> {
-    return this.requestWithBackoff<{ id: string; name: string }>({
+  /** GET /items?ids=X,Y,Z&attributes=id,category_id — batch fetch items
+   *  pra mapear ml_item_id → category_id. Usado pra resolver nomes PT-BR
+   *  de dominios via categoria (o ML nao tem endpoint /domains/:id direto). */
+  async getItemsBatch(token: string, itemIds: string[]): Promise<Array<{ id: string; category_id: string; domain_id?: string }>> {
+    if (itemIds.length === 0) return []
+    return this.requestWithBackoff<Array<{ code: number; body?: { id: string; category_id: string; domain_id?: string } }>>({
       method: 'GET',
-      url:    `${ML_BASE}/domains/${encodeURIComponent(domainId)}`,
+      url:    `${ML_BASE}/items`,
       headers: { Authorization: `Bearer ${token}` },
-    }, 0)
+      params: { ids: itemIds.slice(0, 20).join(','), attributes: 'id,category_id,domain_id' },
+    }, 0).then(results =>
+      results
+        .filter(r => r.code === 200 && r.body?.id && r.body?.category_id)
+        .map(r => r.body!),
+    )
+  }
+
+  /** GET /categories/:id — endpoint PUBLICO do ML (sem auth necessaria).
+   *  Retorna { id, name, settings: { catalog_domain } } com nome PT-BR. */
+  async getCategoryName(categoryId: string): Promise<{ id: string; name: string; catalog_domain?: string }> {
+    return this.requestWithBackoff<{ id: string; name: string; settings?: { catalog_domain?: string } }>({
+      method: 'GET',
+      url:    `${ML_BASE}/categories/${categoryId}`,
+    }, 0).then(r => ({
+      id:               r.id,
+      name:             r.name,
+      catalog_domain:   r.settings?.catalog_domain,
+    }))
+  }
+
+  /** GET /categories/:id/attributes — endpoint PUBLICO do ML, sem auth.
+   *  Retorna array com cada attribute { id, name } em PT-BR. Usado pra
+   *  resolver labels de atributos sem precisar de token. */
+  async getCategoryAttributesPublic(categoryId: string): Promise<Array<{ id: string; name: string }>> {
+    return this.requestWithBackoff<Array<{ id: string; name: string }>>({
+      method: 'GET',
+      url:    `${ML_BASE}/categories/${categoryId}/attributes`,
+    }, 0).then(arr => Array.isArray(arr) ? arr.map(a => ({ id: a.id, name: a.name })) : [])
   }
 
   /** Wrapper com retry + backoff exponencial pra 429.

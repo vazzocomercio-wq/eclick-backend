@@ -1,18 +1,14 @@
-/** ml_labels — cache de traducoes PT-BR (domain + attribute) vindas do ML.
+/** ml_labels — cache de traducoes PT-BR vindas do ML.
  *
- *  Fluxo:
- *    1. Frontend pede /ml-quality/labels
- *    2. Service descobre dominios distintos nos snapshots da org
- *    3. Lookup em ml_labels (kind='domain', expires_at > now)
- *    4. Pra missing: fetch /domains/:id em paralelo (pool de 5), upsert
- *    5. Pra atributos: agrega missing_attributes nos snapshots, lookup
- *       em ml_labels (kind='attribute'), pra missing usa
- *       ml_category_attributes (jsonb com .name PT-BR ja vinda do ML)
- *       e tambem upsert no ml_labels pra cache rapido nas proximas
- *       chamadas
- *    6. Retorna { domains: { ID: name }, attributes: { ID: name } }
+ *  ML nao expoe /domains/:id direto. A estrategia eh:
+ *    1. Pra cada dominio distinto nos snapshots, pega 1 ml_item_id sample
+ *    2. Authenticated GET /items?ids=...&attributes=id,category_id pra
+ *       mapear item -> category_id
+ *    3. Public GET /categories/:cat_id (sem auth) -> name PT-BR
+ *    4. Cache em ml_labels com TTL 30d
  *
- *  TTL: 30d (esses nomes nunca mudam na pratica).
+ *  Pra atributos: usa cache existente de ml_category_attributes onde
+ *  cada attr ja tem .name PT-BR vindo do ML.
  */
 
 import { Injectable, Logger } from '@nestjs/common'
@@ -44,7 +40,7 @@ export class MlLabelsService {
     // 1. Pega dominios + atributos faltantes distintos dos snapshots
     let q = supabaseAdmin
       .from('ml_quality_snapshots')
-      .select('ml_domain_id, pi_missing_attributes, ft_missing_attributes, all_missing_attributes, penalty_reasons')
+      .select('ml_domain_id, ml_item_id, pi_missing_attributes, ft_missing_attributes, all_missing_attributes')
       .eq('organization_id', orgId)
     if (sellerId != null) q = q.eq('seller_id', sellerId)
 
@@ -53,50 +49,57 @@ export class MlLabelsService {
       return { domains: {}, attributes: {} }
     }
 
-    const domainIds = new Set<string>()
-    const attrIds   = new Set<string>()
-    for (const r of (rows as Array<{
+    const typedRows = rows as Array<{
       ml_domain_id: string | null
+      ml_item_id:   string
       pi_missing_attributes: string[] | null
       ft_missing_attributes: string[] | null
       all_missing_attributes: string[] | null
-      penalty_reasons: string[] | null
-    }>)) {
-      if (r.ml_domain_id) domainIds.add(r.ml_domain_id)
+    }>
+
+    const domainIds = new Set<string>()
+    const attrIds   = new Set<string>()
+    const domainSampleItem = new Map<string, string>() // domain_id -> primeiro ml_item_id encontrado
+
+    for (const r of typedRows) {
+      if (r.ml_domain_id) {
+        domainIds.add(r.ml_domain_id)
+        if (!domainSampleItem.has(r.ml_domain_id)) {
+          domainSampleItem.set(r.ml_domain_id, r.ml_item_id)
+        }
+      }
       for (const a of r.pi_missing_attributes  ?? []) attrIds.add(a)
       for (const a of r.ft_missing_attributes  ?? []) attrIds.add(a)
       for (const a of r.all_missing_attributes ?? []) attrIds.add(a)
-      // penalty_reasons sao keys tipo "incomplete_technical_specs" tambem
-      // mas nao sao atributos — deixa raw na UI por enquanto
     }
 
-    // 2. Carrega cache existente (nao expirado)
-    const allIds = [...domainIds, ...attrIds]
-    if (allIds.length === 0) {
+    if (domainIds.size === 0 && attrIds.size === 0) {
       return { domains: {}, attributes: {} }
     }
 
-    const { data: cached } = await supabaseAdmin
-      .from('ml_labels')
-      .select('kind, ml_id, name_pt, expires_at')
-      .or(
-        [
-          domainIds.size > 0 ? `and(kind.eq.domain,ml_id.in.(${[...domainIds].map(quoteIn).join(',')}))`           : '',
-          attrIds.size   > 0 ? `and(kind.eq.attribute,ml_id.in.(${[...attrIds].map(quoteIn).join(',')}))`         : '',
-        ].filter(Boolean).join(','),
-      )
-      .gt('expires_at', new Date().toISOString())
+    // 2. Carrega cache existente (nao expirado)
+    const orFilters: string[] = []
+    if (domainIds.size > 0) orFilters.push(`and(kind.eq.domain,ml_id.in.(${[...domainIds].map(quoteIn).join(',')}))`)
+    if (attrIds.size   > 0) orFilters.push(`and(kind.eq.attribute,ml_id.in.(${[...attrIds].map(quoteIn).join(',')}))`)
 
     const cachedMap = new Map<string, string>()
-    for (const c of (cached ?? []) as MlLabelRow[]) {
-      cachedMap.set(`${c.kind}:${c.ml_id}`, c.name_pt)
+    if (orFilters.length > 0) {
+      const { data: cached } = await supabaseAdmin
+        .from('ml_labels')
+        .select('kind, ml_id, name_pt, expires_at')
+        .or(orFilters.join(','))
+        .gt('expires_at', new Date().toISOString())
+
+      for (const c of (cached ?? []) as MlLabelRow[]) {
+        cachedMap.set(`${c.kind}:${c.ml_id}`, c.name_pt)
+      }
     }
 
-    // 3. Identifica o que falta
+    // 3. Identifica missing
     const missingDomains = [...domainIds].filter(id => !cachedMap.has(`domain:${id}`))
     const missingAttrs   = [...attrIds].filter(id   => !cachedMap.has(`attribute:${id}`))
 
-    // 4. Resolve missing via API ML (precisa de token)
+    // 4. Resolve missing
     if (missingDomains.length > 0 || missingAttrs.length > 0) {
       try {
         const tokenRes = sellerId != null
@@ -106,64 +109,143 @@ export class MlLabelsService {
         if (tokenRes) {
           const token = tokenRes.token
 
-          // 4a. Domains — fetch em paralelo (pool de 5)
-          await this.fetchAndCacheDomains(token, missingDomains, cachedMap)
+          // 4a. Domains via items → category, e ja extrai attribute names
+          //     da mesma categoria pra resolver atributos missing tambem
+          if (missingDomains.length > 0) {
+            await this.fetchAndCacheDomains(token, missingDomains, domainSampleItem, cachedMap, missingAttrs)
+          }
 
-          // 4b. Attributes — preferimos extrair de ml_category_attributes
-          // (cache ja existente) antes de cair pra fetch direto
-          await this.resolveAttributesFromCategoryCache(missingAttrs, cachedMap)
+          // 4b. Atributos ainda missing depois de 4a: tenta cache
+          //     existente em ml_category_attributes
+          const stillMissingAttrs = missingAttrs.filter(id => !cachedMap.has(`attribute:${id}`))
+          if (stillMissingAttrs.length > 0) {
+            await this.resolveAttributesFromCategoryCache(stillMissingAttrs, cachedMap)
+          }
+        } else {
+          this.logger.warn(`[ml-labels] sem token disponivel pra org=${orgId} (skip resolve)`)
         }
       } catch (e) {
         this.logger.warn(`[ml-labels] resolve missing falhou: ${(e as Error).message}`)
       }
     }
 
-    // 5. Monta dictionary
+    // 5. Monta dictionary final (com fallback humanize pra ids ainda missing)
     const domains:    Record<string, string> = {}
     const attributes: Record<string, string> = {}
     for (const id of domainIds) {
-      const name = cachedMap.get(`domain:${id}`)
-      if (name) domains[id] = name
-      else      domains[id] = humanize(id) // fallback
+      domains[id] = cachedMap.get(`domain:${id}`) ?? humanize(id)
     }
     for (const id of attrIds) {
-      const name = cachedMap.get(`attribute:${id}`)
-      if (name) attributes[id] = name
-      else      attributes[id] = humanize(id)
+      attributes[id] = cachedMap.get(`attribute:${id}`) ?? humanize(id)
     }
 
     return { domains, attributes }
   }
 
-  /** Fetch domains em paralelo (pool de 5) + upsert no cache. */
-  private async fetchAndCacheDomains(token: string, ids: string[], cachedMap: Map<string, string>): Promise<void> {
-    if (ids.length === 0) return
+  /** Resolve domain → name via items → category, e tambem extrai attribute
+   *  names das mesmas categorias (sem auth). Pool de 5 em paralelo. */
+  private async fetchAndCacheDomains(
+    token:        string,
+    domainIds:    string[],
+    sampleItems:  Map<string, string>,
+    cachedMap:    Map<string, string>,
+    missingAttrs: string[],
+  ): Promise<void> {
+    // 1. Coleta sample items pra dominios missing
+    const itemToDomain = new Map<string, string>()
+    for (const dId of domainIds) {
+      const sample = sampleItems.get(dId)
+      if (sample) itemToDomain.set(sample, dId)
+    }
+    const itemIds = [...itemToDomain.keys()]
+    if (itemIds.length === 0) return
+
+    // 2. Batch fetch items em chunks de 20
+    const itemToCategory = new Map<string, string>()
+    for (let i = 0; i < itemIds.length; i += 20) {
+      const batch = itemIds.slice(i, i + 20)
+      try {
+        const items = await this.client.getItemsBatch(token, batch)
+        for (const it of items) {
+          if (it.id && it.category_id) itemToCategory.set(it.id, it.category_id)
+        }
+      } catch (e) {
+        this.logger.warn(`[ml-labels] getItemsBatch falhou: ${(e as Error).message}`)
+      }
+    }
+
+    // 3. domain → category
+    const domainToCategory = new Map<string, string>()
+    for (const [item, domain] of itemToDomain) {
+      const cat = itemToCategory.get(item)
+      if (cat) domainToCategory.set(domain, cat)
+    }
+
+    // 4. Para cada categoria unica, fetch /categories/:id E
+    //    /categories/:id/attributes em paralelo (pool 5)
+    const categoryIds = [...new Set(domainToCategory.values())]
+    const categoryToName = new Map<string, string>()
+    const attrIdToName   = new Map<string, string>()
     const POOL = 5
-    for (let i = 0; i < ids.length; i += POOL) {
-      const batch = ids.slice(i, i + POOL)
+    for (let i = 0; i < categoryIds.length; i += POOL) {
+      const batch = categoryIds.slice(i, i + POOL)
       const results = await Promise.allSettled(
-        batch.map(id => this.client.getDomain(token, id)),
+        batch.flatMap(cId => [
+          this.client.getCategoryName(cId).then(r => ({ kind: 'name' as const, cId, data: r })),
+          this.client.getCategoryAttributesPublic(cId).then(r => ({ kind: 'attrs' as const, cId, data: r })),
+        ]),
       )
-      const upserts: Array<{ kind: string; ml_id: string; name_pt: string; raw: unknown }> = []
-      for (let j = 0; j < batch.length; j++) {
-        const id = batch[j]!
-        const res = results[j]!
-        if (res.status === 'fulfilled' && res.value?.name) {
-          cachedMap.set(`domain:${id}`, res.value.name)
-          upserts.push({ kind: 'domain', ml_id: id, name_pt: res.value.name, raw: res.value })
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue
+        if (r.value.kind === 'name' && r.value.data?.name) {
+          categoryToName.set(r.value.cId, r.value.data.name)
+        }
+        if (r.value.kind === 'attrs' && Array.isArray(r.value.data)) {
+          for (const a of r.value.data) {
+            if (a.id && a.name && !attrIdToName.has(a.id)) attrIdToName.set(a.id, a.name)
+          }
         }
       }
-      if (upserts.length > 0) {
-        const { error } = await supabaseAdmin
-          .from('ml_labels')
-          .upsert(upserts, { onConflict: 'kind,ml_id' })
-        if (error) this.logger.warn(`[ml-labels] upsert domains falhou: ${error.message}`)
+    }
+
+    // 5. Upsert ml_labels (domains + attributes encontrados)
+    const upserts: Array<{ kind: string; ml_id: string; name_pt: string; raw: unknown }> = []
+    for (const [domain, cat] of domainToCategory) {
+      const name = categoryToName.get(cat)
+      if (name) {
+        cachedMap.set(`domain:${domain}`, name)
+        upserts.push({
+          kind:    'domain',
+          ml_id:   domain,
+          name_pt: name,
+          raw:     { resolved_via: 'category', category_id: cat },
+        })
       }
+    }
+    // Atributos: so cacheia os que estao em missingAttrs (evita poluir
+    // cache com 100s de attrs irrelevantes pra org)
+    const missingAttrSet = new Set(missingAttrs)
+    for (const [attrId, name] of attrIdToName) {
+      if (!missingAttrSet.has(attrId)) continue
+      cachedMap.set(`attribute:${attrId}`, name)
+      upserts.push({
+        kind:    'attribute',
+        ml_id:   attrId,
+        name_pt: name,
+        raw:     { resolved_via: 'category_attributes' },
+      })
+    }
+    if (upserts.length > 0) {
+      const { error } = await supabaseAdmin
+        .from('ml_labels')
+        .upsert(upserts, { onConflict: 'kind,ml_id' })
+      if (error) this.logger.warn(`[ml-labels] upsert falhou: ${error.message}`)
+      else      this.logger.log(`[ml-labels] cached ${upserts.length} labels (${categoryToName.size} domains, ${attrIdToName.size} attrs)`)
     }
   }
 
-  /** Pra atributos, tenta resolver primeiro do cache de ml_category_attributes
-   *  (que ja tem nome PT-BR vindo do ML quando catprod foi sincado). */
+  /** Pra atributos, resolve do cache de ml_category_attributes (que ja tem
+   *  nome PT-BR vindo do ML quando outras categorias foram sincadas). */
   private async resolveAttributesFromCategoryCache(ids: string[], cachedMap: Map<string, string>): Promise<void> {
     if (ids.length === 0) return
 
@@ -193,17 +275,15 @@ export class MlLabelsService {
         .from('ml_labels')
         .upsert(upserts, { onConflict: 'kind,ml_id' })
       if (error) this.logger.warn(`[ml-labels] upsert attributes falhou: ${error.message}`)
+      else      this.logger.log(`[ml-labels] cached ${upserts.length} attribute labels`)
     }
   }
 }
 
-/** Escape pra IN clause Postgrest. Suporta strings com underscore/hifen. */
 function quoteIn(s: string): string {
-  // Postgrest IN syntax: in.(val1,val2). Strings com virgula/parenteses precisam quotar.
   return /[,()'"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s
 }
 
-/** Fallback: gera nome legivel a partir do ID quando nao temos PT-BR. */
 function humanize(id: string): string {
   return id
     .replace(/^MLB-/, '')
