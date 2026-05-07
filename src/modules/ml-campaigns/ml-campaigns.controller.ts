@@ -4,6 +4,8 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import { MlCampaignsService } from './ml-campaigns.service'
 import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
 import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
+import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
+import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
 
 interface ReqUserPayload {
   id: string
@@ -14,9 +16,11 @@ interface ReqUserPayload {
 @UseGuards(SupabaseAuthGuard)
 export class MlCampaignsController {
   constructor(
-    private readonly svc:      MlCampaignsService,
-    private readonly sync:     MlCampaignsSyncService,
-    private readonly decision: MlCampaignsDecisionService,
+    private readonly svc:       MlCampaignsService,
+    private readonly sync:      MlCampaignsSyncService,
+    private readonly decision:  MlCampaignsDecisionService,
+    private readonly validator: MlCampaignsValidatorService,
+    private readonly apply:     MlCampaignsApplyService,
   ) {}
 
   // ── Dashboard ──────────────────────────────────────────────────
@@ -266,5 +270,103 @@ export class MlCampaignsController {
   aiUsage(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getAiUsageToday(u.orgId)
+  }
+
+  // ═══ Camada 3: Apply + Auditoria ═════════════════════════════════════
+
+  @Post('validate')
+  validateRecommendations(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { recommendation_ids: string[] },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.recommendation_ids) || body.recommendation_ids.length === 0) {
+      throw new BadRequestException('recommendation_ids[] obrigatorio')
+    }
+    return this.validator.validateMany(u.orgId, body.recommendation_ids)
+  }
+
+  @Post('apply/single')
+  applySingle(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { recommendation_id: string; seller_id: number; apply_mode?: 'safe' | 'best_effort' },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.recommendation_id) throw new BadRequestException('recommendation_id obrigatorio')
+    if (!body?.seller_id)         throw new BadRequestException('seller_id obrigatorio')
+    return this.apply.applySingle({
+      orgId:            u.orgId,
+      sellerId:         Number(body.seller_id),
+      userId:           u.id,
+      recommendationId: body.recommendation_id,
+      applyMode:        body.apply_mode ?? 'safe',
+    })
+  }
+
+  @Post('apply/batch')
+  applyBatch(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { recommendation_ids: string[]; seller_id: number; apply_mode?: 'safe' | 'best_effort' },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.recommendation_ids) || body.recommendation_ids.length === 0) {
+      throw new BadRequestException('recommendation_ids[] obrigatorio')
+    }
+    if (!body?.seller_id) throw new BadRequestException('seller_id obrigatorio')
+    return this.apply.applyBatch({
+      orgId:             u.orgId,
+      sellerId:          Number(body.seller_id),
+      userId:            u.id,
+      recommendationIds: body.recommendation_ids,
+      applyMode:         body.apply_mode ?? 'safe',
+    })
+  }
+
+  @Post('leave/single')
+  leaveSingle(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { campaign_item_id: string; seller_id: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.campaign_item_id) throw new BadRequestException('campaign_item_id obrigatorio')
+    if (!body?.seller_id)         throw new BadRequestException('seller_id obrigatorio')
+    return this.apply.leaveSingle(u.orgId, Number(body.seller_id), u.id, body.campaign_item_id)
+  }
+
+  @Get('apply/jobs')
+  listApplyJobs(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.apply.listJobs(u.orgId, sellerId ? Number(sellerId) : undefined, limit ? Number(limit) : 20)
+  }
+
+  @Get('apply/jobs/:id')
+  getApplyJob(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.apply.getJob(u.orgId, id)
+  }
+
+  @Get('audit')
+  audit(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id')   sellerId?:   string,
+    @Query('item_id')     itemId?:     string,
+    @Query('campaign_id') campaignId?: string,
+    @Query('limit')       limit?:      string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.apply.listAuditLog({
+      orgId:      u.orgId,
+      sellerId:   sellerId ? Number(sellerId) : undefined,
+      mlItemId:   itemId,
+      campaignId,
+      limit:      limit ? Number(limit) : 100,
+    })
   }
 }

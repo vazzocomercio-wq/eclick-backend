@@ -87,6 +87,34 @@ export class MlCampaignsApiClient {
     return Array.isArray(r) ? r : []
   }
 
+  /** POST /seller-promotions/offers
+   *  Cria oferta (lojista adere a campanha pra item especifico).
+   *  Body shape varia por promotion_type. Exemplo DEAL:
+   *  { promotion_id, promotion_type, item_id, offer_price, offer_quantity? }
+   *  Retorna { id (offer_id), status, ... } */
+  async createOffer(token: string, sellerId: number, body: Record<string, unknown>): Promise<{ id?: string; offer_id?: string; status?: string; [k: string]: unknown }> {
+    return this.requestWithBackoff<{ id?: string; offer_id?: string; status?: string; [k: string]: unknown }>({
+      method:  'POST',
+      url:     `${ML_BASE}/seller-promotions/offers`,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      params:  { app_version: 'v2' },
+      data:    body,
+    }, sellerId)
+  }
+
+  /** DELETE /seller-promotions/offers/:offerId
+   *  Remove oferta (sai da campanha).
+   *  Para PRICE_DISCOUNT/DOD/LIGHTNING usado tambem pra "edit-recreate"
+   *  (deletar + recriar). Em v1 so usado pra leave/single. */
+  async deleteOffer(token: string, sellerId: number, offerId: string, promotionType: string): Promise<unknown> {
+    return this.requestWithBackoff<unknown>({
+      method:  'DELETE',
+      url:     `${ML_BASE}/seller-promotions/offers/${offerId}`,
+      headers: { Authorization: `Bearer ${token}` },
+      params:  { app_version: 'v2', promotion_type: promotionType },
+    }, sellerId)
+  }
+
   /** GET /sites/MLB/listing_prices — sem auth seller especifica.
    *  Retorna comissao + frete gratis pra (categoria, faixa de preco, logistica). */
   async getListingPrices(token: string, params: {

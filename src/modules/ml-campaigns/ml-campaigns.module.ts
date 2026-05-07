@@ -7,6 +7,8 @@ import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
 import { MlCampaignsCostService } from './ml-campaigns-cost.service'
 import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
 import { MlCampaignsReasoningService } from './ml-campaigns-reasoning.service'
+import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
+import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
 import { MlCampaignsController } from './ml-campaigns.controller'
 
 @Module({
@@ -18,8 +20,10 @@ import { MlCampaignsController } from './ml-campaigns.controller'
     MlCampaignsCostService,
     MlCampaignsDecisionService,
     MlCampaignsReasoningService,
+    MlCampaignsValidatorService,
+    MlCampaignsApplyService,
   ],
   controllers: [MlCampaignsController],
-  exports:     [MlCampaignsService, MlCampaignsSyncService, MlCampaignsDecisionService],
+  exports:     [MlCampaignsService, MlCampaignsSyncService, MlCampaignsDecisionService, MlCampaignsApplyService],
 })
 export class MlCampaignsModule {}
