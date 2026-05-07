@@ -57,6 +57,7 @@ import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 import { StoreConfigModule } from './modules/store-config/store-config.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
+import { MlCampaignsModule } from './modules/ml-campaigns/ml-campaigns.module'
 import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
 import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
 import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
@@ -119,6 +120,7 @@ import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
     StoreCopilotModule,
     StoreConfigModule,
     MlAiCoreModule,
+    MlCampaignsModule,
     MlVerticalModule,
     MlPostsaleModule,
     MlWebhookModule,
