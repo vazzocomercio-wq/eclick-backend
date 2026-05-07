@@ -135,3 +135,40 @@ Nenhuma obrigatória. Reusa:
 
 Opcional (dev):
 - `DISABLE_ML_POSTSALE_SLA_WORKER=true` — desliga o cron de SLA
+- `DISABLE_ML_REPUTATION_WORKER=true` — desliga snapshot diário de reputação ML
+- `DISABLE_ML_SHIPPING_DELAY_WORKER=true` — desliga cron horário de atraso ML
+
+### Intelligence Hub — Vertical ML (MVP 2 do Pós-venda)
+
+Continuação do MVP 1: Intelligence Hub gera **alertas operacionais** quando
+algo sai dos trilhos no ML — reclamação aberta, mediação iniciada, atraso
+confirmado, reputação caindo, mensagem crítica, possível exclusão de
+reclamação.
+
+**Configuração ML adicional no devcenter:** adicionar topic `claims` na
+mesma URL de webhook. `messages` (MVP 1) e `claims` (MVP 2) podem
+coexistir sem conflito.
+
+**Endpoints REST `/intelligence/ml/*`** (auth):
+
+| Método | Rota                                       | Descrição                                  |
+|--------|--------------------------------------------|--------------------------------------------|
+| GET    | `/reputation/latest`                       | Snapshot mais recente                      |
+| GET    | `/reputation/history?days=30`              | Série temporal pra sparklines              |
+| GET    | `/claims?status=&stage=&days=&limit=`      | Lista de reclamações                       |
+| GET    | `/claims/:id`                              | Detalhe de 1 reclamação                    |
+| GET    | `/claim-removals?status=&confidence=`      | Candidatos a exclusão                      |
+| GET    | `/claim-removals/:id`                      | Detalhe do candidato                       |
+| POST   | `/claim-removals/:id/dismiss`              | Marca como falso positivo                  |
+| POST   | `/claim-removals/:id/proceed`              | Confirma + retorna texto sugerido          |
+| POST   | `/claim-removals/:id/regenerate-text`      | Pede novo texto à IA                       |
+
+**Onde os alertas saem:** o módulo reusa o Intelligence Hub existente
+(`alert_signals`, `alert_routing_rules`, `alert_engine`). Routing rule
+default cria 1 entry com `analyzer='ml'` e `categories=[6 tipos ML]`
+apontando pro department `'atendimento'`. Pra ativar WhatsApp do gestor,
+cadastrar via `/alert-managers` (CRUD existente, com verify-phone).
+
+**Real-time:** evento Socket.IO `intelligence:alert` é emitido toda vez
+que `AlertSignalsService.insertMany()` persiste signals — UI usa
+`AlertToastListener` global pra mostrar toasts persistentes.
