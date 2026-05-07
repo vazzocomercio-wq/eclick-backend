@@ -20,10 +20,15 @@ const AUTO_SEND_FEATURE_KEY = 'ml_question_auto_send'
 
 function stripMarkdownHeader(raw: string): string {
   let text = raw.trim()
-  // Remove headers tipo "# Resposta ao Cliente" / "## Resposta" / "### foo" no início
-  text = text.replace(/^#{1,6}\s+.*$/m, '').trim()
-  // Remove "Resposta:" / "Resposta ao Cliente:" no início
-  text = text.replace(/^Resposta(\s+ao\s+Cliente)?:\s*/i, '').trim()
+  // Remove TODAS as linhas iniciais que sao headers markdown (#, ##, ###...)
+  // Loop pra cobrir multiplos headers em sequencia.
+  while (/^\s*#{1,6}\s+/.test(text)) {
+    text = text.replace(/^\s*#{1,6}\s+[^\n]*\n*/, '').trim()
+  }
+  // Remove "Resposta:" / "Resposta ao Cliente:" no inicio (com ou sem #)
+  text = text.replace(/^(?:#+\s*)?Resposta(\s+ao\s+Cliente)?\s*:?\s*/i, '').trim()
+  // Remove **negrito** mantendo conteudo (texto plano)
+  text = text.replace(/\*\*([^*]+)\*\*/g, '$1')
   return text
 }
 
@@ -45,12 +50,12 @@ export class MlQuestionsAiService {
     const result = await this.llm.generateText({
       orgId,
       feature:      'ml_question_transform',
-      systemPrompt: TRANSFORM_PROMPTS[action],
+      systemPrompt: TRANSFORM_PROMPTS[action] + ' NUNCA use markdown (#, ##, **negrito**). NUNCA inicie com "Resposta:" ou similares. Texto plano puro.',
       userPrompt:   text.trim(),
       maxTokens:    400,
     })
 
-    return { transformed: result.text.trim() }
+    return { transformed: stripMarkdownHeader(result.text) }
   }
 
   // ── Parte B — Sugestão + envio aprovado ─────────────────────────────────
