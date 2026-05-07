@@ -79,6 +79,17 @@ export class MlQualityApiClient {
     }, 0) // categoryId nao tem seller, usa 0 pro counter
   }
 
+  /** GET /domains/:id — retorna { id, name } com nome localizado PT-BR
+   *  pra dominios tipo MLB-LIGHT_BULBS → "Lampadas". Usado pra cache de
+   *  labels (ml_labels). Endpoint nao precisa de auth especifica de seller. */
+  async getDomain(token: string, domainId: string): Promise<{ id: string; name: string }> {
+    return this.requestWithBackoff<{ id: string; name: string }>({
+      method: 'GET',
+      url:    `${ML_BASE}/domains/${encodeURIComponent(domainId)}`,
+      headers: { Authorization: `Bearer ${token}` },
+    }, 0)
+  }
+
   /** Wrapper com retry + backoff exponencial pra 429.
    *  3 x 429 consecutivos pro mesmo seller -> throw RateLimitedException
    *  e o caller pausa o job. */

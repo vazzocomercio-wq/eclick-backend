@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { MlQualityService } from './ml-quality.service'
 import { MlQualitySyncService } from './ml-quality-sync.service'
+import { MlLabelsService } from './ml-labels.service'
 
 interface ReqUserPayload {
   id: string
@@ -13,8 +14,9 @@ interface ReqUserPayload {
 @UseGuards(SupabaseAuthGuard)
 export class MlQualityController {
   constructor(
-    private readonly svc:  MlQualityService,
-    private readonly sync: MlQualitySyncService,
+    private readonly svc:    MlQualityService,
+    private readonly sync:   MlQualitySyncService,
+    private readonly labels: MlLabelsService,
   ) {}
 
   // ── Dashboard ─────────────────────────────────────────────────
@@ -79,6 +81,17 @@ export class MlQualityController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getItemHistory(u.orgId, itemId, sellerId ? Number(sellerId) : undefined, days ? Number(days) : 90)
+  }
+
+  // ── Labels (traducoes PT-BR de domains/attributes) ────────────
+
+  @Get('labels')
+  getLabels(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.labels.getLabelsForOrg(u.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   // ── Categorias / domains ──────────────────────────────────────
