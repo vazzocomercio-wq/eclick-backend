@@ -812,8 +812,14 @@ const ADS_ENTRIES: KbEntry[] = [
 - ACOS alvo varia por categoria — descubra break-even (margem)
 - Termos negativos cortam custo
 
-**Especialista ML Ads** (sininho flutuante): chat IA com contexto das campanhas. "Qual pausar?", "onde perco dinheiro?".`,
-    tags: ['ads', 'ml', 'roas'],
+**Especialista ML Ads** (botão flutuante DEDICADO desta tela, canto inf direito):
+- IA com contexto rico das campanhas/ROAS/SKUs em tempo real
+- Empty state com 12 chips de sugestão fluindo (carrossel animado)
+- Histórico de conversas persistente (\`/ads/inteligencia/conversas\`)
+- Perguntas tipo: "Qual pausar?", "Onde perco dinheiro?", "Tenho estoque pra dobrar budget?", "ACOS médio das campanhas"
+
+**O copiloto flutuante GENÉRICO (Cmd/Ctrl+K) fica ESCONDIDO nesta rota** porque a IA especializada de Ads cobre o domínio melhor (com dados reais das campanhas). Cmd/Ctrl+K continua abrindo o copiloto via atalho se quiser usar mesmo assim.`,
+    tags: ['ads', 'ml', 'roas', 'ia-especializada'],
   },
   {
     routes:   ['/dashboard/ads/inteligencia'],
