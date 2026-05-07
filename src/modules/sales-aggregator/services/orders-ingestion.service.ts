@@ -201,7 +201,23 @@ export class OrdersIngestionService {
    * each row. Reads existing rows from `orders` first so already-fetched
    * orders don't re-hit ML; new ones are fetched serially with 1.1s pacing.
    * On any failure we still stamp `buyer_billing_fetched_at = now()` so the
-   * row is treated as "tried" and not retried by the manual top-up button. */
+   * row is treated as "tried" and not retried by the manual top-up button.
+   *
+   * IMPORTANTE — Preservação de CPF: o worker faz UPSERT FULL no upsert
+   * de orders, então `buyer_doc_number: snapshot.doc_number ?? null`
+   * sobrescreve a coluna toda vez. Pra NUNCA apagar CPF bom:
+   *
+   *   1. SEMPRE lê existing data primeiro (sem filtro fetched_at)
+   *   2. Pedidos COM fetched_at → reutiliza snapshot bom (skip ML fetch)
+   *   3. Pedidos SEM fetched_at mas COM doc_number existente → re-fetch
+   *      mas mescla com existing como fallback (se ML não devolver CPF,
+   *      mantém o que já tinha)
+   *   4. Pedidos novos → fetch limpo
+   *
+   * Token único é cross-conta-incompatível: pedido de outra conta da org
+   * retorna 401/403. A camada de ingestão precisaria fan-out, mas como
+   * isso é mais invasivo, a solução defensive aqui evita o pior caso
+   * (perda de CPF). Refetch manual via /refetch-billing já tem fan-out. */
   private async fetchBuyersForOrders(
     orders: MlOrder[],
     token: string,
@@ -212,17 +228,19 @@ export class OrdersIngestionService {
 
     const externalIds = [...new Set(orders.map(o => String(o.id)))]
 
-    // 1. What's already cached in DB (prevents re-fetching across re-syncs)
+    // 1. Lê TODAS as rows existentes (sem filtro fetched_at) — fonte de
+    //    fallback pra preservar CPF/phone/billing_address bom mesmo
+    //    quando ML re-fetch falha.
     const { data: existing } = await supabaseAdmin
       .from('orders')
       .select(
         'external_order_id, buyer_doc_type, buyer_doc_number, buyer_email, buyer_phone, buyer_name, buyer_last_name, buyer_billing_info_id, billing_address, billing_country, buyer_billing_fetched_at',
       )
       .in('external_order_id', externalIds)
-      .not('buyer_billing_fetched_at', 'is', null)
 
+    const existingByOrder = new Map<string, BuyerSnapshot>()
     for (const row of existing ?? []) {
-      out.set(row.external_order_id as string, {
+      existingByOrder.set(row.external_order_id as string, {
         doc_type:        (row.buyer_doc_type       as string | null) ?? null,
         doc_number:      (row.buyer_doc_number     as string | null) ?? null,
         email:           (row.buyer_email          as string | null) ?? null,
@@ -236,7 +254,14 @@ export class OrdersIngestionService {
       })
     }
 
-    // 2. For the rest, run the 2-step ML billing cascade
+    // 2. Pedidos COM fetched_at já set → reutiliza (skip ML). Mantém o
+    //    comportamento de cache que já tinha.
+    for (const [id, snap] of existingByOrder) {
+      if (snap.fetched_at) out.set(id, snap)
+    }
+
+    // 3. Pedidos sem fetched_at — vão pro ML cascade. Mas guardamos o
+    //    existing snapshot pra mesclar como fallback após o fetch.
     const toFetch = externalIds.filter(id => !out.has(id))
     if (toFetch.length === 0) return out
 
@@ -257,17 +282,34 @@ export class OrdersIngestionService {
       for (let j = 0; j < settled.length; j++) {
         const id = batch[j]
         const r  = settled[j]
+        const prev = existingByOrder.get(id) // existing CPF/phone/etc se houver
         if (r.status === 'fulfilled') {
           const { snapshot, hasCpf, hasPhone } = r.value
-          out.set(id, snapshot)
-          if (hasCpf)   withCpf++
-          else          miss++
-          if (hasPhone) withPhone++
+          // Merge defensivo: ML novo > existing > null. Se ML não devolveu
+          // CPF mas existing tinha, preserva existing. Mesma coisa pra
+          // phone/billing_address/etc. Resolve cross-conta sem precisar
+          // fan-out aqui — basta nunca regredir.
+          out.set(id, {
+            doc_type:        snapshot.doc_type        ?? prev?.doc_type        ?? null,
+            doc_number:      snapshot.doc_number      ?? prev?.doc_number      ?? null,
+            email:           snapshot.email           ?? prev?.email           ?? null,
+            phone:           snapshot.phone           ?? prev?.phone           ?? null,
+            name:            snapshot.name            ?? prev?.name            ?? null,
+            last_name:       snapshot.last_name       ?? prev?.last_name       ?? null,
+            billing_info_id: snapshot.billing_info_id ?? prev?.billing_info_id ?? null,
+            billing_address: snapshot.billing_address ?? prev?.billing_address ?? null,
+            billing_country: snapshot.billing_country ?? prev?.billing_country ?? null,
+            fetched_at:      snapshot.fetched_at      ?? new Date().toISOString(),
+          })
+          if (hasCpf || prev?.doc_number) withCpf++
+          else                            miss++
+          if (hasPhone || prev?.phone)    withPhone++
         } else {
-          // Falha total — fetched_at = null pra cron horário tentar de novo
+          // Falha total — preserva existing se houver, senão grava null com
+          // fetched_at=null pra cron horário tentar de novo
           failed++
           this.logger.warn(`[ml-sync.billing.failed] order=${id} ${(r.reason as Error)?.message ?? 'erro'}`)
-          out.set(id, {
+          out.set(id, prev ?? {
             doc_type: null, doc_number: null, email: null, phone: null,
             name: null, last_name: null, billing_info_id: null,
             billing_address: null, billing_country: null,

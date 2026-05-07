@@ -159,7 +159,12 @@ export class MlBillingFetcherService {
    * IMPORTANT — ML billing shape:
    *   { identification: { type, number }, name, last_name, address: { ... } }
    * NOT { doc_type, doc_number }. The legacy fallback parity is kept just
-   * in case but the canonical path is `identification.{type,number}`. */
+   * in case but the canonical path is `identification.{type,number}`.
+   *
+   * NUNCA sobrescreve CPF/phone/billing_address já presente no DB com null
+   * — a função usa conditional assigns no patch (só inclui campo se tiver
+   * valor). Isso garante que um refetch falho cross-conta nunca apaga dados
+   * fiscais bons capturados em fetch anterior. */
   private async resolveBuyer(
     externalOrderId: string,
     buyerId: number | null,
@@ -199,6 +204,8 @@ export class MlBillingFetcherService {
     const patch: Record<string, unknown> = {
       buyer_billing_fetched_at: new Date().toISOString(),
     }
+    // Conditional assigns: só inclui campo no patch se tiver valor — UPDATE
+    // parcial preserva o que já está no DB.
     if (cleanDoc)              patch.buyer_doc_number      = cleanDoc
     if (docType)               patch.buyer_doc_type        = docType
     if (fullName)              patch.buyer_name            = fullName
@@ -206,7 +213,9 @@ export class MlBillingFetcherService {
     if (result.billingInfoId)  patch.buyer_billing_info_id = result.billingInfoId
     if (phone)                 patch.buyer_phone           = phone
     if (billing?.address)      patch.billing_address       = billing.address
-    patch.billing_country = billing?.address?.country_id ?? 'BR'
+    // billing_country só vai no patch se billing veio com address — antes
+    // forçava 'BR' mesmo em fetch falho, sobrescrevendo um país anterior.
+    if (billing?.address)      patch.billing_country       = billing.address.country_id ?? 'BR'
 
     // Step 2 — log the EXACT payload we're about to UPSERT (no surprises).
     this.logger.log(`[ml-sync.billing.upsert] order=${externalOrderId} ${JSON.stringify(patch)}`)
@@ -279,13 +288,6 @@ export class MlBillingFetcherService {
   }> {
     const empty = { processed: 0, with_cpf: 0, with_email: 0, with_phone: 0, no_data: 0, errors: 0 }
 
-    let token: string
-    try {
-      ;({ token } = await this.ml.getValidToken())
-    } catch {
-      return empty
-    }
-
     const { data: orders } = await supabaseAdmin
       .from('orders')
       .select('id, external_order_id, organization_id, raw_data')
@@ -295,23 +297,53 @@ export class MlBillingFetcherService {
 
     if (!orders?.length) return empty
 
+    // Cache de tokens por orgId — evita re-buscar/refresh em cada loop
+    const tokenCache = new Map<string, Array<{ token: string; sellerId: number }>>()
+    const getTokensForOrg = async (orgId: string | null) => {
+      if (!orgId) {
+        try { return [await this.ml.getValidToken()] } catch { return [] }
+      }
+      if (tokenCache.has(orgId)) return tokenCache.get(orgId)!
+      const tokens = await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+      tokenCache.set(orgId, tokens)
+      return tokens
+    }
+
     let withCpf = 0, withPhone = 0, noData = 0, errors = 0
     for (const o of orders) {
       const ext = o.external_order_id as string
+      const orgId = (o.organization_id as string | null) ?? null
       const buyerId = ((o.raw_data as { buyer?: { id?: number } } | null)?.buyer?.id) ?? null
 
-      const { patch, cpfFound, phoneFound, log } = await this.resolveBuyer(ext, buyerId, token)
+      const tokens = await getTokensForOrg(orgId)
+      if (tokens.length === 0) { errors++; continue }
+
+      // Fan-out por pedido — para no primeiro token que devolver CPF
+      let bestPatch: Record<string, unknown> | null = null
+      let bestCpf = false, bestPhone = false, bestLog: string[] = []
+      for (const tk of tokens) {
+        const { patch, cpfFound, phoneFound, log } = await this.resolveBuyer(ext, buyerId, tk.token)
+        if (cpfFound) {
+          bestPatch = patch; bestCpf = true; bestPhone = phoneFound; bestLog = log
+          break
+        }
+        if (!bestPatch || (phoneFound && !bestPhone)) {
+          bestPatch = patch; bestPhone = phoneFound; bestLog = log
+        }
+      }
+
+      if (!bestPatch) bestPatch = { buyer_billing_fetched_at: new Date().toISOString() }
 
       const { error: upErr } = await supabaseAdmin
-        .from('orders').update(patch).eq('id', o.id)
+        .from('orders').update(bestPatch).eq('id', o.id)
 
       if (upErr) { errors++; continue }
-      if (cpfFound)   withCpf++
-      if (phoneFound) withPhone++
-      if (!cpfFound && !phoneFound) noData++
+      if (bestCpf)   withCpf++
+      if (bestPhone) withPhone++
+      if (!bestCpf && !bestPhone) noData++
 
       this.logger.log(
-        `[ml-sync.billing] order=${ext} cpf=${cpfFound ? 'yes' : 'no'} log=${log.join('|')}`,
+        `[ml-sync.billing] order=${ext} cpf=${bestCpf ? 'yes' : 'no'} fanout=${tokens.length} log=${bestLog.join('|')}`,
       )
 
       await new Promise(r => setTimeout(r, 1100))
@@ -334,7 +366,13 @@ export class MlBillingFetcherService {
     }
   }
 
-  /** Manual single-order refetch. Powers POST /ml/orders/:id/refetch-billing. */
+  /** Manual single-order refetch. Powers POST /ml/orders/:id/refetch-billing.
+   *
+   *  Fan-out cross-conta: itera todos os tokens da org e tenta cada um até
+   *  achar billing válido. ML retorna 401/403 quando o token não tem acesso
+   *  ao pedido (pedido pertence a outra conta da mesma org). Sem fan-out,
+   *  pedidos de contas secundárias nunca resolvem CPF.
+   */
   async refetchOne(externalOrderId: string): Promise<{
     ok:    boolean
     order_id: string
@@ -351,50 +389,95 @@ export class MlBillingFetcherService {
     log?:    string[]
     message?: string
   }> {
-    let token: string
-    try {
-      ;({ token } = await this.ml.getValidToken())
-    } catch {
-      return { ok: false, order_id: externalOrderId, buyer: null, message: 'Token ML inválido — reconecte a conta' }
-    }
-
+    // Lê o pedido pra descobrir orgId e buyerId
     const { data: orderRow } = await supabaseAdmin
       .from('orders')
-      .select('id, raw_data')
+      .select('id, raw_data, organization_id')
       .eq('external_order_id', externalOrderId)
       .limit(1)
       .maybeSingle()
 
-    const buyerId = ((orderRow?.raw_data as { buyer?: { id?: number } } | null)?.buyer?.id) ?? null
+    if (!orderRow) {
+      return { ok: false, order_id: externalOrderId, buyer: null, message: 'Pedido não encontrado no DB' }
+    }
 
-    const { patch, log } = await this.resolveBuyer(externalOrderId, buyerId, token)
+    const orgId   = (orderRow.organization_id as string | null) ?? null
+    const buyerId = ((orderRow.raw_data as { buyer?: { id?: number } } | null)?.buyer?.id) ?? null
+
+    // Fan-out: tenta cada token da org até achar billing válido. Sem orgId
+    // (legacy), cai pra single-token via getValidToken() pra não quebrar.
+    let tokens: Array<{ token: string; sellerId: number }> = []
+    if (orgId) {
+      tokens = await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+    }
+    if (tokens.length === 0) {
+      try {
+        const t = await this.ml.getValidToken()
+        tokens = [t]
+      } catch {
+        return { ok: false, order_id: externalOrderId, buyer: null, message: 'Token ML inválido — reconecte a conta' }
+      }
+    }
+
+    // Tenta cada token. Se qualquer um devolver CPF, usa esse patch e para.
+    // Se todos falharem ou voltarem null, usa o melhor patch (com phone se houver).
+    let bestPatch: Record<string, unknown> | null = null
+    let bestLog: string[] = []
+    let bestCpfFound = false
+    let bestPhoneFound = false
+    const aggregatedLog: string[] = []
+
+    for (const tk of tokens) {
+      const { patch, cpfFound, phoneFound, log } = await this.resolveBuyer(externalOrderId, buyerId, tk.token)
+      aggregatedLog.push(`seller=${tk.sellerId}:${log.join('|')}`)
+
+      // Critério de "melhor patch": prioriza o que tem CPF; depois phone;
+      // por último o mais recente. Garante que se conta A devolver CPF e
+      // conta B não, ficamos com o de A.
+      if (cpfFound) {
+        bestPatch = patch
+        bestLog = log
+        bestCpfFound = true
+        bestPhoneFound = phoneFound
+        break // achamos CPF — para fan-out
+      }
+      if (!bestPatch || (phoneFound && !bestPhoneFound)) {
+        bestPatch = patch
+        bestLog = log
+        bestPhoneFound = phoneFound
+      }
+    }
+
+    if (!bestPatch) {
+      bestPatch = { buyer_billing_fetched_at: new Date().toISOString() }
+    }
 
     const { error } = await supabaseAdmin
       .from('orders')
-      .update(patch)
+      .update(bestPatch)
       .eq('external_order_id', externalOrderId)
     if (error) {
       this.logger.error(`[ml.billing.refetch] external=${externalOrderId} db=${error.message}`)
-      return { ok: false, order_id: externalOrderId, buyer: null, log, message: error.message }
+      return { ok: false, order_id: externalOrderId, buyer: null, log: bestLog, message: error.message }
     }
 
     this.logger.log(
-      `[ml-sync.billing] order=${externalOrderId} cpf=${patch.buyer_doc_number ? 'yes' : 'no'} log=${log.join('|')}`,
+      `[ml-sync.billing] order=${externalOrderId} cpf=${bestCpfFound ? 'yes' : 'no'} fanout=${tokens.length} log=${aggregatedLog.join(' || ')}`,
     )
 
     return {
       ok: true,
       order_id: externalOrderId,
-      log,
+      log: bestLog,
       buyer: {
-        doc_type:        (patch.buyer_doc_type        as string | null) ?? null,
-        doc_number:      (patch.buyer_doc_number      as string | null) ?? null,
+        doc_type:        (bestPatch.buyer_doc_type        as string | null) ?? null,
+        doc_number:      (bestPatch.buyer_doc_number      as string | null) ?? null,
         email:           null,
-        phone:           (patch.buyer_phone           as string | null) ?? null,
-        name:            (patch.buyer_name            as string | null) ?? null,
-        last_name:       (patch.buyer_last_name       as string | null) ?? null,
-        billing_info_id: (patch.buyer_billing_info_id as string | null) ?? null,
-        billing_address: patch.billing_address ?? null,
+        phone:           (bestPatch.buyer_phone           as string | null) ?? null,
+        name:            (bestPatch.buyer_name            as string | null) ?? null,
+        last_name:       (bestPatch.buyer_last_name       as string | null) ?? null,
+        billing_info_id: (bestPatch.buyer_billing_info_id as string | null) ?? null,
+        billing_address: bestPatch.billing_address ?? null,
       },
     }
   }
