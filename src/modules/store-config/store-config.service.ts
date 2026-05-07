@@ -139,6 +139,22 @@ export class StoreConfigService {
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
     if (Object.keys(safe).length === 0) throw new BadRequestException('nada pra atualizar')
 
+    // Sanitiza custom_domain: remove protocolo, trailing slash, www. opcional,
+    // espacos e converte pra lowercase. Aceita "https://www.dominio.com.br/"
+    // e salva como "dominio.com.br" (mas mantem subdominio quando intencional
+    // tipo "loja.dominio.com.br").
+    if ('custom_domain' in safe && typeof safe.custom_domain === 'string') {
+      const raw = (safe.custom_domain as string).trim().toLowerCase()
+      if (raw === '') {
+        safe.custom_domain = null
+      } else {
+        safe.custom_domain = raw
+          .replace(/^https?:\/\//, '')   // remove protocolo
+          .replace(/\/.*$/, '')          // remove path
+          .replace(/^www\./, '')          // remove www. (apex preferido)
+      }
+    }
+
     // Se mudou domínio, reseta verificação
     if ('custom_domain' in patch) {
       safe.domain_verified = false
