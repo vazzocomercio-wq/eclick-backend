@@ -573,29 +573,199 @@ const SALES_ENTRIES: KbEntry[] = [
   {
     routes:   ['/dashboard/atendimento/perguntas'],
     category: 'atendimento',
-    title:    'Perguntas do Mercado Livre',
-    content: `**Inbox de perguntas pré-venda** dos compradores ML.
+    title:    'Perguntas do Mercado Livre (pré-venda)',
+    content: `**Inbox de perguntas pré-venda** dos compradores ML — antes do pedido.
 
-**3 colunas**:
+**Como chega cada pergunta** (atualizado 2026-05-07 / sprint MVP 1 ML Pós-venda):
+- ML envia webhook em segundos pra \`POST /ml/webhook\` (topic=questions)
+- Backend identifica seller_id → org → roda \`MlAiCoreService.suggestQuestion\`
+- Sonnet 4.6 lê pergunta + título/preço/estoque + histórico P&R + persona → gera resposta
+- Sugestão fica em \`ml_question_suggestions\` (status=pending)
+- **Não há mais cron de polling** — webhook é fonte única (política realtime-first)
+
+**3 colunas na UI**:
 1. Pergunta + produto + comprador
-2. Sugestão IA (Sonnet com contexto do anúncio)
+2. Sugestão IA editável
 3. Ações: editar, encurtar, humanizar, add garantia, resposta pronta
 
-**Auto-resposta**: confidence ≥ 0.70 → envia automático (config em \`/dashboard/configuracoes/ia\`).
+**Auto-resposta**: confidence ≥ 0.70 → envia automático sem revisão humana
+- Configurar em \`/dashboard/configuracoes/ia\` (toggle \`ml_question_auto_send\`)
+- Recomendação: revisar primeiras 50 antes de ligar auto-send
 
-**Boas práticas**: revise primeiras 50 antes de auto-send, ajuste tom, use templates pra repetitivas.`,
-    tags: ['atendimento', 'ml', 'perguntas'],
+**Pós-venda é outra tela**: questões de COMPRADORES JÁ COMPRARAM (envio, defeito, NF) ficam em \`/dashboard/ml-postsale\`, não aqui.`,
+    tags: ['atendimento', 'ml', 'perguntas', 'pre-venda', 'webhook', 'realtime'],
   },
   {
     routes:   ['/dashboard/atendimento/reclamacoes'],
     category: 'atendimento',
-    title:    'Reclamações',
+    title:    'Reclamações ML',
     content: `**Tickets de reclamação** dos marketplaces (mediation no ML).
 
 **Severidade**: alta (penalização) > média > baixa.
 
-**KPI crítico**: SLA de resposta (ML penaliza > 24h).`,
-    tags: ['atendimento', 'reclamacoes', 'sla'],
+**KPI crítico**: SLA de resposta (ML penaliza > 24h úteis — perde direito de pedir exclusão da reclamação).
+
+**Painel inteligente cobre o mesmo terreno**: \`/dashboard/inteligencia/ml\` lista todas reclamações abertas + candidatos a exclusão de reclamação detectados pela IA + reputação atualizada. Recomendação: usar o painel de inteligência como ponto de partida diário.
+
+**Disparos automáticos** (Intelligence Hub vertical ML — sprint 2026-05-07):
+- Reclamação aberta → alerta WhatsApp pro gestor cadastrado
+- Mediação iniciada → alerta crítico imediato
+- Comprador disse "abri por engano" → candidato a exclusão detectado pela IA híbrida (regex + Haiku)`,
+    tags: ['atendimento', 'reclamacoes', 'sla', 'mediation', 'intelligence'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// ML Pós-venda IA + Intelligence Hub vertical ML (sprints 2026-05-07)
+// ════════════════════════════════════════════════════════════════════════
+
+const ML_POSTSALE_INTELLIGENCE_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/ml-postsale'],
+    category: 'atendimento',
+    title:    'Pós-venda IA — Inbox de mensagens ML após o pedido',
+    content: `**Painel principal de atendimento pós-venda do Mercado Livre** (entregue 2026-05-07).
+
+**O que cobre**: mensagens dentro de pedidos JÁ feitos — dúvidas sobre envio, problemas com produto, pedido de NF, reclamações em formação. **Diferente de \`/dashboard/atendimento/perguntas\`** (perguntas pré-venda em anúncios).
+
+**Layout 3 colunas**:
+1. **Lista de conversas** (esquerda 320px): filtro por SLA (em dia / atenção / alerta / urgente / estourou), busca, badge de não lidas, ordenação automática por urgência
+2. **Conversa + Editor IA** (centro): histórico (comprador esquerda / vendedor direita), caixa cyan com sugestão IA classificada (intent + sentiment + urgency + risk), contador 350 chars, botões Enviar / Pedir nova sugestão / Tom mais empático / Tom mais objetivo / Marcar resolvido
+3. **Contexto da venda** (direita): foto + título + status do envio + dados do comprador + **base de conhecimento editável do produto** (manual, problemas comuns, garantia, política de troca, observações)
+
+**Como funciona o pipeline**:
+1. ML envia webhook \`POST /ml/webhook\` (topic=messages) em segundos
+2. Backend baixa o pack + mensagens via API ML
+3. Pra cada mensagem do COMPRADOR:
+   - **Classificação Haiku** (15 intents: dúvida, entrega, atraso, NF, defeito, irritado, ameaça reclamação, etc.) + sentimento + urgência + risco
+   - **Sugestão Sonnet 4.6** ≤ 350 chars (limite ML), com regenerate-once se estourar; regras duras (nunca pedir telefone, nunca prometer prazo, etc.)
+4. Calcula SLA em horas úteis (08-18 SP, seg-sex)
+5. Emite Socket.IO real-time → UI atualiza sem refresh
+
+**SLA semáforo** (horas úteis desde a msg do comprador sem resposta):
+- 🟢 Verde: <4h | 🟡 Amarelo: 4-12h | 🟠 Laranja: 12-20h | 🔴 Vermelho: 20-24h
+- ⚫ Crítico: ≥24h (limite SLA do ML — perde direito de pedir exclusão de reclamação)
+
+**Boas práticas**:
+- Mantenha **KB do produto** atualizada — IA usa pra responder com precisão
+- Mensagem com risk='crítico' dispara alerta automático no Intelligence Hub (gestor recebe WhatsApp)
+
+**Configuração necessária**: webhook ML no devcenter (callback \`https://api.eclick.app.br/ml/webhook\` + topic \`messages\` ativo).`,
+    tags: ['atendimento', 'ml', 'pos-venda', 'inbox', 'sla', 'webhook', 'ia'],
+  },
+  {
+    routes:   ['/dashboard/inteligencia/ml'],
+    category: 'inteligencia',
+    title:    'Intelligence Hub — Mercado Livre (reputação + claims + exclusão)',
+    content: `**Painel de monitoramento ML** (entregue 2026-05-07 — MVP 2 do Pós-venda).
+
+**O que cobre**: visão de NEGÓCIO do ML — reputação, reclamações abertas, candidatos a exclusão de reclamação. Diferente de \`/dashboard/ml-postsale\` (que é a inbox operacional mensagem-a-mensagem).
+
+**3 áreas**:
+
+1. **Reputação ML** (header com sparklines 30 dias):
+   - Nível atual (5_green / 4_light_green / 3_yellow / 2_orange / 1_red)
+   - 3 KPIs: % Reclamações | % Cancelamentos | % Atraso de envio
+   - Cada KPI tem threshold visual (linha amarela=warning, linha vermelha=crítico)
+   - Trend arrow comparando último vs antepenúltimo
+   - **Snapshot diário 6h SP** (cron) — primeiros dados aparecem amanhã às 6h ou disparáveis manualmente
+
+2. **Reclamações abertas** (esquerda inferior):
+   - Lista de claims do ML com badge "MEDIAÇÃO" quando aplicável
+   - Click leva direto pra inbox (\`/dashboard/ml-postsale\`)
+
+3. **Candidatos a exclusão de reclamação** (direita inferior — IA híbrida):
+   - **Detecção regex + LLM**: 16 patterns PT-BR ("abri por engano", "produto chegou", "não fui eu", "pode cancelar a reclamação") → Haiku qualifica → persiste se confidence ≥ medium
+   - **Confidence badge**: alta/média/baixa
+   - **Texto sugerido pela IA** pra enviar ao ML solicitando exclusão (cyan box)
+   - Botões:
+     - **Confirmar e copiar texto** — copia pro clipboard + marca como solicitado
+     - **Regenerar texto** — pede nova versão à IA
+     - **Falso positivo** — descarta candidato
+
+**Alertas automáticos** (Intelligence Hub gera WhatsApp pro gestor cadastrado):
+- 🚨 Reclamação aberta (severity=crítico, immediate)
+- 🚨 Mediação iniciada (crítico)
+- 📦 Pedido atrasado ≥3d (crítico) ou ≥1d (warning) — cron horário
+- 📉 Reputação ML em risco — cruzar threshold (warning ou crítico)
+- 💬 Mensagem crítica — risk='crítico' detectado no MVP 1
+- 🔓 Candidato a exclusão (warning ou crítico conforme confidence)
+
+**Submissão da exclusão ao ML**: no MVP 2 a IA SÓ gera o texto + copia pro clipboard. Envio é manual via painel ML (cole o texto na mediação).`,
+    tags: ['inteligencia', 'ml', 'reputacao', 'claims', 'exclusao', 'ia'],
+  },
+  {
+    routes:   [
+      '/dashboard/inteligencia',
+      '/dashboard/inteligencia/alertas',
+      '/dashboard/inteligencia/gestores',
+      '/dashboard/inteligencia/relatorios',
+      '/dashboard/inteligencia/configuracoes',
+    ],
+    category: 'inteligencia',
+    title:    'Intelligence Hub — gestores, alertas, regras',
+    content: `**Sistema de monitoramento ativo + alertas multicanal**. Em prod desde 2026-05-04, vertical ML adicionada em 2026-05-07.
+
+**5 analyzers automáticos** geram sinais (\`alert_signals\`):
+- **estoque** (cada 15min) — ruptura iminente, estoque alto
+- **compras** — fornecedor problemático, falta crítica
+- **margem** — margem caindo abaixo do alvo
+- **ads** — campanha sangrando, ROAS ruim
+- **ml** (vertical NOVA — MVP 2) — claim, mediação, atraso, reputação, mensagem crítica, candidato exclusão
+
+**Fluxo de um sinal**:
+1. Analyzer detecta evento → grava em \`alert_signals\` (severity + score 0-100)
+2. **AlertEngine** lê \`alert_routing_rules\` → decide quais gestores recebem (por department + analyzer + categories + min_score)
+3. **AlertDeliveries** rastreia entrega (whatsapp / email / push / dashboard)
+4. **WhatsApp** vai via Baileys quando gestor está \`verified\`
+
+**Telas do hub**:
+- **\`/inteligencia/alertas\`** — feed de alertas dos analyzers, ack/resolve, filtros por severity/analyzer
+- **\`/inteligencia/gestores\`** — CRUD de pessoas que recebem alertas (nome + WhatsApp + departamento). Cada gestor precisa **verificar phone** clicando "Verify-phone" → recebe código WA → confirma. Sem verify, alertas WA não chegam.
+- **\`/inteligencia/ml\`** — painel específico ML (reputação + claims + candidatos exclusão)
+- **\`/inteligencia/relatorios\`** — KPIs históricos
+- **\`/inteligencia/configuracoes\`** — toggles globais (analyzers on/off, quiet hours, max alerts/dia, digest schedule)
+
+**Real-time**: todo signal novo emite Socket.IO \`intelligence:alert\` → componente \`AlertToastListener\` (global em todas telas do dashboard) mostra toast persistente cyan/amarelo/vermelho conforme severity. **Critical fica até user fechar**, warning/info auto-some em 30s.
+
+**Pra ativar a vertical ML pra um lojista**:
+1. Configurar webhook ML no devcenter (URL backend + topic \`messages\`/\`questions\`/\`claims\`)
+2. Cadastrar **manager** em \`/inteligencia/gestores\` com phone do dono → verify-phone
+3. (Opcional) editar routing rule \`atendimento + analyzer=ml\` se quiser custom department
+4. Esperar primeiro evento ML (ou disparar manualmente)`,
+    tags: ['inteligencia', 'hub', 'alertas', 'gestores', 'whatsapp', 'analyzers', 'ml'],
+  },
+  {
+    routes:   ['/dashboard/configuracoes/integracoes', '/dashboard/configuracoes'],
+    category: 'configuracoes',
+    title:    'Webhook Mercado Livre — configuração obrigatória',
+    content: `**Pra módulos ML funcionarem em real-time** (Pós-venda IA, Intelligence Hub ML, Perguntas IA), o webhook precisa estar registrado no devcenter ML.
+
+**Passo a passo** (1 minuto):
+
+1. Acessa https://developers.mercadolivre.com.br/devcenter
+2. Suas aplicações → app do e-Click
+3. Procura aba **"Notificações"** (ou "Configuração de notificações")
+4. Em **URL de retornos de chamada de notificação**:
+   \`\`\`
+   https://api.eclick.app.br/ml/webhook
+   \`\`\`
+   ⚠️ \`api.\`eclick.app.br (backend), NÃO eclick.app.br (frontend) — são URLs diferentes
+5. Em **Tópicos**, marca os 3:
+   - \`messages\` (pós-venda — MVP 1)
+   - \`questions\` (perguntas pré-venda)
+   - \`claims\` (reclamações — MVP 2)
+6. Salvar
+
+**Outra URL no painel ML é a OAuth callback** (\`eclick.app.br/dashboard/integracoes/ml/callback\`) — essa fica como está, é diferente do webhook.
+
+**Validar que funcionou**:
+- Endpoint backend retorna 200 em \`POST /ml/webhook\`
+- Quando uma mensagem nova chega no ML, em <30s aparece em \`ml_conversations\` no Supabase
+- UI \`/dashboard/ml-postsale\` mostra real-time
+
+**Sem webhook configurado**: as telas ficam vazias mesmo com mensagens existentes no ML (módulo só captura A PARTIR do momento que ativa — não faz backfill automático).`,
+    tags: ['configuracoes', 'integracoes', 'webhook', 'ml', 'setup'],
   },
 ]
 
@@ -931,6 +1101,7 @@ export const KB: KbEntry[] = [
   ...COMPRAS_PRICING_ENTRIES,
   ...SALES_ENTRIES,
   ...ADS_ENTRIES,
+  ...ML_POSTSALE_INTELLIGENCE_ENTRIES,
   ...OPS_ENTRIES,
   ...COPILOT_PAGE_ENTRIES,
   ...MULTI_ACCOUNT_ENTRIES,
