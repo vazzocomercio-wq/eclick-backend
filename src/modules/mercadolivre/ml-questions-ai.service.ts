@@ -165,10 +165,10 @@ export class MlQuestionsAiService {
     return { suggestedAnswer, confidence, autoSendEligible }
   }
 
-  async approveAndSend(orgId: string, questionId: string, finalAnswer: string, wasEdited: boolean) {
+  async approveAndSend(orgId: string, questionId: string, finalAnswer: string, wasEdited: boolean, sellerId?: number) {
     if (!finalAnswer?.trim()) throw new BadRequestException('finalAnswer obrigatório')
 
-    await this.ml.answerQuestion(orgId, Number(questionId), finalAnswer.trim())
+    await this.ml.answerQuestion(orgId, Number(questionId), finalAnswer.trim(), sellerId)
 
     await supabaseAdmin
       .from('ml_question_suggestions')

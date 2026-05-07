@@ -1127,8 +1127,8 @@ export class MercadolivreService {
     }
   }
 
-  async answerQuestion(orgId: string | null, questionId: number, text: string) {
-    const { token } = await this.getTokenForOrg(orgId)
+  async answerQuestion(orgId: string | null, questionId: number, text: string, sellerId?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerId)
     try {
       const { data } = await axios.post(
         `${ML_BASE}/answers`,

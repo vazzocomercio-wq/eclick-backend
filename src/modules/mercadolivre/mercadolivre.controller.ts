@@ -397,16 +397,17 @@ export class MercadolivreController {
     return this.questionsAi.getAiStats(user.orgId!)
   }
 
-  // POST /ml/questions/:id/answer  { text: string }
+  // POST /ml/questions/:id/answer  { text: string, seller_id?: number }
   @Post('questions/:id/answer')
   @HttpCode(HttpStatus.OK)
   answerQuestion(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
-    @Body() body: { text: string },
+    @Body() body: { text: string; seller_id?: number | string },
   ) {
     if (!body.text?.trim()) throw new BadRequestException('text é obrigatório')
-    return this.ml.answerQuestion(user.orgId!, Number(id), body.text)
+    const sellerId = body.seller_id != null ? Number(body.seller_id) : undefined
+    return this.ml.answerQuestion(user.orgId!, Number(id), body.text, sellerId)
   }
 
   // POST /ml/questions/:id/suggest-answer
@@ -419,15 +420,16 @@ export class MercadolivreController {
     return this.questionsAi.suggestAnswer(user.orgId!, id)
   }
 
-  // POST /ml/questions/:id/approve-and-send  { finalAnswer, wasEdited }
+  // POST /ml/questions/:id/approve-and-send  { finalAnswer, wasEdited, seller_id? }
   @Post('questions/:id/approve-and-send')
   @HttpCode(HttpStatus.OK)
   approveAndSend(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
-    @Body() body: { finalAnswer: string; wasEdited: boolean },
+    @Body() body: { finalAnswer: string; wasEdited: boolean; seller_id?: number | string },
   ) {
-    return this.questionsAi.approveAndSend(user.orgId!, id, body.finalAnswer, body.wasEdited === true)
+    const sellerId = body.seller_id != null ? Number(body.seller_id) : undefined
+    return this.questionsAi.approveAndSend(user.orgId!, id, body.finalAnswer, body.wasEdited === true, sellerId)
   }
 
   // GET /ml/settings/auto-answer
