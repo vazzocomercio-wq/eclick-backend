@@ -737,7 +737,20 @@ const ML_POSTSALE_INTELLIGENCE_ENTRIES: KbEntry[] = [
 - **\`/inteligencia/relatorios\`** — KPIs históricos
 - **\`/inteligencia/configuracoes\`** — toggles globais (analyzers on/off, quiet hours, max alerts/dia, digest schedule)
 
-**Real-time**: todo signal novo emite Socket.IO \`intelligence:alert\` → componente \`AlertToastListener\` (global em todas telas do dashboard) mostra toast persistente cyan/amarelo/vermelho conforme severity. **Critical fica até user fechar**, warning/info auto-some em 30s.
+**Real-time**: todo signal novo emite Socket.IO \`intelligence:alert\` → componente \`AlertToastListener\` (global em todas telas do dashboard) mostra toast moderno no canto sup direito (abaixo do header).
+
+**Toasts redesign 2026-05-08** — design futurista, menos invasivo:
+- **Glassmorphism**: backdrop-blur + bg semi-transparente + glow colorido por severity
+- **Compact mode default** (340px × ~60px) — só severity + categoria + summary truncado
+- **Hover expande** mostrando suggestion completa, lista de alertas agrupados, link "Ver no painel"
+- **Smart grouping**: alertas mesma categoria+severity em janela 60s viram 1 card com badge "+N"
+- **Auto-dismiss em 8s** (era 30s) com progress bar fina embaixo. Pausa ao hover.
+- **Critical**: ring sutilmente pulsante, sem auto-dismiss
+- **Stack max 3** (novos empurram velhos pra fora). Cards atrás levemente menores (escala -1.5% por nível) — efeito de profundidade.
+- **Slide+fade entry** (320ms cubic-bezier elastic)
+- Sem invasão do conteúdo: posição top-right discreta, dismiss icon só aparece em hover
+
+Severities: critical (vermelho ef4444) > warning (âmbar f59e0b) > info (cyan 06b6d4).
 
 **Pra ativar a vertical ML pra um lojista**:
 1. Configurar webhook ML no devcenter (URL backend + topic \`messages\`/\`questions\`/\`claims\`)
