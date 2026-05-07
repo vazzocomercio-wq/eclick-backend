@@ -202,14 +202,14 @@ export class OrdersService {
       return items.some(it => !it.item?.thumbnail)
     })
 
-    const thumbMap: Record<string, string> = {}
-    if (itemIds.length > 0 && missingThumb) {
+    const thumbMap: Record<string, { thumbnail: string; available_quantity: number | null; permalink: string | null }> = {}
+    if (itemIds.length > 0 && (missingThumb || true)) {
       const idsToQuery = itemIds.slice(0, 50).join(',')
       const results = await Promise.allSettled(
         tokens.map(tk =>
           axios.get(`${ML_BASE}/items`, {
             headers: { Authorization: `Bearer ${tk.token}` },
-            params:  { ids: idsToQuery, attributes: 'id,thumbnail' },
+            params:  { ids: idsToQuery, attributes: 'id,thumbnail,available_quantity,permalink,variations' },
             timeout: 6000,
           }),
         ),
@@ -223,17 +223,26 @@ export class OrdersService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .forEach((b: any) => {
             if (b.body?.id && !thumbMap[b.body.id]) {
-              thumbMap[b.body.id] = b.body.thumbnail ?? ''
+              thumbMap[b.body.id] = {
+                thumbnail:          b.body.thumbnail ?? '',
+                available_quantity: b.body.available_quantity ?? null,
+                permalink:          b.body.permalink ?? null,
+              }
             }
           })
       }
 
-      // Inject thumbs no order_items
+      // Inject thumbs + available_quantity + permalink direto no order_items[i]
+      // (top-level — shape canônico esperado pelo OrderCard)
       for (const o of orders) {
-        const items = (o.order_items as Array<{ item?: { id?: string; thumbnail?: string | null } }>) ?? []
+        const items = (o.order_items as Array<Record<string, unknown>>) ?? []
         for (const it of items) {
-          if (it.item?.id && !it.item.thumbnail && thumbMap[it.item.id]) {
-            it.item.thumbnail = thumbMap[it.item.id]
+          const itemId = (it.item_id as string) ?? ((it.item as { id?: string } | undefined)?.id) ?? null
+          if (itemId && thumbMap[itemId]) {
+            const m = thumbMap[itemId]
+            if (!it.thumbnail && m.thumbnail) it.thumbnail = m.thumbnail
+            if (it.available_quantity == null) it.available_quantity = m.available_quantity
+            if (!it.permalink && m.permalink)  it.permalink = m.permalink
           }
         }
       }
@@ -268,15 +277,67 @@ export class OrdersService {
             const paidAmount     = data.paid_amount     as number | undefined
             const statusDetail   = data.status_detail   as unknown
             const shippingFull   = (data.shipping       as Record<string, unknown> | undefined) ?? {}
+            const orderItemsFull = (data.order_items    as Array<Record<string, unknown>> | undefined) ?? []
+            const packId         = data.pack_id
+            const coupon         = data.coupon
+            const context        = data.context
+
+            // ── /shipments/{id} pra trazer receiver_name, lead_time,
+            //    substatus, tracking_number — só vêm aqui, /orders não tem
+            const shipId = (shippingFull.id as number | undefined) ?? null
+            let shipmentDetail: Record<string, unknown> = {}
+            if (shipId) {
+              try {
+                const { data: sd } = await axios.get<Record<string, unknown>>(
+                  `${ML_BASE}/shipments/${shipId}`,
+                  {
+                    headers: { Authorization: `Bearer ${tk.token}`, 'x-version': '2' },
+                    timeout: 6000,
+                  },
+                )
+                shipmentDetail = sd
+              } catch { /* skip — endpoint pode estar restrito */ }
+            }
+
+            // Mescla shipping: dados de /orders + dados de /shipments
+            const shippingMerged: Record<string, unknown> = {
+              ...shippingFull,
+              receiver_address: shippingFull.receiver_address ?? shipmentDetail.receiver_address ?? null,
+              receiver_name:    (shipmentDetail.receiver_address as Record<string, unknown> | undefined)?.receiver_name
+                                ?? shipmentDetail.receiver_name
+                                ?? null,
+              substatus:        shipmentDetail.substatus     ?? shippingFull.substatus     ?? null,
+              tracking_number:  shipmentDetail.tracking_number ?? null,
+              tracking_method:  shipmentDetail.tracking_method ?? null,
+              service_id:       shipmentDetail.service_id      ?? null,
+              lead_time:        shipmentDetail.lead_time       ?? null,
+              mode:             shipmentDetail.mode             ?? shippingFull.mode             ?? null,
+              delivery_type:    (shipmentDetail.lead_time as Record<string, unknown> | undefined)?.shipping_method ?? null,
+              base_cost:        shipmentDetail.base_cost        ?? shippingFull.base_cost        ?? 0,
+            }
 
             if (payments.length > 0) o.payments = payments
-            if (paidAmount != null)  o.paid_amount = paidAmount
+            if (paidAmount != null)   o.paid_amount = paidAmount
             if (statusDetail != null) o.status_detail = statusDetail
-            if (Object.keys(shippingFull).length > 0) {
+            if (packId != null)       o.pack_id = packId
+            if (coupon != null)       o.coupon  = coupon
+            if (context != null)      o.context = context
+            if (Object.keys(shippingMerged).length > 0) {
               const cur = (o.shipping as Record<string, unknown>) ?? {}
-              o.shipping = { ...cur, ...shippingFull, ...{
-                receiver_address: shippingFull.receiver_address ?? cur.receiver_address,
-              } }
+              o.shipping = { ...cur, ...shippingMerged }
+            }
+            // Mescla order_items[0] com title/variation_attributes/full_unit_price
+            // vindos do /orders/{id} (mais ricos que o que worker salvou)
+            const oiCur = ((o.order_items as Array<Record<string, unknown>>) ?? [])[0]
+            const oiNew = orderItemsFull[0]
+            if (oiCur && oiNew) {
+              const itm = (oiNew.item as Record<string, unknown> | undefined) ?? {}
+              if (!oiCur.title          && itm.title)                oiCur.title = itm.title
+              if (!oiCur.seller_sku     && itm.seller_sku)           oiCur.seller_sku = itm.seller_sku
+              if (!oiCur.variation_id   && itm.variation_id)         oiCur.variation_id = itm.variation_id
+              const va = (itm.variation_attributes as unknown[]) ?? []
+              if (va.length > 0)                                      oiCur.variation_attributes = va
+              if (oiNew.full_unit_price != null)                      oiCur.full_unit_price = oiNew.full_unit_price
             }
 
             // Persiste no raw_data pra próxima página não re-buscar
@@ -286,7 +347,23 @@ export class OrdersService {
                 payments,
                 paid_amount:   paidAmount ?? null,
                 status_detail: statusDetail ?? null,
-                shipping:      Object.keys(shippingFull).length > 0 ? shippingFull : null,
+                pack_id:       packId ?? null,
+                coupon:        coupon ?? null,
+                context:       context ?? null,
+                shipping:      Object.keys(shippingMerged).length > 0 ? shippingMerged : null,
+                // Persiste item enriquecido (variation_attributes + title + seller_sku)
+                item:          oiCur ? {
+                  id:                   oiCur.item_id ?? (oiCur.item as { id?: string } | undefined)?.id ?? null,
+                  title:                oiCur.title,
+                  seller_sku:           oiCur.seller_sku,
+                  thumbnail:            oiCur.thumbnail ?? null,
+                  variation_id:         oiCur.variation_id,
+                  variation_attributes: oiCur.variation_attributes,
+                  quantity:             oiCur.quantity,
+                  unit_price:           oiCur.unit_price,
+                  full_unit_price:      oiCur.full_unit_price,
+                  sale_fee:             oiCur.sale_fee,
+                } : null,
               },
             })
             return // sucesso, não tenta outros tokens
@@ -458,20 +535,23 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
         : (billing.state as string) ?? null,
     } : {})
 
-  // Worker salva item SINGULAR. Frontend espera order_items[].
-  // Reconstruímos um order_item com a mesma shape de /orders/search.
+  // Worker salva item SINGULAR. Frontend espera order_items[] com shape
+  // canônico de /ml/orders/enriched: item_id/title/seller_sku/thumbnail/
+  // variation_attributes ficam no NÍVEL DE TOPO de cada order_items[i],
+  // não aninhados em .item. OrderCard lê item.title direto onde
+  // item = order.order_items[0].
   const orderItem = {
-    item: {
-      id:           itemRaw.id           ?? row.marketplace_listing_id ?? null,
-      title:        itemRaw.title        ?? row.product_title          ?? null,
-      seller_sku:   itemRaw.seller_sku   ?? row.sku                    ?? null,
-      thumbnail:    itemRaw.thumbnail    ?? null,
-      variation_id: itemRaw.variation_id ?? row.variation_id           ?? null,
-      variation_attributes: itemRaw.variation_attributes ?? [],
-    },
-    quantity:    itemRaw.quantity   ?? row.quantity   ?? 1,
-    unit_price:  itemRaw.unit_price ?? row.sale_price ?? 0,
-    sale_fee:    itemRaw.sale_fee   ?? row.platform_fee ?? 0,
+    item_id:              itemRaw.id            ?? row.marketplace_listing_id ?? null,
+    item:                 { id: itemRaw.id ?? row.marketplace_listing_id ?? null }, // compat
+    title:                itemRaw.title         ?? row.product_title          ?? null,
+    seller_sku:           itemRaw.seller_sku    ?? row.sku                    ?? null,
+    thumbnail:            itemRaw.thumbnail     ?? null,
+    variation_id:         itemRaw.variation_id  ?? row.variation_id           ?? null,
+    variation_attributes: (itemRaw.variation_attributes as unknown[]) ?? [],
+    quantity:             itemRaw.quantity      ?? row.quantity               ?? 1,
+    unit_price:           itemRaw.unit_price    ?? row.sale_price             ?? 0,
+    full_unit_price:      itemRaw.full_unit_price ?? itemRaw.unit_price       ?? row.sale_price ?? 0,
+    sale_fee:             itemRaw.sale_fee      ?? row.platform_fee           ?? 0,
   }
 
   return {
@@ -485,6 +565,15 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     payments:      raw.payments ?? [],
     mediations:    raw.mediations ?? [],
     tags:          raw.tags ?? [],
+    // Carrinho/agrupamento — quando ML agrupa pedidos do mesmo comprador
+    pack_id:       raw.pack_id ?? null,
+    // Cupom aplicado pelo seller (id, amount)
+    coupon:        raw.coupon ?? null,
+    // Descontos/estornos (campanhas comerciais — "Aplicamos uma redução de
+    // R$ X na sua tarifa de venda porque você participou de uma campanha")
+    discounts:     raw.discounts ?? null,
+    // Indicador "venda por publicidade" (Mercado Ads)
+    context:       raw.context ?? null,
     buyer: {
       ...buyer,
       doc_number: row.buyer_doc_number ?? (buyer as { doc_number?: string }).doc_number ?? null,
@@ -503,11 +592,19 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
       // OrderCard acessa receiver_address.zip_code sem optional chaining —
       // mantém objeto (vazio se sem dados) em vez de null pra não quebrar a UI.
       receiver_address:        shippingReceiverAddr,
-      receiver_cost:           (shipping as { receiver_cost?: number }).receiver_cost                       ?? null,
+      receiver_name:           (shipping as { receiver_name?: string }).receiver_name           ?? null,
+      receiver_cost:           (shipping as { receiver_cost?: number }).receiver_cost           ?? null,
+      base_cost:               (shipping as { base_cost?: number }).base_cost                   ?? 0,
       estimated_delivery_date: (shipping as { estimated_delivery_date?: string }).estimated_delivery_date   ?? null,
       posting_deadline:        (shipping as { posting_deadline?: string }).posting_deadline                 ?? null,
       date_created:            (shipping as { date_created?: string }).date_created                         ?? null,
       substatus:               (shipping as { substatus?: string }).substatus                               ?? null,
+      tracking_number:         (shipping as { tracking_number?: string }).tracking_number                   ?? null,
+      tracking_method:         (shipping as { tracking_method?: string }).tracking_method                   ?? null,
+      service_id:              (shipping as { service_id?: number }).service_id                             ?? null,
+      lead_time:               (shipping as { lead_time?: Record<string, unknown> }).lead_time              ?? null,
+      mode:                    (shipping as { mode?: string }).mode                                         ?? null,
+      delivery_type:           (shipping as { delivery_type?: string }).delivery_type                       ?? null,
     },
     order_items:   [orderItem],
     cost_price:    row.cost_price ?? 0,
