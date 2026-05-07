@@ -6,6 +6,7 @@ import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
 import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
 import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
 import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
+import { MlCampaignsPostAnalysisService } from './ml-campaigns-post-analysis.service'
 
 interface ReqUserPayload {
   id: string
@@ -16,11 +17,12 @@ interface ReqUserPayload {
 @UseGuards(SupabaseAuthGuard)
 export class MlCampaignsController {
   constructor(
-    private readonly svc:       MlCampaignsService,
-    private readonly sync:      MlCampaignsSyncService,
-    private readonly decision:  MlCampaignsDecisionService,
-    private readonly validator: MlCampaignsValidatorService,
-    private readonly apply:     MlCampaignsApplyService,
+    private readonly svc:        MlCampaignsService,
+    private readonly sync:       MlCampaignsSyncService,
+    private readonly decision:   MlCampaignsDecisionService,
+    private readonly validator:  MlCampaignsValidatorService,
+    private readonly apply:      MlCampaignsApplyService,
+    private readonly post:       MlCampaignsPostAnalysisService,
   ) {}
 
   // ── Dashboard ──────────────────────────────────────────────────
@@ -350,6 +352,54 @@ export class MlCampaignsController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.apply.getJob(u.orgId, id)
+  }
+
+  // ═══ Camada 4: Pos-analise + Aprendizado ═══════════════════════
+
+  @Post('post-analysis/generate/:campaignId')
+  generateAnalysis(
+    @ReqUser() u: ReqUserPayload,
+    @Param('campaignId') campaignId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.post.generateAnalysis(campaignId)
+  }
+
+  @Get('post-analysis')
+  listAnalyses(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.post.listAnalyses(u.orgId, sellerId ? Number(sellerId) : undefined, limit ? Number(limit) : 50)
+  }
+
+  @Get('post-analysis/:id')
+  getAnalysis(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.post.getAnalysis(u.orgId, id)
+  }
+
+  @Get('post-analysis/campaign/:campaignId')
+  getAnalysisByCampaign(
+    @ReqUser() u: ReqUserPayload,
+    @Param('campaignId') campaignId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.post.getAnalysisByCampaign(u.orgId, campaignId)
+  }
+
+  @Get('learnings')
+  learnings(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.post.listLearnings(u.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   @Get('audit')
