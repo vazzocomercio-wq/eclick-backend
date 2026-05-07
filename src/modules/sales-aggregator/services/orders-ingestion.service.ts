@@ -420,11 +420,13 @@ export class OrdersIngestionService {
           buyer_billing_fetched_at: buyer?.fetched_at     ?? null,
           sold_at:                 soldAt,
           raw_data: {
-            order_id:     order.id,
-            date_created: order.date_created,
-            date_closed:  order.date_closed,
-            status:       order.status,
-            total_amount: order.total_amount,
+            order_id:      order.id,
+            date_created:  order.date_created,
+            date_closed:   order.date_closed,
+            status:        order.status,
+            status_detail: order.status_detail ?? null,
+            total_amount:  order.total_amount,
+            paid_amount:   order.paid_amount ?? null,
             item: {
               id:         item.item?.id,
               title:      item.item?.title,
@@ -444,9 +446,23 @@ export class OrdersIngestionService {
                   id:             order.shipping.id,
                   status:         order.shipping.status        ?? null,
                   logistic_type:  order.shipping.logistic_type ?? null,
+                  // Receiver address NÃO vem em /orders/search — só em
+                  // /shipments/{id}. Por isso o mapper usa billing_address
+                  // como fallback. Persistimos os campos disponíveis aqui
+                  // mesmo, caso a ML evolua o endpoint.
+                  receiver_cost:           (order.shipping as Record<string, unknown>).receiver_cost           ?? null,
+                  estimated_delivery_date: (order.shipping as Record<string, unknown>).estimated_delivery_date ?? null,
+                  posting_deadline:        (order.shipping as Record<string, unknown>).posting_deadline        ?? null,
+                  date_created:            (order.shipping as Record<string, unknown>).date_created            ?? null,
+                  substatus:               (order.shipping as Record<string, unknown>).substatus               ?? null,
+                  receiver_address:        (order.shipping as Record<string, unknown>).receiver_address        ?? null,
                 }
               : null,
             shipping_id: order.shipping?.id ?? null,
+            // Persiste payments completo — frontend lê id/total_paid_amount/
+            // installments/payment_type/status. Tipo "loose" pra não brigar
+            // com a interface MlOrder que só tipa 2 campos.
+            payments:    order.payments ?? [],
             mediations:  order.mediations ?? [],
             tags:        order.tags       ?? [],
           },

@@ -261,6 +261,29 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
   const buyer    = (raw.buyer    ?? {}) as Record<string, unknown>
   const shipping = (raw.shipping ?? {}) as Record<string, unknown>
   const itemRaw  = (raw.item     ?? {}) as Record<string, unknown>
+  const billing  = (row.billing_address ?? {}) as Record<string, unknown>
+
+  // Fallback para receiver_address: ML só retorna receiver_address em
+  // /shipments/{id}, que o worker NÃO chama. billing_address vem do
+  // billing-info v2 e é geralmente igual ao endereço de entrega — usa
+  // como fallback pra não deixar o card "Endereço de entrega" vazio.
+  const shippingReceiverAddr =
+    (shipping.receiver_address as Record<string, unknown> | undefined) ??
+    (Object.keys(billing).length > 0 ? {
+      zip_code:      (billing.zip_code      as string) ?? (billing as { zip?: string }).zip ?? null,
+      street_name:   (billing.street_name   as string) ?? null,
+      street_number: (billing.street_number as string) ?? null,
+      complement:    (billing.complement    as string) ?? (billing.comment as string) ?? null,
+      neighborhood:  typeof billing.neighborhood === 'object'
+        ? (billing.neighborhood as { name?: string }).name ?? null
+        : (billing.neighborhood as string) ?? null,
+      city:          typeof billing.city === 'object'
+        ? (billing.city as { name?: string }).name ?? null
+        : (billing.city as string) ?? null,
+      state:         typeof billing.state === 'object'
+        ? (billing.state as { name?: string }).name ?? (billing.state as { id?: string }).id ?? null
+        : (billing.state as string) ?? null,
+    } : {})
 
   // Worker salva item SINGULAR. Frontend espera order_items[].
   // Reconstruímos um order_item com a mesma shape de /orders/search.
@@ -305,9 +328,13 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
       status:            row.shipping_status ?? (shipping as { status?: string }).status    ?? null,
       logistic_type:     (shipping as { logistic_type?: string }).logistic_type             ?? null,
       // OrderCard acessa receiver_address.zip_code sem optional chaining —
-      // mantém objeto vazio em vez de null pra não quebrar a UI.
-      receiver_address:  (shipping as { receiver_address?: Record<string, unknown> }).receiver_address ?? {},
-      estimated_delivery_date: (shipping as { estimated_delivery_date?: string }).estimated_delivery_date ?? null,
+      // mantém objeto (vazio se sem dados) em vez de null pra não quebrar a UI.
+      receiver_address:        shippingReceiverAddr,
+      receiver_cost:           (shipping as { receiver_cost?: number }).receiver_cost                       ?? null,
+      estimated_delivery_date: (shipping as { estimated_delivery_date?: string }).estimated_delivery_date   ?? null,
+      posting_deadline:        (shipping as { posting_deadline?: string }).posting_deadline                 ?? null,
+      date_created:            (shipping as { date_created?: string }).date_created                         ?? null,
+      substatus:               (shipping as { substatus?: string }).substatus                               ?? null,
     },
     order_items:   [orderItem],
     cost_price:    row.cost_price ?? 0,
