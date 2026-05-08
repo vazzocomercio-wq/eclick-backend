@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { MlPostsaleService } from '../ml-postsale/ml-postsale.service'
 import { MlQuestionsAiService } from '../mercadolivre/ml-questions-ai.service'
 import { MlClaimsService } from '../ml-vertical/services/ml-claims.service'
+import { EventsGateway } from '../events/events.gateway'
 import type { MlWebhookPayload } from './ml-webhook.types'
 
 /**
@@ -19,6 +20,7 @@ export class MlWebhookDispatcherService {
     private readonly postsale:  MlPostsaleService,
     private readonly questions: MlQuestionsAiService,
     private readonly claims:    MlClaimsService,
+    private readonly events:    EventsGateway,
   ) {}
 
   async dispatch(payload: MlWebhookPayload): Promise<void> {
@@ -57,8 +59,27 @@ export class MlWebhookDispatcherService {
           await this.claims.handleClaimWebhook(orgId, payload.user_id, payload.resource)
           break
         }
+        case 'orders_v2':
+        case 'shipments': {
+          // resource: /orders/{id} ou /shipments/{id}
+          // Por agora NÃO refazemos ingestion no momento (o aggregator
+          // periódico já cobre — adicionar fetchSingleOrder requer
+          // refactor do client). Mas EMITIMOS Socket.IO pra UI saber que
+          // tem mudança e refrescar a lista.
+          const m = payload.resource.match(/\/(orders|shipments)\/(\d+)/)
+          const externalOrderId = m?.[2]
+          this.events.emitToOrg(orgId, 'order:invalidate', {
+            external_order_id: externalOrderId ?? null,
+            seller_id:         payload.user_id,
+            topic:             payload.topic,
+            resource:          payload.resource,
+            received_at:       new Date().toISOString(),
+          })
+          this.logger.log(`[ml-webhook] orders_v2 emit pra org=${orgId} order=${externalOrderId}`)
+          break
+        }
         default:
-          // Topics que ainda não tratamos: orders_v2, claims, items, shipments...
+          // Topics ainda não tratados: items...
           this.logger.log(`[ml-webhook] topic ${payload.topic} ignorado (org=${orgId} resource=${payload.resource})`)
       }
     } catch (err) {
