@@ -86,6 +86,36 @@ export interface UpdatePartnerProductDto extends Partial<Omit<CreatePartnerProdu
   change_reason?: string  // se mudar custo, registra no history
 }
 
+export interface BulkImportRow {
+  supplier_sku: string
+  master_sku?: string | null
+  product_sku?: string | null    // SKU no catálogo do seller (pra match)
+  product_id?: string | null     // se já souber o UUID
+  product_name?: string | null   // informativo
+  unit_cost: number
+  packaging_cost?: number
+  handling_cost?: number
+  stock?: number
+  lead_time_days?: number | null
+  moq?: number | null
+}
+
+export interface BulkImportDto {
+  supplier_id: string
+  source_file_name?: string | null
+  rows: BulkImportRow[]
+}
+
+export interface BulkImportResult {
+  sync_log_id: string
+  processed: number
+  created: number
+  updated: number
+  failed: number
+  cost_changes: number
+  validation_errors: Array<{ row: number; supplier_sku: string; error: string }>
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 @Injectable()
@@ -619,5 +649,248 @@ export class DropshipService {
     if (error) throw new HttpException(error.message, 500)
     if (!data) throw new NotFoundException('Sync log não encontrado')
     return data
+  }
+
+  // ── Bulk import (planilha pré-parseada no client) ─────────────────────────
+
+  async bulkImportPartnerProducts(
+    orgId: string,
+    dto: BulkImportDto,
+    userId: string | null,
+  ): Promise<BulkImportResult> {
+    if (!dto.supplier_id) throw new BadRequestException('supplier_id é obrigatório')
+    if (!Array.isArray(dto.rows) || dto.rows.length === 0) {
+      throw new BadRequestException('Nenhuma linha para importar')
+    }
+
+    // Valida supplier
+    const { data: sup } = await supabaseAdmin
+      .from('suppliers')
+      .select('id')
+      .eq('id', dto.supplier_id)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!sup) throw new NotFoundException('Fornecedor não encontrado')
+
+    // 1. Cria sync_log status=running
+    const startedAt = new Date()
+    const { data: syncLog, error: logErr } = await supabaseAdmin
+      .from('dropship_sync_logs')
+      .insert({
+        organization_id: orgId,
+        supplier_id: dto.supplier_id,
+        sync_type: 'spreadsheet_import',
+        source: 'spreadsheet',
+        source_file_name: dto.source_file_name ?? null,
+        status: 'running',
+        triggered_by: userId,
+        started_at: startedAt.toISOString(),
+      })
+      .select()
+      .single()
+    if (logErr || !syncLog) throw new HttpException(logErr?.message ?? 'Erro ao criar sync log', 500)
+
+    const result: BulkImportResult = {
+      sync_log_id: syncLog.id,
+      processed: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      cost_changes: 0,
+      validation_errors: [],
+    }
+    const significantCostChanges: Array<{ supplier_sku: string; old: number; new: number; pct_change: number }> = []
+    const outOfStockSkus: string[] = []
+
+    // Pré-busca produtos do org (1x query) pra match por SKU eficiente
+    const { data: products } = await supabaseAdmin
+      .from('products')
+      .select('id, sku')
+      .eq('organization_id', orgId)
+    const productBySku = new Map<string, string>()
+    const productById = new Set<string>()
+    for (const p of (products ?? [])) {
+      if (p.sku) productBySku.set(String(p.sku).trim().toUpperCase(), p.id)
+      productById.add(p.id)
+    }
+
+    // Pré-busca supplier_products desse supplier (pra detectar update vs create + diff de custo)
+    const { data: existing } = await supabaseAdmin
+      .from('supplier_products')
+      .select('id, product_id, supplier_sku, unit_cost, partner_packaging_cost, partner_handling_cost, partner_stock')
+      .eq('supplier_id', dto.supplier_id)
+    const existingBySku = new Map<string, typeof existing[number]>()
+    for (const e of (existing ?? [])) {
+      existingBySku.set(String(e.supplier_sku).trim().toUpperCase(), e)
+    }
+
+    const now = new Date().toISOString()
+
+    // 2. Loop pelas linhas
+    for (let i = 0; i < dto.rows.length; i++) {
+      const row = dto.rows[i]
+      result.processed++
+
+      // Validações básicas
+      if (!row.supplier_sku?.trim()) {
+        result.failed++
+        result.validation_errors.push({ row: i + 1, supplier_sku: '', error: 'SKU do parceiro vazio' })
+        continue
+      }
+      if (typeof row.unit_cost !== 'number' || !isFinite(row.unit_cost) || row.unit_cost < 0) {
+        result.failed++
+        result.validation_errors.push({ row: i + 1, supplier_sku: row.supplier_sku, error: 'Custo inválido' })
+        continue
+      }
+
+      // Resolver product_id
+      let productId: string | null = null
+      if (row.product_id && productById.has(row.product_id)) {
+        productId = row.product_id
+      } else if (row.product_sku) {
+        productId = productBySku.get(row.product_sku.trim().toUpperCase()) ?? null
+      } else if (row.master_sku) {
+        productId = productBySku.get(row.master_sku.trim().toUpperCase()) ?? null
+      }
+
+      if (!productId) {
+        result.failed++
+        result.validation_errors.push({
+          row: i + 1,
+          supplier_sku: row.supplier_sku,
+          error: `Produto não encontrado no catálogo (procurou: ${row.product_sku ?? row.master_sku ?? '(vazio)'})`,
+        })
+        continue
+      }
+
+      const supplierSkuKey = row.supplier_sku.trim().toUpperCase()
+      const existingRow = existingBySku.get(supplierSkuKey)
+
+      const unitCost = row.unit_cost
+      const packagingCost = Number(row.packaging_cost ?? 0) || 0
+      const handlingCost = Number(row.handling_cost ?? 0) || 0
+      const stock = Number(row.stock ?? 0) || 0
+      const leadTime = row.lead_time_days != null ? Number(row.lead_time_days) : null
+      const moq = row.moq != null ? Number(row.moq) : 1
+
+      // Detecta mudança de custo (vs registro existente)
+      let costChanged = false
+      if (existingRow) {
+        costChanged =
+          Math.abs(unitCost - Number(existingRow.unit_cost ?? 0)) > 0.001 ||
+          Math.abs(packagingCost - Number(existingRow.partner_packaging_cost ?? 0)) > 0.001 ||
+          Math.abs(handlingCost - Number(existingRow.partner_handling_cost ?? 0)) > 0.001
+        if (costChanged) {
+          const oldTotal = Number(existingRow.unit_cost ?? 0)
+            + Number(existingRow.partner_packaging_cost ?? 0)
+            + Number(existingRow.partner_handling_cost ?? 0)
+          const newTotal = unitCost + packagingCost + handlingCost
+          const pct = oldTotal > 0 ? ((newTotal - oldTotal) / oldTotal) * 100 : 0
+          if (Math.abs(pct) >= 5) {
+            significantCostChanges.push({
+              supplier_sku: row.supplier_sku,
+              old: oldTotal,
+              new: newTotal,
+              pct_change: Math.round(pct * 100) / 100,
+            })
+          }
+        }
+      }
+
+      // Upsert
+      const { data: upserted, error: upErr } = await supabaseAdmin
+        .from('supplier_products')
+        .upsert(
+          {
+            supplier_id: dto.supplier_id,
+            product_id: productId,
+            supplier_sku: row.supplier_sku.trim(),
+            master_sku: row.master_sku ?? null,
+            unit_cost: unitCost,
+            currency: 'BRL',
+            partner_stock: stock,
+            partner_reserved: 0,
+            partner_packaging_cost: packagingCost,
+            partner_handling_cost: handlingCost,
+            lead_time_days: leadTime,
+            moq,
+            dropship_status: 'active',
+            last_sync_at: now,
+            ...(costChanged && { last_cost_change_at: now }),
+            ...(existingRow && stock !== Number(existingRow.partner_stock ?? 0) && { last_stock_change_at: now }),
+            updated_at: now,
+          },
+          { onConflict: 'supplier_id,product_id', ignoreDuplicates: false },
+        )
+        .select('id')
+        .single()
+      if (upErr || !upserted) {
+        result.failed++
+        result.validation_errors.push({
+          row: i + 1,
+          supplier_sku: row.supplier_sku,
+          error: upErr?.message ?? 'Erro ao salvar',
+        })
+        continue
+      }
+
+      if (existingRow) result.updated++
+      else result.created++
+
+      // Cost history se mudou (ou primeiro cadastro)
+      if (costChanged || !existingRow) {
+        if (existingRow && costChanged) {
+          // fecha snapshot anterior
+          await supabaseAdmin
+            .from('supplier_cost_history')
+            .update({ effective_until: now })
+            .eq('supplier_product_id', upserted.id)
+            .is('effective_until', null)
+        }
+        await supabaseAdmin
+          .from('supplier_cost_history')
+          .insert({
+            organization_id: orgId,
+            supplier_product_id: upserted.id,
+            cost_value: unitCost,
+            cost_packaging: packagingCost,
+            cost_handling: handlingCost,
+            cost_total: unitCost + packagingCost + handlingCost,
+            effective_from: now,
+            change_reason: existingRow ? 'Sync via planilha' : 'Cadastro via planilha',
+            change_source: 'spreadsheet_import',
+          })
+        if (costChanged) result.cost_changes++
+      }
+
+      if (stock <= 0) outOfStockSkus.push(row.supplier_sku)
+    }
+
+    // 3. Atualiza sync_log com counters
+    const completedAt = new Date()
+    const duration = Math.round((completedAt.getTime() - startedAt.getTime()) / 1000)
+    const finalStatus: 'completed' | 'partial' | 'failed' =
+      result.failed === 0 ? 'completed' :
+      result.created + result.updated > 0 ? 'partial' :
+      'failed'
+
+    await supabaseAdmin
+      .from('dropship_sync_logs')
+      .update({
+        products_processed: result.processed,
+        products_created: result.created,
+        products_updated: result.updated,
+        products_failed: result.failed,
+        cost_changes_count: result.cost_changes,
+        out_of_stock_skus: outOfStockSkus,
+        significant_cost_changes: significantCostChanges,
+        validation_errors: result.validation_errors,
+        status: finalStatus,
+        duration_seconds: duration,
+        completed_at: completedAt.toISOString(),
+      })
+      .eq('id', syncLog.id)
+
+    return result
   }
 }

@@ -9,6 +9,7 @@ import {
   CreateDropshipPartnerDto, UpdateDropshipPartnerDto,
   CreateAccountSupplierDto, UpdateAccountSupplierDto,
   CreatePartnerProductDto, UpdatePartnerProductDto,
+  BulkImportDto,
 } from './dropship.service'
 
 @Controller('dropship')
@@ -199,5 +200,20 @@ export class DropshipController {
   ) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getSyncLog(orgId, id)
+  }
+
+  // ── Bulk import (planilha pré-parseada no client) ─────────────────────────
+
+  @Post('partner-products/bulk-import')
+  async bulkImport(
+    @Headers('authorization') auth: string,
+    @Body() dto: BulkImportDto,
+  ) {
+    // Resolve userId (pra registrar triggered_by no log) + orgId
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    const userId = user?.id ?? null
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.bulkImportPartnerProducts(orgId, dto, userId)
   }
 }
