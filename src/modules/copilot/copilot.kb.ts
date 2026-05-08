@@ -851,8 +851,46 @@ Item sem custo cadastrado (catálogo) ou sem preço mínimo aceito do ML — dec
 
 **Editar antes de aprovar**: pode mudar \`price\` ou \`quantity\` — fica registrado no audit_log.
 
-**Após aprovar**: vai pro batch apply em \`/dashboard/ml-campaigns/apply\`.`,
+**Após aprovar**: vai pro batch apply em \`/dashboard/ml-campaigns/apply\` — **MAS atenção ao soft gate** (próxima entry).`,
     tags: ['ml-campaigns', 'recommendations', 'ai-decision'],
+  },
+  {
+    routes:   ['/dashboard/ml-campaigns/manager-queue', '/dashboard/ml-campaigns/config'],
+    category: 'campaigns',
+    title:    'Soft gate de margem mínima + fila do gestor',
+    content: `**Proteção operacional contra aprovações abaixo do mínimo de margem.** (M1, sprint 2026-05-08)
+
+**Como funciona:**
+1. Operador clica "Aprovar" numa recomendação
+2. Sistema calcula M.C.% final (preço escolhido vs cost_breakdown — inclui custo + imposto + comissão ML + frete + embalagem + operacional − subsídio MELI)
+3. Threshold = \`per_campaign_type_overrides[type] ?? min_approval_margin_pct\` (default 10%)
+4. Se margem ≥ threshold → status \`approved\`, segue pro K3 apply
+5. Se margem < threshold → status \`pending_manager_approval\`, vai pra **fila do gestor**
+
+**Fila do gestor** (\`/dashboard/ml-campaigns/manager-queue\`):
+- Lista todas recomendações pending_manager_approval
+- Cada card mostra: produto, margem tentada vs threshold, motivo da IA, warnings
+- Gestor clica "Liberar override" (status → \`manager_approved\`, segue pra apply) OU "Rejeitar" (status → \`rejected_by_manager\`)
+- Modal pede motivo opcional pro audit log
+
+**Audit log** (\`ml_campaign_approval_attempts\`):
+- Toda tentativa abaixo do gate vira uma row
+- Outcome: \`sent_to_manager\` → \`manager_approved\` | \`manager_rejected\`
+- Se um operador acumula > \`audit_attempts_threshold\` (default 5) tentativas em 30d, o sistema avisa "padrão suspeito" pro gestor decidir
+
+**Override por tipo de campanha** (\`per_campaign_type_overrides\`):
+- DEAL com subsídio aceita 8% (porque ML banca parte) mas PRICE_DISCOUNT puro exige 15%
+- JSON \`{ "DEAL": 8, "PRICE_DISCOUNT": 15 }\` no config
+
+**Configuração** (\`/dashboard/ml-campaigns/config\`):
+- \`min_approval_margin_pct\` — limite global
+- \`per_campaign_type_overrides\` — override por tipo
+- \`audit_attempts_threshold\` — quantas tentativas suspeitas trigam alerta
+- \`manager_user_id\` / \`manager_whatsapp_phone\` — quem vê fila + recebe alertas
+- \`assignee_user_id\` / \`notification_phone\` — operador responsável (recebe deadline alerts)
+
+**Valor real:** sem soft gate, operador apressado pode aprovar 30 itens com -2% de margem em 5 minutos. Com gate + audit, gestor enxerga o problema antes do prejuízo virar permanente.`,
+    tags: ['ml-campaigns', 'soft-gate', 'manager', 'audit', 'margin'],
   },
   {
     routes:   ['/dashboard/ml-campaigns/apply', '/dashboard/ml-campaigns/apply/[jobId]'],

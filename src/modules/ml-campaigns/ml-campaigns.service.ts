@@ -3,6 +3,31 @@
 import { Injectable, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 
+/** Calcula M.C.% final pra uma recomendação considerando o cost_breakdown
+ *  do snapshot (ja inclui custo + imposto + comissão + frete + embalagem +
+ *  operacional − subsídio MELI) e o preço final escolhido (que pode ser o
+ *  recomendado ou o editado pelo operador). */
+function computeFinalMarginPct(reco: { cost_breakdown?: Record<string, number> | null; recommended_strategy?: string | null; scenarios?: Record<string, unknown> | null }, finalPrice: number | null | undefined): number {
+  if (finalPrice == null || finalPrice <= 0) return 0
+
+  // Preferir total_costs do cost_breakdown (snapshot canônico).
+  const cb = reco.cost_breakdown ?? {}
+  const totalCosts = Number(cb.total_costs ?? 0)
+  if (totalCosts > 0) {
+    return ((finalPrice - totalCosts) / finalPrice) * 100
+  }
+
+  // Fallback: se não tiver total_costs, usar margem da estratégia escolhida
+  const strat = reco.recommended_strategy
+  const sc = (reco.scenarios ?? {}) as Record<string, { margin_pct?: number; price?: number }>
+  if (strat && sc[strat]?.margin_pct != null) {
+    return Number(sc[strat]!.margin_pct)
+  }
+  // último fallback: competitive
+  if (sc.competitive?.margin_pct != null) return Number(sc.competitive.margin_pct)
+  return 0
+}
+
 interface ListCampaignsInput {
   orgId:     string
   sellerId?: number
@@ -233,24 +258,212 @@ export class MlCampaignsService {
     return data
   }
 
+  /** Aprova uma recomendação aplicando o soft gate de margem.
+   *  Fluxo:
+   *   1. Lê recomendação + config + tipo de campanha
+   *   2. Calcula margem da estratégia escolhida (ou da editada, se operador
+   *      mudou preço, recalcula em cima dos custos do snapshot)
+   *   3. Threshold = per_campaign_type_overrides[type] ?? min_approval_margin_pct
+   *   4. Se margem >= threshold → status='approved'/'edited'
+   *   5. Se margem  < threshold → status='pending_manager_approval' + log
+   *      em ml_campaign_approval_attempts, dispara alerta gestor se passar
+   *      do audit_attempts_threshold em 30d.
+   *  Retorna { recommendation, gate_triggered, threshold_pct, attempted_margin_pct,
+   *           recent_attempts_count? } pra UI mostrar feedback. */
   async approveRecommendation(orgId: string, id: string, userId: string, edited?: { price?: number; quantity?: number }) {
-    const update: Record<string, unknown> = {
-      status:      edited ? 'edited' : 'approved',
-      reviewed_at: new Date().toISOString(),
-      reviewed_by: userId,
+    // 1. Lê recomendação com tipo de campanha
+    const { data: reco, error: rErr } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*, ml_campaigns:campaign_id(ml_promotion_type)')
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .single()
+    if (rErr || !reco) throw new BadRequestException(`approve: recomendação não encontrada`)
+    if (reco.status !== 'pending') {
+      throw new BadRequestException(`approve: recomendação está em status ${reco.status}, esperado pending`)
     }
-    if (edited?.price    != null) update.recommended_price    = edited.price
-    if (edited?.quantity != null) update.recommended_quantity = edited.quantity
 
-    const { data, error } = await supabaseAdmin
+    // 2. Lê config (cria default se não existe)
+    const config = await this.getConfig(orgId, reco.seller_id)
+
+    // 3. Determina margem efetiva
+    const finalPrice    = edited?.price ?? reco.recommended_price
+    const finalQuantity = edited?.quantity ?? reco.recommended_quantity
+    const attemptedMargin = computeFinalMarginPct(reco, finalPrice)
+
+    // 4. Determina threshold (overrride por tipo se existir)
+    const campaignType: string | undefined = (reco as { ml_campaigns?: { ml_promotion_type?: string } })
+      .ml_campaigns?.ml_promotion_type
+    const overrides = (config.per_campaign_type_overrides ?? {}) as Record<string, number>
+    const threshold = (campaignType && overrides[campaignType] != null)
+      ? Number(overrides[campaignType])
+      : Number(config.min_approval_margin_pct ?? 10)
+
+    const newStatus: string = (attemptedMargin >= threshold)
+      ? (edited ? 'edited' : 'approved')
+      : 'pending_manager_approval'
+
+    const update: Record<string, unknown> = {
+      status:               newStatus,
+      reviewed_at:          new Date().toISOString(),
+      reviewed_by:          userId,
+      attempted_margin_pct: attemptedMargin,
+      gate_threshold_pct:   threshold,
+    }
+    if (edited?.price    != null) update.recommended_price    = finalPrice
+    if (edited?.quantity != null) update.recommended_quantity = finalQuantity
+
+    const { data: updated, error: uErr } = await supabaseAdmin
       .from('ml_campaign_recommendations')
       .update(update)
       .eq('organization_id', orgId)
       .eq('id', id)
       .select('*')
       .single()
-    if (error) throw new BadRequestException(`approve: ${error.message}`)
-    return data
+    if (uErr) throw new BadRequestException(`approve: ${uErr.message}`)
+
+    let recentAttemptsCount: number | undefined
+    if (newStatus === 'pending_manager_approval') {
+      // Log da tentativa
+      await supabaseAdmin
+        .from('ml_campaign_approval_attempts')
+        .insert({
+          organization_id:      orgId,
+          seller_id:            reco.seller_id,
+          recommendation_id:    id,
+          operator_user_id:     userId,
+          attempted_margin_pct: attemptedMargin,
+          threshold_pct:        threshold,
+          campaign_type:        campaignType ?? null,
+          outcome:              'sent_to_manager',
+        })
+
+      // Conta tentativas do operador nos últimos 30 dias
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString()
+      const { count } = await supabaseAdmin
+        .from('ml_campaign_approval_attempts')
+        .select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId)
+        .eq('operator_user_id', userId)
+        .gte('created_at', thirtyDaysAgo)
+      recentAttemptsCount = count ?? 0
+    }
+
+    return {
+      recommendation:        updated,
+      gate_triggered:        newStatus === 'pending_manager_approval',
+      attempted_margin_pct:  attemptedMargin,
+      threshold_pct:         threshold,
+      campaign_type:         campaignType,
+      recent_attempts_count: recentAttemptsCount,
+      audit_threshold:       Number(config.audit_attempts_threshold ?? 5),
+    }
+  }
+
+  /** Gestor aprova uma recomendação que está em pending_manager_approval.
+   *  Logs override no audit + libera pra apply. */
+  async managerApproveRecommendation(orgId: string, id: string, managerUserId: string, reason?: string) {
+    const { data: reco, error: rErr } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .single()
+    if (rErr || !reco) throw new BadRequestException(`manager-approve: não encontrada`)
+    if (reco.status !== 'pending_manager_approval') {
+      throw new BadRequestException(`manager-approve: status atual é ${reco.status}, esperado pending_manager_approval`)
+    }
+
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .update({
+        status:                  'manager_approved',
+        manager_decided_by:      managerUserId,
+        manager_decided_at:      new Date().toISOString(),
+        manager_decision_reason: reason ?? null,
+      })
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .select('*')
+      .single()
+    if (uErr) throw new BadRequestException(`manager-approve: ${uErr.message}`)
+
+    // Atualiza última tentativa (se existir) com outcome=manager_approved
+    await supabaseAdmin
+      .from('ml_campaign_approval_attempts')
+      .update({ outcome: 'manager_approved' })
+      .eq('recommendation_id', id)
+      .eq('outcome', 'sent_to_manager')
+
+    return updated
+  }
+
+  /** Gestor rejeita override. Recomendação fica como rejected_by_manager. */
+  async managerRejectRecommendation(orgId: string, id: string, managerUserId: string, reason?: string) {
+    const { data: reco, error: rErr } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .single()
+    if (rErr || !reco) throw new BadRequestException(`manager-reject: não encontrada`)
+    if (reco.status !== 'pending_manager_approval') {
+      throw new BadRequestException(`manager-reject: status atual é ${reco.status}, esperado pending_manager_approval`)
+    }
+
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .update({
+        status:                  'rejected_by_manager',
+        manager_decided_by:      managerUserId,
+        manager_decided_at:      new Date().toISOString(),
+        manager_decision_reason: reason ?? null,
+      })
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .select('*')
+      .single()
+    if (uErr) throw new BadRequestException(`manager-reject: ${uErr.message}`)
+
+    await supabaseAdmin
+      .from('ml_campaign_approval_attempts')
+      .update({ outcome: 'manager_rejected' })
+      .eq('recommendation_id', id)
+      .eq('outcome', 'sent_to_manager')
+
+    return updated
+  }
+
+  /** Lista recomendações na fila do gestor (status=pending_manager_approval). */
+  async listManagerQueue(orgId: string, sellerId?: number, limit = 50, offset = 0) {
+    let q = supabaseAdmin
+      .from('ml_campaign_recommendations')
+      .select('*, ml_campaign_items(ml_item_id, original_price, current_price, thumbnail_url, title), ml_campaigns:campaign_id(name, ml_promotion_type, deadline_date)', { count: 'exact' })
+      .eq('organization_id', orgId)
+      .eq('status', 'pending_manager_approval')
+      .order('reviewed_at', { ascending: true })
+      .range(offset, offset + limit - 1)
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+
+    const { data, count, error } = await q
+    if (error) throw new BadRequestException(`listManagerQueue: ${error.message}`)
+    return { recommendations: data ?? [], total: count ?? 0 }
+  }
+
+  /** Audit: tentativas de aprovar abaixo do gate por operador (últimos 30d).
+   *  Útil pro gestor entender padrão antes de aprovar/rejeitar. */
+  async getAuditOperatorAttempts(orgId: string, operatorUserId: string) {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString()
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaign_approval_attempts')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('operator_user_id', operatorUserId)
+      .gte('created_at', thirtyDaysAgo)
+      .order('created_at', { ascending: false })
+      .limit(100)
+    if (error) throw new BadRequestException(`audit: ${error.message}`)
+    return data ?? []
   }
 
   async rejectRecommendation(orgId: string, id: string, userId: string) {
@@ -295,6 +508,12 @@ export class MlCampaignsService {
       'ai_daily_cap_usd', 'ai_alert_at_pct', 'ai_reasoning_enabled',
       'auto_suggest_on_new_candidate', 'daily_analysis_enabled',
       'auto_approve_enabled', 'auto_approve_score_above',
+      // M1 — operação humana + soft gate
+      'assignee_user_id', 'notification_phone',
+      'manager_user_id', 'manager_whatsapp_phone',
+      'min_approval_margin_pct', 'per_campaign_type_overrides',
+      'deadline_alert_days_before', 'whatsapp_alerts_enabled', 'escalate_alerts',
+      'auto_alert_when_subsidy_above_pct', 'audit_attempts_threshold',
     ]
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]

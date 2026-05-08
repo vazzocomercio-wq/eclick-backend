@@ -259,6 +259,58 @@ export class MlCampaignsController {
     return this.svc.rejectRecommendation(u.orgId, id, u.id)
   }
 
+  // ─── Manager queue (soft gate margem) ──────────────────────────
+
+  /** Lista recomendações que o operador tentou aprovar mas margem < gate */
+  @Get('manager-queue')
+  managerQueue(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+    @Query('offset')    offset?:   string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listManagerQueue(
+      u.orgId,
+      sellerId ? Number(sellerId) : undefined,
+      limit  ? Number(limit)  : 50,
+      offset ? Number(offset) : 0,
+    )
+  }
+
+  /** Gestor aprova override (libera pra apply) */
+  @Post('recommendations/:id/manager-approve')
+  managerApprove(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.managerApproveRecommendation(u.orgId, id, u.id, body?.reason)
+  }
+
+  /** Gestor rejeita override */
+  @Post('recommendations/:id/manager-reject')
+  managerReject(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.managerRejectRecommendation(u.orgId, id, u.id, body?.reason)
+  }
+
+  /** Audit: tentativas de um operador específico nos últimos 30d.
+   *  Gestor pode usar antes de decidir um override. */
+  @Get('audit/operator/:userId')
+  auditOperator(
+    @ReqUser() u: ReqUserPayload,
+    @Param('userId') userId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getAuditOperatorAttempts(u.orgId, userId)
+  }
+
   // ── Config ─────────────────────────────────────────────────────────
 
   @Get('config')
