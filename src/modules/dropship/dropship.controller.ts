@@ -10,6 +10,7 @@ import {
   CreateAccountSupplierDto, UpdateAccountSupplierDto,
   CreatePartnerProductDto, UpdatePartnerProductDto,
   BulkImportDto,
+  CreateReturnDto, UpdateReturnDto, ApproveReturnDto,
 } from './dropship.service'
 
 @Controller('dropship')
@@ -343,5 +344,90 @@ export class DropshipController {
   ) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.listNotifications(orgId, id)
+  }
+
+  // ── Returns (Sprint 8) ────────────────────────────────────────────────────
+
+  @Get('returns')
+  async listReturns(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('marketplace') marketplace?: string,
+    @Query('return_type') return_type?: string,
+    @Query('q') q?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listReturns(orgId, { supplier_id, status, marketplace, return_type, q })
+  }
+
+  @Get('returns/:id')
+  async getReturn(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getReturn(orgId, id)
+  }
+
+  @Post('returns')
+  async createReturn(
+    @Headers('authorization') auth: string,
+    @Body() dto: CreateReturnDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.createReturn(orgId, dto)
+  }
+
+  @Patch('returns/:id')
+  async updateReturn(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateReturnDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.updateReturn(orgId, id, dto)
+  }
+
+  @Post('returns/:id/approve')
+  async approveReturn(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() dto: ApproveReturnDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.approveReturn(orgId, id, dto)
+  }
+
+  @Post('returns/:id/reject')
+  async rejectReturn(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.rejectReturn(orgId, id, body.reason)
+  }
+
+  // ── Credits (Sprint 9) ────────────────────────────────────────────────────
+
+  @Get('credits')
+  async listCredits(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listCredits(orgId, { supplier_id, status })
+  }
+
+  @Get('partners/:supplierId/credits-balance')
+  async creditsBalance(
+    @Headers('authorization') auth: string,
+    @Param('supplierId') supplierId: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const balance = await this.svc.getPendingCreditsBalance(orgId, supplierId)
+    return { supplier_id: supplierId, pending_credits_balance: balance }
   }
 }

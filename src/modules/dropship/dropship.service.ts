@@ -121,6 +121,54 @@ export interface BulkImportResult {
   validation_errors: Array<{ row: number; supplier_sku: string; error: string }>
 }
 
+export type ReturnType =
+  | 'cancellation' | 'return_buyer_regret' | 'return_defective'
+  | 'return_wrong_item' | 'return_damaged' | 'return_not_delivered'
+  | 'return_incomplete' | 'warranty_claim' | 'reclamation_refund'
+  | 'chargeback' | 'partner_negotiated'
+
+export type Responsibility = 'partner' | 'seller' | 'shared' | 'buyer' | 'undefined'
+
+export interface CreateReturnDto {
+  supplier_id: string
+  identification_id?: string | null
+  marketplace: string
+  return_type: ReturnType
+  return_amount: number
+  return_quantity: number
+  responsibility?: Responsibility
+  ml_pack_id?: string | null
+  ml_order_id?: string | null
+  shopee_order_id?: string | null
+  buyer_complaint?: string | null
+  internal_notes?: string | null
+  evidence_urls?: string[]
+  source?: 'manual' | 'sac_module' | 'partner_request'
+  external_id?: string | null
+}
+
+export interface UpdateReturnDto {
+  status?: 'opened' | 'in_transit_back' | 'received' | 'analyzed' | 'closed'
+  responsibility?: Responsibility
+  internal_notes?: string | null
+  partner_response?: string | null
+  resolution_notes?: string | null
+  evidence_urls?: string[]
+  marketplace_return_status?: string | null
+  marketplace_refund_amount?: number | null
+}
+
+export interface ApproveReturnDto {
+  responsibility?: Responsibility
+  resolution_notes?: string | null
+}
+
+export type CreditScenario =
+  | 'same_oc_unpaid'
+  | 'same_oc_approved_unpaid'
+  | 'next_oc_credit'
+  | 'pending_dispute'
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 const FRONTEND_URL = process.env.FRONTEND_URL ?? 'https://eclick.app.br'
@@ -1522,6 +1570,13 @@ export class DropshipService {
         })
         .in('id', identIds)
 
+      // 7. Aplica créditos pendentes do parceiro nessa OC (Sprint 9)
+      try {
+        await this.applyPendingCreditsToOC(orgId, oc.id, grp.supplier_id, Number(oc.gross_total))
+      } catch (e) {
+        this.logger.warn(`[oc-gen] aplicar créditos falhou em ${oc.oc_number}: ${e instanceof Error ? e.message : e}`)
+      }
+
       created.push({ id: oc.id, oc_number: oc.oc_number, gross_total: Number(oc.gross_total) })
     }
 
@@ -2064,6 +2119,581 @@ export class DropshipService {
     return {
       groups: Array.from(groups.values()).sort((a, b) => b.gross_total - a.gross_total),
       total_idents: idents.length,
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 8 — DEVOLUÇÕES E CANCELAMENTOS (CRUD + classificação)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async createReturn(orgId: string, dto: CreateReturnDto) {
+    if (!dto.supplier_id) throw new BadRequestException('supplier_id é obrigatório')
+    if (!dto.marketplace) throw new BadRequestException('marketplace é obrigatório')
+    if (!dto.return_type) throw new BadRequestException('return_type é obrigatório')
+    if (typeof dto.return_amount !== 'number' || dto.return_amount < 0) {
+      throw new BadRequestException('return_amount inválido')
+    }
+    if (typeof dto.return_quantity !== 'number' || dto.return_quantity <= 0) {
+      throw new BadRequestException('return_quantity deve ser > 0')
+    }
+
+    // Resolve identification + OC original se fornecido
+    let originalOcId: string | null = null
+    let originalOcItemId: string | null = null
+    let mlPackId = dto.ml_pack_id ?? null
+    let mlOrderId = dto.ml_order_id ?? null
+
+    if (dto.identification_id) {
+      const { data: ident } = await supabaseAdmin
+        .from('dropship_order_identifications')
+        .select('oc_id, ml_pack_id, ml_order_id, ml_shipment_id, supplier_id')
+        .eq('id', dto.identification_id)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      if (!ident) throw new NotFoundException('Identification não encontrada')
+      originalOcId = ident.oc_id ?? null
+      mlPackId = mlPackId ?? ident.ml_pack_id
+      mlOrderId = mlOrderId ?? ident.ml_order_id
+
+      // Resolve oc_item_id se OC existe
+      if (originalOcId) {
+        const { data: ocItem } = await supabaseAdmin
+          .from('dropship_purchase_order_items')
+          .select('id')
+          .eq('oc_id', originalOcId)
+          .eq('identification_id', dto.identification_id)
+          .maybeSingle()
+        originalOcItemId = ocItem?.id ?? null
+      }
+    }
+
+    // Default responsibility: partner (padrão dropship — parceiro absorve a menos
+    // que seja arrependimento do comprador, em que vai pra buyer)
+    const defaultResp: Responsibility =
+      dto.return_type === 'return_buyer_regret' ? 'buyer' :
+      'partner'
+    const responsibility = dto.responsibility ?? defaultResp
+
+    const { data, error } = await supabaseAdmin
+      .from('dropship_returns')
+      .insert({
+        organization_id: orgId,
+        supplier_id: dto.supplier_id,
+        identification_id: dto.identification_id ?? null,
+        ml_pack_id: mlPackId,
+        ml_order_id: mlOrderId,
+        shopee_order_id: dto.shopee_order_id ?? null,
+        marketplace: dto.marketplace,
+        original_oc_id: originalOcId,
+        original_oc_item_id: originalOcItemId,
+        return_type: dto.return_type,
+        source: dto.source ?? 'manual',
+        external_id: dto.external_id ?? null,
+        return_amount: dto.return_amount,
+        return_quantity: dto.return_quantity,
+        responsibility,
+        status: 'opened',
+        buyer_complaint: dto.buyer_complaint ?? null,
+        internal_notes: dto.internal_notes ?? null,
+        evidence_urls: dto.evidence_urls ?? [],
+      })
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+    return data
+  }
+
+  async listReturns(orgId: string, filters: {
+    supplier_id?: string;
+    status?: string;
+    marketplace?: string;
+    return_type?: string;
+    q?: string;
+  }) {
+    let query = supabaseAdmin
+      .from('dropship_returns')
+      .select(`
+        id, marketplace, ml_order_id, shopee_order_id,
+        return_type, source, return_amount, return_quantity,
+        responsibility, status, credit_strategy, credit_amount,
+        credit_applied_oc_id, credit_applied_at,
+        buyer_complaint, opened_at, resolved_at,
+        original_oc_id, identification_id,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('opened_at', { ascending: false })
+      .limit(200)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) {
+      const arr = filters.status.split(',')
+      query = arr.length > 1 ? query.in('status', arr) : query.eq('status', filters.status)
+    }
+    if (filters.marketplace) query = query.eq('marketplace', filters.marketplace)
+    if (filters.return_type) query = query.eq('return_type', filters.return_type)
+    if (filters.q) query = query.or(`ml_order_id.ilike.%${filters.q}%,shopee_order_id.ilike.%${filters.q}%`)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getReturn(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_returns')
+      .select(`
+        *,
+        suppliers(id, name, legal_name, tax_id),
+        original_oc:dropship_purchase_orders!original_oc_id(id, oc_number, status, net_total)
+      `)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new HttpException(error.message, 500)
+    if (!data) throw new NotFoundException('Devolução não encontrada')
+    return data
+  }
+
+  async updateReturn(orgId: string, id: string, dto: UpdateReturnDto) {
+    const existing = await this.getReturn(orgId, id) as Record<string, unknown>
+    if (existing.status === 'credit_applied' || existing.status === 'closed' || existing.status === 'rejected') {
+      throw new BadRequestException(`Não pode editar devolução já ${existing.status}`)
+    }
+    const patch: Record<string, unknown> = {}
+    const fields = [
+      'status', 'responsibility', 'internal_notes', 'partner_response',
+      'resolution_notes', 'evidence_urls',
+      'marketplace_return_status', 'marketplace_refund_amount',
+    ] as const
+    const dtoRec = dto as Record<string, unknown>
+    for (const k of fields) if (dtoRec[k] !== undefined) patch[k] = dtoRec[k]
+    if (Object.keys(patch).length === 0) return existing
+
+    patch.updated_at = new Date().toISOString()
+    const { data, error } = await supabaseAdmin
+      .from('dropship_returns')
+      .update(patch)
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+    return data
+  }
+
+  async rejectReturn(orgId: string, id: string, reason: string) {
+    if (!reason?.trim()) throw new BadRequestException('Motivo obrigatório')
+    const existing = await this.getReturn(orgId, id) as Record<string, unknown>
+    if (existing.status === 'credit_applied') {
+      throw new BadRequestException('Crédito já foi aplicado, não pode rejeitar')
+    }
+    const { error } = await supabaseAdmin
+      .from('dropship_returns')
+      .update({
+        status: 'rejected',
+        resolution_notes: reason.trim(),
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 9 — RÉGUA DE CRÉDITO (4 CENÁRIOS)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Aprova devolução: identifica cenário + dispara aplicação de crédito */
+  async approveReturn(orgId: string, id: string, dto: ApproveReturnDto) {
+    const ret = await this.getReturn(orgId, id) as Record<string, unknown>
+    if (ret.status === 'credit_applied' || ret.status === 'closed') {
+      throw new BadRequestException('Devolução já processada')
+    }
+
+    // Atualiza responsibility se passado
+    const patch: Record<string, unknown> = {
+      status: 'approved',
+      updated_at: new Date().toISOString(),
+    }
+    if (dto.responsibility) patch.responsibility = dto.responsibility
+    if (dto.resolution_notes) patch.resolution_notes = dto.resolution_notes
+    await supabaseAdmin
+      .from('dropship_returns')
+      .update(patch)
+      .eq('id', id)
+
+    // Re-busca pra ter responsibility atualizada
+    const updated = await this.getReturn(orgId, id) as Record<string, unknown>
+
+    // Identifica cenário
+    const scenario = await this.identifyCreditScenario(updated)
+
+    // Aplica conforme cenário
+    return await this.applyReturnCredit(orgId, updated, scenario)
+  }
+
+  /** Identifica em qual dos 4 cenários a devolução se encaixa */
+  private async identifyCreditScenario(ret: Record<string, unknown>): Promise<CreditScenario> {
+    if (ret.responsibility !== 'partner' && ret.responsibility !== 'shared') {
+      // Se responsabilidade não é do parceiro, não gera crédito
+      return 'pending_dispute'
+    }
+
+    const ocId = ret.original_oc_id as string | null
+    if (!ocId) {
+      // Sem OC = item ainda não foi pra OC → trata como same_oc_unpaid (remove direto)
+      return 'same_oc_unpaid'
+    }
+
+    const { data: oc } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select('status')
+      .eq('id', ocId)
+      .maybeSingle()
+    if (!oc) return 'pending_dispute'
+
+    if (['draft', 'preview_locked'].includes(oc.status as string)) return 'same_oc_unpaid'
+    if (['generated', 'sent', 'viewed', 'approved', 'approved_with_notes', 'rejected', 'on_hold'].includes(oc.status as string)) {
+      return 'same_oc_approved_unpaid'
+    }
+    if (['in_payable', 'paid', 'partially_paid'].includes(oc.status as string)) {
+      return 'next_oc_credit'
+    }
+    return 'pending_dispute'
+  }
+
+  /** Aplica crédito conforme cenário */
+  private async applyReturnCredit(
+    orgId: string,
+    ret: Record<string, unknown>,
+    scenario: CreditScenario,
+  ): Promise<{ scenario: CreditScenario; credit_id?: string; oc_id?: string; amount: number }> {
+    const now = new Date().toISOString()
+    const returnAmount = Number(ret.return_amount ?? 0)
+    const supplierId = ret.supplier_id as string
+
+    // Aplica responsibility split se shared (50/50 default)
+    let creditAmount = returnAmount
+    if (ret.responsibility === 'shared') {
+      const split = ret.responsibility_split as { partner_pct?: number } | null
+      const pct = split?.partner_pct ?? 50
+      creditAmount = (returnAmount * pct) / 100
+    }
+
+    if (scenario === 'pending_dispute') {
+      await supabaseAdmin
+        .from('dropship_returns')
+        .update({
+          status: 'disputed',
+          credit_strategy: 'pending_dispute',
+          credit_amount: 0,
+          updated_at: now,
+        })
+        .eq('id', ret.id as string)
+      return { scenario, amount: 0 }
+    }
+
+    if (scenario === 'same_oc_unpaid') {
+      // Item ainda em OC draft/preview_locked OU sem OC — só remove
+      const ocItemId = ret.original_oc_item_id as string | null
+      if (ocItemId) {
+        await supabaseAdmin
+          .from('dropship_purchase_order_items')
+          .update({ status: 'excluded' })
+          .eq('id', ocItemId)
+        // Recalcula totais da OC
+        await this.recalculateOCTotals(ret.original_oc_id as string)
+      }
+      // Marca identification como returned
+      if (ret.identification_id) {
+        await supabaseAdmin
+          .from('dropship_order_identifications')
+          .update({ dropship_status: 'returned', updated_at: now })
+          .eq('id', ret.identification_id as string)
+      }
+      await supabaseAdmin
+        .from('dropship_returns')
+        .update({
+          status: 'closed',
+          credit_strategy: 'same_oc_unpaid',
+          credit_amount: 0,
+          resolved_at: now,
+          updated_at: now,
+        })
+        .eq('id', ret.id as string)
+      return { scenario, amount: 0 }
+    }
+
+    if (scenario === 'same_oc_approved_unpaid') {
+      // OC já está em status sent/viewed/approved (não paga) — gera crédito DENTRO da OC
+      const ocItemId = ret.original_oc_item_id as string | null
+      const ocId = ret.original_oc_id as string
+      if (ocItemId) {
+        await supabaseAdmin
+          .from('dropship_purchase_order_items')
+          .update({ status: 'credited' })
+          .eq('id', ocItemId)
+      }
+      // Atualiza credits da OC
+      const creditField = this.mapReturnTypeToCreditField(ret.return_type as string)
+      const { data: oc } = await supabaseAdmin
+        .from('dropship_purchase_orders')
+        .select(`gross_total, return_credits, cancellation_credits, warranty_credits, divergence_credits, other_credits`)
+        .eq('id', ocId)
+        .maybeSingle()
+      if (oc) {
+        const updates: Record<string, unknown> = {
+          [creditField]: Number((oc as Record<string, unknown>)[creditField] ?? 0) + creditAmount,
+          updated_at: now,
+        }
+        // Recalcula net_total
+        const totalCredits =
+          Number(oc.return_credits ?? 0) + Number(oc.cancellation_credits ?? 0) +
+          Number(oc.warranty_credits ?? 0) + Number(oc.divergence_credits ?? 0) +
+          Number(oc.other_credits ?? 0)
+        // Adiciona o novo crédito ao total
+        const newTotalCredits = totalCredits + creditAmount
+        updates.net_total = Number(oc.gross_total ?? 0) - newTotalCredits
+        await supabaseAdmin
+          .from('dropship_purchase_orders')
+          .update(updates)
+          .eq('id', ocId)
+      }
+      // Marca identification como returned
+      if (ret.identification_id) {
+        await supabaseAdmin
+          .from('dropship_order_identifications')
+          .update({ dropship_status: 'returned', updated_at: now })
+          .eq('id', ret.identification_id as string)
+      }
+      await supabaseAdmin
+        .from('dropship_returns')
+        .update({
+          status: 'credit_applied',
+          credit_strategy: 'same_oc_approved_unpaid',
+          credit_amount: creditAmount,
+          credit_applied_oc_id: ocId,
+          credit_applied_at: now,
+          resolved_at: now,
+          updated_at: now,
+        })
+        .eq('id', ret.id as string)
+      return { scenario, oc_id: ocId, amount: creditAmount }
+    }
+
+    // next_oc_credit: cria saldo de crédito pra próxima OC
+    const { data: credit, error: cErr } = await supabaseAdmin
+      .from('dropship_partner_credits')
+      .insert({
+        organization_id: orgId,
+        supplier_id: supplierId,
+        return_id: ret.id,
+        source_oc_id: ret.original_oc_id,
+        credit_amount: creditAmount,
+        credit_type: this.mapReturnTypeToCreditType(ret.return_type as string),
+        status: 'pending',
+        notes: `Crédito gerado por devolução em OC ${ret.original_oc_id}`,
+      })
+      .select('id')
+      .single()
+    if (cErr) throw new HttpException(cErr.message, 500)
+
+    // Marca identification como returned
+    if (ret.identification_id) {
+      await supabaseAdmin
+        .from('dropship_order_identifications')
+        .update({ dropship_status: 'returned', updated_at: now })
+        .eq('id', ret.identification_id as string)
+    }
+    await supabaseAdmin
+      .from('dropship_returns')
+      .update({
+        status: 'credit_pending',
+        credit_strategy: 'next_oc_credit',
+        credit_amount: creditAmount,
+        updated_at: now,
+      })
+      .eq('id', ret.id as string)
+
+    return { scenario, credit_id: credit.id, amount: creditAmount }
+  }
+
+  /** Recalcula items_count, units_count, gross_total, net_total da OC.
+   *  Chamado após excluir/creditar item. */
+  private async recalculateOCTotals(ocId: string) {
+    const { data: items } = await supabaseAdmin
+      .from('dropship_purchase_order_items')
+      .select('quantity, line_total, status')
+      .eq('oc_id', ocId)
+    const validItems = (items ?? []).filter(i => ['included', 'pending_credit'].includes(i.status as string))
+    const itemsCount = validItems.length
+    const unitsCount = validItems.reduce((s, i) => s + Number(i.quantity ?? 0), 0)
+    const grossTotal = validItems.reduce((s, i) => s + Number(i.line_total ?? 0), 0)
+
+    const { data: oc } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select(`return_credits, cancellation_credits, warranty_credits, divergence_credits, other_credits`)
+      .eq('id', ocId)
+      .maybeSingle()
+    const totalCredits = oc
+      ? Number(oc.return_credits ?? 0) + Number(oc.cancellation_credits ?? 0) +
+        Number(oc.warranty_credits ?? 0) + Number(oc.divergence_credits ?? 0) +
+        Number(oc.other_credits ?? 0)
+      : 0
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        items_count: itemsCount,
+        units_count: unitsCount,
+        gross_total: grossTotal,
+        net_total: grossTotal - totalCredits,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', ocId)
+  }
+
+  private mapReturnTypeToCreditField(returnType: string): string {
+    switch (returnType) {
+      case 'cancellation':
+        return 'cancellation_credits'
+      case 'warranty_claim':
+        return 'warranty_credits'
+      case 'partner_negotiated':
+        return 'other_credits'
+      default:
+        return 'return_credits'
+    }
+  }
+
+  private mapReturnTypeToCreditType(returnType: string): string {
+    switch (returnType) {
+      case 'cancellation':
+        return 'cancellation'
+      case 'warranty_claim':
+        return 'warranty'
+      case 'partner_negotiated':
+        return 'negotiated_discount'
+      default:
+        return 'return'
+    }
+  }
+
+  // ── Credits queries ───────────────────────────────────────────────────────
+
+  async listCredits(orgId: string, filters: { supplier_id?: string; status?: string }) {
+    let query = supabaseAdmin
+      .from('dropship_partner_credits')
+      .select(`
+        id, credit_amount, credit_type, status,
+        applied_to_oc_id, applied_amount, remaining_amount, applied_at,
+        return_id, source_oc_id, manual_adjustment,
+        notes, expires_at, created_at,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(100)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) query = query.eq('status', filters.status)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getPendingCreditsBalance(orgId: string, supplierId: string): Promise<number> {
+    const { data } = await supabaseAdmin
+      .from('dropship_partner_credits')
+      .select('remaining_amount')
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+      .eq('status', 'pending')
+    return (data ?? []).reduce((s, c) => s + Number(c.remaining_amount ?? 0), 0)
+  }
+
+  /** Aplica créditos pendentes do parceiro numa OC (chamado em generateDailyOCs).
+   *  Usa créditos até zerar gross_total ou esgotar saldo. */
+  private async applyPendingCreditsToOC(orgId: string, ocId: string, supplierId: string, ocGross: number) {
+    if (ocGross <= 0) return
+    const { data: pendingCredits } = await supabaseAdmin
+      .from('dropship_partner_credits')
+      .select('id, credit_amount, applied_amount, credit_type')
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })  // FIFO
+
+    if (!pendingCredits || pendingCredits.length === 0) return
+
+    let remaining = ocGross
+    let totalApplied = 0
+    const byType: Record<string, number> = {
+      return_credits: 0, cancellation_credits: 0, warranty_credits: 0,
+      divergence_credits: 0, other_credits: 0,
+    }
+    const now = new Date().toISOString()
+
+    for (const credit of pendingCredits) {
+      if (remaining <= 0) break
+      const creditRemaining = Number(credit.credit_amount) - Number(credit.applied_amount ?? 0)
+      const apply = Math.min(creditRemaining, remaining)
+      if (apply <= 0) continue
+
+      // Atualiza credit
+      const newApplied = Number(credit.applied_amount ?? 0) + apply
+      const isFullyUsed = Math.abs(Number(credit.credit_amount) - newApplied) < 0.01
+      await supabaseAdmin
+        .from('dropship_partner_credits')
+        .update({
+          status: isFullyUsed ? 'applied' : 'partially_applied',
+          applied_to_oc_id: ocId,
+          applied_amount: newApplied,
+          applied_at: now,
+          updated_at: now,
+        })
+        .eq('id', credit.id)
+
+      const field = this.creditTypeToOCField(credit.credit_type as string)
+      byType[field] += apply
+      totalApplied += apply
+      remaining -= apply
+    }
+
+    if (totalApplied === 0) return
+
+    // Atualiza OC
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        return_credits: byType.return_credits,
+        cancellation_credits: byType.cancellation_credits,
+        warranty_credits: byType.warranty_credits,
+        divergence_credits: byType.divergence_credits,
+        other_credits: byType.other_credits,
+        net_total: ocGross - totalApplied,
+        updated_at: now,
+      })
+      .eq('id', ocId)
+  }
+
+  private creditTypeToOCField(creditType: string): string {
+    switch (creditType) {
+      case 'cancellation':
+        return 'cancellation_credits'
+      case 'warranty':
+        return 'warranty_credits'
+      case 'divergence':
+        return 'divergence_credits'
+      case 'negotiated_discount':
+      case 'manual_adjustment':
+      case 'previous_payment':
+        return 'other_credits'
+      default:
+        return 'return_credits'
     }
   }
 }
