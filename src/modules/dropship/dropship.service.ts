@@ -169,6 +169,45 @@ export type CreditScenario =
   | 'next_oc_credit'
   | 'pending_dispute'
 
+export type DisputeType =
+  | 'cost_divergence' | 'responsibility' | 'amount'
+  | 'product_returned' | 'item_inclusion' | 'other'
+
+export type DisputeStatus =
+  | 'open' | 'in_review' | 'mediation'
+  | 'resolved_partner' | 'resolved_seller' | 'resolved_compromise'
+  | 'escalated' | 'closed'
+
+export interface CreateDisputeDto {
+  supplier_id: string
+  return_id?: string | null
+  oc_item_id?: string | null
+  oc_id?: string | null
+  dispute_type: DisputeType
+  claimed_by: 'seller' | 'partner'
+  claimed_by_name?: string | null
+  reason: string
+  description?: string | null
+  amount_claimed?: number | null
+  amount_partner_accepts?: number | null
+  amount_seller_proposes?: number | null
+  evidence_urls?: string[]
+}
+
+export interface UpdateDisputeDto {
+  status?: 'open' | 'in_review' | 'mediation' | 'escalated'
+  description?: string | null
+  amount_partner_accepts?: number | null
+  amount_seller_proposes?: number | null
+  evidence_urls?: string[]
+}
+
+export interface ResolveDisputeDto {
+  resolution_type: 'resolved_partner' | 'resolved_seller' | 'resolved_compromise'
+  final_resolved_amount?: number | null
+  resolution: string
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 const FRONTEND_URL = process.env.FRONTEND_URL ?? 'https://eclick.app.br'
@@ -2695,6 +2734,191 @@ export class DropshipService {
       default:
         return 'return_credits'
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 10 — DISPUTAS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async createDispute(orgId: string, userId: string | null, dto: CreateDisputeDto) {
+    if (!dto.supplier_id) throw new BadRequestException('supplier_id obrigatório')
+    if (!dto.dispute_type) throw new BadRequestException('Tipo obrigatório')
+    if (!dto.claimed_by) throw new BadRequestException('claimed_by obrigatório')
+    if (!dto.reason?.trim()) throw new BadRequestException('Motivo obrigatório')
+
+    // Resolve oc_id via oc_item_id se não fornecido
+    let ocId = dto.oc_id ?? null
+    if (!ocId && dto.oc_item_id) {
+      const { data: item } = await supabaseAdmin
+        .from('dropship_purchase_order_items')
+        .select('oc_id')
+        .eq('id', dto.oc_item_id)
+        .maybeSingle()
+      ocId = item?.oc_id ?? null
+    }
+    // Resolve oc_id via return_id
+    if (!ocId && dto.return_id) {
+      const { data: ret } = await supabaseAdmin
+        .from('dropship_returns')
+        .select('original_oc_id')
+        .eq('id', dto.return_id)
+        .maybeSingle()
+      ocId = ret?.original_oc_id ?? null
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('dropship_disputes')
+      .insert({
+        organization_id: orgId,
+        supplier_id: dto.supplier_id,
+        return_id: dto.return_id ?? null,
+        oc_item_id: dto.oc_item_id ?? null,
+        oc_id: ocId,
+        dispute_type: dto.dispute_type,
+        claimed_by: dto.claimed_by,
+        claimed_by_name: dto.claimed_by_name ?? null,
+        reason: dto.reason.trim(),
+        description: dto.description ?? null,
+        amount_claimed: dto.amount_claimed ?? null,
+        amount_partner_accepts: dto.amount_partner_accepts ?? null,
+        amount_seller_proposes: dto.amount_seller_proposes ?? null,
+        evidence_urls: dto.evidence_urls ?? [],
+        status: 'open',
+      })
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+
+    // Side-effect: se dispute vincula a uma return, atualiza return.status='disputed'
+    if (dto.return_id) {
+      await supabaseAdmin
+        .from('dropship_returns')
+        .update({ status: 'disputed', updated_at: new Date().toISOString() })
+        .eq('id', dto.return_id)
+        .eq('organization_id', orgId)
+    }
+
+    return data
+  }
+
+  async listDisputes(orgId: string, filters: {
+    supplier_id?: string;
+    status?: string;
+    dispute_type?: string;
+    claimed_by?: string;
+  }) {
+    let query = supabaseAdmin
+      .from('dropship_disputes')
+      .select(`
+        id, dispute_type, claimed_by, claimed_by_name, claimed_at,
+        amount_claimed, amount_partner_accepts, amount_seller_proposes,
+        final_resolved_amount, reason, status,
+        return_id, oc_item_id, oc_id,
+        resolution, resolved_at,
+        created_at,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('claimed_at', { ascending: false })
+      .limit(200)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) {
+      const arr = filters.status.split(',')
+      query = arr.length > 1 ? query.in('status', arr) : query.eq('status', filters.status)
+    }
+    if (filters.dispute_type) query = query.eq('dispute_type', filters.dispute_type)
+    if (filters.claimed_by) query = query.eq('claimed_by', filters.claimed_by)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getDispute(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_disputes')
+      .select(`
+        *,
+        suppliers(id, name, legal_name, tax_id)
+      `)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new HttpException(error.message, 500)
+    if (!data) throw new NotFoundException('Disputa não encontrada')
+    return data
+  }
+
+  async updateDispute(orgId: string, id: string, dto: UpdateDisputeDto) {
+    const existing = await this.getDispute(orgId, id) as Record<string, unknown>
+    const status = existing.status as string
+    if (['resolved_partner', 'resolved_seller', 'resolved_compromise', 'closed'].includes(status)) {
+      throw new BadRequestException(`Disputa já ${status}`)
+    }
+    const patch: Record<string, unknown> = {}
+    const fields = [
+      'status', 'description', 'amount_partner_accepts',
+      'amount_seller_proposes', 'evidence_urls',
+    ] as const
+    const dtoRec = dto as Record<string, unknown>
+    for (const k of fields) if (dtoRec[k] !== undefined) patch[k] = dtoRec[k]
+    if (Object.keys(patch).length === 0) return existing
+    patch.updated_at = new Date().toISOString()
+
+    const { data, error } = await supabaseAdmin
+      .from('dropship_disputes')
+      .update(patch)
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+    return data
+  }
+
+  async resolveDispute(orgId: string, userId: string | null, id: string, dto: ResolveDisputeDto) {
+    const existing = await this.getDispute(orgId, id) as Record<string, unknown>
+    const status = existing.status as string
+    if (['resolved_partner', 'resolved_seller', 'resolved_compromise', 'closed'].includes(status)) {
+      throw new BadRequestException(`Disputa já ${status}`)
+    }
+    if (!dto.resolution?.trim()) throw new BadRequestException('Texto de resolução obrigatório')
+    const valid = ['resolved_partner', 'resolved_seller', 'resolved_compromise']
+    if (!valid.includes(dto.resolution_type)) {
+      throw new BadRequestException(`resolution_type inválido (use ${valid.join('/')})`)
+    }
+
+    const now = new Date().toISOString()
+    const { data, error } = await supabaseAdmin
+      .from('dropship_disputes')
+      .update({
+        status: dto.resolution_type,
+        final_resolved_amount: dto.final_resolved_amount ?? null,
+        resolution: dto.resolution.trim(),
+        resolved_by: userId,
+        resolved_at: now,
+        updated_at: now,
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+
+    // Side-effect: se disputa vinculada a return, retorna o return ao status apropriado
+    if (existing.return_id) {
+      const newReturnStatus =
+        dto.resolution_type === 'resolved_partner' ? 'approved' :
+        dto.resolution_type === 'resolved_seller' ? 'rejected' :
+        'analyzed'  // compromise — operador decide depois
+      await supabaseAdmin
+        .from('dropship_returns')
+        .update({ status: newReturnStatus, updated_at: now })
+        .eq('id', existing.return_id as string)
+    }
+
+    return data
   }
 }
 

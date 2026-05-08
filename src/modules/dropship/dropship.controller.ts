@@ -11,6 +11,7 @@ import {
   CreatePartnerProductDto, UpdatePartnerProductDto,
   BulkImportDto,
   CreateReturnDto, UpdateReturnDto, ApproveReturnDto,
+  CreateDisputeDto, UpdateDisputeDto, ResolveDisputeDto,
 } from './dropship.service'
 
 @Controller('dropship')
@@ -429,5 +430,61 @@ export class DropshipController {
     const orgId = await this.resolveOrgId(auth)
     const balance = await this.svc.getPendingCreditsBalance(orgId, supplierId)
     return { supplier_id: supplierId, pending_credits_balance: balance }
+  }
+
+  // ── Disputes (Sprint 10) ──────────────────────────────────────────────────
+
+  @Get('disputes')
+  async listDisputes(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('dispute_type') dispute_type?: string,
+    @Query('claimed_by') claimed_by?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listDisputes(orgId, { supplier_id, status, dispute_type, claimed_by })
+  }
+
+  @Get('disputes/:id')
+  async getDispute(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getDispute(orgId, id)
+  }
+
+  @Post('disputes')
+  async createDispute(
+    @Headers('authorization') auth: string,
+    @Body() dto: CreateDisputeDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    return this.svc.createDispute(orgId, user?.id ?? null, dto)
+  }
+
+  @Patch('disputes/:id')
+  async updateDispute(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateDisputeDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.updateDispute(orgId, id, dto)
+  }
+
+  @Post('disputes/:id/resolve')
+  async resolveDispute(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() dto: ResolveDisputeDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    return this.svc.resolveDispute(orgId, user?.id ?? null, id, dto)
   }
 }
