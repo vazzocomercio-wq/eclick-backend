@@ -82,7 +82,9 @@ export class MlCampaignsController {
     return this.svc.getMissingDataItems(u.orgId, sellerId ? Number(sellerId) : undefined, limit ? Number(limit) : 100)
   }
 
-  @Get(':id')
+  // Constraint UUID — evita capturar rotas literais como /recommendations,
+  // /config, /audit, etc. que vem depois neste controller.
+  @Get(':id([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
   getCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -91,7 +93,7 @@ export class MlCampaignsController {
     return this.svc.getCampaign(u.orgId, id)
   }
 
-  @Get(':id/items')
+  @Get(':id([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/items')
   listItemsForCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') campaignId: string,
