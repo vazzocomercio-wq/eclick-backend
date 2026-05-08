@@ -256,7 +256,97 @@ export class MlCampaignsSyncService {
     stats.enriched += enriched.enriched
     stats.calls    += enriched.calls
 
+    // ── Fase C: enriquece metadata visual (thumbnail/title) ─────
+    const metaResult = await this.enrichItemsMetadata(orgId, sellerId, token)
+    stats.calls += metaResult.calls
+
     return stats
+  }
+
+  /** Fire-and-forget: dispara enrichItemsMetadata em background.
+   *  Retorna imediatamente { items_pending, started: bool }. */
+  async enrichMetadataAsync(orgId: string, sellerId?: number): Promise<{ items_pending: number; started: boolean }> {
+    let q = supabaseAdmin
+      .from('ml_campaign_items')
+      .select('ml_item_id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .is('thumbnail_url', null)
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    const { count } = await q
+    const pending = count ?? 0
+
+    if (pending === 0) return { items_pending: 0, started: false }
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const tokens = sellerId != null
+            ? [await this.ml.getTokenForOrg(orgId, sellerId).catch(() => null)].filter(Boolean) as Array<{ token: string; sellerId: number }>
+            : await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+          for (const t of tokens) {
+            await this.enrichItemsMetadata(orgId, t.sellerId, t.token).catch(e =>
+              this.logger.warn(`[enrich-async] seller=${t.sellerId} falhou: ${(e as Error).message}`),
+            )
+          }
+        } catch (e) {
+          this.logger.warn(`[enrich-async] erro: ${(e as Error).message}`)
+        }
+      })()
+    })
+
+    return { items_pending: pending, started: true }
+  }
+
+  /** Fase C: pra cada item sem thumbnail_url, faz batch /items?ids=X
+   *  pra pegar thumbnail/title/permalink. Cap de 200 items por sync
+   *  pra nao consumir muito API. Throttle 1 batch/segundo. */
+  private async enrichItemsMetadata(
+    orgId: string, sellerId: number, token: string,
+  ): Promise<{ enriched: number; calls: number }> {
+    const { data: rows } = await supabaseAdmin
+      .from('ml_campaign_items')
+      .select('ml_item_id')
+      .eq('organization_id', orgId)
+      .eq('seller_id',       sellerId)
+      .is('thumbnail_url',   null)
+      .limit(200)
+
+    if (!rows || rows.length === 0) return { enriched: 0, calls: 0 }
+
+    // Distinct items (1 ml_item_id pode estar em N campanhas)
+    const distinctIds = [...new Set((rows as Array<{ ml_item_id: string }>).map(r => r.ml_item_id))]
+
+    let enriched = 0, calls = 0
+    for (let i = 0; i < distinctIds.length; i += 20) {
+      const batch = distinctIds.slice(i, i + 20)
+      try {
+        const items = await this.client.getItemsMetadata(token, sellerId, batch)
+        calls++
+
+        // Upgrade — UPDATE all rows com esse ml_item_id (1 item × N campanhas)
+        for (const it of items) {
+          if (!it.thumbnail && !it.title && !it.permalink) continue
+          await supabaseAdmin
+            .from('ml_campaign_items')
+            .update({
+              thumbnail_url:           it.thumbnail ?? null,
+              title:                   it.title ?? null,
+              permalink:               it.permalink ?? null,
+              last_metadata_synced_at: new Date().toISOString(),
+            })
+            .eq('organization_id', orgId)
+            .eq('seller_id',       sellerId)
+            .eq('ml_item_id',      it.id)
+          enriched++
+        }
+      } catch (e) {
+        this.logger.warn(`[campaigns] getItemsMetadata batch falhou: ${(e as Error).message}`)
+      }
+      // Throttle 1 req/sec
+      if (i + 20 < distinctIds.length) await this.sleep(1000)
+    }
+
+    return { enriched, calls }
   }
 
   /** Sync items de 1 campanha em 1 status, com paginacao search_after.

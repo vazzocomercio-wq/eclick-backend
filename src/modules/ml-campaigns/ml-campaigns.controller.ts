@@ -172,6 +172,17 @@ export class MlCampaignsController {
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)
   }
 
+  /** Enriquece metadata visual (thumbnail/title) dos items em background.
+   *  Frontend chama isso depois de carregar a lista pra preencher thumbs. */
+  @Post('sync/enrich-metadata')
+  enrichMetadata(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.sync.enrichMetadataAsync(u.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
   // ═══ Camada 2: Recommendations + Config ═══════════════════════════
 
   @Post('recommendations/generate')

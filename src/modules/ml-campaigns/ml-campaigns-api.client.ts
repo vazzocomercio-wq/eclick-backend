@@ -87,6 +87,33 @@ export class MlCampaignsApiClient {
     return Array.isArray(r) ? r : []
   }
 
+  /** GET /items?ids=X1,X2,...&attributes=id,thumbnail,title,permalink
+   *  Batch fetch de metadata visual (max 20 ids por chamada).
+   *  Resposta: array de [{ code, body }] — body tem id/thumbnail/title/permalink. */
+  async getItemsMetadata(
+    token:    string,
+    sellerId: number,
+    itemIds:  string[],
+  ): Promise<Array<{ id: string; thumbnail?: string; title?: string; permalink?: string }>> {
+    if (itemIds.length === 0) return []
+    const batch = itemIds.slice(0, 20)
+    const r = await this.requestWithBackoff<Array<{ code: number; body?: { id: string; thumbnail?: string; title?: string; permalink?: string } }>>({
+      method:  'GET',
+      url:     `${ML_BASE}/items`,
+      headers: { Authorization: `Bearer ${token}` },
+      params:  { ids: batch.join(','), attributes: 'id,thumbnail,title,permalink' },
+    }, sellerId)
+
+    return r
+      .filter(it => it.code === 200 && it.body?.id)
+      .map(it => ({
+        id:         it.body!.id,
+        thumbnail:  it.body!.thumbnail,
+        title:      it.body!.title,
+        permalink:  it.body!.permalink,
+      }))
+  }
+
   /** POST /seller-promotions/offers
    *  Cria oferta (lojista adere a campanha pra item especifico).
    *  Body shape varia por promotion_type. Exemplo DEAL:
