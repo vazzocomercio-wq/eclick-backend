@@ -4,6 +4,7 @@ import { MlPostsaleService } from '../ml-postsale/ml-postsale.service'
 import { MlQuestionsAiService } from '../mercadolivre/ml-questions-ai.service'
 import { MlClaimsService } from '../ml-vertical/services/ml-claims.service'
 import { EventsGateway } from '../events/events.gateway'
+import { OrdersIngestionService } from '../sales-aggregator/services/orders-ingestion.service'
 import type { MlWebhookPayload } from './ml-webhook.types'
 
 /**
@@ -21,6 +22,7 @@ export class MlWebhookDispatcherService {
     private readonly questions: MlQuestionsAiService,
     private readonly claims:    MlClaimsService,
     private readonly events:    EventsGateway,
+    private readonly ingestion: OrdersIngestionService,
   ) {}
 
   async dispatch(payload: MlWebhookPayload): Promise<void> {
@@ -62,20 +64,39 @@ export class MlWebhookDispatcherService {
         case 'orders_v2':
         case 'shipments': {
           // resource: /orders/{id} ou /shipments/{id}
-          // Por agora NÃO refazemos ingestion no momento (o aggregator
-          // periódico já cobre — adicionar fetchSingleOrder requer
-          // refactor do client). Mas EMITIMOS Socket.IO pra UI saber que
-          // tem mudança e refrescar a lista.
           const m = payload.resource.match(/\/(orders|shipments)\/(\d+)/)
-          const externalOrderId = m?.[2]
+          const kind = m?.[1] as 'orders' | 'shipments' | undefined
+          const externalId = m?.[2]
+
+          // orders_v2 → ingest single order ANTES do emit (zero latência).
+          // shipments → não tem como ingest direto (id é shipment, não order),
+          // mas o pedido relacionado já existe na DB; emit basta pra UI
+          // re-fetch e pegar status atualizado pelo próximo aggregator OU
+          // a app continua mostrando dados da última ingestion.
+          let upserted = 0
+          if (payload.topic === 'orders_v2' && externalId) {
+            try {
+              const r = await this.ingestion.ingestSingleOrder(orgId, externalId)
+              upserted = r.upserted
+              if (r.skipped) {
+                this.logger.warn(`[ml-webhook] single-ingest skipped order=${externalId}: ${r.reason}`)
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              this.logger.error(`[ml-webhook] single-ingest order=${externalId} falhou: ${msg}`)
+            }
+          }
+
           this.events.emitToOrg(orgId, 'order:invalidate', {
-            external_order_id: externalOrderId ?? null,
+            external_order_id: externalId ?? null,
             seller_id:         payload.user_id,
             topic:             payload.topic,
+            kind,
             resource:          payload.resource,
+            upserted,
             received_at:       new Date().toISOString(),
           })
-          this.logger.log(`[ml-webhook] orders_v2 emit pra org=${orgId} order=${externalOrderId}`)
+          this.logger.log(`[ml-webhook] ${payload.topic} emit pra org=${orgId} id=${externalId} upserted=${upserted}`)
           break
         }
         default:

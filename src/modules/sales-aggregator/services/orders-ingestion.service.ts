@@ -57,6 +57,82 @@ export class OrdersIngestionService {
   /** Public — surfaces the last sync result for /sync-stats. */
   getLastStats(): LastSyncStats { return this.lastStats }
 
+  /** Webhook-driven single-order ingest.
+   *
+   *  Quando ML manda webhook orders_v2 com /orders/{id}, dispatcher
+   *  chama isso pra fazer upsert imediato (não espera aggregator
+   *  periódico). Latência observada: ~2-4s do bipe ao DB.
+   *
+   *  Reúso 100% — usa mesmos helpers do ingestDateRange (fetchShipmentCost,
+   *  fetchBuyersForOrders, buildOrderRows). Só pula:
+   *  - aggregator_runs progress updates (n/a pra single order)
+   *  - countCpfFromBatch (n/a)
+   *  - jornadas auto-trigger (mantém — webhook = evento canônico)
+   *
+   *  Idempotente: upsert por (source, external_order_id, sku). Se já
+   *  existe, atualiza com dados novos (status mudou, etc). */
+  async ingestSingleOrder(orgId: string, externalOrderId: string | number): Promise<{
+    upserted: number
+    skipped:  boolean
+    reason?:  string
+  }> {
+    const t0 = Date.now()
+    let token: string, sellerId: number
+    try {
+      ({ token, sellerId } = await this.mlClient.getTokenForOrg(orgId))
+    } catch (e) {
+      this.logger.warn(`[single-ingest] org=${orgId} sem token ML: ${(e as Error).message}`)
+      return { upserted: 0, skipped: true, reason: 'no_ml_token' }
+    }
+
+    // 1. Fetch order do ML
+    let order: MlOrder
+    try {
+      const raw = await this.mlClient.fetchOrder(token, externalOrderId)
+      if (!raw || typeof raw !== 'object') {
+        return { upserted: 0, skipped: true, reason: 'order_not_found' }
+      }
+      order = raw as MlOrder
+    } catch (e) {
+      this.logger.warn(`[single-ingest] fetchOrder ${externalOrderId} falhou: ${(e as Error).message}`)
+      return { upserted: 0, skipped: true, reason: 'fetch_failed' }
+    }
+
+    // 2. Shipping cost (se tem)
+    const costMap = new Map<number, number>()
+    const shipId = order.shipping?.id
+    if (shipId) {
+      try {
+        costMap.set(shipId, await this.mlClient.fetchShipmentCost(token, shipId))
+      } catch { /* best-effort, default 0 */ }
+    }
+
+    // 3. Listing map (cache reuse — buildListingMap só dura essa execução)
+    const listingMap = await this.buildListingMap(orgId)
+
+    // 4. Buyer billing
+    const stats: IngestionStats = { ordersFound: 1, rowsUpserted: 0, apiCalls: 0, errors: [] }
+    const buyerMap = await this.fetchBuyersForOrders([order], token, stats)
+
+    // 5. Build rows + upsert
+    const rows = this.buildOrderRows(orgId, [order], costMap, listingMap, sellerId, buyerMap)
+    if (rows.length === 0) {
+      return { upserted: 0, skipped: true, reason: 'no_rows_built' }
+    }
+
+    const { error } = await supabaseAdmin
+      .from('orders')
+      .upsert(rows, { onConflict: 'source,external_order_id,sku', ignoreDuplicates: false })
+
+    if (error) {
+      this.logger.error(`[single-ingest] upsert ${externalOrderId} falhou: ${error.message}`)
+      return { upserted: 0, skipped: true, reason: `upsert_error:${error.message.slice(0, 100)}` }
+    }
+
+    this.logger.log(`[single-ingest] order=${externalOrderId} org=${orgId.slice(0,8)} upserted=${rows.length} em ${Date.now() - t0}ms`)
+    return { upserted: rows.length, skipped: false }
+  }
+
   async ingestDateRange(
     orgId: string,
     dateFrom: string, // YYYY-MM-DD
