@@ -82,41 +82,6 @@ export class MlCampaignsController {
     return this.svc.getMissingDataItems(u.orgId, sellerId ? Number(sellerId) : undefined, limit ? Number(limit) : 100)
   }
 
-  @Get(':id')
-  getCampaign(
-    @ReqUser() u: ReqUserPayload,
-    @Param('id') id: string,
-  ) {
-    if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.svc.getCampaign(u.orgId, id)
-  }
-
-  @Get(':id/items')
-  listItemsForCampaign(
-    @ReqUser() u: ReqUserPayload,
-    @Param('id') campaignId: string,
-    @Query('seller_id')      sellerId?:    string,
-    @Query('status')         status?:      string,
-    @Query('health_status')  healthStatus?:string,
-    @Query('has_subsidy')    hasSubsidy?:  string,
-    @Query('q')              q?:           string,
-    @Query('limit')          limit?:       string,
-    @Query('offset')         offset?:      string,
-  ) {
-    if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.svc.listItems({
-      orgId:        u.orgId,
-      sellerId:     sellerId ? Number(sellerId) : undefined,
-      campaignId,
-      status:       status       as any,
-      healthStatus: healthStatus as any,
-      hasSubsidy:   hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
-      q,
-      limit:        limit  ? Number(limit)  : 50,
-      offset:       offset ? Number(offset) : 0,
-    })
-  }
-
   // ── Items (visao por anuncio) ────────────────────────────────────
 
   @Get('items/list')
@@ -483,6 +448,47 @@ export class MlCampaignsController {
       mlItemId:   itemId,
       campaignId,
       limit:      limit ? Number(limit) : 100,
+    })
+  }
+
+  // ── Catch-all dynamic routes — DEVEM ficar por último ─────────────
+  // NestJS resolve rotas na ORDEM de declaração. Se @Get(':id') vier
+  // antes de @Get('recommendations'), 'recommendations' é capturado
+  // como id e o getCampaign tenta validar como uuid, retornando 400.
+  // Por isso ficam aqui no final, depois de todas as rotas estáticas.
+
+  @Get(':id')
+  getCampaign(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getCampaign(u.orgId, id)
+  }
+
+  @Get(':id/items')
+  listItemsForCampaign(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') campaignId: string,
+    @Query('seller_id')      sellerId?:    string,
+    @Query('status')         status?:      string,
+    @Query('health_status')  healthStatus?:string,
+    @Query('has_subsidy')    hasSubsidy?:  string,
+    @Query('q')              q?:           string,
+    @Query('limit')          limit?:       string,
+    @Query('offset')         offset?:      string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listItems({
+      orgId:        u.orgId,
+      sellerId:     sellerId ? Number(sellerId) : undefined,
+      campaignId,
+      status:       status       as any,
+      healthStatus: healthStatus as any,
+      hasSubsidy:   hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
+      q,
+      limit:        limit  ? Number(limit)  : 50,
+      offset:       offset ? Number(offset) : 0,
     })
   }
 }
