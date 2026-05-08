@@ -794,6 +794,100 @@ Severities: critical (vermelho ef4444) > warning (âmbar f59e0b) > info (cyan 06
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// ML Campaign Center IA (F8) — adesão a campanhas ML com decisão IA
+// ════════════════════════════════════════════════════════════════════════
+
+const ML_CAMPAIGNS_ENTRIES: KbEntry[] = [
+  {
+    routes:   [
+      '/dashboard/ml-campaigns',
+      '/dashboard/ml-campaigns/list',
+      '/dashboard/ml-campaigns/[id]',
+    ],
+    category: 'campaigns',
+    title:    'Campaign Center IA — fluxo de adesão a campanhas ML',
+    content: `**Painel de campanhas ML elegíveis com decisão IA por item.** Substitui o "deal participation" manual da plataforma do ML.
+
+**Fluxo correto pra participar de uma campanha (4 passos):**
+
+1. **Sync** (\`POST /ml-campaigns/sync\`): traz lista de campanhas elegíveis + items em cada (status \`candidate\`/\`pending\`/\`started\`).
+2. **Gerar Recomendações IA** (botão "Gerar Recomendações IA (X)" na página da campanha): decision engine analisa cada candidato — margem de contribuição, subsídio MELI (\`meli_percentage\`), preço sugerido vs mínimo aceito — e cria uma recommendation com classificação \`recommended\`/\`not_recommended\`/\`needs_review\` + reason + opportunity_score.
+3. **Aprovar/Editar** (em \`/dashboard/ml-campaigns/recommendations\`): você revisa cada recomendação, edita preço/quantidade se quiser.
+4. **Aplicar** (\`POST /ml-campaigns/apply/single\` ou \`/apply/batch\`): submete pra ML API; item passa de candidate → started.
+
+**Por que NÃO existe botão "Aderir" direto:**
+- ML não aceita adesão sem preço promocional definido
+- IA precisa validar margem mínima (config \`min_margin_pct\`) — sem isso você poderia entrar em campanha que dá prejuízo
+- Subsídio MELI vem por item, não por campanha — IA combina os 2
+
+**Status de item:**
+- \`candidate\`: ML te convidou, ainda não aderiu
+- \`pending\`: aderiu mas campanha não começou
+- \`started\`: ATIVO, vendendo no preço promocional
+- \`finished\`: campanha encerrou
+
+**Health flag INCOMPLETE:**
+Item sem custo cadastrado (catálogo) ou sem preço mínimo aceito do ML — decision engine não consegue julgar margem, marca como needs_review.
+
+**Sair de campanha**: botão "Sair" por linha em items \`started\` → \`POST /leave/single\` → ML remove a oferta, item volta a candidate.
+
+**Subsídio "ML reduz X%"**: ML banca uma parte do desconto. Bom indicador — quanto maior o \`meli_percentage\`, menor seu sacrifício de margem.`,
+    tags: ['ml-campaigns', 'campaigns', 'deal', 'price-discount', 'subsidio'],
+  },
+  {
+    routes:   ['/dashboard/ml-campaigns/recommendations', '/dashboard/ml-campaigns/recommendations/[id]'],
+    category: 'campaigns',
+    title:    'Recomendações IA de campanha — aprovar/rejeitar',
+    content: `**Lista de sugestões geradas pela IA pra cada item candidato.**
+
+**Classificação:**
+- 🟢 \`recommended\`: margem positiva + subsídio bom + sem warnings — aderir é seguro
+- 🟡 \`needs_review\`: dado incompleto ou margem apertada — você decide
+- 🔴 \`not_recommended\`: margem negativa ou abaixo do mínimo configurado
+
+**Opportunity score (0-100):** combina subsídio + visibilidade da campanha + lift estimado de conversão.
+
+**Filtros**: por classification, status (pending/approved/rejected/applied), score mínimo, campaign_id.
+
+**Editar antes de aprovar**: pode mudar \`price\` ou \`quantity\` — fica registrado no audit_log.
+
+**Após aprovar**: vai pro batch apply em \`/dashboard/ml-campaigns/apply\`.`,
+    tags: ['ml-campaigns', 'recommendations', 'ai-decision'],
+  },
+  {
+    routes:   ['/dashboard/ml-campaigns/apply', '/dashboard/ml-campaigns/apply/[jobId]'],
+    category: 'campaigns',
+    title:    'Apply Wizard — aplicar recomendações aprovadas em lote',
+    content: `**Wizard de aplicação em lote** depois que aprovou várias recomendações.
+
+**Modos:**
+- \`safe\`: aplica só as recomendações verdes; pula amarelas/vermelhas mesmo se aprovadas
+- \`best_effort\`: tenta tudo aprovado, registra falhas
+
+**Job pattern**: cria 1 \`ml_campaign_apply_jobs\` row, processa em background, tracking via \`/apply/jobs/:id\` (success_count, failure_count, errors[]).
+
+**Re-tentativa**: se ML API der 429, backoff + retry automático. Se der erro permanente (item pausado, preço inválido), registra no audit_log e segue.`,
+    tags: ['ml-campaigns', 'apply', 'batch'],
+  },
+  {
+    routes:   [
+      '/dashboard/ml-campaigns/analytics',
+      '/dashboard/ml-campaigns/analytics/[campaignId]',
+      '/dashboard/ml-campaigns/health',
+      '/dashboard/ml-campaigns/audit',
+    ],
+    category: 'campaigns',
+    title:    'Analytics + Health + Audit (Camada 4)',
+    content: `**Analytics post-mortem** (\`/analytics\`): por campanha encerrada — o que vendeu, ROI estimado, taxa de conversão, qual classificação IA acertou mais.
+
+**Health** (\`/health\`): items "INCOMPLETE" — falta custo, falta margem mínima, falta preço base. Lista pra você corrigir no catálogo e desbloquear o decision engine.
+
+**Audit log** (\`/audit\`): tudo que aconteceu — quem aprovou o quê, quando, com qual preço. Compliance + debugging.`,
+    tags: ['ml-campaigns', 'analytics', 'audit', 'health'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Ads
 // ════════════════════════════════════════════════════════════════════════
 
@@ -1131,6 +1225,7 @@ export const KB: KbEntry[] = [
   ...COMPRAS_PRICING_ENTRIES,
   ...SALES_ENTRIES,
   ...ADS_ENTRIES,
+  ...ML_CAMPAIGNS_ENTRIES,
   ...ML_POSTSALE_INTELLIGENCE_ENTRIES,
   ...OPS_ENTRIES,
   ...COPILOT_PAGE_ENTRIES,
