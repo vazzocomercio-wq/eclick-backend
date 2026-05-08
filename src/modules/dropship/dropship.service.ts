@@ -2920,6 +2920,306 @@ export class DropshipService {
 
     return data
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 11 — SCORE DO PARCEIRO v1 (5 dimensões × 20 = 100 pts)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Cron @00:30 dia 1 do mês: calcula score do mês anterior pra todas orgs */
+  @Cron('30 0 1 * *', { name: 'dropship-monthly-scores' })
+  async monthlyScoresTick() {
+    try {
+      const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
+      for (const org of orgs ?? []) {
+        try {
+          const r = await this.recalculateAllScores(org.id)
+          if (r.calculated > 0) {
+            this.logger.log(`[scores] org=${org.id} calculados=${r.calculated}`)
+          }
+        } catch (e) {
+          this.logger.warn(`[scores] org=${org.id}: ${e instanceof Error ? e.message : e}`)
+        }
+      }
+    } catch (e) {
+      this.logger.error(`[scores] tick: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  /** Recalcula scores de todos parceiros ativos da org */
+  async recalculateAllScores(orgId: string): Promise<{ calculated: number }> {
+    const { data: profiles } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('supplier_id')
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'active')
+    if (!profiles || profiles.length === 0) return { calculated: 0 }
+
+    const today = new Date()
+    const periodEnd = new Date(today.getFullYear(), today.getMonth(), 1)  // 1º do mês atual
+    const periodStart = new Date(periodEnd)
+    periodStart.setMonth(periodStart.getMonth() - 1)  // 1º do mês anterior
+
+    let calculated = 0
+    for (const p of profiles) {
+      try {
+        await this.calculatePartnerScore(orgId, p.supplier_id, periodStart, periodEnd)
+        calculated++
+      } catch (e) {
+        this.logger.warn(`[scores] supplier ${p.supplier_id}: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    return { calculated }
+  }
+
+  async calculatePartnerScore(
+    orgId: string,
+    supplierId: string,
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<Record<string, unknown>> {
+    const startIso = periodStart.toISOString()
+    const endIso = periodEnd.toISOString()
+
+    // 1. Métricas brutas
+    const [
+      { count: skusCount },
+      { count: oosCount },
+      { data: orders },
+      { data: returns },
+      { data: ocs },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from('supplier_products')
+        .select('id', { count: 'exact', head: true })
+        .eq('supplier_id', supplierId)
+        .eq('dropship_status', 'active'),
+      supabaseAdmin
+        .from('supplier_products')
+        .select('id', { count: 'exact', head: true })
+        .eq('supplier_id', supplierId)
+        .eq('dropship_status', 'active')
+        .lte('partner_stock', 0),
+      supabaseAdmin
+        .from('dropship_order_identifications')
+        .select('id, dropship_status, identified_at, shipped_at')
+        .eq('organization_id', orgId)
+        .eq('supplier_id', supplierId)
+        .gte('identified_at', startIso)
+        .lt('identified_at', endIso),
+      supabaseAdmin
+        .from('dropship_returns')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('supplier_id', supplierId)
+        .eq('status', 'credit_applied')
+        .gte('opened_at', startIso)
+        .lt('opened_at', endIso),
+      supabaseAdmin
+        .from('dropship_purchase_orders')
+        .select('id, sent_to_partner_at, partner_approved_at')
+        .eq('organization_id', orgId)
+        .eq('supplier_id', supplierId)
+        .not('sent_to_partner_at', 'is', null)
+        .gte('reference_date', periodStart.toISOString().slice(0, 10))
+        .lt('reference_date', periodEnd.toISOString().slice(0, 10)),
+    ])
+
+    // Divergences é Sprint 12 — pode não existir ainda; default 0
+    let divergencesCnt = 0
+    try {
+      const { count } = await supabaseAdmin
+        .from('dropship_divergences')
+        .select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId)
+        .eq('supplier_id', supplierId)
+        .gte('detected_at', startIso)
+        .lt('detected_at', endIso)
+      divergencesCnt = count ?? 0
+    } catch { divergencesCnt = 0 }
+
+    const activeSkus = skusCount ?? 0
+    const oos = oosCount ?? 0
+    const ordersTotal = (orders ?? []).length
+    const ordersDelayed = (orders ?? []).filter(o => {
+      // shipped_at > 2 dias após identified_at conta como atraso
+      if (!o.shipped_at || !o.identified_at) return false
+      const diffH = (new Date(o.shipped_at).getTime() - new Date(o.identified_at).getTime()) / 3600000
+      return diffH > 48
+    }).length
+    const returnsCount = (returns ?? []).length
+
+    // Avg approval hours
+    let avgApprovalHours = 0
+    let approvedCount = 0
+    for (const oc of (ocs ?? [])) {
+      if (oc.sent_to_partner_at && oc.partner_approved_at) {
+        const h = (new Date(oc.partner_approved_at).getTime() - new Date(oc.sent_to_partner_at).getTime()) / 3600000
+        avgApprovalHours += h
+        approvedCount++
+      }
+    }
+    avgApprovalHours = approvedCount > 0 ? avgApprovalHours / approvedCount : 0
+
+    // 2. Score por dimensão (0-20 cada)
+    const stockAccuracy = activeSkus === 0 ? 16
+      : Math.round(20 * Math.max(0, (activeSkus - oos) / activeSkus))
+    const shipLeadCompliance = ordersTotal === 0 ? 16
+      : Math.round(20 * Math.max(0, (ordersTotal - ordersDelayed) / ordersTotal))
+    const divergenceRate = ordersTotal === 0 ? 18
+      : Math.round(20 * Math.max(0, 1 - (divergencesCnt / ordersTotal)))
+    const returnRate = ordersTotal === 0 ? 18
+      : Math.round(20 * Math.max(0, 1 - (returnsCount / ordersTotal)))
+    const approvalSpeed = approvedCount === 0 ? 16
+      : Math.round(Math.max(0, 20 - (avgApprovalHours / 24) * 5))  // 24h=15pts, 48h=10pts, etc.
+
+    const breakdown = {
+      stock_accuracy: stockAccuracy,
+      ship_lead_compliance: shipLeadCompliance,
+      divergence_rate: divergenceRate,
+      return_rate: returnRate,
+      approval_speed: approvalSpeed,
+    }
+    const totalScore = Math.min(100, Math.max(0,
+      stockAccuracy + shipLeadCompliance + divergenceRate + returnRate + approvalSpeed,
+    ))
+
+    const rawMetrics = {
+      active_skus: activeSkus,
+      out_of_stock_skus: oos,
+      orders_processed: ordersTotal,
+      orders_delayed: ordersDelayed,
+      delay_rate_pct: ordersTotal > 0 ? Math.round((ordersDelayed / ordersTotal) * 10000) / 100 : 0,
+      returns_count: returnsCount,
+      return_rate_pct: ordersTotal > 0 ? Math.round((returnsCount / ordersTotal) * 10000) / 100 : 0,
+      divergences_count: divergencesCnt,
+      ocs_sent: (ocs ?? []).length,
+      ocs_approved: approvedCount,
+      avg_approval_hours: Math.round(avgApprovalHours * 10) / 10,
+    }
+
+    // 3. Score anterior pra delta
+    const { data: prev } = await supabaseAdmin
+      .from('dropship_partner_scores')
+      .select('total_score')
+      .eq('supplier_id', supplierId)
+      .order('period_end', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    // 4. Insights básicos (Sprint 12 melhora isso com IA)
+    const insights = this.generateBasicInsights(breakdown, rawMetrics, prev?.total_score)
+
+    // 5. Upsert (idempotente)
+    const { data: score, error } = await supabaseAdmin
+      .from('dropship_partner_scores')
+      .upsert(
+        {
+          organization_id: orgId,
+          supplier_id: supplierId,
+          period_start: periodStart.toISOString().slice(0, 10),
+          period_end: periodEnd.toISOString().slice(0, 10),
+          total_score: totalScore,
+          score_breakdown: breakdown,
+          raw_metrics: rawMetrics,
+          insights,
+          prev_score: prev?.total_score ?? null,
+          score_change: prev?.total_score != null ? totalScore - prev.total_score : null,
+        },
+        { onConflict: 'supplier_id,period_start,period_end', ignoreDuplicates: false },
+      )
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+
+    // 6. Atualiza profile com score atual
+    await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .update({
+        partner_score: totalScore,
+        score_breakdown: breakdown,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('supplier_id', supplierId)
+
+    return score
+  }
+
+  private generateBasicInsights(
+    breakdown: Record<string, number>,
+    metrics: Record<string, number>,
+    prevScore: number | undefined,
+  ): Array<{ type: string; message: string }> {
+    const insights: Array<{ type: string; message: string }> = []
+
+    if (breakdown.stock_accuracy < 14) {
+      insights.push({
+        type: 'warning',
+        message: `Estoque baixo: ${metrics.out_of_stock_skus}/${metrics.active_skus} SKUs sem estoque`,
+      })
+    }
+    if (breakdown.ship_lead_compliance < 14) {
+      insights.push({
+        type: 'warning',
+        message: `${metrics.delay_rate_pct}% pedidos atrasaram (>48h pra despachar)`,
+      })
+    }
+    if (breakdown.return_rate < 14) {
+      insights.push({
+        type: 'warning',
+        message: `Taxa de devolução: ${metrics.return_rate_pct}%`,
+      })
+    }
+    if (breakdown.approval_speed < 14 && metrics.ocs_approved > 0) {
+      insights.push({
+        type: 'warning',
+        message: `Aprovação lenta: ${metrics.avg_approval_hours}h em média`,
+      })
+    }
+    if (prevScore != null) {
+      const total = Object.values(breakdown).reduce((s, v) => s + v, 0)
+      const delta = total - prevScore
+      if (delta >= 5) insights.push({ type: 'improvement', message: `Score subiu ${delta} pontos vs mês anterior` })
+      if (delta <= -5) insights.push({ type: 'warning', message: `Score caiu ${Math.abs(delta)} pontos vs mês anterior` })
+    }
+    return insights
+  }
+
+  async listPartnerScores(orgId: string) {
+    // Latest score por supplier
+    const { data, error } = await supabaseAdmin
+      .from('dropship_partner_scores')
+      .select(`
+        id, supplier_id, period_start, period_end,
+        total_score, score_breakdown, prev_score, score_change,
+        insights, calculated_at,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('calculated_at', { ascending: false })
+      .limit(100)
+    if (error) throw new HttpException(error.message, 500)
+
+    // Filtra só o mais recente por supplier
+    const seen = new Set<string>()
+    const latest = (data ?? []).filter(s => {
+      if (seen.has(s.supplier_id)) return false
+      seen.add(s.supplier_id)
+      return true
+    })
+    return latest.sort((a, b) => b.total_score - a.total_score)
+  }
+
+  async getPartnerScoreHistory(orgId: string, supplierId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_partner_scores')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+      .order('period_end', { ascending: false })
+      .limit(24)  // últimos 2 anos mensais
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
 }
 
 // ── Helpers (escopo de módulo) ───────────────────────────────────────────────

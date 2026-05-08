@@ -487,4 +487,27 @@ export class DropshipController {
     const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
     return this.svc.resolveDispute(orgId, user?.id ?? null, id, dto)
   }
+
+  // ── Scores (Sprint 11) ────────────────────────────────────────────────────
+
+  @Get('partners/scores')
+  async listScores(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listPartnerScores(orgId)
+  }
+
+  @Get('partners/:supplierId/score-history')
+  async scoreHistory(
+    @Headers('authorization') auth: string,
+    @Param('supplierId') supplierId: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getPartnerScoreHistory(orgId, supplierId)
+  }
+
+  @Post('partners/scores/recalculate')
+  async recalculateScores(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.recalculateAllScores(orgId)
+  }
 }
