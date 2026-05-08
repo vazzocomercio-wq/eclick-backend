@@ -172,6 +172,18 @@ export class MlCampaignsController {
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)
   }
 
+  /** Fire-and-forget enrichment de thumbnails/titulos.
+   *  Chamado pelo frontend apos load da lista pra preencher visuais
+   *  sem bloquear render. Retorna { items_pending, started }. */
+  @Post('sync/enrich-metadata')
+  enrichMetadata(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.sync.enrichMetadataAsync(u.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
   // ═══ Camada 2: Recommendations + Config ═══════════════════════════
 
   @Post('recommendations/generate')
