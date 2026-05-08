@@ -8,6 +8,7 @@ import {
   DropshipService,
   CreateDropshipPartnerDto, UpdateDropshipPartnerDto,
   CreateAccountSupplierDto, UpdateAccountSupplierDto,
+  CreatePartnerProductDto, UpdatePartnerProductDto,
 } from './dropship.service'
 
 @Controller('dropship')
@@ -116,5 +117,87 @@ export class DropshipController {
   ) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.unlinkAccountSupplier(orgId, id)
+  }
+
+  // ── Partner Products (catálogo dropship) ──────────────────────────────────
+
+  @Get('partner-products')
+  async listPartnerProducts(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('q') q?: string,
+    @Query('master_sku') master_sku?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listPartnerProducts(orgId, { supplier_id, status, q, master_sku })
+  }
+
+  @Get('partner-products/:id')
+  async getPartnerProduct(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getPartnerProduct(orgId, id)
+  }
+
+  @Post('partner-products')
+  async createPartnerProduct(
+    @Headers('authorization') auth: string,
+    @Body() dto: CreatePartnerProductDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.createPartnerProduct(orgId, dto)
+  }
+
+  @Patch('partner-products/:id')
+  async updatePartnerProduct(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() dto: UpdatePartnerProductDto,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.updatePartnerProduct(orgId, id, dto)
+  }
+
+  @Delete('partner-products/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async archivePartnerProduct(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.archivePartnerProduct(orgId, id)
+  }
+
+  @Get('partner-products/:id/cost-history')
+  async listCostHistory(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listCostHistory(orgId, id)
+  }
+
+  // ── Sync logs ──────────────────────────────────────────────────────────────
+
+  @Get('sync-logs')
+  async listSyncLogs(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listSyncLogs(orgId, { supplier_id, status })
+  }
+
+  @Get('sync-logs/:id')
+  async getSyncLog(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getSyncLog(orgId, id)
   }
 }

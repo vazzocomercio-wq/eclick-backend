@@ -64,6 +64,28 @@ export interface UpdateAccountSupplierDto extends Partial<Omit<CreateAccountSupp
   active_until?: string | null
 }
 
+export interface CreatePartnerProductDto {
+  supplier_id: string
+  product_id: string         // produto já existente no catálogo do seller
+  supplier_sku: string       // SKU no parceiro
+  master_sku?: string | null // identidade independente do parceiro
+  unit_cost: number
+  partner_packaging_cost?: number
+  partner_handling_cost?: number
+  partner_stock?: number
+  partner_reserved?: number
+  lead_time_days?: number | null
+  safety_days?: number | null
+  moq?: number | null
+  is_preferred?: boolean
+  notes?: string | null
+  dropship_status?: 'active' | 'paused' | 'unavailable' | 'discontinued' | 'pending_validation'
+}
+
+export interface UpdatePartnerProductDto extends Partial<Omit<CreatePartnerProductDto, 'supplier_id' | 'product_id'>> {
+  change_reason?: string  // se mudar custo, registra no history
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 @Injectable()
@@ -334,5 +356,268 @@ export class DropshipService {
       .eq('organization_id', orgId)
     if (error) throw new HttpException(error.message, 500)
     return { ok: true }
+  }
+
+  // ── Partner Products (catálogo dropship) ──────────────────────────────────
+
+  async listPartnerProducts(orgId: string, filters: {
+    supplier_id?: string; status?: string; q?: string; master_sku?: string
+  }) {
+    let query = supabaseAdmin
+      .from('supplier_products')
+      .select(`
+        id, supplier_id, product_id, supplier_sku, master_sku,
+        unit_cost, currency,
+        partner_stock, partner_reserved, partner_available,
+        partner_packaging_cost, partner_handling_cost,
+        lead_time_days, safety_days, moq, is_preferred,
+        dropship_status,
+        last_sync_at, last_cost_change_at, last_stock_change_at,
+        notes, created_at, updated_at,
+        suppliers!inner(id, name, organization_id),
+        products(id, name, sku, photo_urls, price)
+      `)
+      .eq('suppliers.organization_id', orgId)
+      .order('created_at', { ascending: false })
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) query = query.eq('dropship_status', filters.status)
+    if (filters.master_sku) query = query.eq('master_sku', filters.master_sku)
+    if (filters.q) query = query.ilike('supplier_sku', `%${filters.q}%`)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getPartnerProduct(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('supplier_products')
+      .select(`
+        *,
+        suppliers!inner(id, name, organization_id),
+        products(id, name, sku, photo_urls, price)
+      `)
+      .eq('id', id)
+      .eq('suppliers.organization_id', orgId)
+      .maybeSingle()
+    if (error) throw new HttpException(error.message, 500)
+    if (!data) throw new NotFoundException('Produto dropship não encontrado')
+    return data
+  }
+
+  async createPartnerProduct(orgId: string, dto: CreatePartnerProductDto) {
+    if (!dto.supplier_id) throw new BadRequestException('supplier_id é obrigatório')
+    if (!dto.product_id) throw new BadRequestException('product_id é obrigatório')
+    if (!dto.supplier_sku?.trim()) throw new BadRequestException('SKU do parceiro é obrigatório')
+    if (typeof dto.unit_cost !== 'number' || dto.unit_cost < 0) {
+      throw new BadRequestException('Custo deve ser número >= 0')
+    }
+
+    // Valida supplier pertence à org
+    const { data: sup } = await supabaseAdmin
+      .from('suppliers')
+      .select('id')
+      .eq('id', dto.supplier_id)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!sup) throw new NotFoundException('Fornecedor não encontrado')
+
+    // Valida produto pertence à org
+    const { data: prod } = await supabaseAdmin
+      .from('products')
+      .select('id, sku')
+      .eq('id', dto.product_id)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!prod) throw new NotFoundException('Produto não encontrado')
+
+    const now = new Date().toISOString()
+
+    // Upsert pra suportar re-link (mesmo supplier+product já existe)
+    const { data, error } = await supabaseAdmin
+      .from('supplier_products')
+      .upsert(
+        {
+          supplier_id: dto.supplier_id,
+          product_id: dto.product_id,
+          supplier_sku: dto.supplier_sku.trim(),
+          master_sku: dto.master_sku ?? prod.sku ?? null,
+          unit_cost: dto.unit_cost,
+          currency: 'BRL',
+          partner_stock: dto.partner_stock ?? 0,
+          partner_reserved: dto.partner_reserved ?? 0,
+          partner_packaging_cost: dto.partner_packaging_cost ?? 0,
+          partner_handling_cost: dto.partner_handling_cost ?? 0,
+          lead_time_days: dto.lead_time_days ?? null,
+          safety_days: dto.safety_days ?? null,
+          moq: dto.moq ?? 1,
+          is_preferred: dto.is_preferred ?? false,
+          dropship_status: dto.dropship_status ?? 'active',
+          notes: dto.notes ?? null,
+          last_sync_at: now,
+          last_cost_change_at: now,
+          last_stock_change_at: now,
+          updated_at: now,
+        },
+        { onConflict: 'supplier_id,product_id', ignoreDuplicates: false },
+      )
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+
+    // Registra histórico de custo (primeiro snapshot)
+    await supabaseAdmin
+      .from('supplier_cost_history')
+      .insert({
+        organization_id: orgId,
+        supplier_product_id: data.id,
+        cost_value: dto.unit_cost,
+        cost_packaging: dto.partner_packaging_cost ?? 0,
+        cost_handling: dto.partner_handling_cost ?? 0,
+        cost_total: (dto.unit_cost) + (dto.partner_packaging_cost ?? 0) + (dto.partner_handling_cost ?? 0),
+        effective_from: now,
+        change_reason: 'Cadastro inicial',
+        change_source: 'manual',
+      })
+
+    return data
+  }
+
+  async updatePartnerProduct(orgId: string, id: string, dto: UpdatePartnerProductDto) {
+    const existing = await this.getPartnerProduct(orgId, id) as Record<string, unknown>
+    const supplierProductId = existing.id as string
+
+    const patch: Record<string, unknown> = {}
+    const allowedFields = [
+      'supplier_sku', 'master_sku', 'unit_cost',
+      'partner_stock', 'partner_reserved',
+      'partner_packaging_cost', 'partner_handling_cost',
+      'lead_time_days', 'safety_days', 'moq', 'is_preferred',
+      'dropship_status', 'notes',
+    ] as const
+    const dtoRec = dto as Record<string, unknown>
+    for (const k of allowedFields) {
+      if (dtoRec[k] !== undefined) patch[k] = dtoRec[k]
+    }
+
+    const now = new Date().toISOString()
+
+    // Detecta mudança de custo pra logar histórico
+    const oldCost = Number(existing.unit_cost ?? 0)
+    const oldPack = Number(existing.partner_packaging_cost ?? 0)
+    const oldHand = Number(existing.partner_handling_cost ?? 0)
+    const newCost = (dto.unit_cost ?? oldCost)
+    const newPack = (dto.partner_packaging_cost ?? oldPack)
+    const newHand = (dto.partner_handling_cost ?? oldHand)
+    const costChanged =
+      Math.abs(newCost - oldCost) > 0.001 ||
+      Math.abs(newPack - oldPack) > 0.001 ||
+      Math.abs(newHand - oldHand) > 0.001
+
+    if (costChanged) {
+      patch.last_cost_change_at = now
+      // Fecha snapshot anterior
+      await supabaseAdmin
+        .from('supplier_cost_history')
+        .update({ effective_until: now })
+        .eq('supplier_product_id', supplierProductId)
+        .is('effective_until', null)
+      // Cria snapshot novo
+      await supabaseAdmin
+        .from('supplier_cost_history')
+        .insert({
+          organization_id: orgId,
+          supplier_product_id: supplierProductId,
+          cost_value: newCost,
+          cost_packaging: newPack,
+          cost_handling: newHand,
+          cost_total: newCost + newPack + newHand,
+          effective_from: now,
+          change_reason: dto.change_reason ?? 'Edição manual',
+          change_source: 'manual',
+        })
+    }
+
+    const stockChanged =
+      dto.partner_stock !== undefined && Number(dto.partner_stock) !== Number(existing.partner_stock ?? 0)
+    if (stockChanged) patch.last_stock_change_at = now
+
+    if (Object.keys(patch).length === 0) return existing
+
+    patch.updated_at = now
+    const { data, error } = await supabaseAdmin
+      .from('supplier_products')
+      .update(patch)
+      .eq('id', supplierProductId)
+      .select()
+      .single()
+    if (error) throw new HttpException(error.message, 500)
+    return data
+  }
+
+  async archivePartnerProduct(orgId: string, id: string) {
+    await this.getPartnerProduct(orgId, id) // valida ownership via JOIN
+    const { error } = await supabaseAdmin
+      .from('supplier_products')
+      .update({
+        dropship_status: 'discontinued',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  // ── Cost history ──────────────────────────────────────────────────────────
+
+  async listCostHistory(orgId: string, supplierProductId: string) {
+    // Valida ownership
+    await this.getPartnerProduct(orgId, supplierProductId)
+
+    const { data, error } = await supabaseAdmin
+      .from('supplier_cost_history')
+      .select('*')
+      .eq('supplier_product_id', supplierProductId)
+      .order('effective_from', { ascending: false })
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  // ── Sync logs ──────────────────────────────────────────────────────────────
+
+  async listSyncLogs(orgId: string, filters: { supplier_id?: string; status?: string }) {
+    let query = supabaseAdmin
+      .from('dropship_sync_logs')
+      .select(`
+        id, sync_type, source, source_file_name,
+        products_processed, products_created, products_updated, products_failed,
+        cost_changes_count, stock_changes_count,
+        out_of_stock_skus, status, error_message, duration_seconds,
+        triggered_by, started_at, completed_at,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('started_at', { ascending: false })
+      .limit(50)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) query = query.eq('status', filters.status)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getSyncLog(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_sync_logs')
+      .select(`*, suppliers(id, name)`)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new HttpException(error.message, 500)
+    if (!data) throw new NotFoundException('Sync log não encontrado')
+    return data
   }
 }
