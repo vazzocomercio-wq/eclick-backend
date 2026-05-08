@@ -279,4 +279,49 @@ export class DropshipController {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getTodayOrders(orgId)
   }
+
+  // ── OC (Sprint 4) ──────────────────────────────────────────────────────────
+
+  @Get('oc')
+  async listOCs(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('date_from') date_from?: string,
+    @Query('date_to') date_to?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listOCs(orgId, { supplier_id, status, date_from, date_to })
+  }
+
+  @Get('oc/preview')
+  async previewOCs(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.previewOCs(orgId)
+  }
+
+  @Get('oc/:id')
+  async getOC(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getOC(orgId, id)
+  }
+
+  @Post('oc/generate')
+  async generateOCs(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.generateDailyOCs(orgId)
+  }
+
+  @Post('oc/:id/cancel')
+  async cancelOC(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.cancelOC(orgId, id, body.reason)
+  }
 }
