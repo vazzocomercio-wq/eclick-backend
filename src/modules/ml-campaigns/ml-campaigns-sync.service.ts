@@ -263,6 +263,127 @@ export class MlCampaignsSyncService {
     return stats
   }
 
+  /** Recomputa health_status nos items existentes baseado em products
+   *  ATUAL (custo/imposto/dimensões já cadastrados). Sem chamar ML API.
+   *
+   *  Usar quando user atualiza custos/impostos no catálogo e quer ver o
+   *  health_status refletir DEPOIS sem aguardar sync completo. ~1s pra
+   *  1000 items vs 1-3min do sync ML.
+   *
+   *  Retorna contadores antes/depois pra feedback ao user. */
+  async recomputeHealthStatus(orgId: string, sellerId?: number): Promise<{
+    total:           number
+    updated:         number
+    by_status:       Record<string, number>
+    moved_to_ready:  number
+    auto_linked:     number
+  }> {
+    // Pre-step: tenta auto-link items->products via SKU
+    let autoLinked = 0
+    try {
+      const { data: linkResult } = await supabaseAdmin.rpc('ml_campaign_items_auto_link_products', {
+        p_org_id:    orgId,
+        p_seller_id: sellerId ?? null,
+      })
+      const r = Array.isArray(linkResult) ? linkResult[0] : linkResult
+      autoLinked = r?.linked ?? 0
+      if (autoLinked > 0) {
+        this.logger.log(`[recompute-health] auto-link: ${autoLinked} items linkados via SKU`)
+      }
+    } catch (e) {
+      this.logger.warn(`[recompute-health] auto-link falhou: ${(e as Error).message}`)
+    }
+
+    let q = supabaseAdmin
+      .from('ml_campaign_items')
+      .select('id, product_id, health_status, products(cost_price, tax_percentage, weight_kg, width_cm, height_cm, length_cm)')
+      .eq('organization_id', orgId)
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+
+    const { data: rows, error } = await q
+    if (error) throw new BadRequestException(`recomputeHealth: ${error.message}`)
+    if (!rows || rows.length === 0) {
+      return { total: 0, updated: 0, by_status: {}, moved_to_ready: 0, auto_linked: autoLinked }
+    }
+
+    interface ProductSlim {
+      cost_price:     number | null
+      tax_percentage: number | null
+      weight_kg:      number | null
+      width_cm:       number | null
+      height_cm:      number | null
+      length_cm:      number | null
+    }
+    interface Row {
+      id:               string
+      product_id:       string | null
+      health_status:    string | null
+      // Supabase retorna como array (mesmo que seja FK 1:1 — depende da config)
+      products:         ProductSlim | ProductSlim[] | null
+    }
+
+    let updated = 0
+    let movedToReady = 0
+    const byStatus: Record<string, number> = {}
+
+    // Process em batches de 50 com Promise.all pra não estourar conexão
+    const BATCH = 50
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const slice = rows.slice(i, i + BATCH) as unknown as Row[]
+      await Promise.all(slice.map(async (r) => {
+        const oldStatus = r.health_status
+        let newStatus: string
+        const warnings: Array<{ code: string; message: string }> = []
+        let hasCost = false, hasTax = false, hasDim = false
+
+        // Normaliza products (pode vir como array ou objeto)
+        const productRaw = Array.isArray(r.products) ? r.products[0] : r.products
+        if (!r.product_id) {
+          newStatus = 'incomplete'
+          warnings.push({ code: 'no_internal_product', message: 'Anuncio sem produto interno vinculado' })
+        } else if (!productRaw) {
+          newStatus = 'incomplete'
+          warnings.push({ code: 'product_not_found', message: 'Produto interno nao encontrado' })
+        } else {
+          const p = productRaw
+          hasCost = (p.cost_price ?? 0) > 0
+          hasTax  = p.tax_percentage != null && p.tax_percentage >= 0
+          hasDim  = (p.weight_kg ?? 0) > 0 && (p.width_cm ?? 0) > 0 && (p.height_cm ?? 0) > 0 && (p.length_cm ?? 0) > 0
+
+          if (!hasCost) warnings.push({ code: 'missing_cost',       message: 'Custo nao cadastrado' })
+          if (!hasTax)  warnings.push({ code: 'missing_tax',        message: 'Imposto nao cadastrado' })
+          if (!hasDim)  warnings.push({ code: 'missing_dimensions', message: 'Dimensoes incompletas' })
+
+          if (warnings.length === 0)  newStatus = 'ready'
+          else if (!hasCost)          newStatus = 'missing_cost'
+          else if (!hasTax)           newStatus = 'missing_tax'
+          else if (!hasDim)           newStatus = 'missing_shipping'
+          else                         newStatus = 'incomplete'
+        }
+
+        byStatus[newStatus] = (byStatus[newStatus] ?? 0) + 1
+
+        if (newStatus !== oldStatus) {
+          await supabaseAdmin
+            .from('ml_campaign_items')
+            .update({
+              health_status:    newStatus,
+              has_cost_data:    hasCost,
+              has_tax_data:     hasTax,
+              has_dimensions:   hasDim,
+              health_warnings:  warnings,
+              updated_at:       new Date().toISOString(),
+            })
+            .eq('id', r.id)
+          updated++
+          if (newStatus === 'ready' && oldStatus !== 'ready') movedToReady++
+        }
+      }))
+    }
+
+    return { total: rows.length, updated, by_status: byStatus, moved_to_ready: movedToReady, auto_linked: autoLinked }
+  }
+
   /** Fire-and-forget: dispara enrichItemsMetadata em background.
    *  Retorna imediatamente { items_pending, started: bool }. */
   async enrichMetadataAsync(orgId: string, sellerId?: number): Promise<{ items_pending: number; started: boolean }> {
@@ -323,8 +444,7 @@ export class MlCampaignsSyncService {
         calls++
 
         for (const it of items) {
-          // Considera enriquecido se vier qualquer campo (incluindo status/catalog)
-          const hasAny = it.thumbnail || it.title || it.permalink || it.status != null || it.catalog_listing != null
+          const hasAny = it.thumbnail || it.title || it.permalink || it.status != null || it.catalog_listing != null || it.seller_sku
           if (!hasAny) continue
           await supabaseAdmin
             .from('ml_campaign_items')
@@ -334,6 +454,7 @@ export class MlCampaignsSyncService {
               permalink:               it.permalink ?? null,
               listing_status:          it.status ?? null,
               catalog_listing:         it.catalog_listing ?? false,
+              seller_sku:              it.seller_sku ?? null,
               last_metadata_synced_at: new Date().toISOString(),
             })
             .eq('organization_id', orgId)
@@ -345,6 +466,20 @@ export class MlCampaignsSyncService {
         this.logger.warn(`[campaigns] getItemsMetadata batch falhou: ${(e as Error).message}`)
       }
       if (i + 20 < distinctIds.length) await this.sleep(1000)
+    }
+
+    // Após enrichment, tenta auto-link com products via SKU (rápido — 1 SQL)
+    try {
+      const { data: linkResult } = await supabaseAdmin.rpc('ml_campaign_items_auto_link_products', {
+        p_org_id:    orgId,
+        p_seller_id: sellerId,
+      })
+      const r = Array.isArray(linkResult) ? linkResult[0] : linkResult
+      if (r?.linked > 0) {
+        this.logger.log(`[campaigns] auto-link via SKU: ${r.linked}/${r.total} items linkados a products`)
+      }
+    } catch (e) {
+      this.logger.warn(`[campaigns] auto-link falhou: ${(e as Error).message}`)
     }
 
     return { enriched, calls }

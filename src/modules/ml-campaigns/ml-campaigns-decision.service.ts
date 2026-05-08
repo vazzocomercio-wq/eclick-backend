@@ -120,8 +120,11 @@ export class MlCampaignsDecisionService {
     const config = await this.getConfig(item.organization_id, item.seller_id)
     const token  = (await this.ml.getTokenForOrg(item.organization_id, item.seller_id)).token
 
-    // 1. Health check — se nao OK, vira review_costs
-    if (item.health_status && item.health_status !== 'ready') {
+    // 1. Health check — se nao OK, vira review_costs.
+    //    EXCEÇÃO: missing_shipping (sem dimensões) NÃO bloqueia — ML calcula
+    //    frete na hora do anúncio, decision engine ignora dim. Bloqueante mesmo:
+    //    missing_cost / missing_tax / incomplete (sem produto interno).
+    if (item.health_status && item.health_status !== 'ready' && item.health_status !== 'missing_shipping') {
       return this.saveReviewCosts(item, campaignRow, t0)
     }
 

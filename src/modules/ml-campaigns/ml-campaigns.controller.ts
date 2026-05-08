@@ -155,6 +155,18 @@ export class MlCampaignsController {
     return this.sync.enrichMetadataAsync(u.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
+  /** Recalcula health_status nos items existentes (sem chamar ML API).
+   *  Use quando user atualiza custos/impostos no catalogo — em ~1s reflete
+   *  o INCOMPLETE → ready sem aguardar sync ML completo. */
+  @Post('sync/recompute-health')
+  recomputeHealth(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.sync.recomputeHealthStatus(u.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
   // ═══ Camada 2: Recommendations + Config ═══════════════════════════
 
   @Post('recommendations/generate')

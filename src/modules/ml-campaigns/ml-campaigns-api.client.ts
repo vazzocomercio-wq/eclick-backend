@@ -103,14 +103,16 @@ export class MlCampaignsApiClient {
     permalink?: string;
     status?: string;
     catalog_listing?: boolean;
+    seller_sku?: string;
   }>> {
     if (itemIds.length === 0) return []
     const batch = itemIds.slice(0, 20)
-    const r = await this.requestWithBackoff<Array<{ code: number; body?: { id: string; thumbnail?: string; title?: string; permalink?: string; status?: string; catalog_listing?: boolean } }>>({
+    // seller_custom_field = SKU do lojista, usado pra match com products.sku
+    const r = await this.requestWithBackoff<Array<{ code: number; body?: { id: string; thumbnail?: string; title?: string; permalink?: string; status?: string; catalog_listing?: boolean; seller_custom_field?: string | null } }>>({
       method:  'GET',
       url:     `${ML_BASE}/items`,
       headers: { Authorization: `Bearer ${token}` },
-      params:  { ids: batch.join(','), attributes: 'id,thumbnail,title,permalink,status,catalog_listing' },
+      params:  { ids: batch.join(','), attributes: 'id,thumbnail,title,permalink,status,catalog_listing,seller_custom_field' },
     }, sellerId)
 
     return r
@@ -122,6 +124,7 @@ export class MlCampaignsApiClient {
         permalink:        it.body!.permalink,
         status:           it.body!.status,
         catalog_listing:  it.body!.catalog_listing,
+        seller_sku:       it.body!.seller_custom_field ?? undefined,
       }))
   }
 
