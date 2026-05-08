@@ -1,6 +1,9 @@
-import { Injectable, HttpException, NotFoundException, BadRequestException, Logger } from '@nestjs/common'
+import { Injectable, HttpException, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
+import { randomBytes } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
+import { EmailSenderService } from '../messaging/email-sender.service'
+import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -119,9 +122,17 @@ export interface BulkImportResult {
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
+const FRONTEND_URL = process.env.FRONTEND_URL ?? 'https://eclick.app.br'
+const PORTAL_TTL_HOURS = 72
+
 @Injectable()
 export class DropshipService {
   private readonly logger = new Logger('DropshipService')
+
+  constructor(
+    private readonly emailSender: EmailSenderService,
+    private readonly waSender: WhatsAppSender,
+  ) {}
 
   // ── Partners (supplier + dropship_profile) ─────────────────────────────────
 
@@ -1608,6 +1619,331 @@ export class DropshipService {
     return { ok: true }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 6 — PORTAL DO PARCEIRO + ENVIO DE NOTIFICAÇÕES
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Cria portal session + envia notificação ao parceiro (e-mail + WhatsApp) */
+  async sendOCToPartner(orgId: string, ocId: string): Promise<{
+    session_id: string
+    portal_url: string
+    email_status: string
+    whatsapp_status: string
+  }> {
+    // 1. Busca OC com supplier+profile
+    const oc = await this.getOC(orgId, ocId) as Record<string, unknown>
+    if (!['generated', 'sent', 'viewed'].includes(oc.status as string)) {
+      throw new BadRequestException(`OC com status "${oc.status}" não pode ser enviada`)
+    }
+    const supplierId = oc.supplier_id as string
+
+    // 2. Busca profile pra notification_email/whatsapp
+    const { data: profile } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('notification_email, notification_whatsapp')
+      .eq('supplier_id', supplierId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!profile?.notification_email) {
+      throw new BadRequestException('Parceiro sem e-mail de notificação configurado')
+    }
+
+    // 3. Cria portal session
+    const accessToken = generatePortalToken()
+    const expiresAt = new Date(Date.now() + PORTAL_TTL_HOURS * 3600_000).toISOString()
+    const { data: session, error: sessErr } = await supabaseAdmin
+      .from('dropship_partner_portal_sessions')
+      .insert({
+        organization_id: orgId,
+        supplier_id: supplierId,
+        oc_id: ocId,
+        access_token: accessToken,
+        expires_at: expiresAt,
+        can_approve: true,
+        can_dispute: true,
+        status: 'active',
+      })
+      .select('id')
+      .single()
+    if (sessErr || !session) {
+      throw new HttpException(sessErr?.message ?? 'Erro ao criar sessão', 500)
+    }
+
+    const portalUrl = `${FRONTEND_URL}/portal/oc/${accessToken}`
+    const ocNumber = oc.oc_number as string
+    const supplierRaw = oc.suppliers as unknown
+    const supplier = (Array.isArray(supplierRaw) ? supplierRaw[0] : supplierRaw) as { name: string } | null
+    const supplierName = supplier?.name ?? 'Parceiro'
+    const grossTotal = Number(oc.gross_total ?? 0)
+    const netTotal = Number(oc.net_total ?? 0)
+    const itemsCount = Number(oc.items_count ?? 0)
+    const dueDate = oc.due_date as string
+
+    // 4. Envia e-mail
+    const subject = `Nova OC ${ocNumber} — ${itemsCount} itens · R$ ${netTotal.toFixed(2)}`
+    const body = `
+<p>Olá <strong>${supplierName}</strong>,</p>
+<p>Foi gerada uma nova Ordem de Compra dropship pra revisão e aprovação:</p>
+<ul>
+  <li><strong>OC:</strong> ${ocNumber}</li>
+  <li><strong>Itens:</strong> ${itemsCount}</li>
+  <li><strong>Total bruto:</strong> R$ ${grossTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</li>
+  <li><strong>Total líquido:</strong> R$ ${netTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</li>
+  <li><strong>Vencimento:</strong> ${new Date(dueDate).toLocaleDateString('pt-BR')}</li>
+</ul>
+<p>Acesse o portal abaixo pra revisar itens, aprovar ou contestar (link válido por ${PORTAL_TTL_HOURS}h):</p>
+<p><a href="${portalUrl}" style="background:#00E5FF;color:#09090b;padding:10px 20px;text-decoration:none;border-radius:6px;font-weight:600;">Abrir OC no portal</a></p>
+<p style="font-size:12px;color:#71717a;margin-top:24px;">Link direto: <a href="${portalUrl}">${portalUrl}</a></p>
+`
+    const emailRes = await this.emailSender.sendEmail({
+      orgId,
+      to: profile.notification_email,
+      subject,
+      body,
+    })
+    await supabaseAdmin
+      .from('dropship_oc_notifications')
+      .insert({
+        organization_id: orgId,
+        oc_id: ocId,
+        channel: 'email',
+        recipient: profile.notification_email,
+        notification_type: 'oc_generated',
+        subject,
+        body,
+        status: emailRes.success ? 'sent' : 'failed',
+        sent_at: emailRes.success ? new Date().toISOString() : null,
+        error_message: emailRes.error ?? null,
+        provider_message_id: emailRes.messageId ?? null,
+      })
+
+    // 5. Envia WhatsApp se configurado
+    let waStatus = 'skipped (sem whatsapp configurado)'
+    if (profile.notification_whatsapp) {
+      const waMessage = `Nova OC ${ocNumber} — ${itemsCount} itens, R$ ${netTotal.toFixed(2)}. Aprove em ${portalUrl}`
+      const waRes = await this.waSender.sendTextMessage({
+        phone: profile.notification_whatsapp,
+        message: waMessage,
+      })
+      await supabaseAdmin
+        .from('dropship_oc_notifications')
+        .insert({
+          organization_id: orgId,
+          oc_id: ocId,
+          channel: 'whatsapp',
+          recipient: profile.notification_whatsapp,
+          notification_type: 'oc_generated',
+          body: waMessage,
+          status: waRes.success ? 'sent' : 'failed',
+          sent_at: waRes.success ? new Date().toISOString() : null,
+          error_message: waRes.error ?? null,
+          provider_message_id: waRes.message_id ?? null,
+        })
+      waStatus = waRes.success ? 'sent' : `failed: ${waRes.error}`
+    }
+
+    // 6. Atualiza status OC pra 'sent'
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        status: 'sent',
+        sent_to_partner_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', ocId)
+      .eq('organization_id', orgId)
+
+    return {
+      session_id: session.id,
+      portal_url: portalUrl,
+      email_status: emailRes.success ? 'sent' : `failed: ${emailRes.error}`,
+      whatsapp_status: waStatus,
+    }
+  }
+
+  /** Histórico de notificações enviadas pra uma OC */
+  async listNotifications(orgId: string, ocId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_oc_notifications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('oc_id', ocId)
+      .order('created_at', { ascending: false })
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  // ── Portal público (sem auth — token é o secret) ──────────────────────────
+
+  /** Valida token + retorna session ativa */
+  async validatePortalToken(token: string) {
+    if (!token || token.length < 32) throw new ForbiddenException('Token inválido')
+    const { data: session } = await supabaseAdmin
+      .from('dropship_partner_portal_sessions')
+      .select('*')
+      .eq('access_token', token)
+      .eq('status', 'active')
+      .maybeSingle()
+    if (!session) throw new ForbiddenException('Token inválido ou expirado')
+    if (new Date(session.expires_at) < new Date()) {
+      // Marca como expired
+      await supabaseAdmin
+        .from('dropship_partner_portal_sessions')
+        .update({ status: 'expired' })
+        .eq('id', session.id)
+      throw new ForbiddenException('Sessão expirada — solicite novo link ao seller')
+    }
+    return session
+  }
+
+  /** Visualiza OC via token (registra IP+user_agent) */
+  async viewOCByToken(token: string, ip: string | null, userAgent: string | null) {
+    const session = await this.validatePortalToken(token)
+
+    // Update activity (idempotente, só array_append)
+    const ips = Array.from(new Set([...(session.ip_addresses ?? []), ip].filter(Boolean) as string[]))
+    const uas = Array.from(new Set([...(session.user_agents ?? []), userAgent].filter(Boolean) as string[]))
+    await supabaseAdmin
+      .from('dropship_partner_portal_sessions')
+      .update({
+        first_accessed_at: session.first_accessed_at ?? new Date().toISOString(),
+        last_accessed_at: new Date().toISOString(),
+        access_count: (session.access_count ?? 0) + 1,
+        ip_addresses: ips,
+        user_agents: uas,
+      })
+      .eq('id', session.id)
+
+    // Marca OC como 'viewed' se ainda não estava
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        status: 'viewed',
+        partner_viewed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', session.oc_id)
+      .in('status', ['sent'])  // só transition de sent → viewed
+
+    // Busca OC + items
+    const { data: oc } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select(`
+        id, oc_number, marketplace, marketplace_account_label,
+        reference_date, generation_date, due_date,
+        items_count, units_count, gross_total, total_credits,
+        return_credits, cancellation_credits, warranty_credits,
+        divergence_credits, other_credits, net_total, status,
+        partner_viewed_at, partner_approved_at,
+        notes,
+        suppliers(name, legal_name, tax_id, payment_terms, payment_method)
+      `)
+      .eq('id', session.oc_id)
+      .maybeSingle()
+    if (!oc) throw new NotFoundException('OC não encontrada')
+
+    const { data: items } = await supabaseAdmin
+      .from('dropship_purchase_order_items')
+      .select(`
+        id, partner_sku, master_sku, product_name, variation_label,
+        quantity, unit_cost, packaging_cost, handling_cost, line_total,
+        marketplace, ml_order_id, sale_date, status,
+        products(name, photo_urls)
+      `)
+      .eq('oc_id', session.oc_id)
+      .order('sale_date', { ascending: true })
+
+    return {
+      oc,
+      items: items ?? [],
+      session: {
+        can_approve: session.can_approve,
+        can_dispute: session.can_dispute,
+        expires_at: session.expires_at,
+        approved_at: session.approved_at,
+        rejected_at: session.rejected_at,
+      },
+    }
+  }
+
+  /** Aprovar OC via portal (parceiro) */
+  async approveOCByToken(token: string, body: {
+    approver_name: string;
+    approver_email: string;
+    notes?: string;
+  }) {
+    const session = await this.validatePortalToken(token)
+    if (!session.can_approve) throw new ForbiddenException('Sem permissão pra aprovar')
+    if (session.approved_at || session.rejected_at) {
+      throw new BadRequestException('OC já foi processada')
+    }
+    if (!body.approver_name?.trim() || !body.approver_email?.trim()) {
+      throw new BadRequestException('Nome e e-mail do aprovador são obrigatórios')
+    }
+
+    const now = new Date().toISOString()
+    const newStatus = body.notes?.trim() ? 'approved_with_notes' : 'approved'
+
+    await supabaseAdmin
+      .from('dropship_partner_portal_sessions')
+      .update({
+        approved_at: now,
+        approver_name: body.approver_name.trim(),
+        approver_email: body.approver_email.trim(),
+        status: 'used',
+      })
+      .eq('id', session.id)
+
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        status: newStatus,
+        partner_approved_at: now,
+        partner_approved_by_name: body.approver_name.trim(),
+        partner_approved_by_email: body.approver_email.trim(),
+        partner_approval_notes: body.notes?.trim() ?? null,
+        updated_at: now,
+      })
+      .eq('id', session.oc_id)
+
+    return { ok: true, message: 'OC aprovada com sucesso' }
+  }
+
+  /** Rejeitar OC via portal */
+  async rejectOCByToken(token: string, body: {
+    approver_name: string;
+    approver_email: string;
+    reason: string;
+  }) {
+    const session = await this.validatePortalToken(token)
+    if (session.approved_at || session.rejected_at) {
+      throw new BadRequestException('OC já foi processada')
+    }
+    if (!body.reason?.trim()) throw new BadRequestException('Motivo da rejeição é obrigatório')
+
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from('dropship_partner_portal_sessions')
+      .update({
+        rejected_at: now,
+        approver_name: body.approver_name?.trim() ?? null,
+        approver_email: body.approver_email?.trim() ?? null,
+        status: 'used',
+      })
+      .eq('id', session.id)
+
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        status: 'rejected',
+        partner_rejection_reason: body.reason.trim(),
+        updated_at: now,
+      })
+      .eq('id', session.oc_id)
+
+    return { ok: true, message: 'OC rejeitada — seller será notificado' }
+  }
+
   /** Prévia: quais OCs SERIAM geradas se o cron rodasse agora */
   async previewOCs(orgId: string) {
     const { data: idents } = await supabaseAdmin
@@ -1679,6 +2015,10 @@ export class DropshipService {
 }
 
 // ── Helpers (escopo de módulo) ───────────────────────────────────────────────
+
+function generatePortalToken(): string {
+  return randomBytes(32).toString('hex')  // 64 chars hex
+}
 
 function computeDueDate(today: Date, paymentTerms: string | null): string {
   // payment_terms pode vir como "15", "30", "45" (dias) ou label tipo "D+15"

@@ -11,6 +11,6 @@ import { JourneyEngineService } from './journey-engine.service'
   imports:     [WhatsAppModule, EmailSettingsModule], // WA sender + EM-1 dispatcher
   controllers: [MessagingController],
   providers:   [MessagingService, TemplateRendererService, EmailSenderService, JourneyEngineService],
-  exports:     [MessagingService, TemplateRendererService, JourneyEngineService],
+  exports:     [MessagingService, TemplateRendererService, JourneyEngineService, EmailSenderService],
 })
 export class MessagingModule {}

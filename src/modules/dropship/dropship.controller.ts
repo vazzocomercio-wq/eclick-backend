@@ -324,4 +324,24 @@ export class DropshipController {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.cancelOC(orgId, id, body.reason)
   }
+
+  // ── Portal envio (auth) ────────────────────────────────────────────────────
+
+  @Post('oc/:id/send')
+  async sendToPartner(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.sendOCToPartner(orgId, id)
+  }
+
+  @Get('oc/:id/notifications')
+  async listOCNotifications(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listNotifications(orgId, id)
+  }
 }
