@@ -61,6 +61,7 @@ import { MlCampaignsModule } from './modules/ml-campaigns/ml-campaigns.module'
 import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
 import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
 import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
+import { DropshipModule } from './modules/dropship/dropship.module'
 
 @Module({
   imports: [
@@ -124,6 +125,7 @@ import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
     MlVerticalModule,
     MlPostsaleModule,
     MlWebhookModule,
+    DropshipModule,
   ],
   controllers: [AppController],
   providers: [AppService],

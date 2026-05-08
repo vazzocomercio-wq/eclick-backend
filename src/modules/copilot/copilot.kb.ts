@@ -1279,6 +1279,61 @@ contextuais por rota.`,
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// Dropship Center IA (F9) — em desenvolvimento (Sprint 1)
+// ════════════════════════════════════════════════════════════════════════
+
+const DROPSHIP_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/dropship', '/dashboard/dropship/partners', '/dashboard/dropship/partners/new', '/dashboard/dropship/partners/[id]'],
+    category: 'dropship',
+    title:    'Dropship Center — parceiros e operação',
+    content: `**Central do dropship.** Gerencia parceiros (fornecedores que despacham direto pro comprador final), catálogo, OCs diárias, devoluções e abatimentos.
+
+**Princípio do fluxo**: Vendeu → Despachou → Conferiu → OC do dia → Aprovou → Pagou → Devolução abate.
+
+**Cadastro do parceiro** (\`/dashboard/dropship/partners/new\`):
+- Reusa cadastro de fornecedor (\`suppliers\`) e adiciona perfil dropship (\`supplier_dropship_profiles\` 1:1).
+- Campos do supplier: nome, CNPJ, contato, prazo/método de pagamento.
+- Campos dropship: e-mail/WhatsApp de notificação, cutoff time (até quando o parceiro aceita pedidos do dia), ship_lead_days, integration_type (manual/spreadsheet/api/erp_bling/etc.), janela de OC (preview 12h, cutoff 21h, geração 22h), cost_strategy (default \`current_table\` — custo da tabela vigente), return_credit_strategy (default \`next_oc\`).
+
+**Status do parceiro**: \`active\` (em operação), \`paused\` (pausa temporária), \`inactive\` (arquivado), \`pending_setup\` (cadastro incompleto).
+
+**Score 0-100** (Camada D4 — em desenvolvimento): stock_accuracy, ship_lead_compliance, divergence_rate, return_rate, approval_speed.`,
+    tags: ['dropship', 'partners', 'fornecedor', 'cadastro'],
+  },
+  {
+    routes:   ['/dashboard/dropship/account-suppliers'],
+    category: 'dropship',
+    title:    'Vínculo conta de marketplace ↔ parceiro',
+    content: `**Mapeia "qual parceiro despacha pelos pedidos desta conta de marketplace".**
+
+Necessário porque cada conta ML/Shopee/Amazon pode ter um parceiro diferente. Quando entra um pedido novo:
+1. Sistema lê seller_id (ML) / shop_id (Shopee) / seller_id (Amazon)
+2. Busca em \`seller_account_suppliers\` qual supplier está vinculado a essa conta
+3. Cria \`dropship_order_identifications\` com supplier_id resolvido (Sprint 3)
+
+**Hoje (v1)**: 1 conta = 1 supplier default. **v2**: regras dinâmicas por SKU/região/preço.
+
+**Quando desvincular**: setar \`active_until\` em vez de DELETE — mantém histórico de quem despachou cada pedido antigo.`,
+    tags: ['dropship', 'marketplace', 'mapping'],
+  },
+  {
+    routes:   ['/dashboard/dropship/partners/[id]/products', '/dashboard/dropship/partners/[id]/import'],
+    category: 'dropship',
+    title:    'Catálogo do parceiro + importação',
+    content: `**Catálogo dropship** vive em \`supplier_products\` (mesma tabela do cadastro genérico de fornecedor) com 10 colunas extras: \`partner_stock\`, \`partner_reserved\`, \`partner_available\` (generated), \`master_sku\`, \`partner_packaging_cost\`, \`partner_handling_cost\`, \`last_*_at\`, \`dropship_status\`.
+
+**Sync de catálogo** (Sprint 2 — em desenvolvimento):
+- Manual: form direto na UI
+- Planilha (XLSX/CSV): upload + mapping de colunas + preview antes de aplicar
+- API/ERP (Bling/Tiny/Omie): integração programada
+
+**Custo vigente vs custo histórico**: na geração da OC (22h), o sistema usa o custo ATUAL de \`supplier_products.unit_cost\`. \`supplier_cost_history\` (auditoria) mostra evolução mas não muda o cálculo retroativamente.`,
+    tags: ['dropship', 'catalog', 'sync', 'planilha'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
@@ -1290,6 +1345,7 @@ export const KB: KbEntry[] = [
   ...ATENDENTE_IA_ENTRIES,
   ...CRM_ENTRIES,
   ...COMPRAS_PRICING_ENTRIES,
+  ...DROPSHIP_ENTRIES,
   ...SALES_ENTRIES,
   ...ADS_ENTRIES,
   ...ML_CAMPAIGNS_ENTRIES,
