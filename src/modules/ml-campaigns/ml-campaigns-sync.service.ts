@@ -323,13 +323,17 @@ export class MlCampaignsSyncService {
         calls++
 
         for (const it of items) {
-          if (!it.thumbnail && !it.title && !it.permalink) continue
+          // Considera enriquecido se vier qualquer campo (incluindo status/catalog)
+          const hasAny = it.thumbnail || it.title || it.permalink || it.status != null || it.catalog_listing != null
+          if (!hasAny) continue
           await supabaseAdmin
             .from('ml_campaign_items')
             .update({
               thumbnail_url:           it.thumbnail ?? null,
               title:                   it.title ?? null,
               permalink:               it.permalink ?? null,
+              listing_status:          it.status ?? null,
+              catalog_listing:         it.catalog_listing ?? false,
               last_metadata_synced_at: new Date().toISOString(),
             })
             .eq('organization_id', orgId)
