@@ -1,4 +1,5 @@
-import { Injectable, HttpException, NotFoundException, BadRequestException } from '@nestjs/common'
+import { Injectable, HttpException, NotFoundException, BadRequestException, Logger } from '@nestjs/common'
+import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -120,6 +121,7 @@ export interface BulkImportResult {
 
 @Injectable()
 export class DropshipService {
+  private readonly logger = new Logger('DropshipService')
 
   // ── Partners (supplier + dropship_profile) ─────────────────────────────────
 
@@ -892,5 +894,397 @@ export class DropshipService {
       .eq('id', syncLog.id)
 
     return result
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 3 — IDENTIFICAÇÃO DE PEDIDOS DROPSHIP
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Cron: a cada 5min identifica pedidos novos como dropship */
+  @Cron('*/5 * * * *', { name: 'dropship-identify-orders' })
+  async identifyOrdersTick() {
+    try {
+      const { data: orgs } = await supabaseAdmin
+        .from('organizations')
+        .select('id')
+      for (const org of orgs ?? []) {
+        try {
+          const r = await this.identifyDropshipOrders(org.id)
+          if (r.identified > 0) {
+            this.logger.log(`[identify] org=${org.id} processed=${r.processed} identified=${r.identified}`)
+          }
+        } catch (e) {
+          this.logger.warn(`[identify] org=${org.id} erro: ${e instanceof Error ? e.message : e}`)
+        }
+      }
+    } catch (e) {
+      this.logger.error(`[identify] tick failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  async identifyDropshipOrders(orgId: string): Promise<{ processed: number; identified: number; skipped: number }> {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString()
+
+    // 1. Pega orders dos últimos 7 dias que ainda não tem identification
+    const { data: orders } = await supabaseAdmin
+      .from('orders')
+      .select(`
+        id, source, external_order_id, seller_id, product_id, sku,
+        quantity, sale_price, status, shipping_status, payment_status,
+        sold_at, created_at, raw_data
+      `)
+      .eq('organization_id', orgId)
+      .gte('created_at', sevenDaysAgo)
+      .not('status', 'in', '(cancelled,refunded)')
+      .limit(200)
+
+    if (!orders || orders.length === 0) return { processed: 0, identified: 0, skipped: 0 }
+
+    // Filtra orders que ainda não tem identification (1x query)
+    const orderIds = orders.map(o => o.id)
+    const { data: existing } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('order_id')
+      .in('order_id', orderIds)
+    const identifiedIds = new Set((existing ?? []).map(e => e.order_id))
+    const candidates = orders.filter(o => !identifiedIds.has(o.id))
+
+    if (candidates.length === 0) return { processed: orders.length, identified: 0, skipped: 0 }
+
+    // Pré-busca account-supplier mappings ativos do org
+    const { data: accountSuppliers } = await supabaseAdmin
+      .from('seller_account_suppliers')
+      .select('supplier_id, marketplace, seller_id, shopee_shop_id, amazon_seller_id, is_default')
+      .eq('organization_id', orgId)
+      .is('active_until', null)
+    const accSupMap = new Map<string, string>()  // key = marketplace:account → supplier_id
+    for (const a of (accountSuppliers ?? [])) {
+      const account = a.seller_id ?? a.shopee_shop_id ?? a.amazon_seller_id
+      if (account == null) continue
+      accSupMap.set(`${a.marketplace}:${account}`, a.supplier_id)
+    }
+
+    if (accSupMap.size === 0) {
+      // Sem mapping = nada é dropship (ou todos pedidos vão pro estoque próprio)
+      return { processed: orders.length, identified: 0, skipped: candidates.length }
+    }
+
+    let identified = 0
+    let skipped = 0
+
+    for (const order of candidates) {
+      // 2. Mapear marketplace ao formato seller_account_suppliers
+      const marketplace = this.normalizeMarketplaceName(order.source ?? '')
+      const account = order.seller_id  // ML usa seller_id; outros marketplaces precisam expansão futura
+      if (!marketplace || account == null) { skipped++; continue }
+
+      // 3. Resolver supplier via account
+      const supplierId = accSupMap.get(`${marketplace}:${account}`)
+      if (!supplierId) { skipped++; continue }  // conta não vinculada a parceiro = não é dropship
+
+      // 4. Resolver product (via product_id OR via SKU)
+      let productId = order.product_id as string | null
+      let productSupplyType: string | null = null
+      if (productId) {
+        const { data: p } = await supabaseAdmin
+          .from('products')
+          .select('id, supply_type, sku')
+          .eq('id', productId)
+          .maybeSingle()
+        productSupplyType = p?.supply_type ?? null
+      } else if (order.sku) {
+        const { data: p } = await supabaseAdmin
+          .from('products')
+          .select('id, supply_type')
+          .eq('organization_id', orgId)
+          .eq('sku', order.sku)
+          .maybeSingle()
+        productId = p?.id ?? null
+        productSupplyType = p?.supply_type ?? null
+      }
+
+      if (!productId) { skipped++; continue }
+      if (productSupplyType !== 'dropship') { skipped++; continue }
+
+      // 5. Buscar supplier_products
+      const { data: pp } = await supabaseAdmin
+        .from('supplier_products')
+        .select('id, supplier_sku, master_sku, unit_cost, partner_packaging_cost, partner_handling_cost')
+        .eq('supplier_id', supplierId)
+        .eq('product_id', productId)
+        .maybeSingle()
+
+      const cost = pp
+        ? Number(pp.unit_cost) + Number(pp.partner_packaging_cost ?? 0) + Number(pp.partner_handling_cost ?? 0)
+        : 0
+      const salePrice = Number(order.sale_price ?? 0)
+      const margin = salePrice - cost
+
+      // 6. Criar identification (idempotente via UNIQUE order_id)
+      const { error } = await supabaseAdmin
+        .from('dropship_order_identifications')
+        .insert({
+          organization_id: orgId,
+          order_id: order.id,
+          marketplace,
+          ml_order_id: marketplace === 'mercado_livre' ? order.external_order_id : null,
+          shopee_order_id: marketplace === 'shopee' ? order.external_order_id : null,
+          amazon_order_id: marketplace === 'amazon' ? order.external_order_id : null,
+          supplier_id: supplierId,
+          supplier_product_id: pp?.id ?? null,
+          product_id: productId,
+          partner_sku: pp?.supplier_sku ?? order.sku ?? '',
+          master_sku: pp?.master_sku ?? null,
+          quantity: order.quantity ?? 1,
+          cost_at_sale: cost,
+          sale_price: salePrice,
+          estimated_cost_at_oc: cost,
+          estimated_margin: margin,
+          marketplace_status: order.status,
+          shipping_status: order.shipping_status,
+          payment_status: order.payment_status,
+          dropship_status: pp ? 'identified' : 'on_hold',
+          hold_reason: pp ? null : 'Sem mapeamento supplier_product (rever catálogo)',
+          identified_at: new Date().toISOString(),
+        })
+
+      if (!error) identified++
+      else { skipped++; this.logger.warn(`[identify] order ${order.id}: ${error.message}`) }
+    }
+
+    return { processed: orders.length, identified, skipped }
+  }
+
+  private normalizeMarketplaceName(source: string): string {
+    const s = source.toLowerCase()
+    if (s.includes('mercadolivre') || s.includes('mercado_livre') || s === 'ml') return 'mercado_livre'
+    if (s.includes('shopee')) return 'shopee'
+    if (s.includes('amazon')) return 'amazon'
+    if (s.includes('magalu')) return 'magalu'
+    return ''
+  }
+
+  // ── Orders endpoints ──────────────────────────────────────────────────────
+
+  async listDropshipOrders(orgId: string, filters: {
+    supplier_id?: string;
+    status?: string;
+    date_from?: string;
+    date_to?: string;
+    q?: string;
+  }) {
+    let query = supabaseAdmin
+      .from('dropship_order_identifications')
+      .select(`
+        id, marketplace, ml_order_id, shopee_order_id, amazon_order_id,
+        partner_sku, master_sku, quantity,
+        cost_at_sale, sale_price, estimated_cost_at_oc, estimated_margin,
+        marketplace_status, shipping_status, payment_status,
+        dropship_status, hold_reason,
+        identified_at, shipped_at, shipment_confirmed_at, delivered_at,
+        oc_id,
+        suppliers(id, name),
+        products(id, name, sku, photo_urls),
+        orders(id, external_order_id, buyer_name, sold_at)
+      `)
+      .eq('organization_id', orgId)
+      .order('identified_at', { ascending: false })
+      .limit(200)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) query = query.eq('dropship_status', filters.status)
+    if (filters.date_from) query = query.gte('identified_at', filters.date_from)
+    if (filters.date_to) query = query.lte('identified_at', filters.date_to)
+    if (filters.q) query = query.ilike('partner_sku', `%${filters.q}%`)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async getDropshipOrder(orgId: string, id: string) {
+    const { data, error } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select(`
+        *,
+        suppliers(id, name),
+        products(id, name, sku, photo_urls),
+        orders(*)
+      `)
+      .eq('organization_id', orgId)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new HttpException(error.message, 500)
+    if (!data) throw new NotFoundException('Pedido dropship não encontrado')
+    return data
+  }
+
+  async holdDropshipOrder(orgId: string, id: string, reason: string) {
+    if (!reason?.trim()) throw new BadRequestException('Motivo obrigatório')
+    const { error } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .update({
+        dropship_status: 'on_hold',
+        hold_reason: reason.trim(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  async releaseDropshipOrder(orgId: string, id: string) {
+    const { error } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .update({
+        dropship_status: 'identified',
+        hold_reason: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'on_hold')
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  // ── Dashboard ──────────────────────────────────────────────────────────────
+
+  async getDashboard(orgId: string) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayIso = today.toISOString()
+
+    // Conta partners ativos
+    const { count: activePartnersCount } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'active')
+
+    // SKUs ativos
+    const { count: activeSkusCount } = await supabaseAdmin
+      .from('supplier_products')
+      .select('id', { count: 'exact', head: true })
+      .eq('dropship_status', 'active')
+
+    // Vendas dropship do dia
+    const { data: todayOrders } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('sale_price, quantity, dropship_status, estimated_cost_at_oc')
+      .eq('organization_id', orgId)
+      .gte('identified_at', todayIso)
+
+    const shippedToday = (todayOrders ?? []).filter(o =>
+      ['shipped', 'shipped_confirmed', 'eligible_for_oc'].includes(o.dropship_status as string),
+    ).length
+    const todayValue = (todayOrders ?? []).reduce((s, o) =>
+      s + (Number(o.sale_price ?? 0) * Number(o.quantity ?? 0)), 0,
+    )
+    const todayCmv = (todayOrders ?? []).reduce((s, o) =>
+      s + (Number(o.estimated_cost_at_oc ?? 0) * Number(o.quantity ?? 0)), 0,
+    )
+
+    // Pendências on_hold
+    const { count: onHoldCount } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'on_hold')
+
+    // Out-of-stock
+    const { count: outOfStockCount } = await supabaseAdmin
+      .from('supplier_products')
+      .select('id, suppliers!inner(organization_id)', { count: 'exact', head: true })
+      .eq('suppliers.organization_id', orgId)
+      .eq('dropship_status', 'active')
+      .lte('partner_stock', 0)
+
+    // Recent identifications (últimas 10)
+    const { data: recent } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select(`
+        id, marketplace, partner_sku, quantity, sale_price, estimated_margin,
+        dropship_status, identified_at,
+        suppliers(name),
+        products(name)
+      `)
+      .eq('organization_id', orgId)
+      .order('identified_at', { ascending: false })
+      .limit(10)
+
+    return {
+      kpis: {
+        active_partners: activePartnersCount ?? 0,
+        active_skus: activeSkusCount ?? 0,
+        shipped_today: shippedToday,
+        today_value: todayValue,
+        today_cmv: todayCmv,
+        today_margin: todayValue - todayCmv,
+        on_hold_count: onHoldCount ?? 0,
+        out_of_stock_skus: outOfStockCount ?? 0,
+      },
+      recent_orders: recent ?? [],
+    }
+  }
+
+  async getTodayOrders(orgId: string) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayIso = today.toISOString()
+
+    const { data, error } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select(`
+        id, marketplace, partner_sku, quantity,
+        sale_price, estimated_cost_at_oc, estimated_margin,
+        dropship_status, identified_at, shipped_at,
+        suppliers(id, name),
+        products(id, name, photo_urls)
+      `)
+      .eq('organization_id', orgId)
+      .gte('identified_at', todayIso)
+      .order('identified_at', { ascending: false })
+    if (error) throw new HttpException(error.message, 500)
+
+    // Agregação por supplier
+    const bySupplier = new Map<string, {
+      supplier_id: string;
+      supplier_name: string;
+      orders_count: number;
+      units: number;
+      gross_total: number;
+      cmv: number;
+      margin: number;
+    }>()
+    for (const o of (data ?? [])) {
+      const supRaw = o.suppliers as unknown
+      const sup = (Array.isArray(supRaw) ? supRaw[0] : supRaw) as { id: string; name: string } | null
+        ?? { id: 'unknown', name: '—' }
+      const key = sup.id
+      if (!bySupplier.has(key)) {
+        bySupplier.set(key, {
+          supplier_id: sup.id,
+          supplier_name: sup.name,
+          orders_count: 0,
+          units: 0,
+          gross_total: 0,
+          cmv: 0,
+          margin: 0,
+        })
+      }
+      const agg = bySupplier.get(key)!
+      agg.orders_count++
+      agg.units += Number(o.quantity ?? 0)
+      agg.gross_total += Number(o.sale_price ?? 0) * Number(o.quantity ?? 0)
+      agg.cmv += Number(o.estimated_cost_at_oc ?? 0) * Number(o.quantity ?? 0)
+      agg.margin += Number(o.estimated_margin ?? 0) * Number(o.quantity ?? 0)
+    }
+
+    return {
+      orders: data ?? [],
+      by_supplier: Array.from(bySupplier.values()).sort((a, b) => b.gross_total - a.gross_total),
+    }
   }
 }

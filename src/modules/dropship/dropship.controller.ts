@@ -216,4 +216,67 @@ export class DropshipController {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.bulkImportPartnerProducts(orgId, dto, userId)
   }
+
+  // ── Orders identification (Sprint 3) ──────────────────────────────────────
+
+  @Get('orders')
+  async listOrders(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('date_from') date_from?: string,
+    @Query('date_to') date_to?: string,
+    @Query('q') q?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listDropshipOrders(orgId, { supplier_id, status, date_from, date_to, q })
+  }
+
+  @Get('orders/:id')
+  async getOrder(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getDropshipOrder(orgId, id)
+  }
+
+  @Post('orders/identify')
+  async forceIdentify(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.identifyDropshipOrders(orgId)
+  }
+
+  @Post('orders/:id/hold')
+  async hold(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.holdDropshipOrder(orgId, id, body.reason)
+  }
+
+  @Post('orders/:id/release')
+  async release(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.releaseDropshipOrder(orgId, id)
+  }
+
+  // ── Dashboard ──────────────────────────────────────────────────────────────
+
+  @Get('dashboard')
+  async dashboard(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getDashboard(orgId)
+  }
+
+  @Get('today')
+  async today(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getTodayOrders(orgId)
+  }
 }
