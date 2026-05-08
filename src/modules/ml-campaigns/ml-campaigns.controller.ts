@@ -82,9 +82,7 @@ export class MlCampaignsController {
     return this.svc.getMissingDataItems(u.orgId, sellerId ? Number(sellerId) : undefined, limit ? Number(limit) : 100)
   }
 
-  // Movido pra depois das rotas literais (final do arquivo) pra evitar
-  // hijack de /recommendations, /config, /audit etc.
-  @Get('campaign/:id')
+  @Get(':id')
   getCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -93,33 +91,29 @@ export class MlCampaignsController {
     return this.svc.getCampaign(u.orgId, id)
   }
 
-  @Get('campaign/:id/items')
+  @Get(':id/items')
   listItemsForCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') campaignId: string,
-    @Query('seller_id')      sellerId?:      string,
-    @Query('status')         status?:        string,
-    @Query('health_status')  healthStatus?:  string,
-    @Query('has_subsidy')    hasSubsidy?:    string,
-    @Query('listing_status') listingStatus?: string,
-    @Query('catalog_only')   catalogOnly?:   string,
-    @Query('q')              q?:             string,
-    @Query('limit')          limit?:         string,
-    @Query('offset')         offset?:        string,
+    @Query('seller_id')      sellerId?:    string,
+    @Query('status')         status?:      string,
+    @Query('health_status')  healthStatus?:string,
+    @Query('has_subsidy')    hasSubsidy?:  string,
+    @Query('q')              q?:           string,
+    @Query('limit')          limit?:       string,
+    @Query('offset')         offset?:      string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listItems({
-      orgId:         u.orgId,
-      sellerId:      sellerId ? Number(sellerId) : undefined,
+      orgId:        u.orgId,
+      sellerId:     sellerId ? Number(sellerId) : undefined,
       campaignId,
-      status:        status       as any,
-      healthStatus:  healthStatus as any,
-      hasSubsidy:    hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
-      listingStatus: listingStatus as any,
-      catalogOnly:   catalogOnly === 'true',
+      status:       status       as any,
+      healthStatus: healthStatus as any,
+      hasSubsidy:   hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
       q,
-      limit:         limit  ? Number(limit)  : 50,
-      offset:        offset ? Number(offset) : 0,
+      limit:        limit  ? Number(limit)  : 50,
+      offset:       offset ? Number(offset) : 0,
     })
   }
 
@@ -176,17 +170,6 @@ export class MlCampaignsController {
   syncLogs(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)
-  }
-
-  /** Enriquece metadata visual (thumbnail/title) dos items em background.
-   *  Frontend chama isso depois de carregar a lista pra preencher thumbs. */
-  @Post('sync/enrich-metadata')
-  enrichMetadata(
-    @ReqUser() u: ReqUserPayload,
-    @Query('seller_id') sellerId?: string,
-  ) {
-    if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.sync.enrichMetadataAsync(u.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   // ═══ Camada 2: Recommendations + Config ═══════════════════════════

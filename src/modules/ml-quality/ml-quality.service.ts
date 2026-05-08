@@ -4,19 +4,17 @@ import { Injectable, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 
 interface ListItemsInput {
-  orgId:          string
-  sellerId?:      number
-  level?:         'basic' | 'satisfactory' | 'professional'
-  domainId?:      string
-  hasPenalty?:    boolean
-  minScore?:      number
-  maxScore?:      number
-  listingStatus?: 'active' | 'paused' | 'closed' | 'under_review'
-  catalogOnly?:   boolean
-  q?:             string
-  limit?:         number
-  offset?:        number
-  sort?:          'priority' | 'score_asc' | 'score_desc' | 'recent'
+  orgId:      string
+  sellerId?:  number
+  level?:     'basic' | 'satisfactory' | 'professional'
+  domainId?:  string
+  hasPenalty?: boolean
+  minScore?:  number
+  maxScore?:  number
+  q?:         string
+  limit?:     number
+  offset?:    number
+  sort?:      'priority' | 'score_asc' | 'score_desc' | 'recent'
 }
 
 @Injectable()
@@ -76,15 +74,13 @@ export class MlQualityService {
       .eq('organization_id', input.orgId)
       .range(offset, offset + limit - 1)
 
-    if (input.sellerId      != null) q = q.eq('seller_id', input.sellerId)
-    if (input.level)                 q = q.eq('ml_level', input.level)
-    if (input.domainId)              q = q.eq('ml_domain_id', input.domainId)
-    if (input.hasPenalty    != null) q = q.eq('has_exposure_penalty', input.hasPenalty)
-    if (input.minScore      != null) q = q.gte('ml_score', input.minScore)
-    if (input.maxScore      != null) q = q.lte('ml_score', input.maxScore)
-    if (input.listingStatus)         q = q.eq('listing_status', input.listingStatus)
-    if (input.catalogOnly   === true) q = q.eq('catalog_listing', true)
-    if (input.q?.trim())             q = q.ilike('ml_item_id', `%${input.q.trim()}%`)
+    if (input.sellerId   != null) q = q.eq('seller_id', input.sellerId)
+    if (input.level)              q = q.eq('ml_level', input.level)
+    if (input.domainId)           q = q.eq('ml_domain_id', input.domainId)
+    if (input.hasPenalty != null) q = q.eq('has_exposure_penalty', input.hasPenalty)
+    if (input.minScore   != null) q = q.gte('ml_score', input.minScore)
+    if (input.maxScore   != null) q = q.lte('ml_score', input.maxScore)
+    if (input.q?.trim())          q = q.ilike('ml_item_id', `%${input.q.trim()}%`)
 
     switch (input.sort ?? 'priority') {
       case 'priority':   q = q.order('internal_priority_score', { ascending: false, nullsFirst: false }); break

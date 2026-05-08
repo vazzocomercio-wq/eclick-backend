@@ -96,23 +96,6 @@ export class MlQualityApiClient {
     )
   }
 
-  /** GET /items?ids=...&attributes=id,status,catalog_listing — enriquece
-   *  ml_quality_snapshots com listing status (active/paused/closed) e
-   *  flag catalog_listing (true = competindo por buy box). */
-  async getItemsListingStatus(token: string, itemIds: string[]): Promise<Array<{ id: string; status?: string; catalog_listing?: boolean }>> {
-    if (itemIds.length === 0) return []
-    return this.requestWithBackoff<Array<{ code: number; body?: { id: string; status?: string; catalog_listing?: boolean } }>>({
-      method: 'GET',
-      url:    `${ML_BASE}/items`,
-      headers: { Authorization: `Bearer ${token}` },
-      params: { ids: itemIds.slice(0, 20).join(','), attributes: 'id,status,catalog_listing' },
-    }, 0).then(results =>
-      results
-        .filter(r => r.code === 200 && r.body?.id)
-        .map(r => r.body!),
-    )
-  }
-
   /** GET /categories/:id — endpoint PUBLICO do ML (sem auth necessaria).
    *  Retorna { id, name, settings: { catalog_domain } } com nome PT-BR. */
   async getCategoryName(categoryId: string): Promise<{ id: string; name: string; catalog_domain?: string }> {

@@ -35,34 +35,30 @@ export class MlQualityController {
   @Get('items')
   listItems(
     @ReqUser() u: ReqUserPayload,
-    @Query('seller_id')      sellerId?:      string,
-    @Query('level')          level?:         string,
-    @Query('domain_id')      domainId?:      string,
-    @Query('penalty')        penalty?:       string,
-    @Query('min_score')      minScore?:      string,
-    @Query('max_score')      maxScore?:      string,
-    @Query('listing_status') listingStatus?: string,
-    @Query('catalog_only')   catalogOnly?:   string,
-    @Query('q')              q?:             string,
-    @Query('limit')          limit?:         string,
-    @Query('offset')         offset?:        string,
-    @Query('sort')           sort?:          string,
+    @Query('seller_id')  sellerId?:  string,
+    @Query('level')      level?:     string,
+    @Query('domain_id')  domainId?:  string,
+    @Query('penalty')    penalty?:   string,
+    @Query('min_score')  minScore?:  string,
+    @Query('max_score')  maxScore?:  string,
+    @Query('q')          q?:         string,
+    @Query('limit')      limit?:     string,
+    @Query('offset')     offset?:    string,
+    @Query('sort')       sort?:      string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listItems({
-      orgId:         u.orgId,
-      sellerId:      sellerId ? Number(sellerId) : undefined,
-      level:         level as any,
+      orgId:      u.orgId,
+      sellerId:   sellerId ? Number(sellerId) : undefined,
+      level:      level as any,
       domainId,
-      hasPenalty:    penalty === 'true' ? true : penalty === 'false' ? false : undefined,
-      minScore:      minScore ? Number(minScore) : undefined,
-      maxScore:      maxScore ? Number(maxScore) : undefined,
-      listingStatus: listingStatus as any,
-      catalogOnly:   catalogOnly === 'true',
+      hasPenalty: penalty === 'true' ? true : penalty === 'false' ? false : undefined,
+      minScore:   minScore ? Number(minScore) : undefined,
+      maxScore:   maxScore ? Number(maxScore) : undefined,
       q,
-      limit:         limit  ? Number(limit)  : 50,
-      offset:        offset ? Number(offset) : 0,
-      sort:          sort as any,
+      limit:      limit  ? Number(limit)  : 50,
+      offset:     offset ? Number(offset) : 0,
+      sort:       sort as any,
     })
   }
 
@@ -140,17 +136,6 @@ export class MlQualityController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.sync.syncOrg(u.orgId, { sellerId: sellerId ? Number(sellerId) : undefined })
-  }
-
-  /** Enriquece snapshots com listing_status + catalog_listing
-   *  (active/paused/closed/under_review). Fire-and-forget, retorna em <1s. */
-  @Post('sync/enrich-listing-status')
-  enrichListingStatus(
-    @ReqUser() u: ReqUserPayload,
-    @Query('seller_id') sellerId?: string,
-  ) {
-    if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.sync.enrichListingStatusAsync(u.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   @Get('sync/logs')
