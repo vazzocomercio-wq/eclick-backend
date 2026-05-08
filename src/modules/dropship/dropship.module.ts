@@ -5,9 +5,10 @@ import { DropshipService } from './dropship.service'
 import { MessagingModule } from '../messaging/messaging.module'
 import { WhatsAppModule } from '../whatsapp/whatsapp.module'
 import { FinanceiroModule } from '../financeiro/financeiro.module'
+import { AiModule } from '../ai/ai.module'
 
 @Module({
-  imports: [MessagingModule, WhatsAppModule, FinanceiroModule],
+  imports: [MessagingModule, WhatsAppModule, FinanceiroModule, AiModule],
   controllers: [DropshipController, DropshipPortalController],
   providers: [DropshipService],
   exports: [DropshipService],

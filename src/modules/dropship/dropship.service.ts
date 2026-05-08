@@ -5,6 +5,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { EmailSenderService } from '../messaging/email-sender.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 import { FinanceiroService } from '../financeiro/financeiro.service'
+import { LlmService } from '../ai/llm.service'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -221,6 +222,7 @@ export class DropshipService {
     private readonly emailSender: EmailSenderService,
     private readonly waSender: WhatsAppSender,
     private readonly financeiro: FinanceiroService,
+    private readonly llm: LlmService,
   ) {}
 
   // ── Partners (supplier + dropship_profile) ─────────────────────────────────
@@ -3219,6 +3221,364 @@ export class DropshipService {
       .limit(24)  // últimos 2 anos mensais
     if (error) throw new HttpException(error.message, 500)
     return data ?? []
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SPRINT 12 — DETECÇÃO DE DIVERGÊNCIAS (REGRAS) + COPILOTO IA
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Cron @02h diário: scan de divergências por org */
+  @Cron('0 2 * * *', { name: 'dropship-divergence-scan' })
+  async divergenceScanTick() {
+    try {
+      const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
+      for (const org of orgs ?? []) {
+        try {
+          const r = await this.scanDivergences(org.id)
+          if (r.detected > 0) {
+            this.logger.log(`[divergences] org=${org.id} detectadas=${r.detected}`)
+          }
+        } catch (e) {
+          this.logger.warn(`[divergences] org=${org.id}: ${e instanceof Error ? e.message : e}`)
+        }
+      }
+    } catch (e) {
+      this.logger.error(`[divergences] tick: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  /** Detecta divergências aplicando regras: shipment_delay, missing_partner_product,
+   *  price_below_cost. Idempotente via UNIQUE constraint. */
+  async scanDivergences(orgId: string): Promise<{ detected: number; rules: Record<string, number> }> {
+    const counts: Record<string, number> = {
+      shipment_delay: 0,
+      missing_partner_product: 0,
+      price_below_cost: 0,
+    }
+    let detected = 0
+
+    // ── Regra 1: shipment_delay (>48h sem envio confirmado) ────────────────
+    const cutoff48h = new Date(Date.now() - 48 * 3600_000).toISOString()
+    const { data: delayed } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('id, supplier_id, identified_at, shipped_at, partner_sku')
+      .eq('organization_id', orgId)
+      .lt('identified_at', cutoff48h)
+      .is('shipped_at', null)
+      .in('dropship_status', ['identified', 'awaiting_shipment'])
+      .limit(200)
+
+    for (const ident of (delayed ?? [])) {
+      const hours = Math.round((Date.now() - new Date(ident.identified_at).getTime()) / 3600_000)
+      const created = await this.upsertDivergence({
+        organization_id: orgId,
+        supplier_id: ident.supplier_id,
+        divergence_type: 'shipment_delay',
+        severity: hours > 96 ? 'critical' : hours > 72 ? 'high' : 'medium',
+        identification_id: ident.id,
+        expected_value: 48,
+        actual_value: hours,
+        difference_amount: hours - 48,
+        description: `Pedido ${ident.partner_sku} sem envio há ${hours}h (limite 48h)`,
+        recommended_action: 'Contate o parceiro pra confirmar status do pedido',
+      })
+      if (created) { counts.shipment_delay++; detected++ }
+    }
+
+    // ── Regra 2: missing_partner_product (on_hold por mapeamento) ──────────
+    const { data: unmapped } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('id, supplier_id, partner_sku, hold_reason')
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'on_hold')
+      .ilike('hold_reason', '%mapeamento%')
+      .limit(100)
+
+    for (const ident of (unmapped ?? [])) {
+      const created = await this.upsertDivergence({
+        organization_id: orgId,
+        supplier_id: ident.supplier_id,
+        divergence_type: 'missing_partner_product',
+        severity: 'high',
+        identification_id: ident.id,
+        description: `SKU ${ident.partner_sku} sem mapeamento no catálogo do parceiro`,
+        recommended_action: 'Cadastre o produto no catálogo do parceiro ou pause o anúncio',
+      })
+      if (created) { counts.missing_partner_product++; detected++ }
+    }
+
+    // ── Regra 3: price_below_cost ────────────────────────────────────────
+    const { data: products } = await supabaseAdmin
+      .from('supplier_products')
+      .select(`
+        id, supplier_id, supplier_sku, unit_cost, partner_packaging_cost, partner_handling_cost,
+        products!inner(id, price, organization_id)
+      `)
+      .eq('dropship_status', 'active')
+      .limit(500)
+
+    for (const sp of (products ?? [])) {
+      const productRaw = sp.products as unknown
+      const product = (Array.isArray(productRaw) ? productRaw[0] : productRaw) as {
+        id: string; price: number | null; organization_id: string;
+      } | null
+      if (!product || product.organization_id !== orgId) continue
+      if (!product.price || product.price <= 0) continue
+      const totalCost = Number(sp.unit_cost) + Number(sp.partner_packaging_cost ?? 0) + Number(sp.partner_handling_cost ?? 0)
+      if (Number(product.price) >= totalCost) continue
+      // Vendendo abaixo do custo
+      const diffAmount = totalCost - Number(product.price)
+      const created = await this.upsertDivergence({
+        organization_id: orgId,
+        supplier_id: sp.supplier_id,
+        divergence_type: 'price_below_cost',
+        severity: 'critical',
+        supplier_product_id: sp.id,
+        expected_value: totalCost,
+        actual_value: Number(product.price),
+        difference_amount: diffAmount,
+        difference_pct: Math.round((diffAmount / totalCost) * 100),
+        description: `SKU ${sp.supplier_sku} vendendo a R$ ${product.price.toFixed(2)} (custo R$ ${totalCost.toFixed(2)})`,
+        recommended_action: 'Reajuste o preço pro mínimo viável ou pause o anúncio',
+      })
+      if (created) { counts.price_below_cost++; detected++ }
+    }
+
+    return { detected, rules: counts }
+  }
+
+  /** Cria divergência se ainda não existe aberta pra mesma referência (idempotente).
+   *  Retorna true se criou nova, false se já existia. */
+  private async upsertDivergence(input: {
+    organization_id: string
+    supplier_id: string
+    divergence_type: string
+    severity: string
+    identification_id?: string
+    supplier_product_id?: string
+    oc_id?: string
+    oc_item_id?: string
+    expected_value?: number
+    actual_value?: number
+    difference_amount?: number
+    difference_pct?: number
+    description: string
+    recommended_action?: string
+  }): Promise<boolean> {
+    // Check duplicate
+    let q = supabaseAdmin
+      .from('dropship_divergences')
+      .select('id')
+      .eq('organization_id', input.organization_id)
+      .eq('divergence_type', input.divergence_type)
+      .in('status', ['open', 'acknowledged', 'investigating'])
+    if (input.identification_id) q = q.eq('identification_id', input.identification_id)
+    if (input.supplier_product_id) q = q.eq('supplier_product_id', input.supplier_product_id)
+    if (input.oc_item_id) q = q.eq('oc_item_id', input.oc_item_id)
+
+    const { data: existing } = await q.maybeSingle()
+    if (existing) return false
+
+    const { error } = await supabaseAdmin
+      .from('dropship_divergences')
+      .insert({
+        organization_id: input.organization_id,
+        supplier_id: input.supplier_id,
+        divergence_type: input.divergence_type,
+        severity: input.severity,
+        identification_id: input.identification_id ?? null,
+        supplier_product_id: input.supplier_product_id ?? null,
+        oc_id: input.oc_id ?? null,
+        oc_item_id: input.oc_item_id ?? null,
+        expected_value: input.expected_value ?? null,
+        actual_value: input.actual_value ?? null,
+        difference_amount: input.difference_amount ?? null,
+        difference_pct: input.difference_pct ?? null,
+        description: input.description,
+        recommended_action: input.recommended_action ?? null,
+        status: 'open',
+      })
+    return !error
+  }
+
+  async listDivergences(orgId: string, filters: {
+    supplier_id?: string;
+    status?: string;
+    severity?: string;
+    divergence_type?: string;
+  }) {
+    let query = supabaseAdmin
+      .from('dropship_divergences')
+      .select(`
+        id, divergence_type, severity, status,
+        expected_value, actual_value, difference_amount, difference_pct,
+        description, recommended_action,
+        identification_id, supplier_product_id, oc_id,
+        acknowledged_at, resolved_at, resolution_notes,
+        detected_at,
+        suppliers(id, name)
+      `)
+      .eq('organization_id', orgId)
+      .order('detected_at', { ascending: false })
+      .limit(200)
+
+    if (filters.supplier_id) query = query.eq('supplier_id', filters.supplier_id)
+    if (filters.status) {
+      const arr = filters.status.split(',')
+      query = arr.length > 1 ? query.in('status', arr) : query.eq('status', filters.status)
+    }
+    if (filters.severity) query = query.eq('severity', filters.severity)
+    if (filters.divergence_type) query = query.eq('divergence_type', filters.divergence_type)
+
+    const { data, error } = await query
+    if (error) throw new HttpException(error.message, 500)
+    return data ?? []
+  }
+
+  async acknowledgeDivergence(orgId: string, userId: string | null, id: string) {
+    const { error } = await supabaseAdmin
+      .from('dropship_divergences')
+      .update({
+        status: 'acknowledged',
+        acknowledged_at: new Date().toISOString(),
+        acknowledged_by: userId,
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .eq('status', 'open')
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  async resolveDivergence(orgId: string, userId: string | null, id: string, notes: string) {
+    if (!notes?.trim()) throw new BadRequestException('Notas de resolução obrigatórias')
+    const { error } = await supabaseAdmin
+      .from('dropship_divergences')
+      .update({
+        status: 'resolved',
+        resolved_at: new Date().toISOString(),
+        resolved_by: userId,
+        resolution_notes: notes.trim(),
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  async ignoreDivergence(orgId: string, userId: string | null, id: string, reason: string) {
+    if (!reason?.trim()) throw new BadRequestException('Motivo obrigatório')
+    const { error } = await supabaseAdmin
+      .from('dropship_divergences')
+      .update({
+        status: 'ignored',
+        resolved_at: new Date().toISOString(),
+        resolved_by: userId,
+        resolution_notes: `[IGNORADO] ${reason.trim()}`,
+      })
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new HttpException(error.message, 500)
+    return { ok: true }
+  }
+
+  // ── Copiloto Dropship (IA) ────────────────────────────────────────────────
+
+  /** Recebe pergunta do operador, busca contexto agregado do dashboard +
+   *  parceiros + KPIs, manda pro LLM com system prompt focado. v1 sem
+   *  tool calling — só resposta textual. */
+  async copilotMessage(orgId: string, message: string): Promise<{ response: string; tokens: number }> {
+    if (!message?.trim()) throw new BadRequestException('Mensagem vazia')
+
+    // 1. Coleta contexto do dashboard
+    const dashboard = await this.getDashboard(orgId)
+
+    // 2. Top parceiros + scores
+    const scores = await this.listPartnerScores(orgId)
+
+    // 3. Devoluções abertas
+    const { data: openReturns } = await supabaseAdmin
+      .from('dropship_returns')
+      .select('id, return_type, return_amount, suppliers(name)')
+      .eq('organization_id', orgId)
+      .in('status', ['opened', 'in_transit_back', 'received', 'analyzed', 'approved', 'credit_pending'])
+      .limit(20)
+
+    // 4. Divergências críticas
+    const { data: criticalDivs } = await supabaseAdmin
+      .from('dropship_divergences')
+      .select('divergence_type, severity, description, suppliers(name)')
+      .eq('organization_id', orgId)
+      .eq('status', 'open')
+      .in('severity', ['critical', 'high'])
+      .limit(20)
+
+    // 5. Monta context
+    const context = {
+      kpis: dashboard.kpis,
+      partners_with_scores: scores.slice(0, 10).map(s => ({
+        name: (s.suppliers as { name?: string } | null)?.name ?? '?',
+        score: s.total_score,
+        change: s.score_change,
+      })),
+      partners_at_risk: scores.filter(s => s.total_score < 60).map(s =>
+        (s.suppliers as { name?: string } | null)?.name ?? '?'
+      ),
+      open_returns_count: (openReturns ?? []).length,
+      critical_divergences: (criticalDivs ?? []).slice(0, 10).map(d => ({
+        type: d.divergence_type,
+        severity: d.severity,
+        partner: (d.suppliers as { name?: string } | null)?.name ?? '?',
+        desc: d.description,
+      })),
+    }
+
+    const systemPrompt = `Você é o copiloto Dropship do e-Click. Ajuda o lojista a controlar a operação de dropship.
+
+Você TEM ACESSO AOS DADOS REAIS desta org (passados como JSON no userPrompt).
+Use APENAS os dados fornecidos — não invente números.
+
+CAPACIDADES:
+- Listar parceiros em risco (score < 60) ou top performers
+- Mostrar pagamentos pendentes (a pagar)
+- Identificar divergências críticas com sugestão de ação
+- Comparar parceiros, evolução de score
+- Sugerir ações proativas baseado nos KPIs
+
+REGRAS:
+- Sempre PT-BR
+- Direto, sem jargão
+- Use números reais do contexto
+- Quando sugerir ação, indique qual tela acessar (ex: "vá em /dashboard/dropship/divergences pra revisar")
+- Se não tem dado pra responder, diga claramente "não tenho essa informação"
+- Máximo 4 parágrafos curtos
+
+Você NÃO executa ações — só sugere. Operador clica nas telas.`
+
+    const userPromptText = `CONTEXTO ATUAL (JSON):
+${JSON.stringify(context, null, 2)}
+
+PERGUNTA DO OPERADOR:
+${message.trim()}`
+
+    try {
+      const result = await this.llm.generateText({
+        orgId,
+        feature: 'copilot_help',
+        systemPrompt,
+        userPrompt: userPromptText,
+        maxTokens: 600,
+      })
+      return {
+        response: result.text,
+        tokens: (result.inputTokens ?? 0) + (result.outputTokens ?? 0),
+      }
+    } catch (e) {
+      throw new HttpException(
+        `Copiloto indisponível: ${e instanceof Error ? e.message : 'erro desconhecido'}`,
+        500,
+      )
+    }
   }
 }
 

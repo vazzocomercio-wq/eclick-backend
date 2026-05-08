@@ -510,4 +510,70 @@ export class DropshipController {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.recalculateAllScores(orgId)
   }
+
+  // ── Divergências (Sprint 12) ──────────────────────────────────────────────
+
+  @Get('divergences')
+  async listDivergences(
+    @Headers('authorization') auth: string,
+    @Query('supplier_id') supplier_id?: string,
+    @Query('status') status?: string,
+    @Query('severity') severity?: string,
+    @Query('divergence_type') divergence_type?: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listDivergences(orgId, { supplier_id, status, severity, divergence_type })
+  }
+
+  @Post('divergences/scan')
+  async scanDivergences(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.scanDivergences(orgId)
+  }
+
+  @Post('divergences/:id/acknowledge')
+  async ackDivergence(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    return this.svc.acknowledgeDivergence(orgId, user?.id ?? null, id)
+  }
+
+  @Post('divergences/:id/resolve')
+  async resolveDivergence(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() body: { notes: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    return this.svc.resolveDivergence(orgId, user?.id ?? null, id, body.notes)
+  }
+
+  @Post('divergences/:id/ignore')
+  async ignoreDivergence(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const token = auth?.startsWith('Bearer ') ? auth.slice(7) : auth
+    const { data: { user } } = await supabaseAdmin.auth.getUser(token ?? '')
+    return this.svc.ignoreDivergence(orgId, user?.id ?? null, id, body.reason)
+  }
+
+  // ── Copiloto Dropship (Sprint 12) ─────────────────────────────────────────
+
+  @Post('copilot/message')
+  async copilotMessage(
+    @Headers('authorization') auth: string,
+    @Body() body: { message: string },
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.copilotMessage(orgId, body.message)
+  }
 }
