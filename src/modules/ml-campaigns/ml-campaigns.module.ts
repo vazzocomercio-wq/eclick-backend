@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { AiModule } from '../ai/ai.module'
+import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { MlCampaignsApiClient } from './ml-campaigns-api.client'
 import { MlCampaignsService } from './ml-campaigns.service'
 import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
@@ -10,10 +11,11 @@ import { MlCampaignsReasoningService } from './ml-campaigns-reasoning.service'
 import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
 import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
 import { MlCampaignsPostAnalysisService } from './ml-campaigns-post-analysis.service'
+import { MlCampaignsAlertsService } from './ml-campaigns-alerts.service'
 import { MlCampaignsController } from './ml-campaigns.controller'
 
 @Module({
-  imports:     [MercadolivreModule, AiModule],
+  imports:     [MercadolivreModule, AiModule, ActiveBridgeModule],
   providers:   [
     MlCampaignsApiClient,
     MlCampaignsService,
@@ -24,8 +26,9 @@ import { MlCampaignsController } from './ml-campaigns.controller'
     MlCampaignsValidatorService,
     MlCampaignsApplyService,
     MlCampaignsPostAnalysisService,
+    MlCampaignsAlertsService,
   ],
   controllers: [MlCampaignsController],
-  exports:     [MlCampaignsService, MlCampaignsSyncService, MlCampaignsDecisionService, MlCampaignsApplyService, MlCampaignsPostAnalysisService],
+  exports:     [MlCampaignsService, MlCampaignsSyncService, MlCampaignsDecisionService, MlCampaignsApplyService, MlCampaignsPostAnalysisService, MlCampaignsAlertsService],
 })
 export class MlCampaignsModule {}

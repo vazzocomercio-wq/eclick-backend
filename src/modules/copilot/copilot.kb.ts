@@ -855,6 +855,35 @@ Item sem custo cadastrado (catálogo) ou sem preço mínimo aceito do ML — dec
     tags: ['ml-campaigns', 'recommendations', 'ai-decision'],
   },
   {
+    routes:   ['/dashboard/ml-campaigns/alerts'],
+    category: 'campaigns',
+    title:    'Alertas WhatsApp de campanha (M2 + M3)',
+    content: `**Cron 9h SP** varre todas as configs com \`whatsapp_alerts_enabled=true\` e dispara 3 tipos de alerta via Active Bridge (\`notifyLojista\`):
+
+**1. Deadline warning (escala D-X..D-0):**
+- Campanhas com \`deadline_date\` em \`[hoje, hoje + deadline_alert_days_before]\`
+- Severity: D-2+ medium · D-1 high · D-0 critical (se \`escalate_alerts=true\`)
+- **SKIP se 0 items pendentes** (operador já agiu = não notificar)
+- Dedup: 1 alerta por (campanha × dia × severity)
+
+**2. Subsidy opportunity (proativo):**
+- Campanhas vivas com \`avg_meli_subsidy_pct > auto_alert_when_subsidy_above_pct\` E \`candidate_count > 0\`
+- 1× lifetime por campanha (não enche a paciência)
+
+**3. Manager queue digest:**
+- Se gestor tem N+ \`pending_manager_approval\` e tem \`manager_whatsapp_phone\` → manda 1×/dia
+- Inclui aviso se algum operador acumulou >\`audit_attempts_threshold\` tentativas em 30d
+
+**M3 — Agrupamento:**
+- Se mesmo \`recipient_phone\` recebeu **5+ alertas hoje**, sistema manda **1 digest** "Você tem N pendências" e **bloqueia novos alertas até amanhã**
+- Evita queimar o canal WhatsApp com spam
+
+**Tudo registrado em \`ml_campaign_alert_log\`:** dedup_key + status (sent/skipped_dedup/skipped_no_action/failed) + bridge_response + skip_reason. Audit completo.
+
+**Endpoint manual** \`POST /ml-campaigns/alerts/run\` dispara varredura sem aguardar cron — útil pra testar config (\`/alerts\` tem botão "Rodar agora").`,
+    tags: ['ml-campaigns', 'alerts', 'whatsapp', 'cron', 'active-bridge'],
+  },
+  {
     routes:   ['/dashboard/ml-campaigns/manager-queue', '/dashboard/ml-campaigns/config'],
     category: 'campaigns',
     title:    'Soft gate de margem mínima + fila do gestor',

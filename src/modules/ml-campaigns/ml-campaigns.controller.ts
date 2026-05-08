@@ -7,6 +7,7 @@ import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
 import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
 import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
 import { MlCampaignsPostAnalysisService } from './ml-campaigns-post-analysis.service'
+import { MlCampaignsAlertsService } from './ml-campaigns-alerts.service'
 
 interface ReqUserPayload {
   id: string
@@ -23,6 +24,7 @@ export class MlCampaignsController {
     private readonly validator:  MlCampaignsValidatorService,
     private readonly apply:      MlCampaignsApplyService,
     private readonly post:       MlCampaignsPostAnalysisService,
+    private readonly alerts:     MlCampaignsAlertsService,
   ) {}
 
   // ── Dashboard ──────────────────────────────────────────────────
@@ -449,6 +451,40 @@ export class MlCampaignsController {
       campaignId,
       limit:      limit ? Number(limit) : 100,
     })
+  }
+
+  // ─── Alerts (M2) ───────────────────────────────────────────────
+
+  /** Roda a varredura de alertas agora, sem aguardar cron 9h.
+   *  Útil pra testar config + ver mensagem chegar. */
+  @Post('alerts/run')
+  runAlertsNow(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.alerts.runNow(u.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
+  /** Lista os últimos alertas enviados pra esta org (audit). */
+  @Get('alerts/log')
+  async listAlerts(
+    @ReqUser() u: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const { supabaseAdmin } = await import('../../common/supabase')
+    let q = supabaseAdmin
+      .from('ml_campaign_alert_log')
+      .select('*')
+      .eq('organization_id', u.orgId)
+      .order('created_at', { ascending: false })
+      .limit(limit ? Number(limit) : 50)
+    if (sellerId) q = q.eq('seller_id', Number(sellerId))
+    const { data, error } = await q
+    if (error) throw new BadRequestException(`alerts/log: ${error.message}`)
+    return data ?? []
   }
 
   // ── Catch-all dynamic routes — DEVEM ficar por último ─────────────
