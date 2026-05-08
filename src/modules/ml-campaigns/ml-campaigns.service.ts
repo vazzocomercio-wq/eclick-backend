@@ -277,14 +277,15 @@ export class MlCampaignsService {
    *  Retorna { recommendation, gate_triggered, threshold_pct, attempted_margin_pct,
    *           recent_attempts_count? } pra UI mostrar feedback. */
   async approveRecommendation(orgId: string, id: string, userId: string, edited?: { price?: number; quantity?: number }) {
-    // 1. Lê recomendação com tipo de campanha
+    // 1. Lê recomendação. JOIN 2-níveis: reco → ml_campaign_items → ml_campaigns
+    //    (reco não tem FK direta pra ml_campaigns — passa via campaign_item).
     const { data: reco, error: rErr } = await supabaseAdmin
       .from('ml_campaign_recommendations')
-      .select('*, ml_campaigns:campaign_id(ml_promotion_type)')
+      .select('*, ml_campaign_items!inner(campaign_id, ml_campaigns:campaign_id(ml_promotion_type))')
       .eq('organization_id', orgId)
       .eq('id', id)
       .single()
-    if (rErr || !reco) throw new BadRequestException(`approve: recomendação não encontrada`)
+    if (rErr || !reco) throw new BadRequestException(`approve: recomendação não encontrada${rErr ? ` (${rErr.message})` : ''}`)
     if (reco.status !== 'pending') {
       throw new BadRequestException(`approve: recomendação está em status ${reco.status}, esperado pending`)
     }
@@ -297,9 +298,14 @@ export class MlCampaignsService {
     const finalQuantity = edited?.quantity ?? reco.recommended_quantity
     const attemptedMargin = computeFinalMarginPct(reco, finalPrice)
 
-    // 4. Determina threshold (overrride por tipo se existir)
-    const campaignType: string | undefined = (reco as { ml_campaigns?: { ml_promotion_type?: string } })
-      .ml_campaigns?.ml_promotion_type
+    // 4. Determina threshold (override por tipo se existir).
+    //    Estrutura aninhada do select 2-níveis (Supabase pode retornar
+    //    como objeto OU array — normaliza pra ambos).
+    const itemRel = (reco as { ml_campaign_items?: unknown }).ml_campaign_items
+    const item = Array.isArray(itemRel) ? itemRel[0] : itemRel
+    const campRel = (item as { ml_campaigns?: unknown } | undefined)?.ml_campaigns
+    const campaign = Array.isArray(campRel) ? campRel[0] : campRel
+    const campaignType: string | undefined = (campaign as { ml_promotion_type?: string } | undefined)?.ml_promotion_type
     const overrides = (config.per_campaign_type_overrides ?? {}) as Record<string, number>
     const threshold = (campaignType && overrides[campaignType] != null)
       ? Number(overrides[campaignType])
