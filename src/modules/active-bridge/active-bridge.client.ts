@@ -19,6 +19,28 @@ interface NotifyLojistaInput {
   deeplink?:       string
 }
 
+interface CreateCampaignCardInput {
+  organization_id: string
+  pipeline_id:     string
+  stage_id:        string
+  assigned_to:     string
+  title:           string
+  task_title:      string
+  due_date?:       string
+  value?:          number
+  tags?:           string[]
+  metadata?:       Record<string, unknown>
+  dedup_key?:      string
+}
+
+export interface CreateCampaignCardResult {
+  ok?:                true
+  deal_id?:           string
+  task_id?:           string | null
+  created?:           boolean
+  skipped_no_bridge?: boolean
+}
+
 interface TriggerCartRecoveryInput {
   organization_id: string
   cart_ids?:       string[]
@@ -172,6 +194,42 @@ export class ActiveBridgeClient {
       return await res.json() as { dispatched: number; skipped: number; errors: number }
     } catch (e) {
       this.logger.error(`[active-bridge] sendBroadcast falhou: ${(e as Error).message}`)
+      throw e
+    }
+  }
+
+  /** M4 — cria card no funil "Campanhas/Promoção" + task vinculada no
+   *  Active. Chamado pelo MlCampaignsAlertsService quando um deadline
+   *  alert dispara ou quando uma reco vai pra fila do gestor.
+   *
+   *  No-op se bridge não configurado (volta { skipped_no_bridge: true })
+   *  ou se input.pipeline_id ausente (org não preencheu config M4 ainda). */
+  async createCampaignCard(input: CreateCampaignCardInput): Promise<CreateCampaignCardResult> {
+    if (!this.isConfigured()) {
+      return { skipped_no_bridge: true }
+    }
+    if (!input.pipeline_id || !input.stage_id || !input.assigned_to) {
+      this.logger.warn('[active-bridge] createCampaignCard skipped — config incompleto (pipeline_id/stage_id/assigned_to)')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/create-campaign-card`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw new BadRequestException(`Active responded ${res.status}: ${body.slice(0, 200)}`)
+      }
+      return await res.json() as CreateCampaignCardResult
+    } catch (e) {
+      this.logger.error(`[active-bridge] createCampaignCard falhou: ${(e as Error).message}`)
       throw e
     }
   }

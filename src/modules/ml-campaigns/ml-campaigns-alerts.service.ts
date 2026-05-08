@@ -39,6 +39,13 @@ interface ConfigRow {
   notification_phone:                string | null
   manager_user_id:                   string | null
   manager_whatsapp_phone:            string | null
+  // M4 — Active integration
+  active_org_id:                     string | null   // SaaS↔Active UUID mapping
+  active_pipeline_id:                string | null
+  active_stage_initial_id:           string | null
+  active_stage_pending_manager_id:   string | null
+  active_stage_in_campaign_id:       string | null
+  active_assigned_to:                string | null
 }
 
 interface CampaignRow {
@@ -74,7 +81,7 @@ export class MlCampaignsAlertsService {
     // Busca todas as configs com whatsapp habilitado
     const { data: configs, error } = await supabaseAdmin
       .from('ml_campaigns_config')
-      .select('id, organization_id, seller_id, whatsapp_alerts_enabled, deadline_alert_days_before, escalate_alerts, auto_alert_when_subsidy_above_pct, audit_attempts_threshold, assignee_user_id, notification_phone, manager_user_id, manager_whatsapp_phone')
+      .select('id, organization_id, seller_id, whatsapp_alerts_enabled, deadline_alert_days_before, escalate_alerts, auto_alert_when_subsidy_above_pct, audit_attempts_threshold, assignee_user_id, notification_phone, manager_user_id, manager_whatsapp_phone, active_org_id, active_pipeline_id, active_stage_initial_id, active_stage_pending_manager_id, active_stage_in_campaign_id, active_assigned_to')
       .eq('whatsapp_alerts_enabled', true)
 
     if (error || !configs) {
@@ -184,7 +191,7 @@ export class MlCampaignsAlertsService {
   async runNow(orgId: string, sellerId?: number): Promise<{ sent: number; skipped: number }> {
     let q = supabaseAdmin
       .from('ml_campaigns_config')
-      .select('id, organization_id, seller_id, whatsapp_alerts_enabled, deadline_alert_days_before, escalate_alerts, auto_alert_when_subsidy_above_pct, audit_attempts_threshold, assignee_user_id, notification_phone, manager_user_id, manager_whatsapp_phone')
+      .select('id, organization_id, seller_id, whatsapp_alerts_enabled, deadline_alert_days_before, escalate_alerts, auto_alert_when_subsidy_above_pct, audit_attempts_threshold, assignee_user_id, notification_phone, manager_user_id, manager_whatsapp_phone, active_org_id, active_pipeline_id, active_stage_initial_id, active_stage_pending_manager_id, active_stage_in_campaign_id, active_assigned_to')
       .eq('organization_id', orgId)
       .eq('whatsapp_alerts_enabled', true)
     if (sellerId != null) q = q.eq('seller_id', sellerId)
@@ -317,7 +324,66 @@ export class MlCampaignsAlertsService {
     )
     const deeplink = `/dashboard/ml-campaigns/${c.id}`
 
-    return this.dispatch(cfg, c, 'deadline_warning', severity, message, deeplink, dedupKey)
+    const result = await this.dispatch(cfg, c, 'deadline_warning', severity, message, deeplink, dedupKey)
+
+    // M4 — se Active configurado, cria card no funil "Campanhas/Promoção"
+    // + task vinculada. Idempotente via dedup_key (mesmo deal pra mesmo
+    // contexto não duplica). Falha graciosa: erro NÃO impede WhatsApp.
+    if (result === 'sent') {
+      void this.tryCreateActiveCard(cfg, c, severity, daysLeft, pending).catch(e =>
+        this.logger.warn(`[alerts] active card falhou pra ${c.id}: ${(e as Error).message}`),
+      )
+    }
+
+    return result
+  }
+
+  /** Cria card no funil + task no Active. No-op se config M4 ausente. */
+  private async tryCreateActiveCard(
+    cfg: ConfigRow,
+    c: CampaignRow,
+    severity: 'low' | 'medium' | 'high' | 'critical',
+    daysLeft: number,
+    pending: number,
+  ): Promise<void> {
+    if (!cfg.active_pipeline_id || !cfg.active_stage_initial_id || !cfg.active_assigned_to) {
+      return // M4 não configurado pra essa org/seller
+    }
+
+    const dayLabel = daysLeft <= 0 ? 'HOJE' : `D-${daysLeft}`
+    const cardTitle = `${c.ml_promotion_type} — ${c.name ?? c.ml_campaign_id} (${dayLabel})`
+    const taskTitle = `Revisar ${pending} candidato${pending === 1 ? '' : 's'} de "${c.name ?? c.ml_promotion_type}" antes do deadline`
+
+    // Dedup: 1 card por campanha (não 1 por dia × severity — gestor não
+    // quer ver o mesmo deal sendo recriado a cada escalada)
+    const dedupKey = `campaign:${c.id}`
+
+    // Usa active_org_id se preenchido (mapeamento SaaS↔Active), senão usa
+    // o próprio organization_id (compat com setups single-DB)
+    const activeOrgId = cfg.active_org_id ?? cfg.organization_id
+
+    await this.bridge.createCampaignCard({
+      organization_id: activeOrgId,
+      pipeline_id:     cfg.active_pipeline_id,
+      stage_id:        cfg.active_stage_initial_id,
+      assigned_to:     cfg.active_assigned_to,
+      title:           cardTitle,
+      task_title:      taskTitle,
+      due_date:        c.deadline_date ?? undefined,
+      tags:            ['campaign-center', c.ml_promotion_type.toLowerCase(), `deadline-${dayLabel.toLowerCase()}`],
+      metadata: {
+        ml_campaign_id:    c.ml_campaign_id,
+        ml_promotion_type: c.ml_promotion_type,
+        seller_id:         c.seller_id,
+        candidate_count:   c.candidate_count,
+        pending_items:     pending,
+        severity,
+        days_left:         daysLeft,
+        has_subsidy:       c.has_subsidy_items,
+        avg_subsidy_pct:   c.avg_meli_subsidy_pct,
+      },
+      dedup_key:       dedupKey,
+    })
   }
 
   private deadlineDedupKey(campaignId: string, severity: string): string {

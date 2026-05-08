@@ -514,6 +514,11 @@ export class MlCampaignsService {
       'min_approval_margin_pct', 'per_campaign_type_overrides',
       'deadline_alert_days_before', 'whatsapp_alerts_enabled', 'escalate_alerts',
       'auto_alert_when_subsidy_above_pct', 'audit_attempts_threshold',
+      // M4 — Active integration (cards + tasks)
+      'active_org_id',
+      'active_pipeline_id', 'active_stage_initial_id',
+      'active_stage_pending_manager_id', 'active_stage_in_campaign_id',
+      'active_assigned_to',
     ]
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
