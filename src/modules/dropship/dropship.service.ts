@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { EmailSenderService } from '../messaging/email-sender.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
+import { FinanceiroService } from '../financeiro/financeiro.service'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -132,6 +133,7 @@ export class DropshipService {
   constructor(
     private readonly emailSender: EmailSenderService,
     private readonly waSender: WhatsAppSender,
+    private readonly financeiro: FinanceiroService,
   ) {}
 
   // ── Partners (supplier + dropship_profile) ─────────────────────────────────
@@ -1906,7 +1908,59 @@ export class DropshipService {
       })
       .eq('id', session.oc_id)
 
+    // Side-effect: cria conta a pagar automaticamente (idempotente)
+    try {
+      await this.createPayableForOC(session.organization_id, session.oc_id)
+    } catch (e) {
+      this.logger.warn(`[approve] criar payable falhou: ${e instanceof Error ? e.message : e}`)
+      // Não falha a aprovação — admin pode criar payable manualmente
+    }
+
     return { ok: true, message: 'OC aprovada com sucesso' }
+  }
+
+  /** Cria payable a partir de OC aprovada (idempotente) */
+  private async createPayableForOC(orgId: string, ocId: string) {
+    const { data: oc } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select(`
+        id, oc_number, supplier_id, marketplace, marketplace_account_label,
+        net_total, due_date, payable_id,
+        suppliers(name, tax_id)
+      `)
+      .eq('id', ocId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!oc) return
+    if (oc.payable_id) return  // já tem payable vinculado
+
+    const supRaw = oc.suppliers as unknown
+    const sup = (Array.isArray(supRaw) ? supRaw[0] : supRaw) as { name: string; tax_id: string | null } | null
+    if (!sup) return
+
+    const payable = await this.financeiro.createPayableFromSource({
+      organization_id: orgId,
+      source_type: 'dropship_oc',
+      source_id: ocId,
+      description: `OC ${oc.oc_number} · ${oc.marketplace_account_label ?? oc.marketplace}`,
+      amount: Number(oc.net_total),
+      due_date: oc.due_date as string,
+      beneficiary_name: sup.name,
+      supplier_id: oc.supplier_id as string,
+      beneficiary_doc: sup.tax_id ?? null,
+      category: 'CMV Dropship',
+      metadata: { oc_id: ocId, oc_number: oc.oc_number },
+    })
+
+    // Atualiza oc.payable_id + status='in_payable'
+    await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .update({
+        payable_id: payable.id,
+        status: 'in_payable',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', ocId)
   }
 
   /** Rejeitar OC via portal */

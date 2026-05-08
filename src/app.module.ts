@@ -62,6 +62,7 @@ import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
 import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
 import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
 import { DropshipModule } from './modules/dropship/dropship.module'
+import { FinanceiroModule } from './modules/financeiro/financeiro.module'
 
 @Module({
   imports: [
@@ -126,6 +127,7 @@ import { DropshipModule } from './modules/dropship/dropship.module'
     MlPostsaleModule,
     MlWebhookModule,
     DropshipModule,
+    FinanceiroModule,
   ],
   controllers: [AppController],
   providers: [AppService],
