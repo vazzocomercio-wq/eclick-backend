@@ -273,7 +273,7 @@ export class MlCampaignsPostAnalysisService {
       .select('quantity, sale_price, contribution_margin, contribution_margin_pct')
       .eq('organization_id', orgId)
       .eq('marketplace_listing_id', mlItemId)
-      .eq('platform', 'ML')
+      .eq('platform', 'mercadolivre')
       .gte('sold_at', from.toISOString())
       .lt('sold_at', to.toISOString())
       .in('status', ['paid', 'completed', 'delivered'])

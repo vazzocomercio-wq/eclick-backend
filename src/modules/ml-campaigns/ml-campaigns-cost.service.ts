@@ -73,7 +73,7 @@ export class MlCampaignsCostService {
         .from('product_listings')
         .select('listing_id')
         .eq('product_id', productId)
-        .eq('platform', 'ML')
+        .eq('platform', 'mercadolivre')
         .limit(1)
         .maybeSingle()
       // Sem categoria direto na tabela — usaremos um default conservador

@@ -655,13 +655,14 @@ export class MlCampaignsSyncService {
     status:        MlItemStatus,
   ) {
     // Lookup product interno via product_listings (listing_id = ml_item_id).
-    // Filtra por platform='ML' e cruza com products.organization_id pra
-    // garantir org match (product_listings nao tem organization_id direto).
+    // Filtra por platform='mercadolivre' (string canônica usada pela UI
+    // de vinculação em /catalogo/vinculos) e cruza com products.organization_id
+    // pra garantir org match.
     const { data: listingRow } = await supabaseAdmin
       .from('product_listings')
       .select('product_id, products!inner(organization_id)')
       .eq('listing_id', it.id)
-      .eq('platform',   'ML')
+      .eq('platform',   'mercadolivre')
       .eq('products.organization_id', orgId)
       .limit(1)
       .maybeSingle()
