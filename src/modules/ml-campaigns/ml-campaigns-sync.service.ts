@@ -266,11 +266,12 @@ export class MlCampaignsSyncService {
   /** Fire-and-forget: dispara enrichItemsMetadata em background.
    *  Retorna imediatamente { items_pending, started: bool }. */
   async enrichMetadataAsync(orgId: string, sellerId?: number): Promise<{ items_pending: number; started: boolean }> {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString()
     let q = supabaseAdmin
       .from('ml_campaign_items')
       .select('ml_item_id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
-      .is('thumbnail_url', null)
+      .or(`last_metadata_synced_at.is.null,last_metadata_synced_at.lt.${cutoff}`)
     if (sellerId != null) q = q.eq('seller_id', sellerId)
     const { count } = await q
     const pending = count ?? 0
@@ -297,18 +298,19 @@ export class MlCampaignsSyncService {
     return { items_pending: pending, started: true }
   }
 
-  /** Fase C: pra cada item sem thumbnail_url, faz batch /items?ids=X
-   *  pra pegar thumbnail/title/permalink. Cap de 200 items por sync
-   *  pra nao consumir muito API. Throttle 1 batch/segundo. */
+  /** Fase C: pra cada item sem last_metadata_synced_at OU com sync >24h,
+   *  faz batch /items?ids=X pra pegar thumbnail/title/permalink/status/
+   *  catalog_listing. Cap de 200 items por sync. Throttle 1 batch/segundo. */
   private async enrichItemsMetadata(
     orgId: string, sellerId: number, token: string,
   ): Promise<{ enriched: number; calls: number }> {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString()
     const { data: rows } = await supabaseAdmin
       .from('ml_campaign_items')
       .select('ml_item_id')
       .eq('organization_id', orgId)
       .eq('seller_id',       sellerId)
-      .is('thumbnail_url',   null)
+      .or(`last_metadata_synced_at.is.null,last_metadata_synced_at.lt.${cutoff}`)
       .limit(200)
 
     if (!rows || rows.length === 0) return { enriched: 0, calls: 0 }
@@ -325,13 +327,14 @@ export class MlCampaignsSyncService {
 
         // Upgrade — UPDATE all rows com esse ml_item_id (1 item × N campanhas)
         for (const it of items) {
-          if (!it.thumbnail && !it.title && !it.permalink) continue
           await supabaseAdmin
             .from('ml_campaign_items')
             .update({
               thumbnail_url:           it.thumbnail ?? null,
               title:                   it.title ?? null,
               permalink:               it.permalink ?? null,
+              listing_status:          it.status ?? null,
+              catalog_listing:         it.catalog_listing ?? false,
               last_metadata_synced_at: new Date().toISOString(),
             })
             .eq('organization_id', orgId)

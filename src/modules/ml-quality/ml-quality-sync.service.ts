@@ -31,6 +31,76 @@ export class MlQualitySyncService {
     private readonly mlQApi:    MlQualityApiClient,
   ) {}
 
+  /** Fire-and-forget: enriquece snapshots com listing_status +
+   *  catalog_listing via batch /items?ids=. Frontend chama isso
+   *  ao carregar a lista de anuncios. Retorna em <1s. */
+  async enrichListingStatusAsync(orgId: string, sellerId?: number): Promise<{ items_pending: number; started: boolean }> {
+    let q = supabaseAdmin
+      .from('ml_quality_snapshots')
+      .select('ml_item_id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .is('listing_status', null)
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    const { count } = await q
+    const pending = count ?? 0
+    if (pending === 0) return { items_pending: 0, started: false }
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const tokens = sellerId != null
+            ? [await this.ml.getTokenForOrg(orgId, sellerId).catch(() => null)].filter(Boolean) as Array<{ token: string; sellerId: number }>
+            : await this.ml.getAllTokensForOrg(orgId).catch(() => [])
+          for (const t of tokens) {
+            await this.enrichListingStatus(orgId, t.sellerId, t.token).catch(e =>
+              this.logger.warn(`[quality:enrich] seller=${t.sellerId} falhou: ${(e as Error).message}`),
+            )
+          }
+        } catch (e) {
+          this.logger.warn(`[quality:enrich-async] erro: ${(e as Error).message}`)
+        }
+      })()
+    })
+    return { items_pending: pending, started: true }
+  }
+
+  /** Pega ate 200 items sem listing_status, batch /items?ids=,
+   *  atualiza ml_quality_snapshots. Throttle 1 batch/seg. */
+  private async enrichListingStatus(orgId: string, sellerId: number, token: string): Promise<void> {
+    const { data: rows } = await supabaseAdmin
+      .from('ml_quality_snapshots')
+      .select('ml_item_id')
+      .eq('organization_id', orgId)
+      .eq('seller_id',       sellerId)
+      .is('listing_status',  null)
+      .limit(200)
+
+    if (!rows || rows.length === 0) return
+    const distinctIds = [...new Set((rows as Array<{ ml_item_id: string }>).map(r => r.ml_item_id))]
+
+    for (let i = 0; i < distinctIds.length; i += 20) {
+      const batch = distinctIds.slice(i, i + 20)
+      try {
+        const items = await this.mlQApi.getItemsListingStatus(token, batch)
+        for (const it of items) {
+          await supabaseAdmin
+            .from('ml_quality_snapshots')
+            .update({
+              listing_status:  it.status ?? null,
+              catalog_listing: it.catalog_listing ?? false,
+              updated_at:      new Date().toISOString(),
+            })
+            .eq('organization_id', orgId)
+            .eq('seller_id',       sellerId)
+            .eq('ml_item_id',      it.id)
+        }
+      } catch (e) {
+        this.logger.warn(`[quality:enrich] batch falhou: ${(e as Error).message}`)
+      }
+      if (i + 20 < distinctIds.length) await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+
   async syncOrg(orgId: string, opts: SyncOpts = {}): Promise<MlQualitySyncResult> {
     const t0 = Date.now()
     const tokens = opts.sellerId != null

@@ -87,30 +87,41 @@ export class MlCampaignsApiClient {
     return Array.isArray(r) ? r : []
   }
 
-  /** GET /items?ids=X1,X2,...&attributes=id,thumbnail,title,permalink
-   *  Batch fetch de metadata visual (max 20 ids por chamada).
-   *  Resposta: array de [{ code, body }] — body tem id/thumbnail/title/permalink. */
+  /** GET /items?ids=X1,X2,...&attributes=...
+   *  Batch fetch de metadata (max 20 ids por chamada). Inclui:
+   *  - thumbnail/title/permalink (visual)
+   *  - status (active/paused/closed/under_review)
+   *  - catalog_listing (boolean — true se compete por buy box) */
   async getItemsMetadata(
     token:    string,
     sellerId: number,
     itemIds:  string[],
-  ): Promise<Array<{ id: string; thumbnail?: string; title?: string; permalink?: string }>> {
+  ): Promise<Array<{
+    id: string;
+    thumbnail?: string;
+    title?: string;
+    permalink?: string;
+    status?: string;
+    catalog_listing?: boolean;
+  }>> {
     if (itemIds.length === 0) return []
     const batch = itemIds.slice(0, 20)
-    const r = await this.requestWithBackoff<Array<{ code: number; body?: { id: string; thumbnail?: string; title?: string; permalink?: string } }>>({
+    const r = await this.requestWithBackoff<Array<{ code: number; body?: { id: string; thumbnail?: string; title?: string; permalink?: string; status?: string; catalog_listing?: boolean } }>>({
       method:  'GET',
       url:     `${ML_BASE}/items`,
       headers: { Authorization: `Bearer ${token}` },
-      params:  { ids: batch.join(','), attributes: 'id,thumbnail,title,permalink' },
+      params:  { ids: batch.join(','), attributes: 'id,thumbnail,title,permalink,status,catalog_listing' },
     }, sellerId)
 
     return r
       .filter(it => it.code === 200 && it.body?.id)
       .map(it => ({
-        id:         it.body!.id,
-        thumbnail:  it.body!.thumbnail,
-        title:      it.body!.title,
-        permalink:  it.body!.permalink,
+        id:               it.body!.id,
+        thumbnail:        it.body!.thumbnail,
+        title:            it.body!.title,
+        permalink:        it.body!.permalink,
+        status:           it.body!.status,
+        catalog_listing:  it.body!.catalog_listing,
       }))
   }
 

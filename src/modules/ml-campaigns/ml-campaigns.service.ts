@@ -15,15 +15,17 @@ interface ListCampaignsInput {
 }
 
 interface ListItemsInput {
-  orgId:        string
-  sellerId?:    number
-  campaignId?:  string                // uuid da row ml_campaigns
-  status?:      'candidate' | 'pending' | 'started' | 'finished'
-  healthStatus?: 'ready' | 'missing_cost' | 'missing_tax' | 'missing_shipping' | 'incomplete'
-  hasSubsidy?:  boolean
-  q?:           string                 // busca por ml_item_id
-  limit?:       number
-  offset?:      number
+  orgId:          string
+  sellerId?:      number
+  campaignId?:    string                // uuid da row ml_campaigns
+  status?:        'candidate' | 'pending' | 'started' | 'finished'
+  healthStatus?:  'ready' | 'missing_cost' | 'missing_tax' | 'missing_shipping' | 'incomplete'
+  hasSubsidy?:    boolean
+  listingStatus?: 'active' | 'paused' | 'closed' | 'under_review'
+  catalogOnly?:   boolean
+  q?:             string                 // busca por ml_item_id
+  limit?:         number
+  offset?:        number
 }
 
 @Injectable()
@@ -128,12 +130,14 @@ export class MlCampaignsService {
       .range(offset, offset + limit - 1)
       .order('updated_at', { ascending: false })
 
-    if (input.sellerId   != null) q = q.eq('seller_id',     input.sellerId)
-    if (input.campaignId)         q = q.eq('campaign_id',   input.campaignId)
-    if (input.status)             q = q.eq('status',        input.status)
-    if (input.healthStatus)       q = q.eq('health_status', input.healthStatus)
-    if (input.hasSubsidy != null) q = q.eq('has_meli_subsidy', input.hasSubsidy)
-    if (input.q?.trim())          q = q.ilike('ml_item_id', `%${input.q.trim()}%`)
+    if (input.sellerId      != null) q = q.eq('seller_id',     input.sellerId)
+    if (input.campaignId)            q = q.eq('campaign_id',   input.campaignId)
+    if (input.status)                q = q.eq('status',        input.status)
+    if (input.healthStatus)          q = q.eq('health_status', input.healthStatus)
+    if (input.hasSubsidy    != null) q = q.eq('has_meli_subsidy', input.hasSubsidy)
+    if (input.listingStatus)         q = q.eq('listing_status', input.listingStatus)
+    if (input.catalogOnly   === true) q = q.eq('catalog_listing', true)
+    if (input.q?.trim())             q = q.ilike('ml_item_id', `%${input.q.trim()}%`)
 
     const { data, count, error } = await q
     if (error) throw new BadRequestException(`listItems: ${error.message}`)

@@ -97,25 +97,29 @@ export class MlCampaignsController {
   listItemsForCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') campaignId: string,
-    @Query('seller_id')      sellerId?:    string,
-    @Query('status')         status?:      string,
-    @Query('health_status')  healthStatus?:string,
-    @Query('has_subsidy')    hasSubsidy?:  string,
-    @Query('q')              q?:           string,
-    @Query('limit')          limit?:       string,
-    @Query('offset')         offset?:      string,
+    @Query('seller_id')      sellerId?:      string,
+    @Query('status')         status?:        string,
+    @Query('health_status')  healthStatus?:  string,
+    @Query('has_subsidy')    hasSubsidy?:    string,
+    @Query('listing_status') listingStatus?: string,
+    @Query('catalog_only')   catalogOnly?:   string,
+    @Query('q')              q?:             string,
+    @Query('limit')          limit?:         string,
+    @Query('offset')         offset?:        string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listItems({
-      orgId:        u.orgId,
-      sellerId:     sellerId ? Number(sellerId) : undefined,
+      orgId:         u.orgId,
+      sellerId:      sellerId ? Number(sellerId) : undefined,
       campaignId,
-      status:       status       as any,
-      healthStatus: healthStatus as any,
-      hasSubsidy:   hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
+      status:        status       as any,
+      healthStatus:  healthStatus as any,
+      hasSubsidy:    hasSubsidy === 'true' ? true : hasSubsidy === 'false' ? false : undefined,
+      listingStatus: listingStatus as any,
+      catalogOnly:   catalogOnly === 'true',
       q,
-      limit:        limit  ? Number(limit)  : 50,
-      offset:       offset ? Number(offset) : 0,
+      limit:         limit  ? Number(limit)  : 50,
+      offset:        offset ? Number(offset) : 0,
     })
   }
 
