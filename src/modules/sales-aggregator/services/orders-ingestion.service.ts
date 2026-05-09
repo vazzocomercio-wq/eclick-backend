@@ -98,12 +98,15 @@ export class OrdersIngestionService {
       return { upserted: 0, skipped: true, reason: 'fetch_failed' }
     }
 
-    // 2. Shipping cost (se tem)
+    // 2. Shipping breakdown (sender/receiver/gross/ml_refund)
     const costMap = new Map<number, number>()
+    const breakdownMap = new Map<number, { sender_cost: number; receiver_cost: number; gross_amount: number; ml_refund: number }>()
     const shipId = order.shipping?.id
     if (shipId) {
       try {
-        costMap.set(shipId, await this.mlClient.fetchShipmentCost(token, shipId))
+        const bd = await this.mlClient.fetchShipmentBreakdown(token, shipId)
+        breakdownMap.set(shipId, bd)
+        costMap.set(shipId, bd.sender_cost)
       } catch { /* best-effort, default 0 */ }
     }
 
@@ -114,8 +117,8 @@ export class OrdersIngestionService {
     const stats: IngestionStats = { ordersFound: 1, rowsUpserted: 0, apiCalls: 0, errors: [] }
     const buyerMap = await this.fetchBuyersForOrders([order], token, stats)
 
-    // 5. Build rows + upsert
-    const rows = this.buildOrderRows(orgId, [order], costMap, listingMap, sellerId, buyerMap)
+    // 5. Build rows + upsert (com breakdown de frete)
+    const rows = this.buildOrderRows(orgId, [order], costMap, listingMap, sellerId, buyerMap, breakdownMap)
     if (rows.length === 0) {
       return { upserted: 0, skipped: true, reason: 'no_rows_built' }
     }
@@ -463,12 +466,14 @@ export class OrdersIngestionService {
     listingMap: Map<string, ProductInfo>,
     sellerId: number,
     buyerMap: Map<string, BuyerSnapshot> = new Map(),
+    breakdownMap: Map<number, { sender_cost: number; receiver_cost: number; gross_amount: number; ml_refund: number }> = new Map(),
   ): Record<string, unknown>[] {
     const rows: Record<string, unknown>[] = []
     const now = new Date().toISOString()
 
     for (const order of orders) {
       const orderShippingCost = order.shipping?.id ? (costMap.get(order.shipping.id) ?? 0) : 0
+      const shipBreakdown     = order.shipping?.id ? breakdownMap.get(order.shipping.id) : undefined
       const orderTotal = order.total_amount ?? 1
       const buyer = buyerMap.get(String(order.id))
       // Buyer name fallback: billing name → first+last → nickname
@@ -503,6 +508,13 @@ export class OrdersIngestionService {
 
         const soldAt = order.date_closed ?? order.date_created
 
+        // Aloca breakdown do frete proporcional ao item (mesmo critério
+        // do shippingCost). Cada componente é split pelo peso do item.
+        const splitRatio = orderTotal > 0 ? (itemTotal / orderTotal) : 0
+        const buyerPaidAlloc  = (shipBreakdown?.receiver_cost ?? 0) * splitRatio
+        const mlRefundAlloc   = (shipBreakdown?.ml_refund     ?? 0) * splitRatio
+        const grossAlloc      = (shipBreakdown?.gross_amount  ?? 0) * splitRatio
+
         rows.push({
           organization_id:         orgId,
           source:                  'mercadolivre',
@@ -517,6 +529,9 @@ export class OrdersIngestionService {
           sale_price:              unitPrice,
           platform_fee:            Math.round(saleFee * 100) / 100,
           shipping_cost:           Math.round(shippingAlloc * 100) / 100,
+          shipping_buyer_paid:     Math.round(buyerPaidAlloc * 100) / 100,
+          shipping_ml_refund:      Math.round(mlRefundAlloc * 100) / 100,
+          shipping_gross:          Math.round(grossAlloc * 100) / 100,
           cost_price:              costPriceTotal != null ? Math.round(costPriceTotal * 100) / 100 : null,
           tax_amount:              taxAmount != null ? Math.round(taxAmount * 100) / 100 : null,
           gross_profit:            Math.round(grossProfit * 100) / 100,

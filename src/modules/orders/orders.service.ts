@@ -478,9 +478,12 @@ interface DbOrderRow {
   sale_price:       number | null
   quantity:         number | null
   cost_price:       number | null
-  platform_fee:     number | null
-  shipping_cost:    number | null
-  tax_amount:       number | null
+  platform_fee:        number | null
+  shipping_cost:       number | null
+  shipping_buyer_paid: number | null
+  shipping_ml_refund:  number | null
+  shipping_gross:      number | null
+  tax_amount:          number | null
   gross_profit:     number | null
   contribution_margin:     number | null
   contribution_margin_pct: number | null
@@ -620,9 +623,17 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     // undefined (reading 'toLocaleString')".
     tarifa_ml:        row.platform_fee  ?? 0,
     frete_vendedor:   row.shipping_cost ?? 0,
-    frete_comprador:  0,
+    frete_comprador:  row.shipping_buyer_paid ?? 0,
     lucro_bruto:      row.gross_profit  ?? 0,
     margem_contribuicao_pct: row.contribution_margin_pct ?? 0,
+    // Breakdown novo do frete (Sprint UI extra) — UI mostra
+    // tooltips detalhados + linha de reembolso ML
+    shipping_breakdown: {
+      buyer_paid:  row.shipping_buyer_paid ?? 0,
+      ml_refund:   row.shipping_ml_refund  ?? 0,
+      seller_paid: row.shipping_cost       ?? 0,
+      gross:       row.shipping_gross      ?? 0,
+    },
     has_problem:      row.has_problem,
     problem_note:     row.problem_note,
     problem_severity: row.problem_severity,

@@ -166,6 +166,49 @@ export class MercadoLivreClient {
     }
   }
 
+  /** Breakdown completo do frete — usado pra mostrar:
+   *  - Frete comprador (receiver.cost)
+   *  - Reembolso ML (gross_amount − sender.cost − receiver.cost, ou
+   *    soma dos sender.discounts.promoted_amount, dependendo do caso)
+   *  - Frete vendedor (sender.cost — o que ele realmente paga)
+   *  - Frete bruto (gross_amount — valor cheio sem descontos) */
+  async fetchShipmentBreakdown(token: string, shipmentId: number): Promise<{
+    sender_cost:     number
+    receiver_cost:   number
+    gross_amount:    number
+    ml_refund:       number
+  }> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await this.withRetry<any>(() =>
+        axios.get(`${ML_BASE}/shipments/${shipmentId}/costs`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      )
+      const senderCost   = Number(data?.senders?.[0]?.cost ?? 0)
+      const receiverCost = Number(data?.receiver?.cost ?? data?.receivers?.[0]?.cost ?? 0)
+      const grossAmount  = Number(data?.gross_amount ?? 0)
+      // Reembolso ML = bruto − o que cobrou de ambos. Se ML descontou
+      // do vendedor (sender_discount.promoted_amount) e/ou comprador
+      // (receiver_discount.promoted_amount), o reembolso aparece aí.
+      // Pegamos o sender.discounts mais relevante (promoted_amount).
+      const senderDiscounts = data?.senders?.[0]?.discounts ?? []
+      const senderPromoted = senderDiscounts.reduce(
+        (s: number, d: { promoted_amount?: number }) => s + Number(d?.promoted_amount ?? 0), 0,
+      )
+      // ml_refund = quanto ML bancou do total: bruto − pago efetivo de ambos
+      const mlRefund = Math.max(0, grossAmount - senderCost - receiverCost) || senderPromoted
+      return {
+        sender_cost:   Math.round(senderCost * 100) / 100,
+        receiver_cost: Math.round(receiverCost * 100) / 100,
+        gross_amount:  Math.round(grossAmount * 100) / 100,
+        ml_refund:     Math.round(mlRefund * 100) / 100,
+      }
+    } catch {
+      return { sender_cost: 0, receiver_cost: 0, gross_amount: 0, ml_refund: 0 }
+    }
+  }
+
   /** PASSO 1 do fluxo oficial — `GET /orders/{id}` retorna o pedido inteiro,
    * incluindo `buyer.billing_info.id` que precisamos pra resolver dados
    * fiscais no PASSO 2. Sempre envia `x-version: 2`. Lança em erro pra que o
