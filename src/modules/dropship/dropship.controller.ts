@@ -83,6 +83,15 @@ export class DropshipController {
 
   // ── Account-Suppliers ────────────────────────────────────────────────────
 
+  @Get('connected-accounts')
+  async listConnectedAccounts(
+    @Headers('authorization') auth: string,
+    @Query('marketplace') marketplace: string,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listConnectedAccounts(orgId, marketplace)
+  }
+
   @Get('account-suppliers')
   async listAccountSuppliers(
     @Headers('authorization') auth: string,

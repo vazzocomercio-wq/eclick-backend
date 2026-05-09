@@ -412,6 +412,99 @@ export class DropshipService {
 
   // ── Account-Supplier mapping ──────────────────────────────────────────────
 
+  /** Lista contas de marketplace JÁ CONECTADAS na plataforma (via OAuth)
+   *  pra UI de "Novo Vínculo" oferecer dropdown em vez de input livre.
+   *  - mercado_livre → ml_connections (canônica)
+   *  - shopee/amazon/magalu/others → marketplace_connections (status=active) */
+  async listConnectedAccounts(orgId: string, marketplace: string): Promise<{
+    marketplace: string
+    accounts: Array<{
+      id_field: 'seller_id' | 'shopee_shop_id' | 'amazon_seller_id'
+      id_value: string
+      nickname: string | null
+      already_linked: boolean
+    }>
+  }> {
+    if (!marketplace) throw new BadRequestException('marketplace obrigatório')
+
+    type Acc = {
+      id_field: 'seller_id' | 'shopee_shop_id' | 'amazon_seller_id'
+      id_value: string
+      nickname: string | null
+    }
+    let raw: Acc[] = []
+
+    if (marketplace === 'mercado_livre') {
+      const { data } = await supabaseAdmin
+        .from('ml_connections')
+        .select('seller_id, nickname')
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false })
+      raw = (data ?? []).map(r => ({
+        id_field: 'seller_id' as const,
+        id_value: String(r.seller_id),
+        nickname: r.nickname ?? null,
+      }))
+    } else if (['shopee', 'amazon', 'magalu', 'others'].includes(marketplace)) {
+      const platformMap: Record<string, string> = {
+        shopee: 'shopee', amazon: 'amazon', magalu: 'magalu', others: 'others',
+      }
+      const { data } = await supabaseAdmin
+        .from('marketplace_connections')
+        .select('platform, seller_id, shop_id, external_id, nickname, status')
+        .eq('organization_id', orgId)
+        .eq('platform', platformMap[marketplace])
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+      raw = (data ?? []).map(r => {
+        if (marketplace === 'shopee') {
+          return {
+            id_field: 'shopee_shop_id' as const,
+            id_value: String(r.shop_id ?? r.external_id ?? r.seller_id ?? ''),
+            nickname: r.nickname ?? null,
+          }
+        }
+        if (marketplace === 'amazon') {
+          return {
+            id_field: 'amazon_seller_id' as const,
+            id_value: String(r.seller_id ?? r.external_id ?? ''),
+            nickname: r.nickname ?? null,
+          }
+        }
+        // magalu/others: usa seller_id como fallback
+        return {
+          id_field: 'seller_id' as const,
+          id_value: String(r.seller_id ?? r.external_id ?? ''),
+          nickname: r.nickname ?? null,
+        }
+      }).filter(a => a.id_value)
+    }
+
+    // Marca as que já têm vínculo ativo (pra UX)
+    const { data: existing } = await supabaseAdmin
+      .from('seller_account_suppliers')
+      .select('seller_id, shopee_shop_id, amazon_seller_id')
+      .eq('organization_id', orgId)
+      .eq('marketplace', marketplace)
+      .is('active_until', null)
+    const linkedSet = new Set<string>()
+    for (const e of (existing ?? [])) {
+      const key = e.seller_id != null ? `seller_id:${e.seller_id}`
+        : e.shopee_shop_id ? `shopee_shop_id:${e.shopee_shop_id}`
+        : e.amazon_seller_id ? `amazon_seller_id:${e.amazon_seller_id}`
+        : null
+      if (key) linkedSet.add(key)
+    }
+
+    return {
+      marketplace,
+      accounts: raw.map(a => ({
+        ...a,
+        already_linked: linkedSet.has(`${a.id_field}:${a.id_value}`),
+      })),
+    }
+  }
+
   async listAccountSuppliers(orgId: string, filters: { supplier_id?: string; marketplace?: string }) {
     let query = supabaseAdmin
       .from('seller_account_suppliers')
