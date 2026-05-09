@@ -6,6 +6,7 @@ import { EmailSenderService } from '../messaging/email-sender.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 import { FinanceiroService } from '../financeiro/financeiro.service'
 import { LlmService } from '../ai/llm.service'
+import PDFDocument from 'pdfkit'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
@@ -1429,6 +1430,169 @@ export class DropshipService {
       },
       recent_orders: recent ?? [],
     }
+  }
+
+  // ── PDF Generation (Sprint 6.5) ──────────────────────────────────────────
+
+  /** Gera PDF da OC. Layout simples: header + dados parceiro + tabela items
+   *  + totais + footer. Retorna Buffer pronto pra response binária. */
+  async generateOCPdf(orgId: string, ocId: string): Promise<Buffer> {
+    const oc = await this.getOC(orgId, ocId) as Record<string, unknown> & {
+      items: Array<{
+        partner_sku: string; product_name: string; quantity: number;
+        unit_cost: number; line_total: number; ml_order_id: string | null;
+      }>
+    }
+    const supRaw = oc.suppliers as unknown
+    const sup = (Array.isArray(supRaw) ? supRaw[0] : supRaw) as {
+      name: string; legal_name: string | null; tax_id: string | null;
+      contact_email: string | null; contact_phone: string | null;
+      payment_terms: string | null; payment_method: string | null;
+    } | null
+
+    return new Promise<Buffer>((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ size: 'A4', margin: 50, bufferPages: true })
+        const chunks: Buffer[] = []
+        doc.on('data', (c: Buffer) => chunks.push(c))
+        doc.on('end', () => resolve(Buffer.concat(chunks)))
+        doc.on('error', reject)
+
+        // ── Header ─────────────────────────────────────────────────────────
+        doc.fillColor('#0a0a0e').rect(0, 0, doc.page.width, 80).fill()
+        doc.fillColor('#00E5FF').fontSize(18).font('Helvetica-Bold')
+          .text('e-Click', 50, 30)
+        doc.fillColor('#ffffff').fontSize(10).font('Helvetica')
+          .text('Ordem de Compra Dropship', 50, 52)
+        doc.fillColor('#a1a1aa').fontSize(9)
+          .text(`Gerada em ${new Date().toLocaleString('pt-BR')}`, doc.page.width - 200, 30, { width: 150, align: 'right' })
+
+        // ── Número OC + status ──────────────────────────────────────────────
+        doc.fillColor('#000000').fontSize(20).font('Helvetica-Bold')
+          .text(`${oc.oc_number}`, 50, 100)
+        doc.fillColor('#71717a').fontSize(10).font('Helvetica')
+          .text(`Status: ${oc.status}`, 50, 125)
+          .text(`Marketplace: ${oc.marketplace_account_label ?? oc.marketplace}`, 50, 140)
+
+        // ── Datas (lado direito) ────────────────────────────────────────────
+        doc.fontSize(9)
+          .text('Data de referência:', 380, 100, { width: 150, align: 'left' })
+          .font('Helvetica-Bold').fillColor('#000000')
+          .text(fmtDate(String(oc.reference_date)), 380, 113, { width: 150, align: 'left' })
+          .font('Helvetica').fillColor('#71717a')
+          .text('Vencimento:', 380, 130, { width: 150, align: 'left' })
+          .font('Helvetica-Bold').fillColor('#000000')
+          .text(fmtDate(String(oc.due_date)), 380, 143, { width: 150, align: 'left' })
+
+        // ── Dados parceiro ──────────────────────────────────────────────────
+        let y = 175
+        doc.moveTo(50, y).lineTo(545, y).strokeColor('#e4e4e7').stroke()
+        y += 10
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000')
+          .text('PARCEIRO', 50, y)
+        y += 18
+        doc.fontSize(10).font('Helvetica').fillColor('#000000')
+          .text(sup?.name ?? '—', 50, y)
+        y += 14
+        doc.fontSize(9).fillColor('#71717a')
+          .text(`Razão Social: ${sup?.legal_name ?? '—'}    CNPJ: ${sup?.tax_id ?? '—'}`, 50, y)
+        y += 12
+        doc.text(`Contato: ${sup?.contact_email ?? '—'}    ${sup?.contact_phone ?? ''}`, 50, y)
+        y += 12
+        doc.text(`Pagamento: ${sup?.payment_terms ?? '—'} dias · ${(sup?.payment_method ?? '—').toUpperCase()}`, 50, y)
+        y += 18
+
+        // ── Tabela de items ─────────────────────────────────────────────────
+        doc.moveTo(50, y).lineTo(545, y).strokeColor('#e4e4e7').stroke()
+        y += 10
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#000000')
+          .text('ITENS', 50, y)
+        y += 20
+
+        // Cabeçalho da tabela
+        doc.fillColor('#f4f4f5').rect(50, y, 495, 20).fill()
+        doc.fillColor('#000000').fontSize(8).font('Helvetica-Bold')
+          .text('SKU PARCEIRO', 55, y + 6, { width: 90 })
+          .text('PRODUTO',      150, y + 6, { width: 200 })
+          .text('PEDIDO ML',    355, y + 6, { width: 80 })
+          .text('QTD',          440, y + 6, { width: 30, align: 'right' })
+          .text('CUSTO',        475, y + 6, { width: 65, align: 'right' })
+        y += 22
+
+        // Rows
+        doc.fontSize(8).font('Helvetica').fillColor('#000000')
+        for (const item of oc.items.slice(0, 30)) {
+          if (y > 720) {
+            doc.addPage()
+            y = 50
+          }
+          doc.text(item.partner_sku ?? '—', 55, y, { width: 90, ellipsis: true })
+          doc.text(item.product_name ?? '—', 150, y, { width: 200, ellipsis: true })
+          doc.fillColor('#71717a').text(item.ml_order_id ?? '—', 355, y, { width: 80, ellipsis: true })
+          doc.fillColor('#000000').text(String(item.quantity), 440, y, { width: 30, align: 'right' })
+          doc.text(fmtBrl(Number(item.line_total)), 475, y, { width: 65, align: 'right' })
+          y += 14
+        }
+        if (oc.items.length > 30) {
+          doc.fillColor('#71717a').fontSize(8).font('Helvetica-Oblique')
+            .text(`...mais ${oc.items.length - 30} itens não listados (ver Excel completo)`, 55, y)
+          y += 14
+        }
+
+        // ── Totais ──────────────────────────────────────────────────────────
+        y += 10
+        doc.moveTo(350, y).lineTo(545, y).strokeColor('#e4e4e7').stroke()
+        y += 10
+        doc.fontSize(9).font('Helvetica').fillColor('#71717a')
+          .text(`${oc.items_count} itens · ${oc.units_count} unidades`, 50, y)
+
+        const drawTotal = (label: string, val: number, bold = false, color = '#000000') => {
+          doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color)
+            .fontSize(bold ? 11 : 9)
+            .text(label, 350, y, { width: 130, align: 'right' })
+            .text(fmtBrl(val), 480, y, { width: 60, align: 'right' })
+          y += bold ? 18 : 14
+        }
+        drawTotal('Bruto:', Number(oc.gross_total))
+        if (Number(oc.total_credits) > 0) {
+          drawTotal('Devoluções:', -Number(oc.return_credits))
+          if (Number(oc.cancellation_credits) > 0) drawTotal('Cancelamentos:', -Number(oc.cancellation_credits))
+          if (Number(oc.warranty_credits) > 0) drawTotal('Garantias:', -Number(oc.warranty_credits))
+          if (Number(oc.divergence_credits) > 0) drawTotal('Divergências:', -Number(oc.divergence_credits))
+          if (Number(oc.other_credits) > 0) drawTotal('Outros:', -Number(oc.other_credits))
+          drawTotal('Total créditos:', -Number(oc.total_credits), false, '#fcd34d')
+        }
+        y += 4
+        doc.moveTo(350, y).lineTo(545, y).strokeColor('#000000').stroke()
+        y += 10
+        drawTotal('LÍQUIDO A PAGAR:', Number(oc.net_total), true, '#0a0a0e')
+
+        // ── Footer ──────────────────────────────────────────────────────────
+        const range = doc.bufferedPageRange()
+        for (let i = 0; i < range.count; i++) {
+          doc.switchToPage(range.start + i)
+          doc.fontSize(8).fillColor('#71717a').font('Helvetica')
+            .text(
+              `Página ${i + 1} de ${range.count}  ·  Documento gerado por e-Click  ·  ${oc.oc_number}`,
+              50, doc.page.height - 40,
+              { width: doc.page.width - 100, align: 'center' },
+            )
+        }
+
+        doc.end()
+      } catch (e) { reject(e) }
+    })
+  }
+
+  async generateOCPdfByToken(token: string): Promise<{ buffer: Buffer; ocNumber: string }> {
+    const session = await this.validatePortalToken(token)
+    const buffer = await this.generateOCPdf(session.organization_id, session.oc_id)
+    const { data: oc } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select('oc_number')
+      .eq('id', session.oc_id)
+      .maybeSingle()
+    return { buffer, ocNumber: oc?.oc_number ?? 'oc' }
   }
 
   /** Status de configuração da org pra UI mostrar avisos (banner amber)
@@ -3751,6 +3915,14 @@ ${message.trim()}`
 
 function generatePortalToken(): string {
   return randomBytes(32).toString('hex')  // 64 chars hex
+}
+
+function fmtDate(d: string): string {
+  return new Date(d).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+}
+
+function fmtBrl(v: number): string {
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
 
 function computeDueDate(today: Date, paymentTerms: string | null): string {

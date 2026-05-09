@@ -1,7 +1,7 @@
 import {
-  Controller, Get, Post, Param, Body, Req, Headers,
+  Controller, Get, Post, Param, Body, Req, Res, Headers,
 } from '@nestjs/common'
-import type { Request } from 'express'
+import type { Request, Response } from 'express'
 import { DropshipService } from './dropship.service'
 
 /**
@@ -47,5 +47,20 @@ export class DropshipPortalController {
     @Body() body: { approver_name: string; approver_email: string; reason: string },
   ) {
     return this.svc.rejectOCByToken(token, body)
+  }
+
+  /** Download PDF da OC (público com token) */
+  @Get(':token/pdf')
+  async pdf(
+    @Param('token') token: string,
+    @Res() res: Response,
+  ) {
+    const { buffer, ocNumber } = await this.svc.generateOCPdfByToken(token)
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="${ocNumber}.pdf"`,
+      'Cache-Control': 'no-store',
+    })
+    res.send(buffer)
   }
 }

@@ -1,7 +1,8 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query,
-  UseGuards, HttpCode, HttpStatus, Headers, HttpException,
+  UseGuards, HttpCode, HttpStatus, Headers, HttpException, Res,
 } from '@nestjs/common'
+import type { Response } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import {
@@ -330,6 +331,22 @@ export class DropshipController {
   async generateOCs(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.generateDailyOCs(orgId)
+  }
+
+  @Get('oc/:id/pdf')
+  async ocPdf(
+    @Headers('authorization') auth: string,
+    @Param('id') id: string,
+    @Res() res: Response,
+  ) {
+    const orgId = await this.resolveOrgId(auth)
+    const buffer = await this.svc.generateOCPdf(orgId, id)
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="${id}.pdf"`,
+      'Cache-Control': 'no-store',
+    })
+    res.send(buffer)
   }
 
   @Post('oc/:id/cancel')
