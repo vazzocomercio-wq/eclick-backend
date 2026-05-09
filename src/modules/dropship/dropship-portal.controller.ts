@@ -64,3 +64,41 @@ export class DropshipPortalController {
     res.send(buffer)
   }
 }
+
+/**
+ * Webhooks de marketplaces (rotas públicas, validação por payload structure).
+ *
+ * Registrar URLs nos providers:
+ *   ML:     POST {BACKEND_URL}/webhooks/ml/claims (topic claims)
+ *   Shopee: POST {BACKEND_URL}/webhooks/shopee/returns
+ *
+ * v1 cria registro em dropship_returns rascunho. Operador completa
+ * detalhes (return_amount, type específico, responsibility) via UI.
+ *
+ * v2 vai fetchar API com token armazenado e auto-classificar.
+ */
+@Controller('webhooks')
+export class DropshipWebhooksController {
+  constructor(private readonly svc: DropshipService) {}
+
+  @Post('ml/claims')
+  async mlClaim(@Body() payload: {
+    resource: string;
+    topic: string;
+    user_id: number;
+    application_id?: number;
+    sent?: string;
+  }) {
+    return this.svc.handleMLClaimWebhook(payload)
+  }
+
+  @Post('shopee/returns')
+  async shopeeReturn(@Body() payload: {
+    code?: number;
+    shop_id?: number;
+    timestamp?: number;
+    data?: { ordersn?: string; return_sn?: string; status?: string };
+  }) {
+    return this.svc.handleShopeeReturnWebhook(payload)
+  }
+}

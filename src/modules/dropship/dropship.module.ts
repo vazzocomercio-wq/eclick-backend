@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common'
 import { DropshipController } from './dropship.controller'
-import { DropshipPortalController } from './dropship-portal.controller'
+import { DropshipPortalController, DropshipWebhooksController } from './dropship-portal.controller'
 import { DropshipService } from './dropship.service'
 import { MessagingModule } from '../messaging/messaging.module'
 import { WhatsAppModule } from '../whatsapp/whatsapp.module'
@@ -9,7 +9,7 @@ import { AiModule } from '../ai/ai.module'
 
 @Module({
   imports: [MessagingModule, WhatsAppModule, FinanceiroModule, AiModule],
-  controllers: [DropshipController, DropshipPortalController],
+  controllers: [DropshipController, DropshipPortalController, DropshipWebhooksController],
   providers: [DropshipService],
   exports: [DropshipService],
 })

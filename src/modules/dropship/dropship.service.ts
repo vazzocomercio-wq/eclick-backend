@@ -3553,6 +3553,182 @@ export class DropshipService {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  // POLISH #8 — WEBHOOKS ML/SHOPEE DE DEVOLUÇÃO
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Recebe webhook do ML pra topic="claims". ML envia notificação leve
+   * (só user_id + resource), backend deve fetchar detalhes via API com
+   * o token do seller.
+   *
+   * Fluxo v1 (parcial):
+   *   1. Resolve org via seller_id em ml_connections
+   *   2. Cria registro em dropship_returns com status='opened',
+   *      source='marketplace_webhook', external_id=resource ID
+   *   3. raw_marketplace_data armazena o payload pra análise posterior
+   *
+   * TODO v2:
+   *   - Validar IP de origem do ML (lista oficial de IPs)
+   *   - Fetch detalhes do claim via /post-purchase/v1/claims/{id}
+   *     (precisa MercadolivreService.getTokenForOrg)
+   *   - Mapear claim.reason_id → return_type (ML tem ~50 codes)
+   *   - Resolver responsibility do contrato em supplier_dropship_profiles
+   *     .return_responsibility
+   *   - Auto-aprovar e disparar applyReturnCredit se contrato permitir
+   */
+  async handleMLClaimWebhook(payload: {
+    resource: string;     // ex: "/claims/12345"
+    topic: string;        // ex: "claims"
+    user_id: number;      // = seller_id ML
+    application_id?: number;
+    sent?: string;
+  }): Promise<{ ok: boolean; reason?: string; return_id?: string }> {
+    if (payload.topic !== 'claims') return { ok: true, reason: 'topic ignorado' }
+    if (!payload.user_id || !payload.resource) return { ok: false, reason: 'payload incompleto' }
+
+    // Extract claim ID
+    const claimMatch = payload.resource.match(/\/claims\/(\d+)/)
+    const claimId = claimMatch?.[1]
+    if (!claimId) return { ok: false, reason: 'claim ID não extraído' }
+
+    // 1. Resolve org via seller_id
+    const { data: mlConn } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id, seller_id')
+      .eq('seller_id', payload.user_id)
+      .maybeSingle()
+    if (!mlConn) return { ok: false, reason: 'seller_id não vinculado a nenhuma org' }
+    const orgId = mlConn.organization_id as string
+
+    // 2. Resolve supplier via seller_account_suppliers (account → supplier)
+    const { data: accSup } = await supabaseAdmin
+      .from('seller_account_suppliers')
+      .select('supplier_id')
+      .eq('organization_id', orgId)
+      .eq('marketplace', 'mercado_livre')
+      .eq('seller_id', payload.user_id)
+      .is('active_until', null)
+      .maybeSingle()
+    if (!accSup) return { ok: true, reason: 'conta não vinculada a supplier dropship' }
+
+    // 3. Idempotência: já existe return com mesmo external_id?
+    const { data: existing } = await supabaseAdmin
+      .from('dropship_returns')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('marketplace', 'mercado_livre')
+      .eq('external_id', claimId)
+      .maybeSingle()
+    if (existing) return { ok: true, reason: 'return já criado', return_id: existing.id }
+
+    // 4. Cria return em rascunho. v1 sem fetch ML — operador completa
+    //    return_type / return_amount manualmente até webhook v2 fetchar
+    //    detalhes.
+    const { data: ret, error } = await supabaseAdmin
+      .from('dropship_returns')
+      .insert({
+        organization_id: orgId,
+        supplier_id: accSup.supplier_id,
+        marketplace: 'mercado_livre',
+        return_type: 'reclamation_refund',  // default — operador ajusta
+        source: 'marketplace_webhook',
+        external_id: claimId,
+        return_amount: 0,                   // operador preenche
+        return_quantity: 1,
+        responsibility: 'undefined',
+        status: 'opened',
+        marketplace_return_status: 'open',
+        marketplace_opened_at: new Date().toISOString(),
+        opened_at: new Date().toISOString(),
+        internal_notes: `Webhook ML claim ${claimId} — preencher detalhes`,
+      })
+      .select('id')
+      .single()
+    if (error) {
+      this.logger.error(`[webhook-ml] erro criar return: ${error.message}`)
+      return { ok: false, reason: error.message }
+    }
+
+    this.logger.log(`[webhook-ml] org=${orgId} claim=${claimId} return=${ret.id} criado`)
+    return { ok: true, return_id: ret.id }
+  }
+
+  /**
+   * Webhook Shopee Return Push (escopo reduzido v1).
+   * Shopee envia notification.return_status com partner_id + shop_id +
+   * data interna do return.
+   *
+   * TODO v2:
+   *   - Validar HMAC com partner_key (header X-Sign)
+   *   - Fetch /api/v2/returns/get_return_detail pra dados completos
+   */
+  async handleShopeeReturnWebhook(payload: {
+    code?: number;
+    shop_id?: number;
+    timestamp?: number;
+    data?: { ordersn?: string; return_sn?: string; status?: string };
+  }): Promise<{ ok: boolean; reason?: string; return_id?: string }> {
+    const shopId = payload.shop_id
+    const returnSn = payload.data?.return_sn
+    if (!shopId || !returnSn) return { ok: false, reason: 'payload incompleto' }
+
+    const { data: conn } = await supabaseAdmin
+      .from('marketplace_connections')
+      .select('organization_id')
+      .eq('platform', 'shopee')
+      .eq('shop_id', String(shopId))
+      .eq('status', 'active')
+      .maybeSingle()
+    if (!conn) return { ok: false, reason: 'shop_id não vinculado' }
+    const orgId = conn.organization_id as string
+
+    const { data: accSup } = await supabaseAdmin
+      .from('seller_account_suppliers')
+      .select('supplier_id')
+      .eq('organization_id', orgId)
+      .eq('marketplace', 'shopee')
+      .eq('shopee_shop_id', String(shopId))
+      .is('active_until', null)
+      .maybeSingle()
+    if (!accSup) return { ok: true, reason: 'conta não vinculada a supplier dropship' }
+
+    const { data: existing } = await supabaseAdmin
+      .from('dropship_returns')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('marketplace', 'shopee')
+      .eq('external_id', returnSn)
+      .maybeSingle()
+    if (existing) return { ok: true, reason: 'return já criado', return_id: existing.id }
+
+    const { data: ret, error } = await supabaseAdmin
+      .from('dropship_returns')
+      .insert({
+        organization_id: orgId,
+        supplier_id: accSup.supplier_id,
+        marketplace: 'shopee',
+        return_type: 'reclamation_refund',
+        source: 'marketplace_webhook',
+        external_id: returnSn,
+        shopee_order_id: payload.data?.ordersn ?? null,
+        return_amount: 0,
+        return_quantity: 1,
+        responsibility: 'undefined',
+        status: 'opened',
+        marketplace_return_status: payload.data?.status ?? 'open',
+        marketplace_opened_at: new Date().toISOString(),
+        opened_at: new Date().toISOString(),
+        internal_notes: `Webhook Shopee return ${returnSn} — preencher detalhes`,
+      })
+      .select('id')
+      .single()
+    if (error) return { ok: false, reason: error.message }
+
+    this.logger.log(`[webhook-shopee] org=${orgId} return_sn=${returnSn} return=${ret.id} criado`)
+    return { ok: true, return_id: ret.id }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // SPRINT 12 — DETECÇÃO DE DIVERGÊNCIAS (REGRAS) + COPILOTO IA
   // ══════════════════════════════════════════════════════════════════════════
 

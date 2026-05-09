@@ -1279,27 +1279,48 @@ contextuais por rota.`,
 ]
 
 // ════════════════════════════════════════════════════════════════════════
-// Dropship Center IA (F9) — em desenvolvimento (Sprint 1)
+// Dropship Center IA (F9) — completo (12 sprints)
 // ════════════════════════════════════════════════════════════════════════
 
 const DROPSHIP_ENTRIES: KbEntry[] = [
   {
-    routes:   ['/dashboard/dropship', '/dashboard/dropship/partners', '/dashboard/dropship/partners/new', '/dashboard/dropship/partners/[id]'],
+    routes:   ['/dashboard/dropship'],
     category: 'dropship',
-    title:    'Dropship Center — parceiros e operação',
-    content: `**Central do dropship.** Gerencia parceiros (fornecedores que despacham direto pro comprador final), catálogo, OCs diárias, devoluções e abatimentos.
+    title:    'Dropship Center — visão geral',
+    content: `**Central do dropship.** Operação completa: parceiros, catálogo, identificação automática de pedidos, OCs diárias, portal do parceiro, devoluções, créditos, disputas, score, divergências, copiloto IA.
 
-**Princípio do fluxo**: Vendeu → Despachou → Conferiu → OC do dia → Aprovou → Pagou → Devolução abate.
+**Princípio**: Vendeu → Despachou → Conferiu → OC do dia → Aprovou → Pagou → Devolução abate.
 
-**Cadastro do parceiro** (\`/dashboard/dropship/partners/new\`):
-- Reusa cadastro de fornecedor (\`suppliers\`) e adiciona perfil dropship (\`supplier_dropship_profiles\` 1:1).
-- Campos do supplier: nome, CNPJ, contato, prazo/método de pagamento.
-- Campos dropship: e-mail/WhatsApp de notificação, cutoff time (até quando o parceiro aceita pedidos do dia), ship_lead_days, integration_type (manual/spreadsheet/api/erp_bling/etc.), janela de OC (preview 12h, cutoff 21h, geração 22h), cost_strategy (default \`current_table\` — custo da tabela vigente), return_credit_strategy (default \`next_oc\`).
+**KPIs no dashboard** (\`/dashboard/dropship\`): Parceiros ativos, SKUs dropship, Despachados hoje, Receita hoje, CMV, Margem, Em Hold, Sem Estoque. Banner de alerta se há pedidos em hold ou SKUs sem estoque do parceiro.
 
-**Status do parceiro**: \`active\` (em operação), \`paused\` (pausa temporária), \`inactive\` (arquivado), \`pending_setup\` (cadastro incompleto).
+**Cron jobs ativos**:
+- \`dropship-identify-orders\` @5min — busca orders novos das contas vinculadas a parceiros e cria \`dropship_order_identifications\`
+- \`dropship-oc-generation\` @22h diário — agrupa identifications elegíveis por (supplier, marketplace, conta) e gera OCs
+- \`dropship-monthly-scores\` @00:30 dia 1 — calcula score do mês anterior dos parceiros ativos
+- \`dropship-divergence-scan\` @02h — detecta 3 tipos de divergência (atraso envio, sem mapeamento, preço<custo)`,
+    tags: ['dropship', 'overview'],
+  },
+  {
+    routes:   ['/dashboard/dropship/partners', '/dashboard/dropship/partners/new', '/dashboard/dropship/partners/[id]'],
+    category: 'dropship',
+    title:    'Parceiros dropship — cadastro e configuração',
+    content: `**Cadastro do parceiro** (\`/dashboard/dropship/partners/new\`):
+Form único com 6 seções (Identificação / Contato / Notificação / Janela operacional / Estratégia / Pagamento). Backend faz 2 inserts atômicos (\`suppliers\` + \`supplier_dropship_profiles\`).
 
-**Score 0-100** (Camada D4 — em desenvolvimento): stock_accuracy, ship_lead_compliance, divergence_rate, return_rate, approval_speed.`,
-    tags: ['dropship', 'partners', 'fornecedor', 'cadastro'],
+**Campos críticos**:
+- \`notification_email\` (obrigatório) — pra onde a OC é enviada
+- \`cutoff_time\` (default 14h) — até quando parceiro processa pedido do dia
+- \`integration_type\`: manual / spreadsheet / api / csv_email / sftp / erp_bling / erp_tiny / erp_omie
+- \`cost_strategy\` (default \`current_table\`) — custo do momento da OC, não do momento da venda
+- \`return_credit_strategy\` (default \`next_oc\`) — devolução vira crédito na próxima OC
+- Janela OC: \`oc_preview_open_time\` 12h, \`oc_review_cutoff_time\` 21h, \`oc_generation_time\` 22h
+
+**Status**: active / paused (com paused_reason) / inactive (arquivado) / pending_setup. Soft-delete via DELETE = status='inactive'.
+
+**Detalhe do parceiro** mostra KPIs (status / SKUs ativos / pedidos 30d / a pagar) + 3 botões secundários no header (Catálogo / Logs sync / Arquivar).
+
+**Saldo de créditos**: badge na lista mostra valor pendente por parceiro (de devoluções aprovadas que viraram \`dropship_partner_credits\`).`,
+    tags: ['dropship', 'partners', 'cadastro'],
   },
   {
     routes:   ['/dashboard/dropship/account-suppliers'],
@@ -1307,29 +1328,309 @@ const DROPSHIP_ENTRIES: KbEntry[] = [
     title:    'Vínculo conta de marketplace ↔ parceiro',
     content: `**Mapeia "qual parceiro despacha pelos pedidos desta conta de marketplace".**
 
-Necessário porque cada conta ML/Shopee/Amazon pode ter um parceiro diferente. Quando entra um pedido novo:
-1. Sistema lê seller_id (ML) / shop_id (Shopee) / seller_id (Amazon)
+Quando entra um pedido novo no Mercado Livre/Shopee/Amazon, o cron @5min:
+1. Lê \`order.seller_id\` (ML) ou \`shop_id\` (Shopee) ou \`amazon_seller_id\`
 2. Busca em \`seller_account_suppliers\` qual supplier está vinculado a essa conta
-3. Cria \`dropship_order_identifications\` com supplier_id resolvido (Sprint 3)
+3. Resolve \`product_id\` via SKU se products.product_id é null
+4. Valida \`products.supply_type='dropship'\`
+5. Cria \`dropship_order_identifications\` com supplier_id resolvido + snapshot de custo + margem estimada
 
-**Hoje (v1)**: 1 conta = 1 supplier default. **v2**: regras dinâmicas por SKU/região/preço.
+**Hoje (v1)**: 1 conta = 1 supplier default (\`is_default=true\`). **v2 (futuro)**: regras dinâmicas por SKU/região/preço.
 
-**Quando desvincular**: setar \`active_until\` em vez de DELETE — mantém histórico de quem despachou cada pedido antigo.`,
+**Pedido sem mapeamento** (account não vinculada): o cron NÃO cria identification. O pedido é tratado como NÃO-dropship.
+
+**Pedido com SKU sem supplier_product**: cria identification status='on_hold' com hold_reason explicativo. Aparece na divergência \`missing_partner_product\`.
+
+**Desvincular**: setar \`active_until\` em vez de DELETE — preserva histórico.`,
     tags: ['dropship', 'marketplace', 'mapping'],
   },
   {
     routes:   ['/dashboard/dropship/partners/[id]/products', '/dashboard/dropship/partners/[id]/import'],
     category: 'dropship',
     title:    'Catálogo do parceiro + importação',
-    content: `**Catálogo dropship** vive em \`supplier_products\` (mesma tabela do cadastro genérico de fornecedor) com 10 colunas extras: \`partner_stock\`, \`partner_reserved\`, \`partner_available\` (generated), \`master_sku\`, \`partner_packaging_cost\`, \`partner_handling_cost\`, \`last_*_at\`, \`dropship_status\`.
+    content: `**Catálogo dropship** vive em \`supplier_products\` (mesma tabela do cadastro genérico) com 10 colunas extras dropship: \`partner_stock\`, \`partner_reserved\`, \`partner_available\` (generated), \`master_sku\`, \`partner_packaging_cost\`, \`partner_handling_cost\`, \`last_*_at\`, \`dropship_status\`.
 
-**Sync de catálogo** (Sprint 2 — em desenvolvimento):
-- Manual: form direto na UI
-- Planilha (XLSX/CSV): upload + mapping de colunas + preview antes de aplicar
-- API/ERP (Bling/Tiny/Omie): integração programada
+**Adicionar produto**: modal lateral com autocomplete de products (search via supabase.from('products').or(name.ilike,sku.ilike) com debounce 250ms) + form de cost/packaging/handling/stock/lead/moq.
 
-**Custo vigente vs custo histórico**: na geração da OC (22h), o sistema usa o custo ATUAL de \`supplier_products.unit_cost\`. \`supplier_cost_history\` (auditoria) mostra evolução mas não muda o cálculo retroativamente.`,
-    tags: ['dropship', 'catalog', 'sync', 'planilha'],
+**Editar produto**: modal mostra cost decomposto. Mudança de custo pede motivo + cria snapshot em \`supplier_cost_history\` (auditoria, NÃO afeta cálculo retroativo).
+
+**Histórico de custos**: clique no ícone History → modal timeline de \`supplier_cost_history\` com snapshot vigente destacado em cyan.
+
+**Importação em massa** (\`/import\`): wizard 3-step:
+1. Upload XLSX/CSV com colunas: supplier_sku (req), unit_cost (req), master_sku, product_sku, packaging_cost, handling_cost, stock, lead_time_days, moq. Aliases case-insensitive aceitos (PT-BR + EN).
+2. Preview com KPIs (válidas/erro) + tabela 30 primeiras linhas marcando erros.
+3. POST /dropship/partner-products/bulk-import. Upsert por (supplier, product). Detecta cost change >5% e marca em significant_cost_changes. Resultado mostra criados/atualizados/falhas + link pro sync log.
+
+**Custo vigente vs histórico**: OC gerada às 22h usa \`supplier_products.unit_cost\` ATUAL (current_table strategy). cost_history só audita.`,
+    tags: ['dropship', 'catalog', 'sync', 'planilha', 'import'],
+  },
+  {
+    routes:   ['/dashboard/dropship/orders', '/dashboard/dropship/orders/today'],
+    category: 'dropship',
+    title:    'Pedidos dropship — identificação e gestão',
+    content: `**\`/dashboard/dropship/orders\`** lista pedidos identificados como dropship. Tabela com pedido ID + marketplace pill + parceiro + produto (com thumb) + qtd/preço/custo/margem (verde se >0, red se <0) + status pill + ações.
+
+**Status workflow** (14 estados): \`identified\` → \`shipped\` → \`shipped_confirmed\` → \`eligible_for_oc\` → \`in_oc_*\` → \`in_payable\` → \`paid\`. Atalhos: \`on_hold\` (com hold_reason) / \`returned\` / \`cancelled\`.
+
+**Ações inline**: Pause (suspende com reason) / Play (libera de hold). Botão "Forçar identificação" no header dispara o cron manualmente.
+
+**\`/dashboard/dropship/orders/today\`** mostra agregação do dia:
+- 5 KPIs gerais (Pedidos / Unidades / Receita / CMV / Margem com cor semântica)
+- Cards por parceiro (orders count + receita/CMV/margem + % margem)
+- Tabela detalhada cronológica do dia
+
+**Margem estimada**: salva snapshot em identification (cost_at_sale + sale_price + estimated_margin). Pra cálculo final usa \`supplier_products.unit_cost\` vigente quando OC é gerada.`,
+    tags: ['dropship', 'orders', 'pedidos'],
+  },
+  {
+    routes:   ['/dashboard/dropship/oc', '/dashboard/dropship/oc/preview', '/dashboard/dropship/oc/[id]'],
+    category: 'dropship',
+    title:    'Ordens de Compra (OC) Dropship — geração diária + portal',
+    content: `**OC dropship ≠ purchase_order de importação**. OC dropship é diária (cron @22h), 1 por (supplier, marketplace, conta), numeração \`DOC-YYYY-MM-DD-SUPPLIER_SLUG-NNN\`.
+
+**Workflow status**: draft → generated → sent → viewed → approved → in_payable → paid. Pode também: rejected / cancelled / on_hold.
+
+**\`/dashboard/dropship/oc\`** — lista com 4 KPIs (Total / Geradas-sem-envio / Aguard. aprovação / Valor líquido total). CutoffBanner no topo mostra fase atual:
+- 00:00-12:00 cinza "Aguardando prévia abrir"
+- 12:00-21:00 cyan "Prévia aberta"
+- 21:00-22:00 amber "Prévia trancada"
+- 22:00-00:00 verde "OCs do dia geradas"
+Countdown ao próximo evento (re-render @1min).
+
+**\`/oc/preview\`** — agregação live (calcula on-the-fly, não persiste): mostra quais OCs SERIAM geradas se rodasse cron agora, agrupadas por (supplier, marketplace) com items_count + units + gross_total estimado. Auto-refresh @60s.
+
+**\`/oc/[id]\`** — detalhe rico:
+- Status pill grande + datas (referência/vencimento)
+- 4 KPIs (Itens/Unidades/Bruto/Líquido)
+- Breakdown de créditos (5 tipos: return/cancellation/warranty/divergence/other) quando total_credits>0
+- Dados do parceiro denormalizados (CNPJ/contato/payment_terms)
+- Tabela de items com thumb + custo decomposto + status item
+- Botões: **Excel** (gera client-side via lib xlsx, 2 abas), **Enviar Parceiro** (dispara e-mail+WA com link portal), **Cancelar OC** (com prompt motivo — reverte items pra eligible_for_oc).
+
+**Portal do parceiro** (\`/portal/oc/[token]\`, **PÚBLICO sem auth**):
+- Token 64 chars hex aleatório (crypto.randomBytes(32))
+- Expira 72h
+- Registra IP+user_agent acumulado em arrays
+- Aprovação OU rejeição com nome+email do aprovador
+- Aprovação dispara side-effect: cria \`accounts_payable\` automático + atualiza OC status='in_payable' + payable_id
+
+**Régua de vencimento**: lê \`suppliers.payment_terms\` ('15'/'30'/'D+45') → due_date.`,
+    tags: ['dropship', 'oc', 'portal', 'aprovacao'],
+  },
+  {
+    routes:   ['/dashboard/dropship/sync-logs'],
+    category: 'dropship',
+    title:    'Logs de sincronização do catálogo',
+    content: `**Histórico de imports/syncs do catálogo** dropship. Cada import de planilha cria 1 row em \`dropship_sync_logs\` com:
+- Counters (processados / criados / atualizados / falhas)
+- significant_cost_changes JSONB (lista de SKUs com mudança >5%)
+- out_of_stock_skus[]
+- validation_errors JSONB (linhas que falharam com motivo)
+- Status: running → completed / partial / failed
+
+**Filtro deep-link**: \`?supplier_id=X\` filtra logs daquele parceiro (botão "Logs" no detalhe do parceiro).
+
+**v1 popula via**: spreadsheet_import (POST /partner-products/bulk-import). Outros sync types (api_pull, sftp, csv_email) ficam pra futuras integrações.`,
+    tags: ['dropship', 'sync', 'logs'],
+  },
+  {
+    routes:   ['/dashboard/dropship/returns'],
+    category: 'dropship',
+    title:    'Devoluções dropship + régua de crédito',
+    content: `**Devoluções abertas pelo COMPRADOR** (cancelamento, defeito, arrependimento, etc.) que geram crédito do parceiro conforme régua de 4 cenários.
+
+**11 tipos**: cancellation / return_buyer_regret / return_defective / return_wrong_item / return_damaged / return_not_delivered / return_incomplete / warranty_claim / reclamation_refund / chargeback / partner_negotiated.
+
+**Responsibility**: partner (default — gera crédito) / seller (nós absorvemos) / shared (50/50 default, configurável via responsibility_split.partner_pct) / buyer (arrependimento) / undefined.
+
+**Régua de crédito 4 cenários** (aplicada ao aprovar):
+1. \`same_oc_unpaid\`: OC ainda em draft/preview_locked → marca item excluded + recalcula totais
+2. \`same_oc_approved_unpaid\`: OC sent/viewed/approved (não paga) → marca item credited + ajusta net_total dentro da OC
+3. \`next_oc_credit\`: OC já paid → cria saldo em \`dropship_partner_credits\` (status pending) pra abater na próxima OC
+4. \`pending_dispute\`: responsibility != partner/shared → status='disputed', sem crédito
+
+**Auto-aplicação na OC do dia**: cron @22h após criar OC chama applyPendingCreditsToOC FIFO — itera credits pending do supplier, aplica até zerar gross ou esgotar saldo, decompõe por type (return/cancellation/warranty/etc.) na OC.
+
+**v1 criação manual**. Webhooks ML/Shopee deferidos pra v2 (precisa registrar em ML Application + endpoint público com HMAC).`,
+    tags: ['dropship', 'returns', 'credits', 'regua'],
+  },
+  {
+    routes:   ['/dashboard/dropship/credits'],
+    category: 'dropship',
+    title:    'Saldo de créditos do parceiro',
+    content: `**Créditos pendentes** (\`dropship_partner_credits\` status='pending') que serão aplicados na próxima OC do parceiro automaticamente.
+
+**Fontes**:
+- Devoluções aprovadas com cenário \`next_oc_credit\` (OC original já paga)
+- Ajustes manuais (status='manual_adjustment')
+- Pagamento anterior excedente (status='previous_payment')
+
+**7 credit_types**: return / cancellation / warranty / divergence / manual_adjustment / negotiated_discount / previous_payment. Cada tipo decompõe em campo correto da próxima OC (return_credits, cancellation_credits, warranty_credits, divergence_credits, other_credits).
+
+**\`/dashboard/dropship/credits\`** mostra saldo total + cards por parceiro (pending/applied/count) + lista detalhada com link "Ver OC" quando applied_to_oc_id preenchido.
+
+**FIFO**: ao aplicar créditos numa OC nova, ordena por created_at ascending. Suporta aplicação parcial (status \`partially_applied\`).`,
+    tags: ['dropship', 'credits', 'saldo'],
+  },
+  {
+    routes:   ['/dashboard/dropship/disputes'],
+    category: 'dropship',
+    title:    'Disputas — contestações entre seller e parceiro',
+    content: `**Disputas ≠ Devoluções**: returns são abertas pelo comprador. Disputas são abertas pelo SELLER ou PARCEIRO contestando algum valor/responsabilidade.
+
+**6 dispute_types**: cost_divergence (custo divergente da OC) / responsibility (quem absorve devolução) / amount (valor do crédito) / product_returned (parceiro alega não receber) / item_inclusion (item não deveria estar na OC) / other.
+
+**8 status**: open → in_review → mediation → resolved_(partner|seller|compromise) → closed. Ou escalated (jurídico/manual).
+
+**Side-effects**:
+- Criar dispute vinculada a return → atualiza return.status='disputed'
+- Resolver dispute (resolved_partner) → return volta pra 'approved'
+- Resolver dispute (resolved_seller) → return.status='rejected'
+- Resolver dispute (resolved_compromise) → return.status='analyzed' (operador decide depois)
+
+**Modal Resolver** pede: tipo de resolução (3 opções) + final_resolved_amount + texto de resolução obrigatório (vai pro registro de auditoria).`,
+    tags: ['dropship', 'disputes', 'conflito'],
+  },
+  {
+    routes:   ['/dashboard/dropship/scores'],
+    category: 'dropship',
+    title:    'Score do parceiro v1 (5 dimensões × 20pts)',
+    content: `**Score 0-100 mensal** dos parceiros dropship. Cron @00:30 dia 1 do mês calcula score do mês ANTERIOR (período fixo: 1º do mês passado → 1º deste).
+
+**5 dimensões cada 0-20 pts**:
+1. \`stock_accuracy\` = 20 × (active_skus - oos) / active_skus
+2. \`ship_lead_compliance\` = 20 × (orders sem atraso >48h shipped lag)
+3. \`divergence_rate\` = 20 × (1 - divergencesCount/orders) — populado quando Sprint 12 detecta
+4. \`return_rate\` = 20 × (1 - credit_applied returns / orders)
+5. \`approval_speed\` = 20 - (avg_approval_hours / 24) × 5
+
+**Sem dados** retorna 16-18 pts (neutro, não penaliza parceiros novos).
+
+**Insights gerados** (basic v1, IA na v2): warning se dimensão <14, improvement se score subiu ≥5pts vs mês anterior.
+
+**\`/dashboard/dropship/scores\`** — ranking ordenado por total_score desc:
+- 4 KPIs (parceiros pontuados / score médio / top score / em risco<60)
+- Cards expandíveis: posição #N (1-3 com troféus gold/silver/bronze) + score grande colorido (verde≥80, amber≥60, red<60) + indicator change (TrendingUp/Down)
+- Click expande: 5 dimensões com barras coloridas + insights (improvement/warning)
+
+**Botão "Recalcular agora"** força fora do cron (útil pra testar). Atualiza \`supplier_dropship_profiles.partner_score\` após cálculo.`,
+    tags: ['dropship', 'score', 'ranking', 'kpi'],
+  },
+  {
+    routes:   ['/dashboard/dropship/divergences'],
+    category: 'dropship',
+    title:    'Divergências detectadas automaticamente',
+    content: `**Cron @02h diário** scan-eia 3 regras automáticas:
+
+1. **\`shipment_delay\`**: identifications sem shipped_at após 48h.
+   Severity: 48-72h=medium, 72-96h=high, >96h=critical.
+   Ação sugerida: contatar parceiro pra confirmar status.
+
+2. **\`missing_partner_product\`**: identifications on_hold com hold_reason "%mapeamento%".
+   Severity: high.
+   Ação: cadastrar produto no catálogo do parceiro ou pausar anúncio.
+
+3. **\`price_below_cost\`**: products.price < unit_cost+packaging+handling.
+   Severity: critical.
+   Ação: reajustar preço ou pausar anúncio.
+
+**Outras 6 regras planejadas v2**: cost_change_uninformed, cost_at_oc_different, stock_inconsistency, no_shipment_confirmation, return_amount_mismatch, duplicate_oc_item.
+
+**Idempotência**: UNIQUE constraint composto (type + refs) WHERE status IN open/ack/investig garante que não cria duplicada.
+
+**Workflow status**: open → acknowledged → investigating → resolved / ignored. Operador clica botões inline (CheckCircle2 / EyeOff) com prompts de notas/motivo.
+
+**4 severities** com border-left colorido nos cards: critical=red / high=orange / medium=amber / low=gray.
+
+**Botão "Escanear agora"** força run fora do cron @02h.`,
+    tags: ['dropship', 'divergencias', 'regras', 'auto'],
+  },
+  {
+    routes:   ['/dashboard/dropship/copilot'],
+    category: 'dropship',
+    title:    'Copiloto IA do Dropship',
+    content: `**Chat com IA** focado no dropship (\`/dashboard/dropship/copilot\`).
+
+**Como funciona** (v1):
+1. Operador faz pergunta em texto livre
+2. Backend coleta contexto agregado: KPIs do dashboard, top 10 scores, parceiros at risk, devoluções abertas, divergências críticas
+3. Monta system prompt PT-BR focado: usar APENAS dados reais, sugerir ações com nome de tela, max 4 parágrafos
+4. Chama LlmService.generateText feature='copilot_help' (Haiku 4.5 com fallback Sonnet)
+5. Resposta em texto livre (sem tool calling em v1)
+
+**Sugestões iniciais** (clicáveis):
+- "Quais parceiros estão em risco hoje?"
+- "Quanto eu tenho a pagar nos próximos 7 dias?"
+- "Quais devoluções estão abertas?"
+- "Que divergências críticas tenho?"
+- "Como está o score do top parceiro?"
+- "Quais SKUs estão sem estoque?"
+
+**Tools/function calling** deferido pra v2 (precisaria estender LlmService pra expor a interface tools-aware do Anthropic SDK).
+
+**Custo**: ~$0.001-0.005/mensagem (Haiku 4.5 é barato). Logged em ai_usage_log via LlmService.`,
+    tags: ['dropship', 'copilot', 'ia', 'chat'],
+  },
+  {
+    routes:   ['/portal/oc/[token]'],
+    category: 'dropship',
+    title:    'Portal público do parceiro (sem login)',
+    content: `**Rota pública**: \`/portal/oc/[token]\` — fora do dashboard, sem auth.
+
+**Como o parceiro chega aqui**: e-mail/WhatsApp com link disparado pelo seller via botão "Enviar Parceiro" na detalhe da OC.
+
+**Token**: 64 chars hex aleatório (\`crypto.randomBytes(32).toString('hex')\`). Expira 72h. Cada acesso registra IP + user_agent acumulado em arrays pra auditoria.
+
+**Tela do parceiro** mostra:
+- Header eClick + número OC + countdown do token
+- Card Parceiro (CNPJ/razão social/marketplace/datas/payment_terms)
+- 3 KPIs grandes (Bruto / Créditos / Líquido cyan)
+- Breakdown de créditos (5 tipos) quando total>0
+- Tabela items com thumb + custo decomposto
+- Notas seller (se houver)
+
+**2 ações**:
+- **Aprovar**: nome+email obrigatórios + notas opcional. Se notas preenchido vira \`approved_with_notes\`. Side-effect: cria \`accounts_payable\` automático e atualiza OC pra \`in_payable\`.
+- **Rejeitar**: motivo obrigatório (vai pro \`partner_rejection_reason\`). Sem crédito.
+
+**Estados**: já processada / link expirado / link inválido com mensagens claras.`,
+    tags: ['dropship', 'portal', 'parceiro', 'publico'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Financeiro — Contas a Pagar (Sprint 7 dropship)
+// ════════════════════════════════════════════════════════════════════════
+
+const FINANCEIRO_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/financeiro/contas-a-pagar', '/dashboard/financeiro/contas-a-pagar/[id]'],
+    category: 'financeiro',
+    title:    'Contas a Pagar (módulo financeiro genérico)',
+    content: `**Módulo \`accounts_payable\` polimórfico** que serve qualquer fluxo de saída — não só dropship.
+
+**Source types** (9): \`dropship_oc\` (auto-criado quando OC dropship aprovada via portal) / \`purchase_order\` (importação — futura integração) / \`manual\` (lançamento manual) / \`service\` / \`rent\` / \`tax\` / \`salary\` / \`utility\` / \`other\`.
+
+**Auto-criação dropship**: quando parceiro aprova OC no portal, side-effect cria payable com:
+- description: \`OC {oc_number} · {marketplace_account}\`
+- amount: \`oc.net_total\`
+- due_date: \`oc.due_date\` (calculada de \`suppliers.payment_terms\`)
+- beneficiary_name: parceiro (denormalizado)
+- category: 'CMV Dropship'
+- metadata: { oc_id, oc_number }
++ atualiza \`oc.payable_id\` + status='in_payable'.
+UNIQUE (source_type, source_id) garante idempotência.
+
+**Numeração**: \`AP-YYYYMM-NNNN\` (sequencial mensal por org).
+
+**5 status**: pending → partial / paid / overdue / cancelled. Cron @06h marca pending/partial com due_date<today como overdue.
+
+**\`/dashboard/financeiro/contas-a-pagar\`** mostra 5 KPIs (Em aberto / Vencidas / Próx 7d / Próx 30d / Pago no mês), filtros (Em aberto agregado / Vencidas / Pendentes / Parciais / Pagas / Todas), search por descrição/beneficiário/número.
+
+**Modal Pagar** suporta pagamento parcial (\`paid_amount\`), 8 métodos (pix/boleto/transfer/check/cash/credit_card/debit_card/other), URL comprovante (paste manual). Quando totalmente pago + source=dropship_oc → side-effect: marca OC como \`paid\` com payment_method/reference.
+
+**Cancelar** rejeita se já paga.`,
+    tags: ['financeiro', 'contas-a-pagar', 'payable', 'dropship'],
   },
 ]
 
@@ -1346,6 +1647,7 @@ export const KB: KbEntry[] = [
   ...CRM_ENTRIES,
   ...COMPRAS_PRICING_ENTRIES,
   ...DROPSHIP_ENTRIES,
+  ...FINANCEIRO_ENTRIES,
   ...SALES_ENTRIES,
   ...ADS_ENTRIES,
   ...ML_CAMPAIGNS_ENTRIES,
