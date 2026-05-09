@@ -291,6 +291,12 @@ export class DropshipController {
     return this.svc.getTodayOrders(orgId)
   }
 
+  @Get('setup-status')
+  async setupStatus(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getSetupStatus(orgId)
+  }
+
   // ── OC (Sprint 4) ──────────────────────────────────────────────────────────
 
   @Get('oc')

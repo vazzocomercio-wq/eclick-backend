@@ -54,7 +54,7 @@ export class FinanceiroService {
 
   // ── Cron: marca payables vencidos como overdue ────────────────────────────
 
-  @Cron('0 6 * * *', { name: 'financeiro-mark-overdue' })
+  @Cron('0 6 * * *', { name: 'financeiro-mark-overdue', timeZone: 'America/Sao_Paulo' })
   async markOverdueTick() {
     try {
       const today = new Date().toISOString().slice(0, 10)

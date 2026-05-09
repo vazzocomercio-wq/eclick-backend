@@ -223,7 +223,14 @@ export class DropshipService {
     private readonly waSender: WhatsAppSender,
     private readonly financeiro: FinanceiroService,
     private readonly llm: LlmService,
-  ) {}
+  ) {
+    if (!process.env.FRONTEND_URL) {
+      this.logger.warn(
+        `[config] FRONTEND_URL não definida — usando fallback ${FRONTEND_URL}. ` +
+        `Configure no Railway env se for diferente (afeta links do portal do parceiro).`,
+      )
+    }
+  }
 
   // ── Partners (supplier + dropship_profile) ─────────────────────────────────
 
@@ -1424,6 +1431,71 @@ export class DropshipService {
     }
   }
 
+  /** Status de configuração da org pra UI mostrar avisos (banner amber)
+   *  quando algo crítico não está configurado. */
+  async getSetupStatus(orgId: string): Promise<{
+    has_partners: boolean
+    has_active_partners: boolean
+    has_email_config: boolean
+    has_whatsapp_config: boolean
+    has_account_links: boolean
+    blockers: string[]
+  }> {
+    // Email config (procura row em email_settings)
+    const { data: emailCfg } = await supabaseAdmin
+      .from('email_settings')
+      .select('id, is_verified')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    const hasEmail = !!emailCfg
+
+    // WhatsApp config (env Z-API OU Meta cfg no DB)
+    const hasZapi = !!process.env.ZAPI_INSTANCE_ID && !!process.env.ZAPI_TOKEN
+    let hasWaCfg = hasZapi
+    if (!hasWaCfg) {
+      const { data: waCfg } = await supabaseAdmin
+        .from('whatsapp_configs')
+        .select('id')
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      hasWaCfg = !!waCfg
+    }
+
+    // Partners
+    const { count: partnersCount } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+    const { count: activePartnersCount } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('dropship_status', 'active')
+
+    // Vínculos conta-supplier
+    const { count: linksCount } = await supabaseAdmin
+      .from('seller_account_suppliers')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .is('active_until', null)
+
+    const blockers: string[] = []
+    if (!partnersCount) blockers.push('no_partners')
+    else if (!activePartnersCount) blockers.push('no_active_partners')
+    if (!linksCount) blockers.push('no_account_links')
+    if (!hasEmail) blockers.push('no_email_config')
+    if (!hasWaCfg) blockers.push('no_whatsapp_config')
+
+    return {
+      has_partners: !!partnersCount,
+      has_active_partners: !!activePartnersCount,
+      has_email_config: hasEmail,
+      has_whatsapp_config: hasWaCfg,
+      has_account_links: !!linksCount,
+      blockers,
+    }
+  }
+
   async getTodayOrders(orgId: string) {
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -1488,7 +1560,7 @@ export class DropshipService {
   // ══════════════════════════════════════════════════════════════════════════
 
   /** Cron: 22h todo dia gera OCs de cada org */
-  @Cron('0 22 * * *', { name: 'dropship-oc-generation' })
+  @Cron('0 22 * * *', { name: 'dropship-oc-generation', timeZone: 'America/Sao_Paulo' })
   async generateOCsTick() {
     try {
       const { data: orgs } = await supabaseAdmin
@@ -3021,7 +3093,7 @@ export class DropshipService {
   // ══════════════════════════════════════════════════════════════════════════
 
   /** Cron @00:30 dia 1 do mês: calcula score do mês anterior pra todas orgs */
-  @Cron('30 0 1 * *', { name: 'dropship-monthly-scores' })
+  @Cron('30 0 1 * *', { name: 'dropship-monthly-scores', timeZone: 'America/Sao_Paulo' })
   async monthlyScoresTick() {
     try {
       const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
@@ -3321,7 +3393,7 @@ export class DropshipService {
   // ══════════════════════════════════════════════════════════════════════════
 
   /** Cron @02h diário: scan de divergências por org */
-  @Cron('0 2 * * *', { name: 'dropship-divergence-scan' })
+  @Cron('0 2 * * *', { name: 'dropship-divergence-scan', timeZone: 'America/Sao_Paulo' })
   async divergenceScanTick() {
     try {
       const { data: orgs } = await supabaseAdmin.from('organizations').select('id')
