@@ -145,7 +145,17 @@ export class OrdersIngestionService {
     runId: string,
   ): Promise<IngestionStats> {
     const t0 = Date.now()
-    const { token, sellerId } = await this.mlClient.getTokenForOrg(orgId)
+
+    // CRITICAL: itera TODAS as contas ML conectadas da org. Antes pegava
+    // só a com updated_at mais recente (getTokenForOrg sem sellerId), o
+    // que fazia o aggregator ignorar pedidos das outras contas em orgs
+    // multi-conta. Resultado pré-fix: a tela /pedidos parava de receber
+    // pedidos da conta principal quando uma conta secundária era
+    // conectada/atualizada depois.
+    const tokens = await this.mlClient.getAllTokensForOrg(orgId)
+    if (tokens.length === 0) {
+      throw new Error('Nenhuma conta ML conectada nesta organização')
+    }
 
     // Build listing→product lookup map for this org (once, upfront)
     const listingMap = await this.buildListingMap(orgId)
@@ -155,98 +165,100 @@ export class OrdersIngestionService {
 
     for (let i = 0; i < dates.length; i++) {
       const date = dates[i]
-      try {
-        // Update current processing date
-        await supabaseAdmin
-          .from('aggregator_runs')
-          .update({ current_date_processing: date, processed_dates: i })
-          .eq('id', runId)
+      // Update current processing date (1 vez por data, antes do fan-out de contas)
+      await supabaseAdmin
+        .from('aggregator_runs')
+        .update({ current_date_processing: date, processed_dates: i })
+        .eq('id', runId)
 
-        const { orders, apiCalls } = await this.mlClient.fetchOrdersByDateRange(token, sellerId, date, date)
-        stats.apiCalls += apiCalls
-        stats.ordersFound += orders.length
+      // Fan-out por conta — cada conta usa seu próprio token e sellerId
+      for (const { token, sellerId } of tokens) {
+        try {
+          const { orders, apiCalls } = await this.mlClient.fetchOrdersByDateRange(token, sellerId, date, date)
+          stats.apiCalls += apiCalls
+          stats.ordersFound += orders.length
 
-        if (orders.length === 0) continue
+          if (orders.length === 0) continue
 
-        // Fetch shipping costs in parallel (one per order that has shipping)
-        const shipIds = [...new Set(orders.map(o => o.shipping?.id).filter(Boolean))] as number[]
-        const costMap = new Map<number, number>()
-        if (shipIds.length > 0) {
-          const costResults = await Promise.allSettled(
-            shipIds.map(id => this.mlClient.fetchShipmentCost(token, id)),
-          )
-          stats.apiCalls += shipIds.length
-          shipIds.forEach((id, idx) => {
-            const r = costResults[idx]
-            costMap.set(id, r.status === 'fulfilled' ? r.value : 0)
-          })
-        }
+          // Fetch shipping costs in parallel (one per order that has shipping)
+          const shipIds = [...new Set(orders.map(o => o.shipping?.id).filter(Boolean))] as number[]
+          const costMap = new Map<number, number>()
+          if (shipIds.length > 0) {
+            const costResults = await Promise.allSettled(
+              shipIds.map(id => this.mlClient.fetchShipmentCost(token, id)),
+            )
+            stats.apiCalls += shipIds.length
+            shipIds.forEach((id, idx) => {
+              const r = costResults[idx]
+              costMap.set(id, r.status === 'fulfilled' ? r.value : 0)
+            })
+          }
 
-        // Fetch buyer billing for orders we haven't billed yet (CPF/email/phone).
-        // Reuses any cached value already in DB so we never re-hit ML for the
-        // same order. New orders get 1.1s pacing → no 429s on the billing
-        // endpoint. The downstream sync_buyer_to_unified trigger fires per row.
-        const buyerMap = await this.fetchBuyersForOrders(orders, token, stats)
+          // Fetch buyer billing for orders we haven't billed yet (CPF/email/phone).
+          // Reuses any cached value already in DB so we never re-hit ML for the
+          // same order. New orders get 1.1s pacing → no 429s on the billing
+          // endpoint. The downstream sync_buyer_to_unified trigger fires per row.
+          const buyerMap = await this.fetchBuyersForOrders(orders, token, stats)
 
-        // Build rows for every order item
-        const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId, buyerMap)
+          // Build rows for every order item
+          const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId, buyerMap)
 
-        if (rows.length > 0) {
-          const BATCH = 100
-          for (let b = 0; b < rows.length; b += BATCH) {
-            const batch = rows.slice(b, b + BATCH)
-            const { error } = await supabaseAdmin
-              .from('orders')
-              .upsert(batch, {
-                onConflict: 'source,external_order_id,sku',
-                ignoreDuplicates: false,
-              })
-            if (error) {
-              console.error(`[aggregator] UPSERT FAILED on ${date} batch ${b}:`, error.message)
-              stats.errors.push({ date, error: `upsert batch ${b}: ${error.message}` })
-            } else {
-              stats.rowsUpserted += batch.length
+          if (rows.length > 0) {
+            const BATCH = 100
+            for (let b = 0; b < rows.length; b += BATCH) {
+              const batch = rows.slice(b, b + BATCH)
+              const { error } = await supabaseAdmin
+                .from('orders')
+                .upsert(batch, {
+                  onConflict: 'source,external_order_id,sku',
+                  ignoreDuplicates: false,
+                })
+              if (error) {
+                console.error(`[aggregator] UPSERT FAILED on ${date} seller=${sellerId} batch ${b}:`, error.message)
+                stats.errors.push({ date, error: `seller=${sellerId} upsert batch ${b}: ${error.message}` })
+              } else {
+                stats.rowsUpserted += batch.length
+              }
             }
           }
-        }
 
-        // Auto-trigger de jornadas (Messaging Studio) — best-effort.
-        // Falha aqui não derruba a ingestion; engine de retry depende dos
-        // próprios runs. 1 evento por order (não por row); status mapeado
-        // pra trigger_event no MessagingService.statusToTrigger().
-        try {
-          const events = orders.map(o => {
-            const buyer = buyerMap.get(String(o.id))
-            const first = o.order_items?.[0]
-            return {
-              external_order_id: String(o.id),
-              status:            o.status ?? null,
-              buyer_phone:       buyer?.phone ?? null,
-              buyer_name:        buyer?.name  ?? null,
-              product_title:     first?.item?.title ?? null,
-            }
-          })
-          await this.messaging.fireForOrderEvents(orgId, events)
+          // Auto-trigger de jornadas (Messaging Studio) — best-effort.
+          // Falha aqui não derruba a ingestion; engine de retry depende dos
+          // próprios runs. 1 evento por order (não por row); status mapeado
+          // pra trigger_event no MessagingService.statusToTrigger().
+          try {
+            const events = orders.map(o => {
+              const buyer = buyerMap.get(String(o.id))
+              const first = o.order_items?.[0]
+              return {
+                external_order_id: String(o.id),
+                status:            o.status ?? null,
+                buyer_phone:       buyer?.phone ?? null,
+                buyer_name:        buyer?.name  ?? null,
+                product_title:     first?.item?.title ?? null,
+              }
+            })
+            await this.messaging.fireForOrderEvents(orgId, events)
+          } catch (err: unknown) {
+            this.logger.warn(`[messaging.trigger] hook falhou: ${(err as Error)?.message}`)
+          }
         } catch (err: unknown) {
-          this.logger.warn(`[messaging.trigger] hook falhou: ${(err as Error)?.message}`)
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error(`[aggregator] error on ${date} seller=${sellerId}:`, msg)
+          stats.errors.push({ date, error: `seller=${sellerId}: ${msg}` })
         }
-
-        // Update run stats
-        await supabaseAdmin
-          .from('aggregator_runs')
-          .update({
-            processed_dates: i + 1,
-            orders_fetched: stats.ordersFound,
-            orders_inserted: stats.rowsUpserted,
-            api_calls_made: stats.apiCalls,
-          })
-          .eq('id', runId)
-
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[aggregator] error on ${date}:`, msg)
-        stats.errors.push({ date, error: msg })
       }
+
+      // Update run stats — após processar todas as contas dessa data
+      await supabaseAdmin
+        .from('aggregator_runs')
+        .update({
+          processed_dates: i + 1,
+          orders_fetched: stats.ordersFound,
+          orders_inserted: stats.rowsUpserted,
+          api_calls_made: stats.apiCalls,
+        })
+        .eq('id', runId)
     }
 
     // Consolidated final summary + persist for /sync-stats endpoint

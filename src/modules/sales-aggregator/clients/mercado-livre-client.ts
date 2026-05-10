@@ -117,6 +117,10 @@ export class MercadoLivreClient {
     return this.ml.getTokenForOrg(orgId, sellerId)
   }
 
+  async getAllTokensForOrg(orgId: string): Promise<Array<{ token: string; sellerId: number }>> {
+    return this.ml.getAllTokensForOrg(orgId)
+  }
+
   async fetchOrdersByDateRange(
     token: string,
     sellerId: number,
