@@ -63,15 +63,17 @@ export class OrdersIngestionService {
    *  chama isso pra fazer upsert imediato (não espera aggregator
    *  periódico). Latência observada: ~2-4s do bipe ao DB.
    *
-   *  Reúso 100% — usa mesmos helpers do ingestDateRange (fetchShipmentCost,
-   *  fetchBuyersForOrders, buildOrderRows). Só pula:
-   *  - aggregator_runs progress updates (n/a pra single order)
-   *  - countCpfFromBatch (n/a)
-   *  - jornadas auto-trigger (mantém — webhook = evento canônico)
-   *
-   *  Idempotente: upsert por (source, external_order_id, sku). Se já
-   *  existe, atualiza com dados novos (status mudou, etc). */
-  async ingestSingleOrder(orgId: string, externalOrderId: string | number): Promise<{
+   *  CRITICAL: o `sellerId` precisa ser passado pelo dispatcher (vem do
+   *  payload do webhook = `payload.user_id`). Sem isso, em orgs com mais
+   *  de 1 conta ML conectada, getTokenForOrg pega a conta com updated_at
+   *  mais recente — pode ser a errada — e fetchOrder retorna 404 porque
+   *  o token não tem acesso àquele pedido. Resultado: upserted=0, pedido
+   *  some, UI nunca atualiza. */
+  async ingestSingleOrder(
+    orgId: string,
+    externalOrderId: string | number,
+    sellerIdHint?: number,
+  ): Promise<{
     upserted: number
     skipped:  boolean
     reason?:  string
@@ -79,9 +81,9 @@ export class OrdersIngestionService {
     const t0 = Date.now()
     let token: string, sellerId: number
     try {
-      ({ token, sellerId } = await this.mlClient.getTokenForOrg(orgId))
+      ({ token, sellerId } = await this.mlClient.getTokenForOrg(orgId, sellerIdHint))
     } catch (e) {
-      this.logger.warn(`[single-ingest] org=${orgId} sem token ML: ${(e as Error).message}`)
+      this.logger.warn(`[single-ingest] org=${orgId} seller=${sellerIdHint ?? 'auto'} sem token ML: ${(e as Error).message}`)
       return { upserted: 0, skipped: true, reason: 'no_ml_token' }
     }
 

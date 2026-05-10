@@ -76,7 +76,11 @@ export class MlWebhookDispatcherService {
           let upserted = 0
           if (payload.topic === 'orders_v2' && externalId) {
             try {
-              const r = await this.ingestion.ingestSingleOrder(orgId, externalId)
+              // Passa user_id (sellerId da conta que disparou o webhook) pra
+              // garantir que o token usado seja DAQUELA conta — sem isso,
+              // orgs multi-conta acabam usando token da conta errada e
+              // fetchOrder volta vazio, fazendo o pedido sumir.
+              const r = await this.ingestion.ingestSingleOrder(orgId, externalId, payload.user_id)
               upserted = r.upserted
               if (r.skipped) {
                 this.logger.warn(`[ml-webhook] single-ingest skipped order=${externalId}: ${r.reason}`)
