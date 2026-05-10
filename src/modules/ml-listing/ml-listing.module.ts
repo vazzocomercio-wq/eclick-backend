@@ -3,6 +3,7 @@ import { MlListingController } from './ml-listing.controller'
 import { MlListingService } from './services/ml-listing.service'
 import { ListingAggregationService } from './services/listing-aggregation.service'
 import { ListingStockScannerService } from './services/listing-stock-scanner.service'
+import { ListingStatusScannerService } from './services/listing-status-scanner.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 
 /**
@@ -13,7 +14,12 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 @Module({
   imports: [MercadolivreModule],
   controllers: [MlListingController],
-  providers: [MlListingService, ListingAggregationService, ListingStockScannerService],
+  providers: [
+    MlListingService,
+    ListingAggregationService,
+    ListingStockScannerService,
+    ListingStatusScannerService,
+  ],
   exports: [MlListingService, ListingAggregationService],
 })
 export class MlListingModule {}

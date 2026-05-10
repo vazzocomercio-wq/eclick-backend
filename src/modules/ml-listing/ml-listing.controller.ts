@@ -82,7 +82,15 @@ export class MlListingController {
     throw new BadRequestException('action inválida — use snooze | dismiss | resolve')
   }
 
-  // ── Out of stock (atalho) ────────────────────────────────────────────────
+  // ── Visão por anúncio ────────────────────────────────────────────────────
+
+  @Get('items/:itemId')
+  getItemTasks(@ReqUser() user: AuthUser, @Param('itemId') itemId: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listTasksByItem(user.orgId, itemId)
+  }
+
+  // ── Atalhos ──────────────────────────────────────────────────────────────
 
   @Get('out-of-stock')
   listOutOfStock(
@@ -92,6 +100,20 @@ export class MlListingController {
   ) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.listOutOfStock(
+      user.orgId,
+      sellerId ? Number(sellerId) : undefined,
+      limit ? Number(limit) : 100,
+    )
+  }
+
+  @Get('inactive')
+  listInactive(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listInactive(
       user.orgId,
       sellerId ? Number(sellerId) : undefined,
       limit ? Number(limit) : 100,
@@ -124,5 +146,13 @@ export class MlListingController {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
     return this.svc.runStockScan(user.orgId, Number(body.seller_id))
+  }
+
+  @Post('scan/status')
+  @HttpCode(HttpStatus.OK)
+  runStatusScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runStatusScan(user.orgId, Number(body.seller_id))
   }
 }

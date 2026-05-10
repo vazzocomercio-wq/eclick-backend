@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { supabaseAdmin } from '../../../common/supabase'
 import { ListingAggregationService } from './listing-aggregation.service'
 import { ListingStockScannerService } from './listing-stock-scanner.service'
+import { ListingStatusScannerService } from './listing-status-scanner.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -28,8 +29,9 @@ export class MlListingService {
   private readonly logger = new Logger(MlListingService.name)
 
   constructor(
-    private readonly aggregation: ListingAggregationService,
-    private readonly stockScanner: ListingStockScannerService,
+    private readonly aggregation:   ListingAggregationService,
+    private readonly stockScanner:  ListingStockScannerService,
+    private readonly statusScanner: ListingStatusScannerService,
   ) {}
 
   // ── Tasks ────────────────────────────────────────────────────────────────
@@ -230,6 +232,13 @@ export class MlListingService {
       result.tasks_resolved_auto += stock.tasks_resolved_auto
       result.api_calls_count     += stock.api_calls
 
+      const status = await this.statusScanner.scan(orgId, sellerId)
+      result.items_scanned       += status.items_scanned
+      result.tasks_created       += status.tasks_created
+      result.tasks_updated       += status.tasks_updated
+      result.tasks_resolved_auto += status.tasks_resolved_auto
+      result.api_calls_count     += status.api_calls
+
       result.duration_seconds = Math.round((Date.now() - t0) / 1000)
       await this.completeScanLog(log.id, result)
     } catch (err) {
@@ -287,6 +296,57 @@ export class MlListingService {
       await this.failScanLog(log.id, err as Error)
       throw err
     }
+  }
+
+  async runStatusScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_status')
+    const t0 = Date.now()
+    try {
+      const s = await this.statusScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type: 'scanner_status',
+        items_scanned: s.items_scanned,
+        tasks_created: s.tasks_created,
+        tasks_updated: s.tasks_updated,
+        tasks_resolved_auto: s.tasks_resolved_auto,
+        api_calls_count: s.api_calls,
+        errors_count: 0,
+        duration_seconds: Math.round((Date.now() - t0) / 1000),
+        status: 'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  async listInactive(orgId: string, sellerId?: number, limit = 100) {
+    let q = supabaseAdmin
+      .from('ml_listing_tasks')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('task_type', 'INACTIVE_PAUSED')
+      .in('status', ['open', 'snoozed', 'in_progress'])
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    q = q.order('priority_score', { ascending: false }).limit(Math.min(limit, 500))
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return data ?? []
+  }
+
+  /** Tasks de um anúncio específico (visão consolidada). */
+  async listTasksByItem(orgId: string, itemId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('ml_listing_tasks')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('ml_item_id', itemId)
+      .order('status', { ascending: true })
+      .order('priority_score', { ascending: false, nullsFirst: false })
+    if (error) throw new Error(error.message)
+    return data ?? []
   }
 
   // ── Scan logs helpers ────────────────────────────────────────────────────

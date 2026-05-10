@@ -1679,22 +1679,28 @@ const ML_LISTING_ENTRIES: KbEntry[] = [
     tags: ['listings', 'tasks', 'agregação', 'f7', 'f8', 'f9', 'multi-conta'],
   },
   {
-    routes:   ['/dashboard/listings/items/[itemId]', '/dashboard/listings/out-of-stock'],
+    routes:   ['/dashboard/listings/items/[itemId]', '/dashboard/listings/out-of-stock', '/dashboard/listings/inactive'],
     category: 'listing-center',
-    title:    'Visão consolidada por anúncio + atalho sem estoque',
-    content:  `Na rota \`/dashboard/listings/items/{itemId}\` o lojista vê **todas** as tarefas pendentes daquele anúncio em um só lugar — qualidade, preço, fiscal, estoque, promoção. Em \`/dashboard/listings/out-of-stock\` é um atalho filtrado pra tasks \`OUT_OF_STOCK\` ordenadas por priority_score (impacto financeiro estimado: vendas/12 × preço).
+    title:    'Visão consolidada por anúncio + atalhos (sem estoque, pausados)',
+    content:  `Na rota \`/dashboard/listings/items/{itemId}\` o lojista vê **todas** as tarefas pendentes daquele anúncio em um só lugar — qualidade, preço, fiscal, estoque, promoção, status. Atalhos do sidebar via \`?type=OUT_OF_STOCK\` ou \`?type=INACTIVE_PAUSED\` filtram a tela principal.
 
-**Scanner de estoque**:
-- Chama \`/users/{seller}/items/search?status=active\` (paginado 50/page até 5000)
+**Scanner de estoque** (\`scanner_stock\`):
+- Lista \`/users/{seller}/items/search?status=active\` (paginado 50/page até 5000)
 - Pra cada item: \`GET /items/{id}?attributes=id,available_quantity,sold_quantity,price,title,last_updated\`
 - Pacing 100ms entre calls (= 10 req/s, ML aguenta sem 429)
-- Severity calculado por sold_quantity + last_updated:
-  - \`critical\` se sold>50 + atualizado em <7 dias (= perdendo venda agora)
-  - \`high\` se sold>10
-  - \`medium\` se sold>0
-  - \`low\` se sem vendas
-- Auto-resolve quando estoque volta (item não detectado mais como out_of_stock por >6h)`,
-    tags: ['listings', 'estoque', 'out-of-stock', 'scanner'],
+- Severity por sold_quantity + last_updated: \`critical\` (sold>50 + <7d), \`high\` (>10), \`medium\` (>0), \`low\`
+- Auto-resolve quando estoque volta (>6h sem aparecer)
+
+**Scanner de status** (\`scanner_status\` — Sprint 2):
+- Lista \`/users/{seller}/items/search?status=paused\` + \`status=closed\`
+- Pra cada item: GET full pra inspecionar \`sub_status\`, \`tags\`, \`warnings\`
+- Classificação genérica v1 (out_of_stock / moderation_pending / warning / pausado_pelo_vendedor / closed). L3 vai refinar pra mais categorias específicas.
+- Severity por motivo: out_of_stock=high, moderation=high, warning=high, closed_com_vendas=medium, closed_sem_vendas=low
+- Auto-resolve quando item volta pra active (>6h sem aparecer como pausado/closed)
+- Endpoint: \`POST /listings/scan/status\` body=\`{seller_id}\`
+
+**Full scan** (\`POST /listings/scan/full\`) executa em sequência: agregação F7/F8/F9 + scanner stock + scanner status. Latência ~5-10min pra 1000+ anúncios. Cada scanner roda independente — falha em um não derruba os outros.`,
+    tags: ['listings', 'estoque', 'pausados', 'scanner', 'status'],
   },
 ]
 
