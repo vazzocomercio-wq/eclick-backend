@@ -82,7 +82,7 @@ export class OrdersService {
       limit?:     number
       q?:         string
       seller_id?: number
-      tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao'
+      tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao' | 'canceladas'
     } = {},
   ) {
     const offset = Math.max(options.offset ?? 0, 0)
@@ -124,6 +124,12 @@ export class OrdersService {
         case 'encerradas':
           // status=cancelled OU shipping_status in (delivered, not_delivered)
           q = q.or('status.eq.cancelled,shipping_status.in.(delivered,not_delivered)')
+          break
+        case 'canceladas':
+          // Filtro independente — pedido com mediação + cancelled aparece
+          // aqui E em 'mediacao'. Comportamento desejado (opção C escolhida
+          // pelo user — visibilidade dupla pra ações de auditoria/dispute).
+          q = q.eq('status', 'cancelled')
           break
         case 'flex':
           // Flex precisa de logistic_type — se worker não populou, ninguém aparece
@@ -410,6 +416,7 @@ export class OrdersService {
   async listOrdersTabCounts(orgId: string | null, sellerId?: number): Promise<{
     abertas: number; em_preparacao: number; despachadas: number;
     pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
+    canceladas: number;
   }> {
     const buildBase = () => {
       let q = supabaseAdmin.from('orders').select('*', { count: 'exact', head: true })
@@ -419,7 +426,7 @@ export class OrdersService {
       return q
     }
 
-    const [abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao] = await Promise.all([
+    const [abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao, canceladas] = await Promise.all([
       buildBase()
         .not('status', 'in', '(cancelled,payment_required,payment_in_process)')
         .or('shipping_status.is.null,shipping_status.in.(pending,not_specified)')
@@ -445,9 +452,14 @@ export class OrdersService {
       buildBase()
         .or('raw_data->mediations.cs.[{}],raw_data->tags.cs.["mediation_in_progress"]')
         .then(r => r.count ?? 0),
+      // Canceladas — count INDEPENDENTE (pode sobrepor com mediacao e encerradas).
+      // Opção C: visibilidade dupla pra auditoria/dispute.
+      buildBase()
+        .eq('status', 'cancelled')
+        .then(r => r.count ?? 0),
     ])
 
-    return { abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao }
+    return { abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao, canceladas }
   }
 
   async listOrdersKpis(orgId: string | null, sellerId?: number) {

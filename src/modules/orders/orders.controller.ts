@@ -43,7 +43,7 @@ export class OrdersController {
     @Query('seller_id') sellerId?: string,
     @Query('tab')       tab?:      string,
   ) {
-    const validTabs = ['abertas','em_preparacao','despachadas','pgto_pendente','flex','encerradas','mediacao'] as const
+    const validTabs = ['abertas','em_preparacao','despachadas','pgto_pendente','flex','encerradas','mediacao','canceladas'] as const
     const safeTab = (validTabs as readonly string[]).includes(tab ?? '')
       ? (tab as typeof validTabs[number])
       : undefined
