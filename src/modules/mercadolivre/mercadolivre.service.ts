@@ -2241,6 +2241,12 @@ export class MercadolivreService {
     let tarifa_total = 0, frete_vendedor_total = 0, frete_comprador_total = 0
     let custo_total = 0, imposto_total = 0
     let qtd_aprovadas = 0, qtd_canceladas = 0
+    // Cobertura de custos: pedidos com cost_price > 0 vs sem (= produtos sem
+    // custo cadastrado). Sem custo entram com 0 nos totais → margem de
+    // contribuição fica artificialmente alta. UI usa esses contadores pra
+    // alertar e projetar margem realista.
+    let qtd_com_custo = 0, qtd_sem_custo = 0
+    let fat_com_custo = 0
 
     const enrichedOrders = allRows.map(row => {
       const totalAmount    = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
@@ -2265,6 +2271,12 @@ export class MercadolivreService {
         custo_total           += costPrice ?? 0
         imposto_total         += taxAmount ?? 0
         qtd_aprovadas++
+        if (costPrice != null && costPrice > 0) {
+          qtd_com_custo++
+          fat_com_custo += totalAmount
+        } else {
+          qtd_sem_custo++
+        }
       } else if (isCancelled) {
         canceladas += totalAmount
         qtd_canceladas++
@@ -2315,6 +2327,20 @@ export class MercadolivreService {
       ? Math.round((margem_contribuicao / qtd_aprovadas) * 100) / 100
       : 0
 
+    // Margem projetada: usa o custo % médio dos pedidos COM custo cadastrado
+    // como proxy pra estimar custo dos pedidos sem custo. Útil quando muitos
+    // produtos não têm cost_price preenchido — a margem nominal fica inflada
+    // (custo=0 nos sem cadastro) e a projetada dá uma estimativa realista.
+    const custo_pct_medio = fat_com_custo > 0
+      ? Math.round((custo_total / fat_com_custo) * 10000) / 100   // ex: 62.51
+      : 0
+    const custo_projetado = faturamento_ml * (custo_pct_medio / 100)
+    const margem_projetada =
+      faturamento_ml - tarifa_total - frete_vendedor_total - custo_projetado - imposto_total
+    const margem_projetada_pct = faturamento_ml > 0
+      ? Math.round((margem_projetada / faturamento_ml) * 10000) / 100
+      : 0
+
     const kpis = {
       vendas_aprovadas:    r(vendas_aprovadas),
       faturamento_ml:      r(faturamento_ml),
@@ -2331,6 +2357,12 @@ export class MercadolivreService {
       qtd_canceladas,
       ticket_medio,
       ticket_medio_mc,
+      // Cobertura de custos pra UI alertar margem possivelmente inflada
+      qtd_com_custo,
+      qtd_sem_custo,
+      custo_pct_medio,                    // ex: 62.51 = 62,51% dos com-custo
+      margem_projetada:     r(margem_projetada),
+      margem_projetada_pct,
     }
 
     const donutBase = faturamento_ml || 1
