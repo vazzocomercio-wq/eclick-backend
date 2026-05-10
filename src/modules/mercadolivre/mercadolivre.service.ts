@@ -1134,8 +1134,10 @@ export class MercadolivreService {
   }
 
   private async fetchQuestionsRaw(token: string, sellerId: number, status = 'UNANSWERED'): Promise<{ questions: any[]; total: number }> {
-    // Primary: /questions/search?seller_id=...
-    const primaryUrl = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=${status}&limit=50`
+    // Primary: /questions/search?seller_id=...&sort=date_desc
+    // sort=date_desc é CRITICAL — sem isso ML retorna ordem ASC e pegamos
+    // perguntas de meses atrás ao invés das pendentes recentes.
+    const primaryUrl = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=${status}&sort=date_desc&limit=50`
     try {
       const { data } = await axios.get(primaryUrl, { headers: { Authorization: `Bearer ${token}` } })
       return { questions: data?.questions ?? [], total: data?.total ?? 0 }
@@ -1145,8 +1147,8 @@ export class MercadolivreService {
       // Silent fallback for 403/404 — try legacy endpoint
     }
 
-    // Fallback: /my/received_questions
-    const fallbackUrl = `${ML_BASE}/my/received_questions?status=${status}&limit=50`
+    // Fallback: /my/received_questions (também com sort=date_desc)
+    const fallbackUrl = `${ML_BASE}/my/received_questions?status=${status}&sort=date_desc&limit=50`
     const { data: fb } = await axios.get(fallbackUrl, { headers: { Authorization: `Bearer ${token}` } })
     return { questions: fb?.questions ?? [], total: fb?.total ?? 0 }
   }
@@ -1271,7 +1273,11 @@ export class MercadolivreService {
     const MAX_PAGES = 6 // até 300 perguntas (suficiente pra 14 dias na maioria das contas)
 
     for (let p = 0; p < MAX_PAGES; p++) {
-      const url = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=ANSWERED&limit=${PAGE}&offset=${offset}`
+      // CRITICAL: sort=date_desc — sem isso ML retorna ASC (mais antigas
+      // primeiro). Conta com 700+ perguntas tinha as 6 primeiras páginas
+      // todas de 2025, e as recentes nunca eram lidas → /perf-stats
+      // mostrava "3 respostas" agregando de outras contas só.
+      const url = `${ML_BASE}/questions/search?seller_id=${sellerId}&status=ANSWERED&sort=date_desc&limit=${PAGE}&offset=${offset}`
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data } = await axios.get<any>(url, { headers: { Authorization: `Bearer ${token}` } })
@@ -1291,7 +1297,9 @@ export class MercadolivreService {
           }
         }
 
-        // Para paginação: se todas as desta página são MAIS VELHAS que cutoff, sai
+        // Com sort=date_desc, oldestInPage é o final da página. Se
+        // já passamos do cutoff, sai (próximas páginas serão ainda mais
+        // antigas).
         if (oldestInPage < cutoffMs) break
         offset += PAGE
       } catch {
