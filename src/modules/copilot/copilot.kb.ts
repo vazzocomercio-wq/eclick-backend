@@ -1635,6 +1635,70 @@ UNIQUE (source_type, source_id) garante idempotência.
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// Onda 12 — F10 ML Listing Center IA (Sprint 1 — L1 Foundation + Agregação)
+// ════════════════════════════════════════════════════════════════════════
+
+const ML_LISTING_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/listings', '/dashboard/listings/tasks', '/dashboard/listings/tasks/[id]'],
+    category: 'listing-center',
+    title:    'ML Listing Center — central de tarefas dos anúncios',
+    content:  `**ML Listing Center IA (F10)** é a tela única onde o lojista vê tudo que precisa fazer hoje em seus anúncios ML, **priorizado por impacto financeiro**. Não duplica lógica: agrega sinais do **Quality Center (F7)**, **Campaign Center (F8)** e **Dropship Center (F9)** via VIEW SQL, e adiciona scanners próprios.
+
+**Tipos de tarefa** atuais (Sprint 1 entrega L1):
+- \`OUT_OF_STOCK\` — anúncio sem estoque (scanner próprio)
+- \`QUALITY_LOW\` / \`QUALITY_INCOMPLETE\` — agregado do F7
+- \`PROMOTION_AVAILABLE\` / \`PROMOTION_HIGH_OPPORTUNITY\` — agregado do F8
+- \`DROPSHIP_PARTNER_OUT_OF_STOCK\` — agregado do F9
+- (futuras): \`PRICE_HIGH\`, \`LOSING_BUY_BOX\`, \`PRICE_AUTOMATION_AVAILABLE\`, \`FISCAL_DATA_MISSING\`, \`CATALOG_ELIGIBLE\`, \`INACTIVE_PAUSED\`
+
+**Severities**: \`critical\` / \`high\` / \`medium\` / \`low\` — define prioridade.
+
+**Status**: \`open\` (precisa ação) / \`snoozed\` (adiada N dias) / \`in_progress\` / \`resolved_auto\` (sinal sumiu) / \`resolved_manual\` (operador) / \`dismissed\` (descartada) / \`expired\`.
+
+**Auto-resolve**: tasks agregadas (do F7/F8/F9) que não aparecem mais na VIEW por >6h são marcadas como \`resolved_auto\` automaticamente. Tasks de \`scanner_stock\` que voltam a ter estoque idem.
+
+**Como usar**:
+1. Tela \`/dashboard/listings\` mostra summary (críticas / impacto R$ / por tipo).
+2. Filtrar tasks por tipo, severidade, item ou seller_id.
+3. Cada task tem \`deeplink_url\` apontando pro módulo onde resolve (ex: tarefas \`QUALITY_LOW\` levam pro Quality Center). Listing Center é a **porta de entrada**, mas resolução acontece no módulo dono.
+4. Snooze (1-90 dias) / Dismiss (descarta com motivo) / Resolve manual (com nota).
+
+**Endpoints principais (auth):**
+- \`GET /listings/summary?seller_id=\` — totais por severidade + por tipo + impacto R$
+- \`GET /listings/tasks?task_type=&severity=&status=&seller_id=&offset=&limit=\` — listar
+- \`PATCH /listings/tasks/:id\` body=\`{action:'snooze'|'dismiss'|'resolve', days?, reason?, notes?}\`
+- \`POST /listings/scan/full\` body=\`{seller_id}\` — agregação + scanner stock
+- \`POST /listings/scan/stock\` body=\`{seller_id}\` — só scanner stock
+- \`POST /listings/scan/aggregation\` — só lê VIEW (rápido, sem ML)
+- \`GET /listings/out-of-stock?seller_id=\` — atalho
+
+**Multi-conta**: cada task tem \`seller_id\` próprio. Scans devem receber \`seller_id\` no body (gotcha multi-conta — sem isso, pega token da conta com updated_at mais recente).
+
+**Spec canônica**: \`docs/ml-listing-center-spec.md\`. Smoke test dos endpoints novos em \`scripts/smoke-test-pricing-endpoints.mjs\`.`,
+    tags: ['listings', 'tasks', 'agregação', 'f7', 'f8', 'f9', 'multi-conta'],
+  },
+  {
+    routes:   ['/dashboard/listings/items/[itemId]', '/dashboard/listings/out-of-stock'],
+    category: 'listing-center',
+    title:    'Visão consolidada por anúncio + atalho sem estoque',
+    content:  `Na rota \`/dashboard/listings/items/{itemId}\` o lojista vê **todas** as tarefas pendentes daquele anúncio em um só lugar — qualidade, preço, fiscal, estoque, promoção. Em \`/dashboard/listings/out-of-stock\` é um atalho filtrado pra tasks \`OUT_OF_STOCK\` ordenadas por priority_score (impacto financeiro estimado: vendas/12 × preço).
+
+**Scanner de estoque**:
+- Chama \`/users/{seller}/items/search?status=active\` (paginado 50/page até 5000)
+- Pra cada item: \`GET /items/{id}?attributes=id,available_quantity,sold_quantity,price,title,last_updated\`
+- Pacing 100ms entre calls (= 10 req/s, ML aguenta sem 429)
+- Severity calculado por sold_quantity + last_updated:
+  - \`critical\` se sold>50 + atualizado em <7 dias (= perdendo venda agora)
+  - \`high\` se sold>10
+  - \`medium\` se sold>0
+  - \`low\` se sem vendas
+- Auto-resolve quando estoque volta (item não detectado mais como out_of_stock por >6h)`,
+    tags: ['listings', 'estoque', 'out-of-stock', 'scanner'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
@@ -1652,6 +1716,7 @@ export const KB: KbEntry[] = [
   ...ADS_ENTRIES,
   ...ML_CAMPAIGNS_ENTRIES,
   ...ML_POSTSALE_INTELLIGENCE_ENTRIES,
+  ...ML_LISTING_ENTRIES,
   ...OPS_ENTRIES,
   ...COPILOT_PAGE_ENTRIES,
   ...MULTI_ACCOUNT_ENTRIES,

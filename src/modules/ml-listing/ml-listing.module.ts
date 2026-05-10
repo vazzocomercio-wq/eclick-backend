@@ -1,0 +1,19 @@
+import { Module } from '@nestjs/common'
+import { MlListingController } from './ml-listing.controller'
+import { MlListingService } from './services/ml-listing.service'
+import { ListingAggregationService } from './services/listing-aggregation.service'
+import { ListingStockScannerService } from './services/listing-stock-scanner.service'
+import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+
+/**
+ * F10 ML Listing Center IA.
+ * Sprint 1 (L1): aggregation + stock scanner + endpoints base.
+ * Próximas sprints (L1-2 a L4) adicionarão status/pricing/automation/fiscal/score/copilot.
+ */
+@Module({
+  imports: [MercadolivreModule],
+  controllers: [MlListingController],
+  providers: [MlListingService, ListingAggregationService, ListingStockScannerService],
+  exports: [MlListingService, ListingAggregationService],
+})
+export class MlListingModule {}
