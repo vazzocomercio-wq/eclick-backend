@@ -1189,26 +1189,16 @@ export class DropshipService {
       const supplierId = accSupMap.get(`${marketplace}:${account}`)
       if (!supplierId) { skipped++; continue }  // conta não vinculada a parceiro = não é dropship
 
-      // 4. Resolver product (via product_id OR via SKU)
-      let productId = order.product_id as string | null
-      let productSupplyType: string | null = null
-      if (productId) {
-        const { data: p } = await supabaseAdmin
-          .from('products')
-          .select('id, supply_type, sku')
-          .eq('id', productId)
-          .maybeSingle()
-        productSupplyType = p?.supply_type ?? null
-      } else if (order.sku) {
-        const { data: p } = await supabaseAdmin
-          .from('products')
-          .select('id, supply_type')
-          .eq('organization_id', orgId)
-          .eq('sku', order.sku)
-          .maybeSingle()
-        productId = p?.id ?? null
-        productSupplyType = p?.supply_type ?? null
-      }
+      // 4. Resolver product. Cascata de 3 estratégias por ordem de
+      //    confiabilidade — para no primeiro hit:
+      //    a) order.product_id (já resolvido na ingestão)
+      //    b) listing_id em raw_data → product_listings → product_id
+      //       (mais robusto que SKU — listing nunca muda; cobre múltiplos
+       //       anúncios com SKUs distintos vinculados ao mesmo produto)
+      //    c) order.sku == products.sku literal (master_sku)
+      const resolved = await this.resolveProductForOrder(orgId, order)
+      const productId = resolved.productId
+      const productSupplyType = resolved.supplyType
 
       if (!productId) { skipped++; continue }
       if (productSupplyType !== 'dropship') { skipped++; continue }
@@ -1269,6 +1259,81 @@ export class DropshipService {
     if (s.includes('amazon')) return 'amazon'
     if (s.includes('magalu')) return 'magalu'
     return ''
+  }
+
+  /** Resolve catálogo do pedido: product_id explícito > vínculo via
+   *  listing_id em product_listings > master_sku literal. Retorna o
+   *  primeiro hit. Sem hit = produto não está no catálogo da org. */
+  private async resolveProductForOrder(
+    orgId: string,
+    order: { product_id?: string | null; sku?: string | null; raw_data?: unknown },
+  ): Promise<{ productId: string | null; supplyType: string | null }> {
+    // a) product_id já resolvido pela ingestão
+    if (order.product_id) {
+      const { data: p } = await supabaseAdmin
+        .from('products')
+        .select('id, supply_type')
+        .eq('id', order.product_id)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      if (p?.id) return { productId: p.id as string, supplyType: (p.supply_type as string | null) ?? null }
+    }
+
+    // b) listing_id (MLB ID) em raw_data → product_listings → products
+    const listingIds = this.extractListingIdsFromRawData(order.raw_data)
+    if (listingIds.length > 0) {
+      const { data: pls } = await supabaseAdmin
+        .from('product_listings')
+        .select('product_id')
+        .in('listing_id', listingIds)
+        .eq('is_active', true)
+      const candidates = (pls ?? [])
+        .map(r => (r as { product_id?: string | null }).product_id)
+        .filter((x): x is string => !!x)
+      if (candidates.length > 0) {
+        const { data: ps } = await supabaseAdmin
+          .from('products')
+          .select('id, supply_type')
+          .in('id', [...new Set(candidates)])
+          .eq('organization_id', orgId)
+          .limit(1)
+        const p = ps?.[0]
+        if (p?.id) return { productId: p.id as string, supplyType: (p.supply_type as string | null) ?? null }
+      }
+    }
+
+    // c) master_sku literal (último recurso)
+    if (order.sku) {
+      const { data: p } = await supabaseAdmin
+        .from('products')
+        .select('id, supply_type')
+        .eq('organization_id', orgId)
+        .eq('sku', order.sku)
+        .maybeSingle()
+      if (p?.id) return { productId: p.id as string, supplyType: (p.supply_type as string | null) ?? null }
+    }
+
+    return { productId: null, supplyType: null }
+  }
+
+  /** Extrai MLB IDs (= listing_id) de raw_data.order_items[*].
+   *  ML coloca o id em order_items[i].item.id ou order_items[i].item_id. */
+  private extractListingIdsFromRawData(raw: unknown): string[] {
+    if (!raw || typeof raw !== 'object') return []
+    const items = (raw as { order_items?: unknown[] }).order_items
+    if (!Array.isArray(items)) return []
+    const ids = new Set<string>()
+    for (const it of items) {
+      if (!it || typeof it !== 'object') continue
+      const o = it as { item_id?: unknown; item?: { id?: unknown } }
+      if (typeof o.item_id === 'string' && o.item_id) ids.add(o.item_id)
+      const inner = o.item?.id
+      if (inner != null) {
+        const s = String(inner)
+        if (s) ids.add(s)
+      }
+    }
+    return [...ids]
   }
 
   // ── Orders endpoints ──────────────────────────────────────────────────────
