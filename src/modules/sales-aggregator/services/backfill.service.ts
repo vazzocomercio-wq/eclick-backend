@@ -42,8 +42,12 @@ export class BackfillService implements OnApplicationBootstrap {
 
   /** Healthcheck no startup — confirma que os @Cron decorators do
    * BackfillService chegaram a registrar no SchedulerRegistry. Se algum
-   * estiver ausente, loga ERROR (visível no Railway). */
-  onApplicationBootstrap() {
+   * estiver ausente, loga ERROR (visível no Railway).
+   *
+   * Plus: limpa runs órfãs (status='running' há > 15min) que ficaram em
+   * deploy/restart anterior. Sem isso o cron hourly entra em loop de
+   * 409 e nada roda até alguém cancelar manualmente. */
+  async onApplicationBootstrap() {
     try {
       const jobs = this.schedulerRegistry.getCronJobs()
       const all  = Array.from(jobs.keys())
@@ -58,6 +62,25 @@ export class BackfillService implements OnApplicationBootstrap {
         } else {
           this.logger.error(`[health.cron] ✗ ${name} NÃO encontrado — @Cron não registrou. Verifique ScheduleModule.forRoot() em app.module.ts`)
         }
+      }
+
+      // Cleanup de runs zumbis no startup
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString()
+      const { data: stale } = await supabaseAdmin
+        .from('aggregator_runs')
+        .select('id, organization_id, started_at')
+        .eq('status', 'running')
+        .lt('started_at', fifteenMinAgo)
+      if (stale && stale.length > 0) {
+        this.logger.warn(`[startup] limpando ${stale.length} run(s) órfã(s) de deploy anterior`)
+        await supabaseAdmin
+          .from('aggregator_runs')
+          .update({
+            status: 'failed',
+            completed_at: new Date().toISOString(),
+            error_message: 'Run órfã detectada no startup — Railway restart matou o processo',
+          })
+          .in('id', stale.map(r => r.id))
       }
     } catch (e: unknown) {
       this.logger.error(`[health.cron] erro ao validar crons: ${(e as Error)?.message}`)
@@ -200,6 +223,29 @@ export class BackfillService implements OnApplicationBootstrap {
     days: number,
     userId: string | null,
   ): Promise<{ runId: string }> {
+    // Marca runs órfãs como failed antes de checar lock.
+    // Run "running" há > 15min sem progresso é zumbi (Railway restart/OOM
+    // matou o processo mas DB ficou com status='running'). Sem isso o cron
+    // hourly entrava em loop de 409 e nada rodava por dias.
+    const fifteenMinAgo = new Date(Date.now() - 15 * 60_000).toISOString()
+    const { data: stale } = await supabaseAdmin
+      .from('aggregator_runs')
+      .select('id, started_at')
+      .eq('organization_id', orgId)
+      .eq('status', 'running')
+      .lt('started_at', fifteenMinAgo)
+    if (stale && stale.length > 0) {
+      this.logger.warn(`[startRun] limpando ${stale.length} run(s) zumbi org=${orgId}`)
+      await supabaseAdmin
+        .from('aggregator_runs')
+        .update({
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: 'Run órfã detectada — processo morreu (Railway restart/OOM/timeout)',
+        })
+        .in('id', stale.map(r => r.id))
+    }
+
     // Check for active run
     const { data: active } = await supabaseAdmin
       .from('aggregator_runs')
@@ -244,15 +290,28 @@ export class BackfillService implements OnApplicationBootstrap {
 
     const runId = run.id as string
 
-    // Fire and forget background processing
+    // Fire and forget background processing com WATCHDOG.
+    // Promise.race contra timeout de 10min — se ingest/snapshot pendurar
+    // (ML API timeout, deadlock), aborta e marca como failed.
     const startedAt = Date.now()
+    const TIMEOUT_MS = 10 * 60_000  // 10min — ingestDateRange normal leva 10-60s
     ;(async () => {
       const errorDetails: Array<{ date: string; error: string }> = []
-      try {
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Watchdog timeout (>${TIMEOUT_MS / 60000}min sem completar)`)),
+          TIMEOUT_MS,
+        ),
+      )
+      const workPromise = (async () => {
         const ingestionStats = await this.ordersIngestion.ingestDateRange(orgId, dateFrom, dateTo, runId)
         if (ingestionStats.errors.length) errorDetails.push(...ingestionStats.errors)
-
         await this.snapshotsAggregation.aggregateDateRange(orgId, dateFrom, dateTo, runId)
+        return ingestionStats
+      })()
+
+      try {
+        await Promise.race([workPromise, timeoutPromise])
 
         const duration = Math.round((Date.now() - startedAt) / 1000)
         await supabaseAdmin
