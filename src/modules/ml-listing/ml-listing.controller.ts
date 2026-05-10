@@ -155,4 +155,62 @@ export class MlListingController {
     if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
     return this.svc.runStatusScan(user.orgId, Number(body.seller_id))
   }
+
+  @Post('scan/pricing')
+  @HttpCode(HttpStatus.OK)
+  runPricingScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runPricingScan(user.orgId, Number(body.seller_id))
+  }
+
+  // ── Pricing — sugestões ──────────────────────────────────────────────────
+
+  @Get('pricing/suggestions')
+  listSuggestions(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('buy_box_status') buyBoxStatus?: 'winning' | 'losing' | 'sharing_first_place',
+    @Query('min_diff_pct') minDiffPct?: string,
+    @Query('offset') offset?: string,
+    @Query('limit')  limit?:  string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listPricingSuggestions(user.orgId, {
+      seller_id:      sellerId ? Number(sellerId) : undefined,
+      buy_box_status: buyBoxStatus,
+      min_diff_pct:   minDiffPct ? Number(minDiffPct) : undefined,
+      offset:         offset ? Number(offset) : 0,
+      limit:          limit  ? Number(limit)  : 50,
+    })
+  }
+
+  @Get('pricing/suggestions/:itemId')
+  getSuggestion(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Query('seller_id') sellerId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!sellerId) throw new BadRequestException('seller_id (query) é obrigatório')
+    return this.svc.pricing().getSuggestion(user.orgId, Number(sellerId), itemId)
+  }
+
+  @Post('pricing/apply/:itemId')
+  @HttpCode(HttpStatus.OK)
+  async applyPrice(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number; mode?: 'safe' | 'force'; price?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.pricing().applyPrice(
+      user.orgId,
+      Number(body.seller_id),
+      itemId,
+      body.mode ?? 'safe',
+      body.price ? Number(body.price) : undefined,
+    )
+  }
 }

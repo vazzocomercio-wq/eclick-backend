@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../../common/supabase'
 import { ListingAggregationService } from './listing-aggregation.service'
 import { ListingStockScannerService } from './listing-stock-scanner.service'
 import { ListingStatusScannerService } from './listing-status-scanner.service'
+import { ListingPricingScannerService } from './listing-pricing-scanner.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -29,10 +30,14 @@ export class MlListingService {
   private readonly logger = new Logger(MlListingService.name)
 
   constructor(
-    private readonly aggregation:   ListingAggregationService,
-    private readonly stockScanner:  ListingStockScannerService,
-    private readonly statusScanner: ListingStatusScannerService,
+    private readonly aggregation:    ListingAggregationService,
+    private readonly stockScanner:   ListingStockScannerService,
+    private readonly statusScanner:  ListingStatusScannerService,
+    private readonly pricingScanner: ListingPricingScannerService,
   ) {}
+
+  /** Exposed pra controller invocar direto (apply price). */
+  pricing(): ListingPricingScannerService { return this.pricingScanner }
 
   // ── Tasks ────────────────────────────────────────────────────────────────
 
@@ -239,6 +244,14 @@ export class MlListingService {
       result.tasks_resolved_auto += status.tasks_resolved_auto
       result.api_calls_count     += status.api_calls
 
+      const pricing = await this.pricingScanner.scan(orgId, sellerId)
+      // pricing.items_scanned é # itens com sugestão; somamos no total
+      result.items_scanned       += pricing.items_scanned
+      result.tasks_created       += pricing.tasks_created
+      result.tasks_updated       += pricing.tasks_updated
+      result.tasks_resolved_auto += pricing.tasks_resolved_auto
+      result.api_calls_count     += pricing.api_calls
+
       result.duration_seconds = Math.round((Date.now() - t0) / 1000)
       await this.completeScanLog(log.id, result)
     } catch (err) {
@@ -296,6 +309,53 @@ export class MlListingService {
       await this.failScanLog(log.id, err as Error)
       throw err
     }
+  }
+
+  async runPricingScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_pricing')
+    const t0 = Date.now()
+    try {
+      const p = await this.pricingScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type: 'scanner_pricing',
+        items_scanned: p.items_scanned,
+        tasks_created: p.tasks_created,
+        tasks_updated: p.tasks_updated,
+        tasks_resolved_auto: p.tasks_resolved_auto,
+        api_calls_count: p.api_calls,
+        errors_count: 0,
+        duration_seconds: Math.round((Date.now() - t0) / 1000),
+        status: 'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  async listPricingSuggestions(orgId: string, opts: {
+    seller_id?: number
+    buy_box_status?: 'winning' | 'losing' | 'sharing_first_place'
+    min_diff_pct?: number
+    limit?: number
+    offset?: number
+  } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500)
+    const offset = Math.max(opts.offset ?? 0, 0)
+    let q = supabaseAdmin
+      .from('ml_listing_pricing_suggestions')
+      .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
+    if (opts.seller_id != null)     q = q.eq('seller_id', opts.seller_id)
+    if (opts.buy_box_status)        q = q.eq('buy_box_status', opts.buy_box_status)
+    if (opts.min_diff_pct != null)  q = q.gte('price_difference_pct', opts.min_diff_pct)
+    q = q.order('price_difference_pct', { ascending: false, nullsFirst: false })
+         .range(offset, offset + limit - 1)
+    const { data, error, count } = await q
+    if (error) throw new Error(error.message)
+    return { suggestions: data ?? [], total: count ?? 0 }
   }
 
   async runStatusScan(orgId: string, sellerId: number): Promise<ScanResult> {

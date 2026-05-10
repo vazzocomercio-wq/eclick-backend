@@ -1699,8 +1699,49 @@ const ML_LISTING_ENTRIES: KbEntry[] = [
 - Auto-resolve quando item volta pra active (>6h sem aparecer como pausado/closed)
 - Endpoint: \`POST /listings/scan/status\` body=\`{seller_id}\`
 
-**Full scan** (\`POST /listings/scan/full\`) executa em sequência: agregação F7/F8/F9 + scanner stock + scanner status. Latência ~5-10min pra 1000+ anúncios. Cada scanner roda independente — falha em um não derruba os outros.`,
+**Full scan** (\`POST /listings/scan/full\`) executa em sequência: agregação F7/F8/F9 + scanner stock + scanner status + scanner pricing. Latência ~5-10min pra 1000+ anúncios. Cada scanner roda independente — falha em um não derruba os outros.`,
     tags: ['listings', 'estoque', 'pausados', 'scanner', 'status'],
+  },
+  {
+    routes:   ['/dashboard/listings/pricing'],
+    category: 'listing-center',
+    title:    'Pricing IA — sugestões de preço via price_to_win',
+    content:  `Tela \`/dashboard/listings/pricing\` mostra **anúncios com sugestão de preço**, ordenados por diferença % (atual vs sugerido). Vem do endpoint \`/items/{id}/price_to_win\` da ML — muito mais rico que o que a spec original previa.
+
+**Dados que cada sugestão traz:**
+- \`current_price\` × \`suggested_price\` (= price_to_win)
+- \`buy_box_status\`: **winning** / **losing** / **sharing_first_place**
+- \`visit_share\`: maximum / medium / low (proxy de visibilidade)
+- \`competitors_sharing\`: quantos concorrentes empatam o 1º lugar
+- \`reason[]\`: motivos de estar perdendo (quando aplica)
+- \`catalog_product_id\`: vincula ao catálogo ML (Sprint 4 vai usar pra card CATALOG_ELIGIBLE)
+- \`winner\`: item_id + preço de quem está vencendo
+- \`boosts\`: free_shipping, fulfillment, cross_docking, etc. (alimenta scanners de Full e frete)
+- \`internal_margin_at_suggested_pct\`: margem que sobra ao aplicar a sugestão (cruzando com cost_price local)
+- \`is_below_cost\` / \`is_below_min_margin\`: validações pra mode=safe
+
+**Tarefas geradas pelo scanner pricing:**
+- \`PRICE_HIGH\` quando diff ≥ 5% e não abaixo do custo
+- \`LOSING_BUY_BOX\` quando status='losing' OU competitors_sharing > 0
+
+**Aplicar preço:**
+- Botão **Aplicar** chama \`POST /listings/pricing/apply/:itemId\` mode=safe.
+- Mode safe valida: skip se abaixo do custo (\`skipped_reason='price_below_cost'\`) ou margem abaixo do mínimo (default 15%, \`skipped_reason='below_min_margin'\`).
+- Botão **Forçar** (aparece quando is_below_cost) usa mode=force pra ignorar validações.
+- PUT /items/{id} no ML; ao sucesso, current_price é atualizado e tasks abertas desse item viram resolved_manual.
+
+**Scanner é 2-step (pós-smoke-test 2026-05-10):**
+1. \`GET /suggestions/user/{seller}/items\` — lista IDs com sugestão (1 call, retorna até ~1k)
+2. Pra cada ID: \`GET /items/{id}/price_to_win\` (pacing 200ms = 5 req/s)
+
+Latência: 140 itens (Vazzo) × 200ms ≈ 28s.
+
+**Endpoints (auth):**
+- \`POST /listings/scan/pricing\` body=\`{seller_id}\`
+- \`GET  /listings/pricing/suggestions?seller_id=&buy_box_status=&min_diff_pct=\`
+- \`GET  /listings/pricing/suggestions/:itemId?seller_id=\`
+- \`POST /listings/pricing/apply/:itemId\` body=\`{seller_id, mode='safe'|'force', price?}\``,
+    tags: ['listings', 'pricing', 'price-to-win', 'buy-box', 'apply', 'multi-conta'],
   },
 ]
 
