@@ -784,103 +784,6 @@ export class MercadolivreService {
     return { total_visits: body.total_visits ?? 0, date_from: body.date_from ?? null, date_to: body.date_to ?? null }
   }
 
-  // ── Shared helpers for getRecentOrders ───────────────────────────────────────
-
-  private async _fetchShipments(token: string, orders: any[]): Promise<Record<number, any>> {
-    // Fetch up to 40 shipments (parallel); ML rate-limit is lenient for reads
-    const ids = [...new Set(
-      orders.slice(0, 40).map((o: any) => o.shipping?.id).filter(Boolean)
-    )] as number[]
-    const map: Record<number, any> = {}
-    if (!ids.length) return map
-    const results = await Promise.allSettled(
-      ids.map(id => axios.get(`${ML_BASE}/shipments/${id}`, { headers: { Authorization: `Bearer ${token}` } }))
-    )
-    let failed = 0
-    ids.forEach((id, i) => {
-      if (results[i].status === 'fulfilled') {
-        map[id] = (results[i] as PromiseFulfilledResult<any>).value.data
-      } else {
-        failed++
-      }
-    })
-    if (failed > 0) console.warn(`[shipments] ${failed}/${ids.length} fetches failed`)
-    return map
-  }
-
-  private _mapOrder(o: any, shipMap: Record<number, any>) {
-    const ship = shipMap[o.shipping?.id] ?? null
-    const stateId: string = ship?.receiver_address?.state?.id ?? ''
-    // ML returns "BR-SP" — extract "SP"
-    const uf = stateId.startsWith('BR-') ? stateId.slice(3) : (stateId.length === 2 ? stateId : null)
-    return {
-      id: o.id,
-      status: o.status,
-      date_created: o.date_created,
-      total_amount: o.total_amount,
-      items: (o.order_items ?? []).map((i: any) => ({
-        item_id: i.item?.id,
-        title: i.item?.title,
-        quantity: i.quantity,
-        unit_price: i.unit_price,
-      })),
-      shipping_state: uf,
-      shipping_city: ship?.receiver_address?.city?.name ?? null,
-    }
-  }
-
-  // Fetches up to 500 orders via paginated calls (50/page, ML API limit with date filters).
-  // Build URLs manually to avoid axios percent-encoding colons in ISO 8601 datetimes.
-  private async _fetchAllOrders(
-    token: string,
-    sellerId: number,
-    dateFrom?: string,
-    dateTo?: string,
-    withSort = true,
-  ): Promise<{ results: any[]; total: number }> {
-    const allOrders: any[] = []
-    let pageOffset = 0
-    let total: number | null = null
-    let pageResults: any[] = []
-
-    do {
-      let url = `${ML_BASE}/orders/search?seller=${sellerId}&limit=50&offset=${pageOffset}`
-      if (withSort) url += '&sort=date_desc'
-      if (dateFrom) url += `&order.date_created.from=${dateFrom}T00:00:00.000-03:00`
-      if (dateTo)   url += `&order.date_created.to=${dateTo}T23:59:59.999-03:00`
-
-      const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
-      pageResults = data?.results ?? []
-      if (total === null) total = data?.paging?.total ?? 0
-
-      allOrders.push(...pageResults)
-      pageOffset += 50
-    } while (
-      pageResults.length === 50 &&
-      allOrders.length < (total ?? 0) &&
-      pageOffset < 500  // hard cap: 10 pages = 500 orders max
-    )
-
-    return { results: allOrders, total: total ?? 0 }
-  }
-
-  /** Pedidos recentes lidos da DB (sem chamadas live ao ML).
-   *
-   *  Versão antiga fazia /orders/search live com cap 500 + /shipments/{id}
-   *  por pedido. Bugs em prod:
-   *  - Cap de 500 truncava períodos longos (mês com >500 pedidos).
-   *  - Falhas silenciosas em ML 429/500 retornavam lista parcial.
-   *  - _mapOrder retornava apenas {id, status, date_created, total_amount,
-   *    items, shipping_state, shipping_city} — SEM platform_fee, frete,
-   *    custo, imposto. Dashboard não tinha dados pra calcular lucro real.
-   *
-   *  Esta versão lê da tabela `orders` (já enriquecida pelo aggregator):
-   *  - Tarifa real (item.sale_fee → platform_fee)
-   *  - Frete vendedor real (/shipments/.../costs → shipping_cost)
-   *  - Custo + imposto (via vínculo product_listings → cost_price/tax_amount)
-   *  - Margem de contribuição já calculada por row
-   *
-   *  Pagina explicitamente até SAFETY_CAP. Multi-conta natural via seller_id. */
   async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string, sellerIdFilter?: number) {
     // Mapa seller_id → nickname pra account_nickname no shape de retorno
     const { data: conns } = await supabaseAdmin
@@ -1019,43 +922,6 @@ export class MercadolivreService {
     return { orders, total: allRows.length }
   }
 
-  private async _getRecentOrdersForSeller(_orgId: string, token: string, sellerId: number, dateFrom?: string, dateTo?: string) {
-    try {
-      const { results: rawOrders, total } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, true)
-      const shipMap = await this._fetchShipments(token, rawOrders)
-      // Fire-and-forget: decrement stock for new paid/shipped orders
-      this.processOrdersStock(rawOrders).catch((e: Error) =>
-        console.error('[stock-sync] processOrdersStock falhou:', e.message),
-      )
-      return {
-        orders: rawOrders.map((o: any) => this._mapOrder(o, shipMap)),
-        total,
-      }
-    } catch (err: any) {
-      const mlStatus = err?.response?.status ?? 500
-      const mlData   = err?.response?.data
-      console.error('[recent-orders] ML error', mlStatus, mlData?.message ?? '')
-
-      if (mlStatus === 400) {
-        console.warn('[recent-orders] 400 — retrying without sort')
-        try {
-          const { results: rawOrders2, total: total2 } = await this._fetchAllOrders(token, sellerId, dateFrom, dateTo, false)
-          const shipMap2 = await this._fetchShipments(token, rawOrders2)
-          return {
-            orders: rawOrders2.map((o: any) => this._mapOrder(o, shipMap2)),
-            total: total2,
-          }
-        } catch (err2: any) {
-          console.error('[recent-orders] fallback also failed:', err2?.response?.status, JSON.stringify(err2?.response?.data))
-          return { orders: [], total: 0 }
-        }
-      }
-
-      const mlMsg = mlData?.message ?? mlData?.error ?? err?.message ?? 'Erro ao buscar pedidos'
-      throw new HttpException(mlMsg, mlStatus)
-    }
-  }
-
   // ── ML stock sync ────────────────────────────────────────────────────────
 
   async updateListingStock(listingId: string, newQuantity: number, orgId?: string): Promise<void> {
@@ -1129,6 +995,12 @@ export class MercadolivreService {
   }
 
   // ── Auto stock decrement ─────────────────────────────────────────────────
+  // ⚠️ ÓRFÃO TEMPORÁRIO: decrementStock e processOrdersStock foram chamados
+  // por _getRecentOrdersForSeller (deletado neste commit). A lógica é
+  // valiosa: idempotência via stock_movements, sync com ML, auto-pause em
+  // estoque baixo. Plano: re-wire dentro da ingestion (ingestSingleOrder /
+  // ingestDateRange) pra rodar 1x por pedido NOVO em vez de na lazy do
+  // dashboard. Mantidos aqui até essa integração ficar pronta — não deletar.
 
   private async decrementStock(orderId: number, listingId: string, qtdVendida: number) {
     // Idempotency check
