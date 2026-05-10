@@ -82,4 +82,19 @@ export class SalesAggregatorController {
     await this.backfill.cancelRun(user.orgId, runId)
     return { ok: true }
   }
+
+  /** POST /sales-aggregator/enrich-shipping — popula shipping_status
+   *  via /shipments/{id} pra pedidos sem o campo. Usado pra backfill
+   *  histórico além do cron horário. */
+  @Post('enrich-shipping')
+  @HttpCode(202)
+  async enrichShipping(
+    @ReqUser() user: AuthUser,
+    @Body() body: { limit?: number; daysBack?: number },
+  ) {
+    const limit    = Math.min(Math.max(body.limit ?? 200, 1), 1000)
+    const daysBack = Math.min(Math.max(body.daysBack ?? 30, 1), 365)
+    const result = await this.backfill.runShippingEnrich(user.orgId, { limit, daysBack })
+    return { ...result, message: `Enrich shipping concluído (${result.updated} atualizados)` }
+  }
 }

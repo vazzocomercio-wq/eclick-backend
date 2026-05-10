@@ -212,9 +212,43 @@ export class BackfillService implements OnApplicationBootstrap {
     }
   }
 
+  /** Cron @ :42 de cada hora — enriquece shipping_status via
+   *  /shipments/{id}. Necessário porque /orders/search NÃO devolve
+   *  esses campos. Sem isso as tabs "Em Preparação" / "Despachadas"
+   *  e os KPIs "pendentes envio" / "em trânsito" ficam zeradas.
+   *  Cada execução pega até 200 pedidos por org (≈40s a 200ms/req). */
+  @Cron('42 * * * *', { name: 'shippingEnrich', timeZone: 'America/Sao_Paulo' })
+  async shippingEnrichCron(): Promise<void> {
+    const t0 = Date.now()
+    console.log(`[shipping-enrich.cron] iniciando at ${new Date().toISOString()}`)
+    const { data: connections } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id')
+    const orgIds = [...new Set((connections ?? []).map((c: { organization_id: string }) => c.organization_id))]
+
+    let totalUpdated = 0
+    for (const orgId of orgIds) {
+      try {
+        const r = await this.ordersIngestion.enrichShippingStatuses(orgId, { limit: 200, daysBack: 30 })
+        totalUpdated += r.updated
+        console.log(`[shipping-enrich.cron] org=${orgId.slice(0,8)} ✓ checked=${r.checked} updated=${r.updated} skipped=${r.skipped}`)
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[shipping-enrich.cron] org=${orgId.slice(0,8)} ✗ ${msg}`)
+      }
+    }
+    console.log(`[shipping-enrich.cron] concluído: ${totalUpdated} pedidos enriquecidos em ${Math.round((Date.now()-t0)/1000)}s`)
+  }
+
   /** Manual instant trigger — POST /sales-aggregator/sync-now */
   async syncNow(orgId: string | null, days = 1): Promise<{ runId: string }> {
     return this.startRun(await this.resolveOrgId(orgId), 'manual', Math.min(Math.max(days, 1), 7), null)
+  }
+
+  /** Manual trigger pra enrich shipping (admin/ops) */
+  async runShippingEnrich(orgId: string | null, options: { limit?: number; daysBack?: number } = {}) {
+    const resolved = await this.resolveOrgId(orgId)
+    return this.ordersIngestion.enrichShippingStatuses(resolved, options)
   }
 
   private async startRun(

@@ -156,6 +156,34 @@ export class MercadoLivreClient {
     return { orders: allOrders, apiCalls }
   }
 
+  /** GET /shipments/{id} — retorna status, substatus, logistic_type, etc.
+   *  ML NÃO devolve esses campos em /orders/search, só aqui. Usado pelo
+   *  enrich shipping pra popular shipping_status (que alimenta as tabs
+   *  "Em preparação", "Despachadas", e os KPIs "pendentes envio" / "em trânsito"). */
+  async fetchShipment(token: string, shipmentId: number): Promise<{
+    status:        string | null
+    substatus:     string | null
+    logistic_type: string | null
+  } | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await this.withRetry<any>(() =>
+        axios.get(`${ML_BASE}/shipments/${shipmentId}`, {
+          headers: { Authorization: `Bearer ${token}`, 'x-format-new': 'true' },
+          timeout: 8000,
+        }),
+      )
+      if (!data || typeof data !== 'object') return null
+      return {
+        status:        (data.status        as string | null) ?? null,
+        substatus:     (data.substatus     as string | null) ?? null,
+        logistic_type: (data.logistic_type as string | null) ?? null,
+      }
+    } catch {
+      return null
+    }
+  }
+
   async fetchShipmentCost(token: string, shipmentId: number): Promise<number> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

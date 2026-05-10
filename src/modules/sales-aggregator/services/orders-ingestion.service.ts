@@ -279,6 +279,101 @@ export class OrdersIngestionService {
     return stats
   }
 
+  /** Enriquece pedidos com shipping_status / logistic_type via /shipments/{id}.
+   *  ML não devolve esses campos em /orders/search — só em /shipments/{id}.
+   *  Sem isso: tabs "Em Preparação" / "Despachadas" / "Encerradas" /
+   *  "Flex" e KPIs "pendentes envio" / "em trânsito" ficam sempre zero.
+   *
+   *  Estratégia: pega N pedidos mais recentes com shipping_id mas sem
+   *  shipping_status, agrupa por seller_id (token correto pra cada
+   *  conta), chama /shipments/{id} com pacing 1.5s entre chamadas, faz
+   *  UPDATE individual. Idempotente. */
+  async enrichShippingStatuses(
+    orgId: string,
+    options: { limit?: number; daysBack?: number } = {},
+  ): Promise<{ checked: number; updated: number; skipped: number }> {
+    const limit    = Math.min(Math.max(options.limit ?? 200, 1), 1000)
+    const daysBack = Math.max(options.daysBack ?? 30, 1)
+    const fromIso  = new Date(Date.now() - daysBack * 86400_000).toISOString()
+
+    const { data: rows } = await supabaseAdmin
+      .from('orders')
+      .select('id, seller_id, shipping_id, external_order_id, raw_data')
+      .eq('organization_id', orgId)
+      .not('shipping_id', 'is', null)
+      .is('shipping_status', null)
+      .gte('sold_at', fromIso)
+      .neq('status', 'cancelled')
+      .order('sold_at', { ascending: false })
+      .limit(limit)
+
+    if (!rows || rows.length === 0) return { checked: 0, updated: 0, skipped: 0 }
+
+    // Agrupa por seller_id pra usar token correto de cada conta
+    type Row = { id: string; seller_id: number; shipping_id: number; external_order_id: string; raw_data: Record<string, unknown> | null }
+    const bySeller = new Map<number, Row[]>()
+    for (const r of rows as Row[]) {
+      if (!r.seller_id || !r.shipping_id) continue
+      if (!bySeller.has(r.seller_id)) bySeller.set(r.seller_id, [])
+      bySeller.get(r.seller_id)!.push(r)
+    }
+
+    let updated = 0
+    let skipped = 0
+    let checked = 0
+
+    for (const [sellerId, batch] of bySeller) {
+      let token: string
+      try {
+        ({ token } = await this.mlClient.getTokenForOrg(orgId, sellerId))
+      } catch (e) {
+        this.logger.warn(`[enrich-shipping] org=${orgId.slice(0,8)} seller=${sellerId} sem token: ${(e as Error).message}`)
+        skipped += batch.length
+        continue
+      }
+
+      for (const r of batch) {
+        checked++
+        const shipment = await this.mlClient.fetchShipment(token, r.shipping_id)
+        if (!shipment) { skipped++; continue }
+
+        // Mescla os campos novos no raw_data.shipping preservando o resto
+        const raw = (r.raw_data ?? {}) as Record<string, unknown>
+        const existingShipping = (raw.shipping as Record<string, unknown> | undefined) ?? {}
+        const newRawData = {
+          ...raw,
+          shipping: {
+            ...existingShipping,
+            status:        shipment.status,
+            substatus:     shipment.substatus,
+            logistic_type: shipment.logistic_type,
+          },
+        }
+
+        const { error: upErr } = await supabaseAdmin
+          .from('orders')
+          .update({
+            shipping_status: shipment.status,
+            raw_data:        newRawData,
+          })
+          .eq('id', r.id)
+
+        if (upErr) {
+          this.logger.warn(`[enrich-shipping] update ${r.external_order_id}: ${upErr.message}`)
+          skipped++
+          continue
+        }
+
+        updated++
+        // Pacing pra evitar 429 — ML aceita ~5 req/s por token; 200ms = 5 req/s
+        await new Promise(res => setTimeout(res, 200))
+      }
+    }
+
+    this.logger.log(`[enrich-shipping] org=${orgId.slice(0,8)} checked=${checked} updated=${updated} skipped=${skipped}`)
+    return { checked, updated, skipped }
+  }
+
   /** Counts how many orders ingested in this run ended up with CPF —
    * derived from the DB after upsert finishes. */
   private async countCpfFromBatch(_stats: IngestionStats): Promise<number> {

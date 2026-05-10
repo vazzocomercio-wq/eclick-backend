@@ -403,6 +403,53 @@ export class OrdersService {
 
   /** KPIs agregados pra header da tela de pedidos.
    *  Today / current_month / last_month — lê do DB (snapshot ingerido). */
+  /** Conta pedidos por tab — usado pelas badges das abas em /pedidos.
+   *  Antes a tela contava só o que estava na página atual (10 itens),
+   *  então as badges eram enganosas. Aqui rodamos count exact por tab
+   *  em paralelo (head:true = sem fetch de rows). */
+  async listOrdersTabCounts(orgId: string | null, sellerId?: number): Promise<{
+    abertas: number; em_preparacao: number; despachadas: number;
+    pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
+  }> {
+    const buildBase = () => {
+      let q = supabaseAdmin.from('orders').select('*', { count: 'exact', head: true })
+      if (orgId)    q = q.eq('organization_id', orgId)
+      if (sellerId) q = q.eq('seller_id', sellerId)
+      q = q.in('source', ['mercadolivre', 'manual'])
+      return q
+    }
+
+    const [abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao] = await Promise.all([
+      buildBase()
+        .not('status', 'in', '(cancelled,payment_required,payment_in_process)')
+        .or('shipping_status.is.null,shipping_status.in.(pending,not_specified)')
+        .then(r => r.count ?? 0),
+      buildBase()
+        .neq('status', 'cancelled')
+        .in('shipping_status', ['handling', 'ready_to_ship'])
+        .then(r => r.count ?? 0),
+      buildBase()
+        .neq('status', 'cancelled')
+        .in('shipping_status', ['shipped', 'in_transit'])
+        .then(r => r.count ?? 0),
+      buildBase()
+        .in('status', ['payment_required', 'payment_in_process'])
+        .then(r => r.count ?? 0),
+      buildBase()
+        .neq('status', 'cancelled')
+        .eq('raw_data->shipping->>logistic_type', 'self_service')
+        .then(r => r.count ?? 0),
+      buildBase()
+        .or('status.eq.cancelled,shipping_status.in.(delivered,not_delivered)')
+        .then(r => r.count ?? 0),
+      buildBase()
+        .or('raw_data->mediations.cs.[{}],raw_data->tags.cs.["mediation_in_progress"]')
+        .then(r => r.count ?? 0),
+    ])
+
+    return { abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao }
+  }
+
   async listOrdersKpis(orgId: string | null, sellerId?: number) {
     const now = new Date()
     const todayFr = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
@@ -413,23 +460,40 @@ export class OrdersService {
     type Agg = { count: number; revenue: number; pending_shipment: number; in_transit: number; delivered: number; by_day: Array<{ date: string; count: number; revenue: number }> }
 
     const aggregateRange = async (from: string, to?: string): Promise<Agg> => {
-      let q = supabaseAdmin
-        .from('orders')
-        .select('sold_at, sale_price, quantity, status, shipping_status')
-        .gte('sold_at', from)
-        .neq('status', 'cancelled')
-        .neq('status', 'invalid')
-      if (to)         q = q.lte('sold_at', to)
-      if (orgId)      q = q.eq('organization_id', orgId)
-      if (sellerId)   q = q.eq('seller_id', sellerId)
-      q = q.in('source', ['mercadolivre', 'manual'])
+      // Pagina explicitamente — Supabase corta silenciosamente em 1000 rows
+      // por padrão. Sem isso, mês com >1000 pedidos retorna count e revenue
+      // truncados (caso real Vazzo abril/2026: 1222 pedidos viraram 1000).
+      const PAGE_SIZE  = 1000
+      const SAFETY_CAP = 50_000  // ~1.5y mesmo pra contas grandes
+      type Row = { sold_at: string; sale_price: number; quantity: number; shipping_status: string | null }
+      const allRows: Row[] = []
+      let pageStart = 0
 
-      const { data, error } = await q
-      if (error) throw new Error(error.message)
+      while (pageStart < SAFETY_CAP) {
+        let q = supabaseAdmin
+          .from('orders')
+          .select('sold_at, sale_price, quantity, status, shipping_status')
+          .gte('sold_at', from)
+          .neq('status', 'cancelled')
+          .neq('status', 'invalid')
+        if (to)         q = q.lte('sold_at', to)
+        if (orgId)      q = q.eq('organization_id', orgId)
+        if (sellerId)   q = q.eq('seller_id', sellerId)
+        q = q.in('source', ['mercadolivre', 'manual'])
+        q = q.range(pageStart, pageStart + PAGE_SIZE - 1)
+
+        const { data, error } = await q
+        if (error) throw new Error(error.message)
+        const page = (data ?? []) as Row[]
+        if (page.length === 0) break
+        allRows.push(...page)
+        if (page.length < PAGE_SIZE) break
+        pageStart += PAGE_SIZE
+      }
 
       const byDay: Record<string, { count: number; revenue: number }> = {}
       let count = 0, revenue = 0, pendingShipment = 0, inTransit = 0, delivered = 0
-      for (const row of (data ?? []) as Array<{ sold_at: string; sale_price: number; quantity: number; shipping_status: string | null }>) {
+      for (const row of allRows) {
         const d = (row.sold_at ?? '').substring(0, 10)
         const orderRevenue = (row.sale_price ?? 0) * (row.quantity ?? 1)
         if (d) {

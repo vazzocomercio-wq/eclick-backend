@@ -67,4 +67,16 @@ export class OrdersController {
       sellerId ? Number(sellerId) : undefined,
     )
   }
+
+  /** GET /orders/list/tab-counts?seller_id= — counts por tab (independente da página) */
+  @Get('list/tab-counts')
+  listOrdersTabCounts(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.orders.listOrdersTabCounts(
+      user.orgId,
+      sellerId ? Number(sellerId) : undefined,
+    )
+  }
 }
