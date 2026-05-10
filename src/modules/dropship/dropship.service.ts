@@ -676,6 +676,7 @@ export class DropshipService {
       .from('supplier_products')
       .upsert(
         {
+          organization_id: orgId,
           supplier_id: dto.supplier_id,
           product_id: dto.product_id,
           supplier_sku: dto.supplier_sku.trim(),
@@ -1009,6 +1010,7 @@ export class DropshipService {
         .from('supplier_products')
         .upsert(
           {
+            organization_id: orgId,
             supplier_id: dto.supplier_id,
             product_id: productId,
             supplier_sku: row.supplier_sku.trim(),
