@@ -48,7 +48,9 @@ export function formatDigestMessage(
     for (const s of arr) {
       index++
       const name = s.entity_name ?? humanizeCategory(s.category)
-      lines.push(`${index}. *${name}* — ${oneLineSummary(s)}`)
+      const sku  = (s.data?.sku as string | null | undefined) ?? null
+      const header = sku ? `*${name}* _(${sku})_` : `*${name}*`
+      lines.push(`${index}. ${header} — ${oneLineSummary(s, name)}`)
     }
   }
 
@@ -58,9 +60,28 @@ export function formatDigestMessage(
   return lines.join('\n')
 }
 
-function oneLineSummary(s: AlertSignal): string {
-  // Pega primeira frase do summary_pt; se já é curta usa toda.
-  const first = s.summary_pt.split(/(?<=[.!?])\s/)[0]
+/** Remove duplicação do nome no início (analyzers historicamente prefixam
+ *  com `${name} ...` no summary_pt). Aí pega primeira frase. */
+function oneLineSummary(s: AlertSignal, entityName: string | null): string {
+  let body = s.summary_pt.trim()
+
+  // Remove prefixo do nome se presente (case-insensitive, robusto a "..." truncate)
+  if (entityName) {
+    const namePrefix = entityName.trim().toLowerCase()
+    const bodyLower  = body.toLowerCase()
+    if (bodyLower.startsWith(namePrefix)) {
+      body = body.slice(entityName.length).trim()
+      // Remove leading "com ", "tem ", "está ", connectores comuns
+      body = body.replace(/^(com|tem|está|esta|teve|tinha|terá|sera|será)\s+/i, '')
+      // Capitaliza primeira letra
+      if (body.length > 0) {
+        body = body[0].toUpperCase() + body.slice(1)
+      }
+    }
+  }
+
+  // Pega primeira frase
+  const first = body.split(/(?<=[.!?])\s/)[0]
   return first.length <= 100 ? first : first.slice(0, 97) + '…'
 }
 
