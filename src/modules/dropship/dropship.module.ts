@@ -6,9 +6,10 @@ import { MessagingModule } from '../messaging/messaging.module'
 import { WhatsAppModule } from '../whatsapp/whatsapp.module'
 import { FinanceiroModule } from '../financeiro/financeiro.module'
 import { AiModule } from '../ai/ai.module'
+import { ChannelsModule } from '../channels/channels.module'
 
 @Module({
-  imports: [MessagingModule, WhatsAppModule, FinanceiroModule, AiModule],
+  imports: [MessagingModule, WhatsAppModule, FinanceiroModule, AiModule, ChannelsModule],
   controllers: [DropshipController, DropshipPortalController, DropshipWebhooksController],
   providers: [DropshipService],
   exports: [DropshipService],

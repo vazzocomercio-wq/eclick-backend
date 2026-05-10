@@ -6,6 +6,7 @@ import { EmailSenderService } from '../messaging/email-sender.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 import { FinanceiroService } from '../financeiro/financeiro.service'
 import { LlmService } from '../ai/llm.service'
+import { BaileysProvider } from '../channels/providers/baileys.provider'
 import PDFDocument from 'pdfkit'
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -224,6 +225,7 @@ export class DropshipService {
     private readonly waSender: WhatsAppSender,
     private readonly financeiro: FinanceiroService,
     private readonly llm: LlmService,
+    private readonly baileys: BaileysProvider,
   ) {
     if (!process.env.FRONTEND_URL) {
       this.logger.warn(
@@ -1613,17 +1615,29 @@ export class DropshipService {
       .maybeSingle()
     const hasEmail = !!emailCfg
 
-    // WhatsApp config (env Z-API OU Meta cfg no DB)
+    // WhatsApp config — 3 fontes possíveis (em ordem de preferência):
+    //   1. Canal whatsapp_free ativo (Baileys — gratuito)
+    //   2. Env vars Z-API
+    //   3. Row em whatsapp_configs (Meta Cloud)
+    const { data: freeCh } = await supabaseAdmin
+      .from('channels')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('channel_type', 'whatsapp_free')
+      .eq('status', 'active')
+      .maybeSingle()
+    const hasBaileys = !!freeCh
     const hasZapi = !!process.env.ZAPI_INSTANCE_ID && !!process.env.ZAPI_TOKEN
-    let hasWaCfg = hasZapi
-    if (!hasWaCfg) {
+    let hasMetaCfg = false
+    if (!hasBaileys && !hasZapi) {
       const { data: waCfg } = await supabaseAdmin
         .from('whatsapp_configs')
         .select('id')
         .eq('organization_id', orgId)
         .maybeSingle()
-      hasWaCfg = !!waCfg
+      hasMetaCfg = !!waCfg
     }
+    const hasWaCfg = hasBaileys || hasZapi || hasMetaCfg
 
     // Partners
     const { count: partnersCount } = await supabaseAdmin
@@ -2145,13 +2159,55 @@ export class DropshipService {
       })
 
     // 5. Envia WhatsApp se configurado
+    //    Preferência: Baileys (gratuito) → Z-API → Meta Cloud
     let waStatus = 'skipped (sem whatsapp configurado)'
     if (profile.notification_whatsapp) {
       const waMessage = `Nova OC ${ocNumber} — ${itemsCount} itens, R$ ${netTotal.toFixed(2)}. Aprove em ${portalUrl}`
-      const waRes = await this.waSender.sendTextMessage({
-        phone: profile.notification_whatsapp,
-        message: waMessage,
-      })
+      let success = false
+      let messageId: string | null = null
+      let errMsg: string | null = null
+      let provider = 'unknown'
+
+      // Tentativa 1: canal whatsapp_free (Baileys) ativo na org
+      const { data: freeChannel } = await supabaseAdmin
+        .from('channels')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('channel_type', 'whatsapp_free')
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (freeChannel) {
+        try {
+          const r = await this.baileys.sendMessage(
+            freeChannel.id,
+            profile.notification_whatsapp.replace(/\D/g, ''),  // só dígitos
+            'text',
+            { body: waMessage },
+          )
+          success = true
+          messageId = r.message_id
+          provider = 'baileys'
+        } catch (e) {
+          errMsg = e instanceof Error ? e.message : 'erro Baileys'
+          this.logger.warn(`[oc-send] Baileys falhou, tentando Z-API/Meta: ${errMsg}`)
+        }
+      }
+
+      // Tentativa 2 (fallback): WhatsAppSender (Z-API ou Meta Cloud)
+      if (!success) {
+        const waRes = await this.waSender.sendTextMessage({
+          phone: profile.notification_whatsapp,
+          message: waMessage,
+        })
+        success = waRes.success
+        messageId = waRes.message_id ?? null
+        if (!success && !errMsg) errMsg = waRes.error ?? null
+        provider = success ? 'zapi-or-meta' : provider
+      }
+
       await supabaseAdmin
         .from('dropship_oc_notifications')
         .insert({
@@ -2161,12 +2217,13 @@ export class DropshipService {
           recipient: profile.notification_whatsapp,
           notification_type: 'oc_generated',
           body: waMessage,
-          status: waRes.success ? 'sent' : 'failed',
-          sent_at: waRes.success ? new Date().toISOString() : null,
-          error_message: waRes.error ?? null,
-          provider_message_id: waRes.message_id ?? null,
+          status: success ? 'sent' : 'failed',
+          sent_at: success ? new Date().toISOString() : null,
+          error_message: errMsg,
+          provider,
+          provider_message_id: messageId,
         })
-      waStatus = waRes.success ? 'sent' : `failed: ${waRes.error}`
+      waStatus = success ? `sent (${provider})` : `failed: ${errMsg}`
     }
 
     // 6. Atualiza status OC pra 'sent'
