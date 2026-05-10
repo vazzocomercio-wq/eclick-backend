@@ -241,7 +241,7 @@ export class DropshipService {
     let query = supabaseAdmin
       .from('supplier_dropship_profiles')
       .select(`
-        id, dropship_status, integration_type,
+        id, supplier_id, dropship_status, integration_type,
         cutoff_time, ship_lead_days,
         notification_email, notification_whatsapp,
         oc_generation_time, oc_preview_open_time, oc_review_cutoff_time,
