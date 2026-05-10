@@ -864,42 +864,159 @@ export class MercadolivreService {
     return { results: allOrders, total: total ?? 0 }
   }
 
+  /** Pedidos recentes lidos da DB (sem chamadas live ao ML).
+   *
+   *  Versão antiga fazia /orders/search live com cap 500 + /shipments/{id}
+   *  por pedido. Bugs em prod:
+   *  - Cap de 500 truncava períodos longos (mês com >500 pedidos).
+   *  - Falhas silenciosas em ML 429/500 retornavam lista parcial.
+   *  - _mapOrder retornava apenas {id, status, date_created, total_amount,
+   *    items, shipping_state, shipping_city} — SEM platform_fee, frete,
+   *    custo, imposto. Dashboard não tinha dados pra calcular lucro real.
+   *
+   *  Esta versão lê da tabela `orders` (já enriquecida pelo aggregator):
+   *  - Tarifa real (item.sale_fee → platform_fee)
+   *  - Frete vendedor real (/shipments/.../costs → shipping_cost)
+   *  - Custo + imposto (via vínculo product_listings → cost_price/tax_amount)
+   *  - Margem de contribuição já calculada por row
+   *
+   *  Pagina explicitamente até SAFETY_CAP. Multi-conta natural via seller_id. */
   async getRecentOrders(orgId: string, offset = 0, limit = 50, dateFrom?: string, dateTo?: string, sellerIdFilter?: number) {
-    // Multi-conta: sem sellerIdFilter → fan-out sobre todas contas da org
-    if (sellerIdFilter == null) {
-      const tokens = await this.getAllTokensForOrg(orgId).catch(() => [])
-      if (tokens.length === 0) throw new HttpException('ML não conectado — verifique a integração', 401)
-      if (tokens.length === 1) {
-        return this._getRecentOrdersForSeller(orgId, tokens[0].token, tokens[0].sellerId, dateFrom, dateTo)
-      }
-      const perAccount = await Promise.all(
-        tokens.map(t =>
-          this._getRecentOrdersForSeller(orgId, t.token, t.sellerId, dateFrom, dateTo)
-            .catch(e => {
-              console.error(`[recent-orders] account ${t.sellerId} falhou:`, e?.message)
-              return { orders: [], total: 0 }
-            }),
-        ),
-      )
-      const orders = perAccount.flatMap(r => r.orders)
-      // Sort merged orders by date_created desc pra UI consistente
-      orders.sort((a: any, b: any) => (b.date_created ?? '').localeCompare(a.date_created ?? ''))
-      return {
-        orders,
-        total: perAccount.reduce((s, r) => s + r.total, 0),
-      }
+    // Mapa seller_id → nickname pra account_nickname no shape de retorno
+    const { data: conns } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, nickname')
+      .eq('organization_id', orgId)
+    const nickByseller: Record<number, string> = {}
+    for (const c of (conns ?? []) as Array<{ seller_id: number; nickname: string | null }>) {
+      nickByseller[c.seller_id] = c.nickname ?? `Conta #${c.seller_id}`
     }
-
-    // Conta especifica selecionada
-    let token: string
-    let sellerId: number
-    try {
-      ;({ token, sellerId } = await this.getTokenForOrg(orgId, sellerIdFilter))
-    } catch (authErr: any) {
-      console.error('[recent-orders] getTokenForOrg failed:', authErr?.message ?? authErr)
+    if (Object.keys(nickByseller).length === 0) {
       throw new HttpException('ML não conectado — verifique a integração', 401)
     }
-    return this._getRecentOrdersForSeller(orgId, token, sellerId, dateFrom, dateTo)
+    if (sellerIdFilter != null && !nickByseller[sellerIdFilter]) {
+      throw new HttpException(`Conta ML ${sellerIdFilter} nao encontrada`, 401)
+    }
+
+    // dateFrom/dateTo vêm como YYYY-MM-DD; pra sold_at usamos tz BRT
+    const isoFrom = dateFrom ? `${dateFrom}T00:00:00.000-03:00` : null
+    const isoTo   = dateTo   ? `${dateTo}T23:59:59.999-03:00`   : null
+
+    type Row = {
+      id:                       string
+      external_order_id:        string
+      status:                   string | null
+      sold_at:                  string | null
+      seller_id:                number
+      sku:                      string | null
+      product_title:            string | null
+      quantity:                 number | null
+      sale_price:               number | null
+      platform_fee:             number | null
+      cost_price:               number | null
+      tax_amount:               number | null
+      shipping_cost:            number | null
+      shipping_buyer_paid:      number | null
+      contribution_margin:      number | null
+      contribution_margin_pct:  number | null
+      gross_profit:             number | null
+      raw_data:                 Record<string, unknown> | null
+      marketplace_listing_id:   string | null
+      billing_address:          Record<string, unknown> | null
+    }
+
+    const PAGE_SIZE  = 1000
+    const SAFETY_CAP = 50_000
+    const allRows: Row[] = []
+    let pageStart = 0
+
+    while (pageStart < SAFETY_CAP) {
+      let q = supabaseAdmin
+        .from('orders')
+        .select(
+          'id, external_order_id, status, sold_at, seller_id, sku, product_title, ' +
+          'quantity, sale_price, platform_fee, cost_price, tax_amount, ' +
+          'shipping_cost, shipping_buyer_paid, contribution_margin, ' +
+          'contribution_margin_pct, gross_profit, raw_data, ' +
+          'marketplace_listing_id, billing_address',
+        )
+        .eq('organization_id', orgId)
+        .in('source', ['mercadolivre', 'manual'])
+      if (sellerIdFilter != null) q = q.eq('seller_id', sellerIdFilter)
+      if (isoFrom) q = q.gte('sold_at', isoFrom)
+      if (isoTo)   q = q.lte('sold_at', isoTo)
+      q = q.order('sold_at', { ascending: false }).range(pageStart, pageStart + PAGE_SIZE - 1)
+
+      const { data, error } = await q
+      if (error) throw new HttpException(error.message, 500)
+      const page = (data ?? []) as unknown as Row[]
+      if (page.length === 0) break
+      allRows.push(...page)
+      if (page.length < PAGE_SIZE) break
+      pageStart += PAGE_SIZE
+    }
+
+    // Aplica offset/limit do request (UI normalmente passa limit alto pra
+    // computar agregados sobre o período inteiro; tabela usa offset+limit)
+    const sliceStart = Math.max(offset, 0)
+    const sliceEnd   = limit > 0 ? sliceStart + limit : allRows.length
+    const paginated  = allRows.slice(sliceStart, sliceEnd)
+
+    const orders = paginated.map(row => {
+      const raw      = (row.raw_data        ?? {}) as Record<string, unknown>
+      const itemRaw  = (raw.item            ?? {}) as Record<string, unknown>
+      const shipping = (raw.shipping        ?? {}) as Record<string, unknown>
+      const billing  = (row.billing_address ?? {}) as Record<string, unknown>
+
+      // Defensive coercion — ML às vezes manda state/city como object {id,name}
+      // ou string "BR-SP". Mesma armadilha do BrazilSalesMap/dashboard.
+      const recvAddr = (shipping.receiver_address as Record<string, unknown> | undefined) ?? {}
+      const stateRaw = recvAddr.state ?? billing.state
+      let shippingState: string | null = null
+      if (typeof stateRaw === 'string') {
+        shippingState = stateRaw.startsWith('BR-') ? stateRaw.slice(3) : stateRaw
+      } else if (stateRaw && typeof stateRaw === 'object') {
+        const s = String((stateRaw as { id?: unknown; name?: unknown }).id
+                      ?? (stateRaw as { name?: unknown }).name
+                      ?? '')
+        shippingState = s.startsWith('BR-') ? s.slice(3) : s
+      }
+      const cityRaw = recvAddr.city ?? billing.city ?? billing.city_name
+      let shippingCity: string | null = null
+      if (typeof cityRaw === 'string') shippingCity = cityRaw
+      else if (cityRaw && typeof cityRaw === 'object') shippingCity = (cityRaw as { name?: string }).name ?? null
+
+      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+
+      return {
+        id:               row.external_order_id,
+        status:           row.status,
+        date_created:     (raw.date_created as string) ?? row.sold_at,
+        total_amount:     totalAmount,
+        seller_id:        row.seller_id,
+        account_nickname: nickByseller[row.seller_id] ?? `Conta #${row.seller_id}`,
+        items: [{
+          item_id:    (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
+          title:      (itemRaw.title as string) ?? row.product_title,
+          quantity:   row.quantity ?? 1,
+          unit_price: Number(row.sale_price ?? 0),
+          seller_sku: row.sku ?? null,
+        }],
+        shipping_state: shippingState,
+        shipping_city:  shippingCity,
+        // Campos enriquecidos pra cálculos no frontend (lucro, margem, etc.)
+        platform_fee:        Number(row.platform_fee        ?? 0),
+        shipping_cost:       Number(row.shipping_cost       ?? 0),
+        shipping_buyer_paid: Number(row.shipping_buyer_paid ?? 0),
+        cost_price:              row.cost_price              != null ? Number(row.cost_price)              : null,
+        tax_amount:              row.tax_amount              != null ? Number(row.tax_amount)              : null,
+        contribution_margin:     row.contribution_margin     != null ? Number(row.contribution_margin)     : null,
+        contribution_margin_pct: row.contribution_margin_pct != null ? Number(row.contribution_margin_pct) : null,
+        gross_profit:            row.gross_profit            != null ? Number(row.gross_profit)            : null,
+      }
+    })
+
+    return { orders, total: allRows.length }
   }
 
   private async _getRecentOrdersForSeller(_orgId: string, token: string, sellerId: number, dateFrom?: string, dateTo?: string) {
