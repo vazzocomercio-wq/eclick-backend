@@ -2085,6 +2085,123 @@ Cards futuros (E2-E4, próximas camadas — placeholders nullable hoje):
 Trend = \`unknown\` na primeira sync; vira \`improving\`/\`stable\`/\`degrading\` quando há snapshot anterior pra comparar.`,
     tags: ['executive-dashboard', 'reputation', 'mercado-lider', 'risk', 'trend'],
   },
+  {
+    routes:   ['/dashboard/executive/logistics'],
+    category: 'executive-dashboard',
+    title:    'Logística — atrasos, despacho do dia e Flex',
+    content:  `**F11 E3 — Logística** mostra o estado dos envios e atrasos do seller em tempo quase real. Cron diário (\`03:30 BRT\`) faz scan completo: \`/shipments/{id}/delays\` por shipment e \`/flex/sites/MLB/items/{id}/v2\` por item ativo. Cron horário (\`:23\`) só agrega counts (sem chamadas ML).
+
+**4 cards de operação do dia:**
+- **Pra despachar hoje** — count de \`orders.shipping_status='ready_to_ship'\` (sem call ML — já temos local)
+- **Despachados hoje** — count de \`shipping_status='shipped'\` com \`updated_at >= 00:00\`
+- **Atrasos abertos** — \`ml_shipment_delays\` com \`status='open'\`, breakdown \`h/s/t\` (handling/sla/transit)
+- **Flex elegível** — items com \`has_flex=true\`, mostra cobertura do scan (% de items com entrada em \`ml_flex_status\`)
+
+**Breakdown de atrasos por categoria:**
+- \`handling_delayed\` — você atrasou pra postar (afeta \`delayed_handling_time\` rate, que é a métrica que o Mercado Líder usa)
+- \`sla_delayed\` — prazo prometido ao comprador estourou
+- \`transit_delayed\` — transportadora segurou (depende da Mercado Envios, menos sob controle do seller)
+
+**Tabela de últimos atrasos detectados** com shipment_id + order_id + tipo + dias + data prevista + quando foi detectado.
+
+**Limitação atual do Flex (documentar pro user):**
+- API ML retorna SOMENTE \`{has_flex: bool}\` no endpoint \`/flex/.../v2\`. Não distingue "elegível inativo" vs "ativo entregando agora".
+- Pra ativar Flex de fato, lojista usa o painel ML.
+
+**Multi-conta:** seletor de conta quando >1 seller. Cron passa \`sellerId\` explícito em todos os \`getTokenForOrg\` (feedback_ml_multiconta_token).
+
+**Endpoints (backend):**
+- \`GET /executive/logistics\` — summary de todas as contas da org
+- \`GET /executive/logistics/delays?seller_id=X&limit=50\` — atrasos abertos
+- \`GET /executive/logistics/flex/eligible?seller_id=X&limit=100\` — items has_flex=true
+- \`POST /executive/logistics/scan?seller_id=X\` — full scan manual (\`?kind=delays\`/\`flex\`/\`summary\` pra parcial)
+
+**Tabelas:**
+- \`ml_shipment_delays\` (unique por \`ml_shipment_id+delay_type\`, auto-resolve quando 404 da API ML)
+- \`ml_flex_status\` (unique por \`org+seller+ml_item_id\`, refresh diário)
+- \`ml_logistics_summary\` (1 row por org+seller — counts agregados pro dashboard)
+
+**Dedupar shipping_id antes de iterar** (orders multi-item compartilham mesmo \`shipping.id\`). 404 do endpoint \`/delays\` = sinal POSITIVO (sem atraso) — gatilha auto-resolve de delays anteriores do mesmo shipment.
+
+**Pendências adiadas (E3 fase 2):**
+- Full (fulfillment) — endpoint não validado no smoke
+- Distinguir Flex ativo vs elegível inativo — precisa de outro endpoint ainda a ser investigado`,
+    tags: ['executive-dashboard', 'logistics', 'shipments', 'delays', 'flex', 'mercado-envios'],
+  },
+  {
+    routes:   ['/dashboard/executive/visits'],
+    category: 'executive-dashboard',
+    title:    'Visitas + Conversão — funil de tráfego do ML',
+    content:  `**F11 E4 — Visitas** mostra tráfego diário do seller no ML e calcula taxa de conversão (visitas → pedidos). Cron diário (\`03:00 BRT\`) sincroniza os últimos 7 dias de cada (org, seller) via \`/users/{id}/items_visits/time_window?last=7&unit=day\`.
+
+**Por que time_window (não date_from/date_to)?**
+A variante com \`date_from/date_to\` ISO retorna **400 BAD REQUEST** ("Invalid request unknown date format") — gotcha confirmado no smoke F11 (vide \`reference_ml_api_shapes_f11\`). \`time_window\` é a forma robusta.
+
+**Componentes:**
+- **3 KPI cards 7d:** Visitas (com delta vs 7d anteriores), Pedidos + unidades, Taxa de conversão (verde ≥5% / amarela 1–5% / vermelha <1%)
+- **Card de hoje parcial** quando o último dia tem total incompleto (API agrega ao longo do dia)
+- **Gráfico SVG inline** com 2 séries: visitas (linha cyan sólida) + pedidos (linha lima tracejada, escala secundária). Sem chart lib.
+- **Tabela diária** com mudança vs dia anterior e vs mesmo dia da semana passada
+- **Seletor de período**: 7d / 14d / 30d / 60d
+
+**Cálculos:**
+- Conversion rate = orders / visits × 100 (cruzamento Postgres com \`orders\` filtrado por seller_id + platform=mercadolivre)
+- "Dia parcial" detectado quando \`date === today\` no momento do sync
+- Comparações pré-computadas no sync (vs prev_day, vs same_day_last_week)
+
+**Gotchas (vide \`reference_ml_api_shapes_f11\`):**
+- API retorna \`results[]\` **fora de ordem cronológica** — backend sorta antes de gravar
+- \`visits_detail[]\` permite breakdown por \`company\` (multimercados) — preservado em JSONB
+- Último dia da janela é parcial — flag \`is_partial\` no schema; UI exclui dos agregados 7d
+
+**Endpoints (backend):**
+- \`GET /executive/visits?seller_id=X&days=30\` — histórico diário
+- \`POST /executive/visits/sync?seller_id=X&days=30\` — manual
+
+**Tabela:** \`ml_items_visits_daily\` (1 row por org+seller+date)
+
+**Pendência adiada (E4 fase 2):** granularidade por item via \`/items/{id}/visits\` pra mostrar "top anúncios com muita visita, pouca venda" — endpoint não validado no smoke.`,
+    tags: ['executive-dashboard', 'visits', 'conversion', 'funnel', 'tempo-real'],
+  },
+  {
+    routes:   ['/dashboard/executive/ads'],
+    category: 'executive-dashboard',
+    title:    'Ads — visibilidade sobre ml_ads_* (não é F12 completo)',
+    content:  `**F11 E5 — Ads Visibility** mostra performance dos Product Ads / Brand Ads / Display Ads do seller sem precisar abrir o painel do ML. Camada **só de leitura** sobre o módulo \`ml-ads\` que já existe e já sincroniza diariamente as tabelas \`ml_ads_campaigns\` e \`ml_ads_reports\`.
+
+**ESCOPO IMPORTANTE:** não é F12 completo. Aqui mostra. Pra **editar bids, recomendar budget, ou gerenciar campanhas** é módulo separado futuro (F12). Esta sprint só consome o dado que já existe.
+
+**4 KPI cards 7d:**
+- **Gasto** (vermelho) + delta vs 7d anteriores
+- **Receita** (verde) + delta vs 7d anteriores
+- **ACOS** (verde ≤15% / amarelo 15–30% / vermelho >30%) — limite configurável em \`ml_ads_summary.acos_threshold\` (default 30%)
+- **ROAS** — multiplicador de retorno por R$ investido (>3x = healthy)
+
+**2ª linha:** cliques + CTR · impressões · campanhas vencendo (ROAS >3x) · campanhas perdendo dinheiro (ACOS > threshold) · campanhas ativas.
+
+**Gráfico spend vs revenue 30d** — SVG inline 2 séries (receita verde sólida, gasto vermelho tracejado).
+
+**Filtros** (toggle + chip bar): tipo de campanha (PADS / BADS / DISPLAY).
+
+**Leaderboards 7d:**
+- **Top 10 perdendo dinheiro** (ACOS desc) — ação imediata pro lojista pausar ou ajustar bid
+- **Top 10 vencendo** (ROAS desc) — escalar budget aqui
+
+**Multi-conta nota importante:** Ads é por \`advertiser_id\`, NÃO por \`seller_id\`. Não há vínculo persistido \`advertiser_id ↔ seller_id\`, então agregamos por \`organization_id\`. Vazzo tem 2 advertisers (636197 + 2157277) cobertos por 1 ml_ads_summary row. UI executive aggregate puxa do snapshots[0] (não soma cross-account pra evitar duplicação).
+
+**Coverage alert:** se \`ml_ads_campaigns\` não tem rows pra org, mostra "Conecte Product Ads pra ver mais dados". Quando o módulo ml-ads detectar via OAuth, KPIs aparecem automaticamente.
+
+**Endpoints (backend):**
+- \`GET /executive/ads\` — summary org-level
+- \`GET /executive/ads/leaderboard?kind=winners|losers&limit=10\`
+- \`GET /executive/ads/chart?days=30\` — série temporal
+- \`POST /executive/ads/refresh\` — manual (sem chamadas ML — só re-agrega Postgres)
+
+**Tabela cache:** \`ml_ads_summary\` (PK organization_id, refresh hourly em \`:37\`).
+
+**Performance Vazzo 7d em prod (2026-05-11):** R$ 1.576 spend → R$ 11.538 revenue · ACOS 13.7% · ROAS 7.32x · 31 campanhas ativas · 11 perdendo dinheiro · 14 vencendo.`,
+    tags: ['executive-dashboard', 'ads', 'acos', 'roas', 'product-ads', 'visibility'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════

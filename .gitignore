@@ -47,3 +47,6 @@ lerna-debug.log*
 
 # typescript
 *.tsbuildinfo
+
+# F11 smoke outputs (gerados localmente, não versionar)
+smoke-f11-output.json

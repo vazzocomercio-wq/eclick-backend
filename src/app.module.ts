@@ -64,6 +64,8 @@ import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
 import { DropshipModule } from './modules/dropship/dropship.module'
 import { FinanceiroModule } from './modules/financeiro/financeiro.module'
 import { MlListingModule } from './modules/ml-listing/ml-listing.module'
+import { ExecutiveDashboardModule } from './modules/executive-dashboard/executive-dashboard.module'
+import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/visits-scanner.module'
 
 @Module({
   imports: [
@@ -130,6 +132,8 @@ import { MlListingModule } from './modules/ml-listing/ml-listing.module'
     DropshipModule,
     FinanceiroModule,
     MlListingModule,
+    ExecutiveDashboardModule,
+    VisitsScannerModule,
   ],
   controllers: [AppController],
   providers: [AppService],
