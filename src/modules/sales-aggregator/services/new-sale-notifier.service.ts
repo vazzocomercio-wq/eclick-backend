@@ -70,6 +70,9 @@ export class NewSaleNotifierService {
       this.fetchThumbnail(orgId, sellerId, listingId),
     ])
 
+    // 2b. Origem da venda — inferida dos tags do raw_data (zero custo)
+    const source = this.classifySource(o.raw_data)
+
     // 3. Valores
     const qty       = Number(o.quantity ?? 1)
     const unitPrice = Number(o.sale_price ?? 0)
@@ -92,7 +95,7 @@ export class NewSaleNotifierService {
       ? `${qty}× ${title} · R$ ${total.toFixed(2)} · margem ${margemPct.toFixed(1)}%`
       : `${title} · R$ ${total.toFixed(2)} · margem ${margemPct.toFixed(1)}%`
 
-    const suggestion = this.composeSuggestion({ trend, ads, conversion, margemPct })
+    const suggestion = this.composeSuggestion({ trend, ads, conversion, margemPct, source })
 
     // 5. Severity: 'info' default; 'warning' se margem baixa OU venda com prejuízo
     const severity = margemPct < 0 ? 'warning' : margemPct < 10 ? 'warning' : 'info'
@@ -115,6 +118,7 @@ export class NewSaleNotifierService {
         sku:                o.sku ?? null,
         sold_at:            o.sold_at ?? null,
         thumbnail,
+        source,
         values: {
           quantity:        qty,
           unit_price:      unitPrice,
@@ -134,6 +138,48 @@ export class NewSaleNotifierService {
     }
 
     await this.alertSignals.insertMany(orgId, [draft])
+  }
+
+  // ── Classifica origem da venda lendo raw_data (zero custo) ──────────────
+  /**
+   * ML NÃO retorna no /orders/{id} se a venda veio de campanha ADS ou via
+   * afiliado — esses dados ficam em APIs separadas (Advertising attribution,
+   * Partners API). Aqui usamos o que está disponível:
+   *
+   * - `tags: ['catalog']` → venda via catálogo ML (busca/lista canônica)
+   * - sem catalog       → comprou pela página do anúncio direto
+   * - `b2b`             → comprador empresa
+   * - `bundle`          → kit/combo
+   * - `pack_order`      → pedido com múltiplos items no carrinho
+   * - `order_has_discount` → cupom aplicado
+   *
+   * `ads_attribution` requer cross-check com tabela própria de
+   * attribution (não preenchida hoje). Quando estiver, posso adicionar
+   * direto aqui — campo já está reservado no payload.
+   */
+  private classifySource(raw: unknown): {
+    channel: 'catalog' | 'direct_listing'
+    tags:    string[]
+    is_b2b:        boolean
+    is_kit:        boolean
+    is_pack:       boolean
+    has_discount:  boolean
+    /** Reservado pra quando ml-ads-attribution sync estiver ativo */
+    ads_attribution: { is_ads: boolean; source?: 'unknown' } | null
+  } {
+    const tags: string[] = Array.isArray((raw as { tags?: string[] } | null | undefined)?.tags)
+      ? ((raw as { tags: string[] }).tags ?? [])
+      : []
+    const tagSet = new Set(tags)
+    return {
+      channel:        tagSet.has('catalog') ? 'catalog' : 'direct_listing',
+      tags,
+      is_b2b:         tagSet.has('b2b'),
+      is_kit:         tagSet.has('bundle'),
+      is_pack:        tagSet.has('pack_order'),
+      has_discount:   tagSet.has('order_has_discount'),
+      ads_attribution: null,  // TODO: cross-check com ml_ads_attributed_sales quando sync existir
+    }
   }
 
   // ── Thumbnail do ML (com cache em product_listings.listing_thumbnail) ────
@@ -328,8 +374,19 @@ export class NewSaleNotifierService {
     ads:        Awaited<ReturnType<NewSaleNotifierService['fetchAds']>>
     conversion: Awaited<ReturnType<NewSaleNotifierService['computeConversion']>>
     margemPct:  number
+    source:     ReturnType<NewSaleNotifierService['classifySource']>
   }): string {
     const parts: string[] = []
+
+    // Origem
+    const originParts: string[] = [
+      ctx.source.channel === 'catalog' ? '📦 Catálogo ML' : '🏷️ Anúncio direto',
+    ]
+    if (ctx.source.is_b2b)        originParts.push('B2B')
+    if (ctx.source.is_kit)        originParts.push('Kit')
+    if (ctx.source.is_pack)       originParts.push('Carrinho')
+    if (ctx.source.has_discount)  originParts.push('Cupom')
+    parts.push(originParts.join(' · '))
 
     if (ctx.trend) {
       const arrow = ctx.trend.direction === 'up' ? '↑' : ctx.trend.direction === 'down' ? '↓' : '→'
