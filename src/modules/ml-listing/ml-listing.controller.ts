@@ -298,4 +298,54 @@ export class MlListingController {
     if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
     return this.svc.automation().disableAutomation(user.orgId, Number(body.seller_id), itemId)
   }
+
+  // ── Fiscal scanner (Sprint 5 / L3) ───────────────────────────────────────
+
+  @Post('scan/fiscal')
+  @HttpCode(HttpStatus.OK)
+  runFiscalScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runFiscalScan(user.orgId, Number(body.seller_id))
+  }
+
+  @Get('fiscal')
+  listFiscal(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('blocked_only') blockedOnly?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.fiscal().list(user.orgId, {
+      seller_id:    sellerId ? Number(sellerId) : undefined,
+      blocked_only: blockedOnly === 'true',
+      limit:        limit ? Number(limit) : 100,
+    })
+  }
+
+  @Get('fiscal/blocked-nfe')
+  listBlockedNfe(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.fiscal().list(user.orgId, {
+      seller_id:    sellerId ? Number(sellerId) : undefined,
+      blocked_only: true,
+      limit:        500,
+    })
+  }
+
+  @Post('fiscal/:itemId/fix')
+  @HttpCode(HttpStatus.OK)
+  fixFiscal(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number; fixes: Array<{ id: string; value_name: string }> },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    if (!Array.isArray(body?.fixes) || body.fixes.length === 0) {
+      throw new BadRequestException('fixes[] obrigatório (ex: [{id:"NCM", value_name:"8543.70.99"}])')
+    }
+    return this.svc.fiscal().fix(user.orgId, Number(body.seller_id), itemId, body.fixes)
+  }
 }

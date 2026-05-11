@@ -6,6 +6,7 @@ import { ListingStatusScannerService } from './listing-status-scanner.service'
 import { ListingPricingScannerService } from './listing-pricing-scanner.service'
 import { ListingAutomationScannerService } from './listing-automation-scanner.service'
 import { ListingCatalogScannerService } from './listing-catalog-scanner.service'
+import { ListingFiscalScannerService } from './listing-fiscal-scanner.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -38,11 +39,13 @@ export class MlListingService {
     private readonly pricingScanner:    ListingPricingScannerService,
     private readonly automationScanner: ListingAutomationScannerService,
     private readonly catalogScanner:    ListingCatalogScannerService,
+    private readonly fiscalScanner:     ListingFiscalScannerService,
   ) {}
 
-  /** Exposed pra controller invocar direto (apply/activate/configure). */
+  /** Exposed pra controller invocar direto (apply/activate/configure/fix). */
   pricing():    ListingPricingScannerService    { return this.pricingScanner }
   automation(): ListingAutomationScannerService { return this.automationScanner }
+  fiscal():     ListingFiscalScannerService     { return this.fiscalScanner }
 
   // ── Tasks ────────────────────────────────────────────────────────────────
 
@@ -269,6 +272,13 @@ export class MlListingService {
       result.tasks_resolved_auto += automation.tasks_resolved_auto
       result.api_calls_count     += automation.api_calls
 
+      const fiscal = await this.fiscalScanner.scan(orgId, sellerId)
+      result.items_scanned       += fiscal.items_scanned
+      result.tasks_created       += fiscal.tasks_created
+      result.tasks_updated       += fiscal.tasks_updated
+      result.tasks_resolved_auto += fiscal.tasks_resolved_auto
+      result.api_calls_count     += fiscal.api_calls
+
       result.duration_seconds = Math.round((Date.now() - t0) / 1000)
       await this.completeScanLog(log.id, result)
     } catch (err) {
@@ -316,6 +326,30 @@ export class MlListingService {
         tasks_updated: stock.tasks_updated,
         tasks_resolved_auto: stock.tasks_resolved_auto,
         api_calls_count: stock.api_calls,
+        errors_count: 0,
+        duration_seconds: Math.round((Date.now() - t0) / 1000),
+        status: 'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  async runFiscalScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_fiscal')
+    const t0 = Date.now()
+    try {
+      const f = await this.fiscalScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type: 'scanner_fiscal',
+        items_scanned: f.items_scanned,
+        tasks_created: f.tasks_created,
+        tasks_updated: f.tasks_updated,
+        tasks_resolved_auto: f.tasks_resolved_auto,
+        api_calls_count: f.api_calls,
         errors_count: 0,
         duration_seconds: Math.round((Date.now() - t0) / 1000),
         status: 'completed',

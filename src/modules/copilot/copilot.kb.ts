@@ -1795,6 +1795,35 @@ Aproveita \`catalog_product_id\` já em cache do scanner_pricing. Pra cada item 
 **Atalhos no sidebar**: "Automação preço" (tela), "Catálogo" (filtro \`?type=CATALOG_ELIGIBLE\` na tela principal).`,
     tags: ['listings', 'pricing-automation', 'catalogo', 'buy-box', 'multi-conta'],
   },
+  {
+    routes:   ['/dashboard/listings/fiscal'],
+    category: 'listing-center',
+    title:    'Fiscal NF-e — NCM, GTIN, origem (Sprint 5 / L3)',
+    content:  `Tela \`/dashboard/listings/fiscal\` lista anúncios por **compliance fiscal**. Mostra os 6 atributos checados (NCM, GTIN, ORIGIN, CEST, BRAND, MODEL) com badge verde (presente) ou vermelho (ausente).
+
+**Bloqueia NF-e** quando NCM, GTIN OU ORIGIN estão ausentes — esses 3 são obrigatórios pra emissão de nota fiscal. Cria task \`FISCAL_DATA_MISSING\` severity=high.
+
+**Score fiscal**: % dos 6 checks que passam (0-100).
+
+**Aplicar correção**: botão "Corrigir" abre modal com inputs pros campos faltando. Submit chama \`POST /listings/fiscal/:itemId/fix\` body=\`{seller_id, fixes: [{id: 'NCM', value_name: '...'}, ...]}\`. Backend faz \`PUT /items/{id}\` no ML com os atributos. Após sucesso, re-fetch o item pra atualizar snapshot + resolve task como \`resolved_manual\` se não bloqueia mais.
+
+**Scanner fiscal**:
+- Lista todos items ativos do seller via /users/{seller}/items/search (paginado 50/page até 5000)
+- Pra cada: \`GET /items/{id}?attributes=id,attributes,status,title,price\`
+- Pacing 100ms (10 req/s)
+- Auto-resolve: tasks abertas que não viram bloqueio em >6h viram resolved_auto
+
+**Endpoints (auth):**
+- \`POST /listings/scan/fiscal\` body=\`{seller_id}\`
+- \`GET  /listings/fiscal?seller_id=&blocked_only=true\`
+- \`GET  /listings/fiscal/blocked-nfe?seller_id=\` (atalho)
+- \`POST /listings/fiscal/:itemId/fix\` body=\`{seller_id, fixes[]}\`
+
+**Atalho no sidebar**: "Fiscal (NF-e)" → /dashboard/listings/fiscal.
+
+**Importante**: atributos fiscais ficam no ANÚNCIO (PUT /items/{id}), não no produto do catálogo. Mesmo item migrado de produto pode ter atributos diferentes do esperado.`,
+    tags: ['listings', 'fiscal', 'nfe', 'ncm', 'gtin', 'compliance', 'multi-conta'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════
