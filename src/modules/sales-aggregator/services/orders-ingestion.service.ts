@@ -110,6 +110,28 @@ export class OrdersIngestionService {
         breakdownMap.set(shipId, bd)
         costMap.set(shipId, bd.sender_cost)
       } catch { /* best-effort, default 0 */ }
+
+      // 2b. Shipment FULL — pega receiver_address (state/city) e demais
+      //     campos de envio que /orders/{id} não retorna (vem só
+      //     `shipping: {id}`). Sem isso, mapa "Vendas por Região" fica
+      //     zerado em todo pedido novo. Best-effort; falha não derruba.
+      try {
+        const sh = await this.mlClient.fetchShipmentFull(token, shipId)
+        if (sh) {
+          // Mesclamos os campos diretamente no `order.shipping` antes do
+          // buildOrderRows. raw_data.shipping vai ser populado a partir
+          // desses campos. Mantém o tipo loose porque MlOrder.shipping
+          // só tipa { id, status, logistic_type }.
+          const shipObj = order.shipping as unknown as Record<string, unknown>
+          shipObj.status                  = sh.status        ?? shipObj.status        ?? null
+          shipObj.substatus               = sh.substatus     ?? shipObj.substatus     ?? null
+          shipObj.logistic_type           = sh.logistic_type ?? shipObj.logistic_type ?? null
+          shipObj.receiver_address        = sh.receiver_address  ?? shipObj.receiver_address  ?? null
+          shipObj.estimated_delivery_date = sh.estimated_delivery_date ?? shipObj.estimated_delivery_date ?? null
+          shipObj.posting_deadline        = sh.posting_deadline        ?? shipObj.posting_deadline        ?? null
+          shipObj.date_created            = sh.date_created            ?? shipObj.date_created            ?? null
+        }
+      } catch { /* best-effort */ }
     }
 
     // 3. Listing map (cache reuse — buildListingMap só dura essa execução)
@@ -334,7 +356,11 @@ export class OrdersIngestionService {
 
       for (const r of batch) {
         checked++
-        const shipment = await this.mlClient.fetchShipment(token, r.shipping_id)
+        // Usa fetchShipmentFull — pega status + substatus + logistic_type +
+        // receiver_address de uma vez. Antes era fetchShipment (3 campos),
+        // mas isso deixava endereço de fora e quebrava o mapa "Vendas por
+        // Região" do dashboard. Custa o mesmo (1 GET /shipments/{id}).
+        const shipment = await this.mlClient.fetchShipmentFull(token, r.shipping_id)
         if (!shipment) { skipped++; continue }
 
         // Mescla os campos novos no raw_data.shipping preservando o resto
@@ -344,9 +370,13 @@ export class OrdersIngestionService {
           ...raw,
           shipping: {
             ...existingShipping,
-            status:        shipment.status,
-            substatus:     shipment.substatus,
-            logistic_type: shipment.logistic_type,
+            status:           shipment.status,
+            substatus:        shipment.substatus,
+            logistic_type:    shipment.logistic_type,
+            receiver_address: shipment.receiver_address ?? existingShipping.receiver_address ?? null,
+            estimated_delivery_date: shipment.estimated_delivery_date ?? existingShipping.estimated_delivery_date ?? null,
+            posting_deadline:        shipment.posting_deadline        ?? existingShipping.posting_deadline        ?? null,
+            date_created:            shipment.date_created            ?? existingShipping.date_created            ?? null,
           },
         }
 
@@ -371,6 +401,126 @@ export class OrdersIngestionService {
     }
 
     this.logger.log(`[enrich-shipping] org=${orgId.slice(0,8)} checked=${checked} updated=${updated} skipped=${skipped}`)
+    return { checked, updated, skipped }
+  }
+
+  /** Backfill direcionado pra `receiver_address`. Diferente de
+   *  `enrichShippingStatuses` que filtra por `shipping_status IS NULL`,
+   *  aqui pegamos pedidos que JÁ têm status mas estão sem endereço — o
+   *  caso clássico do webhook orders_v2: ML retorna `shipping: {id}` em
+   *  /orders/{id} sem o endereço, status vem depois via shipments e
+   *  endereço fica nunca. Resultado: mapa "Vendas por Região" zerado em
+   *  todos os pedidos novos.
+   *
+   *  Filtro: shipping_id NOT NULL, sold_at >= now() - daysBack,
+   *  status != cancelled, raw_data->shipping->>receiver_address IS NULL.
+   *  Usa fetchShipmentFull (que devolve endereço + status) e faz merge
+   *  preservando os campos existentes em raw_data.shipping. */
+  async enrichShippingAddresses(
+    orgId: string,
+    options: { limit?: number; daysBack?: number } = {},
+  ): Promise<{ checked: number; updated: number; skipped: number }> {
+    const limit    = Math.min(Math.max(options.limit ?? 200, 1), 1000)
+    const daysBack = Math.max(options.daysBack ?? 30, 1)
+    const fromIso  = new Date(Date.now() - daysBack * 86400_000).toISOString()
+
+    // Filtro: pega TODOS os pedidos com shipping_id no período e
+    // filtra em JS pelos que estão sem `state` em receiver_address.
+    // Detalhe: PostgREST `.is('jsonpath', null)` NÃO catches JSON null
+    // (só SQL null) — se a coluna tem o valor JSON `null` literal, o
+    // filtro do PostgREST passa direto. Como o webhook orders_v2 grava
+    // `receiver_address: null` (JSON null), precisamos filtrar em JS.
+    const { data: rows, error: selErr } = await supabaseAdmin
+      .from('orders')
+      .select('id, seller_id, shipping_id, external_order_id, raw_data')
+      .eq('organization_id', orgId)
+      .not('shipping_id', 'is', null)
+      .gte('sold_at', fromIso)
+      .neq('status', 'cancelled')
+      .order('sold_at', { ascending: false })
+      .limit(Math.max(limit * 5, 1000)) // pega mais; filtra em JS
+
+    if (selErr) {
+      this.logger.error(`[enrich-address] select falhou: ${selErr.message}`)
+      return { checked: 0, updated: 0, skipped: 0 }
+    }
+    if (!rows || rows.length === 0) return { checked: 0, updated: 0, skipped: 0 }
+
+    type Row = { id: string; seller_id: number; shipping_id: number; external_order_id: string; raw_data: Record<string, unknown> | null }
+    const needsAddress = (r: Row): boolean => {
+      const ship = (r.raw_data?.shipping as Record<string, unknown> | undefined) ?? null
+      const recv = ship?.receiver_address as Record<string, unknown> | null | undefined
+      if (!recv) return true
+      const state = (recv.state as { name?: string } | string | null | undefined)
+      if (!state) return true
+      if (typeof state === 'string') return state.trim() === ''
+      return !state.name
+    }
+    const filtered = (rows as Row[]).filter(needsAddress).slice(0, limit)
+    if (filtered.length === 0) return { checked: 0, updated: 0, skipped: 0 }
+
+    const bySeller = new Map<number, Row[]>()
+    for (const r of filtered) {
+      if (!r.seller_id || !r.shipping_id) continue
+      if (!bySeller.has(r.seller_id)) bySeller.set(r.seller_id, [])
+      bySeller.get(r.seller_id)!.push(r)
+    }
+
+    let updated = 0
+    let skipped = 0
+    let checked = 0
+
+    for (const [sellerId, batch] of bySeller) {
+      let token: string
+      try {
+        ({ token } = await this.mlClient.getTokenForOrg(orgId, sellerId))
+      } catch (e) {
+        this.logger.warn(`[enrich-address] org=${orgId.slice(0,8)} seller=${sellerId} sem token: ${(e as Error).message}`)
+        skipped += batch.length
+        continue
+      }
+
+      for (const r of batch) {
+        checked++
+        const shipment = await this.mlClient.fetchShipmentFull(token, r.shipping_id)
+        if (!shipment || !shipment.receiver_address) { skipped++; continue }
+
+        const raw = (r.raw_data ?? {}) as Record<string, unknown>
+        const existingShipping = (raw.shipping as Record<string, unknown> | undefined) ?? {}
+        const newRawData = {
+          ...raw,
+          shipping: {
+            ...existingShipping,
+            status:           shipment.status        ?? existingShipping.status        ?? null,
+            substatus:        shipment.substatus     ?? existingShipping.substatus     ?? null,
+            logistic_type:    shipment.logistic_type ?? existingShipping.logistic_type ?? null,
+            receiver_address: shipment.receiver_address,
+            estimated_delivery_date: shipment.estimated_delivery_date ?? existingShipping.estimated_delivery_date ?? null,
+            posting_deadline:        shipment.posting_deadline        ?? existingShipping.posting_deadline        ?? null,
+            date_created:            shipment.date_created            ?? existingShipping.date_created            ?? null,
+          },
+        }
+
+        const updatePayload: Record<string, unknown> = { raw_data: newRawData }
+        if (shipment.status) updatePayload.shipping_status = shipment.status
+
+        const { error: upErr } = await supabaseAdmin
+          .from('orders')
+          .update(updatePayload)
+          .eq('id', r.id)
+
+        if (upErr) {
+          this.logger.warn(`[enrich-address] update ${r.external_order_id}: ${upErr.message}`)
+          skipped++
+          continue
+        }
+
+        updated++
+        await new Promise(res => setTimeout(res, 200))
+      }
+    }
+
+    this.logger.log(`[enrich-address] org=${orgId.slice(0,8)} checked=${checked} updated=${updated} skipped=${skipped}`)
     return { checked, updated, skipped }
   }
 

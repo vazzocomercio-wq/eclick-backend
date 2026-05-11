@@ -184,6 +184,49 @@ export class MercadoLivreClient {
     }
   }
 
+  /** GET /shipments/{id} — versão completa que retorna o payload todo,
+   *  incluindo `receiver_address` (state.id/name, city.name). Necessário
+   *  porque /orders/{id} devolve `shipping: {id}` apenas — sem endereço.
+   *  Sem isso o mapa "Vendas por Região" do dashboard fica zerado em
+   *  pedidos novos (ingeridos via webhook orders_v2).
+   *
+   *  IMPORTANTE: NÃO usar header `x-format-new: true`. O formato novo
+   *  exclui `receiver_address` do payload por padrão (só devolve
+   *  status/substatus/logistic_type). O formato legado tem o endereço
+   *  + status/substatus/logistic_type, então é estritamente superior
+   *  pra esse uso. */
+  async fetchShipmentFull(token: string, shipmentId: number): Promise<{
+    status:        string | null
+    substatus:     string | null
+    logistic_type: string | null
+    receiver_address: Record<string, unknown> | null
+    estimated_delivery_date: unknown
+    posting_deadline:        unknown
+    date_created:            unknown
+  } | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data } = await this.withRetry<any>(() =>
+        axios.get(`${ML_BASE}/shipments/${shipmentId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 8000,
+        }),
+      )
+      if (!data || typeof data !== 'object') return null
+      return {
+        status:        (data.status        as string | null) ?? null,
+        substatus:     (data.substatus     as string | null) ?? null,
+        logistic_type: (data.logistic_type as string | null) ?? null,
+        receiver_address: (data.receiver_address as Record<string, unknown> | null) ?? null,
+        estimated_delivery_date: data.estimated_delivery_date ?? data.shipping_option?.estimated_delivery_final?.date ?? null,
+        posting_deadline:        data.posting_deadline        ?? data.shipping_option?.estimated_handling_limit?.date ?? null,
+        date_created:            data.date_created            ?? null,
+      }
+    } catch {
+      return null
+    }
+  }
+
   async fetchShipmentCost(token: string, shipmentId: number): Promise<number> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

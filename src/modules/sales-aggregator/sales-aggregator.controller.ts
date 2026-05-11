@@ -97,4 +97,21 @@ export class SalesAggregatorController {
     const result = await this.backfill.runShippingEnrich(user.orgId, { limit, daysBack })
     return { ...result, message: `Enrich shipping concluído (${result.updated} atualizados)` }
   }
+
+  /** POST /sales-aggregator/enrich-shipping-address — popula
+   *  receiver_address (state/city) em raw_data.shipping via
+   *  /shipments/{id}. Necessário pro mapa "Vendas por Região" do
+   *  dashboard porque pedidos novos chegam pelo webhook orders_v2 sem
+   *  endereço (ML retorna `shipping: {id}` apenas em /orders/{id}). */
+  @Post('enrich-shipping-address')
+  @HttpCode(202)
+  async enrichShippingAddress(
+    @ReqUser() user: AuthUser,
+    @Body() body: { limit?: number; daysBack?: number },
+  ) {
+    const limit    = Math.min(Math.max(body.limit ?? 200, 1), 1000)
+    const daysBack = Math.min(Math.max(body.daysBack ?? 30, 1), 365)
+    const result = await this.backfill.runShippingAddressEnrich(user.orgId, { limit, daysBack })
+    return { ...result, message: `Enrich endereços concluído (${result.updated} atualizados)` }
+  }
 }

@@ -251,6 +251,15 @@ export class BackfillService implements OnApplicationBootstrap {
     return this.ordersIngestion.enrichShippingStatuses(resolved, options)
   }
 
+  /** Manual trigger pra enrich endereços (mapa de vendas por região).
+   *  Pedidos novos via webhook orders_v2 chegam com `shipping: {id}` mas
+   *  sem `receiver_address` — esse backfill busca /shipments/{id} e
+   *  popula raw_data.shipping.receiver_address. */
+  async runShippingAddressEnrich(orgId: string | null, options: { limit?: number; daysBack?: number } = {}) {
+    const resolved = await this.resolveOrgId(orgId)
+    return this.ordersIngestion.enrichShippingAddresses(resolved, options)
+  }
+
   private async startRun(
     orgId: string,
     runType: 'backfill' | 'daily' | 'manual',
