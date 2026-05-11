@@ -1408,20 +1408,107 @@ export class MercadolivreService {
     }
   }
 
+  /**
+   * Lista reclamações abertas via /post-purchase/v1/claims/search.
+   *
+   * Endpoint validado 2026-05-11 contra VAZZO_: retorna 25 claims abertos
+   * (4 stage=claim + 21 mediations). O endpoint antigo `/post-purchase/claims`
+   * (sem /v1/search) retornava 404 silenciosamente e mostrava sempre 0.
+   *
+   * `status=opened` é OBRIGATÓRIO (sem filtro, ML 400). `role` removido —
+   * não é param válido.
+   */
   async getClaims(orgId: string, sellerIdFilter?: number) {
     try {
       const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
-      const { data: body } = await axios.get(`${ML_BASE}/post-purchase/claims`, {
+      const { data: body } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/search`, {
         headers: { Authorization: `Bearer ${token}` },
-        params: { role: 'seller', status: 'opened' },
+        params: { status: 'opened', limit: 50 },
       })
-      return body
+      // Normaliza pra { data, total } que o frontend espera
+      return {
+        data:  body?.data ?? [],
+        total: body?.paging?.total ?? body?.data?.length ?? 0,
+      }
     } catch (err: any) {
       const status = err?.response?.status ?? 500
       // Expected for accounts without claims access — return empty silently.
       if (status === 401 || status === 403 || status === 404) return { data: [], total: 0 }
       console.error('[claims] ML error:', status, err?.response?.data?.message ?? err?.message)
       throw new HttpException(err?.response?.data?.message ?? err?.message ?? 'Erro ao buscar reclamações', status)
+    }
+  }
+
+  /** GET /post-purchase/v1/claims/{id} — visão básica (status, stage, type, reason, players). */
+  async getClaim(orgId: string, claimId: number | string, sellerIdFilter?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    const { data } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return data
+  }
+
+  /** GET /post-purchase/v1/claims/{id}/detail — due_date, action_responsible, title, description, problem. */
+  async getClaimDetail(orgId: string, claimId: number | string, sellerIdFilter?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    try {
+      const { data } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}/detail`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      return data
+    } catch (err: any) {
+      // /detail pode 404 quando claim ainda não está em mediação ou nao tem due_date
+      if (err?.response?.status === 404) return null
+      throw err
+    }
+  }
+
+  /** GET /post-purchase/v1/claims/{id}/messages — mensagens da reclamação (sender_role, message, attachments). */
+  async getClaimMessages(orgId: string, claimId: number | string, sellerIdFilter?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    try {
+      const { data } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}/messages`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      // ML retorna { messages: [...] } OU array direto OU { data: [...] } — normalizar
+      const list = Array.isArray(data) ? data : (data?.messages ?? data?.data ?? [])
+      return { messages: list }
+    } catch (err: any) {
+      if (err?.response?.status === 404) return { messages: [] }
+      throw err
+    }
+  }
+
+  /**
+   * POST /post-purchase/v1/claims/{id}/actions/send-message
+   * receiver_role: 'complainant' (comprador) | 'mediator' | 'respondent'
+   */
+  async sendClaimMessage(
+    orgId: string,
+    claimId: number | string,
+    sellerIdFilter: number | undefined,
+    body: { receiver_role: 'complainant' | 'mediator' | 'respondent'; message: string; attachments?: string[] },
+  ) {
+    const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    const { data } = await axios.post(
+      `${ML_BASE}/post-purchase/v1/claims/${claimId}/actions/send-message`,
+      body,
+      { headers: { Authorization: `Bearer ${token}` } },
+    )
+    return data
+  }
+
+  /** GET /post-purchase/v1/claims/{id}/actions-history — auditoria. */
+  async getClaimActionsHistory(orgId: string, claimId: number | string, sellerIdFilter?: number) {
+    const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
+    try {
+      const { data } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}/actions-history`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      return { history: Array.isArray(data) ? data : (data?.data ?? data?.history ?? []) }
+    } catch (err: any) {
+      if (err?.response?.status === 404) return { history: [] }
+      throw err
     }
   }
 

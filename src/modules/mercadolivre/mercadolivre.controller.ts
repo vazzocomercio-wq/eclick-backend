@@ -509,6 +509,66 @@ export class MercadolivreController {
     }
   }
 
+  // path-to-regexp v6: literais ANTES de :id catch-all (feedback_path_to_regexp_v6)
+
+  // GET /ml/claims/:id/detail
+  @Get('claims/:id/detail')
+  getClaimDetail(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getClaimDetail(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
+  }
+
+  // GET /ml/claims/:id/messages
+  @Get('claims/:id/messages')
+  getClaimMessages(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getClaimMessages(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
+  }
+
+  // GET /ml/claims/:id/actions-history
+  @Get('claims/:id/actions-history')
+  getClaimActionsHistory(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getClaimActionsHistory(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
+  }
+
+  // POST /ml/claims/:id/messages
+  @Post('claims/:id/messages')
+  sendClaimMessage(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { receiver_role: 'complainant' | 'mediator' | 'respondent'; message: string; attachments?: string[]; seller_id?: number },
+  ) {
+    if (!body?.message || body.message.trim().length === 0) {
+      throw new BadRequestException('message obrigatório')
+    }
+    if (!body.receiver_role) body.receiver_role = 'complainant'
+    return this.ml.sendClaimMessage(user.orgId!, id, body.seller_id, {
+      receiver_role: body.receiver_role,
+      message:       body.message,
+      attachments:   body.attachments,
+    })
+  }
+
+  // GET /ml/claims/:id (catch-all — fica POR ÚLTIMO entre as rotas /claims/:id)
+  @Get('claims/:id')
+  getClaim(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getClaim(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
+  }
+
   // ── Catalog / Listings ────────────────────────────────────────────────────
 
   // GET /ml/orders/kpis?seller_id=...
