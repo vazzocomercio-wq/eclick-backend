@@ -493,6 +493,49 @@ export class MlListingController {
     return this.svc.bulk().getAction(user.orgId, id)
   }
 
+  // ── Copilot quick-actions (refinamento pós-Sprint 8) ─────────────────────
+  // Endpoints granulares pro FloatingCopilot consumir e responder perguntas
+  // tipo "quais anúncios mais críticos?" / "aplica preço nos top 10 saudáveis"
+  // sem precisar conhecer 30+ endpoints específicos. Cada um retorna um
+  // payload pequeno e linkável.
+
+  @Get('copilot/snapshot')
+  async copilotSnapshot(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    const sid = sellerId ? Number(sellerId) : undefined
+
+    // Summary + top 5 critical tasks + top 5 unhealthy listings em 1 só payload
+    const [summary, critical, unhealthy] = await Promise.all([
+      this.svc.getSummary(user.orgId, sid),
+      this.svc.listTasks(user.orgId, { seller_id: sid, severity: 'critical', limit: 5 }),
+      this.svc.health().list(user.orgId, { seller_id: sid, max_score: 59, limit: 5 }),
+    ])
+    return {
+      summary,
+      critical_tasks_sample: critical.tasks,
+      unhealthy_listings_sample: unhealthy,
+      links: {
+        all_tasks:    '/dashboard/listings',
+        scores:       '/dashboard/listings/scores',
+        pricing:      '/dashboard/listings/pricing',
+        bulk:         '/dashboard/listings/bulk',
+      },
+    }
+  }
+
+  @Get('copilot/top-problems')
+  async copilotTopProblems(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listTasks(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      limit:     limit ? Number(limit) : 10,
+    })
+  }
+
   @Post('fiscal/:itemId/fix')
   @HttpCode(HttpStatus.OK)
   fixFiscal(

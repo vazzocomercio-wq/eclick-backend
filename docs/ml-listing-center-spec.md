@@ -1,8 +1,45 @@
 # ML Listing Center IA — Especificação Técnica
 
 **Módulo F10 do e-Click SaaS** (eclick.app.br)
-**Versão:** 1.1 (pós-smoke-test 2026-05-10)
+**Versão:** 1.2 (entrega Sprints 1-8 + refinamentos cron+copilot — 2026-05-11)
+**Status:** ✅ Em produção. L1-L4 entregues.
 **Stack:** Next.js (Netlify) + NestJS (Railway) + Supabase Postgres
+
+---
+
+## Status atual da implementação (snapshot 2026-05-11)
+
+### ✅ Entregue (Sprints 1-8)
+
+| Camada | Sprint | O que entrou | Hash |
+|---|---|---|---|
+| L1 | 1 | Migrations base + VIEW agregadora + StockScanner + 8 endpoints | `ebcb735` |
+| L1 | 2 | StatusScanner + telas `/listings` e `/listings/items/[id]` + sidebar | `1e7d2ff` + `ae843b1` |
+| L2 | 3 | PricingScanner (price_to_win 2-step) + tela `/pricing` + apply | `8275dc3` + `ac88b80` |
+| L2 | 4 | AutomationScanner + CatalogScanner + tela `/pricing/automation` | `0a86965` + `ed44828` |
+| L3 | 5 | FiscalScanner + tela `/fiscal` + fix via PUT | `3fda4ef` + `35be278` |
+| L3 | 6 | PauseClassifications + tela `/policy` (12 categorias) | `95c332c` + `0321b9b` |
+| L4 | 7 | HealthScoreService (6 dims weighted) + tela `/scores` | `392b3fa` + `9657543` |
+| L4 | 8 | BulkActions (4 ops) + tela `/bulk` + KB copilot | `77ea3b9` + `b9e767d` |
+| – | refinamento | Cron daily 02:30 BRT + hourly aggregation + copilot quick-actions | (este commit) |
+
+### ⏭️ Adiado pra próxima iteração
+
+| Item | Razão de adiar |
+|---|---|
+| IA real no `top_recommendation` | Determinístico é suficiente pra MVP. Substituir custaria ~$10/mês e adiciona dependência. Refinar quando o user pedir explicitamente. |
+| Card `WRONG_DIMENSIONS` | Complexo: precisa cruzar peso/dimensões do anúncio vs peso real do produto físico. Provável precisar ML support pra batch get. |
+| Card `SHIPPING_COST_CHANGED` | Requer snapshot histórico de `listing_prices` + comparação serial. Tabela nova + cron de polling. |
+| Card `BUYER_EXPERIENCE_ISSUE` | Cruzar orders + claims + returns + messages com window de 30d. Heurística sutil. |
+| Card `FULL_ELIGIBLE` | Regras semi-públicas do ML, precisa engenharia reversa do `/users/{id}/items/visits/eligibility` e similares. |
+| Tool calling no FloatingCopilot | Requer mudanças no copilot frontend pra interpretar intent → invocar endpoint /listings/copilot/quick-action correto. Backend está pronto (endpoints `copilot/snapshot` e `copilot/top-problems`). |
+
+### Crons ativos (após esse commit)
+
+- `listingDailyFullScan` — 02:30 BRT diário. Roda full scan completo (8 scanners) pra todas as orgs+sellers. Watchdog 15min/seller.
+- `listingHourlyAggregation` — :17 de cada hora. Só aggregation (lê VIEW, zero ML calls). Watchdog 3min/seller.
+
+
 
 **Pré-requisitos (módulos já entregues):**
 - F7 ML Quality Center IA → fornece sinais de qualidade
