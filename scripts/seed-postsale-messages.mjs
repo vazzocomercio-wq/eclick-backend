@@ -288,7 +288,7 @@ async function scanSeller(orgId, sellerId) {
         if (exists) continue
 
         const fromId = String(m.from?.user_id ?? '')
-        const direction = fromId === String(sellerId) ? 'outbound' : 'inbound'
+        const direction = fromId === String(sellerId) ? 'seller' : 'buyer'
         const text = m.text?.plain ?? m.text ?? m.message?.text ?? ''
         const sentAt     = m.message_date?.created ?? null
         const receivedAt = m.message_date?.received ?? null
