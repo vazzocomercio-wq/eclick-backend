@@ -152,6 +152,52 @@ Cada bucket lista top 5 produtos. Click no produto → \`/dashboard/produtos/[id
 
 const CREATIVE_ENTRIES: KbEntry[] = [
   {
+    routes:   ['/dashboard/catalogo/anuncios/mercadolivre'],
+    category: 'catalogo',
+    title:    'Anúncios Mercado Livre — listagem + vínculo em massa',
+    content: `**Lista TODOS os anúncios das contas ML conectadas** desta organização (multi-conta). Tabs: Ativos / Pausados / Finalizados / Em revisão.
+
+**Filtros**:
+- Search por Título / SKU / MLB ID
+- Filtros avançados (toggle): tipo (Premium/Ouro/Clássico), logística (Full/Self/Drop-off), promoção, **sem vínculo** (anúncios SEM produto do catálogo linkado), sem custo, sem foto, estoque 0+ativo, sem campanha, saúde com problema
+- Chips no topo mostram os filtros ativos
+
+**Por anúncio (card)**:
+- Thumbnail + título + MLB id (Copy) + SKU (Copy) + badge da CONTA (multi-conta)
+- Badges de tipo (Full/Catálogo/Premium/Ouro/Clássico)
+- Preço + tarifa ML calculada + líquido
+- Estoque INLINE editável quando vinculado a produto (input direto)
+- Health score semi-gauge
+- Badge "📦 Produto vinculado" quando há entry em product_listings
+
+🔗 **Vincular anúncios a produto (em massa)** — botão roxo "Vincular a produto":
+1. Aplica filtro "Sem vínculo" pra ver só não-vinculados (recomendado)
+2. Marca os checkboxes dos anúncios desejados (multi-conta OK — pode misturar contas no mesmo batch)
+3. Click no botão "Vincular a produto" (toolbar OU barra flutuante inferior)
+4. Modal abre com breakdown por conta + busca de produtos do catálogo
+5. Escolhe UM produto + define qtd por unidade (para kits, ex: produto = 1 unidade do kit-de-3 = 3)
+6. Confirma → backend grava \`product_listings\` rows com \`account_id = seller_id\` por anúncio
+7. Idempotente: se vínculo já existe (race), retorna \`skipped\` sem duplicar
+
+**O que ganhamos com o vínculo**:
+- Pedidos vindos do anúncio puxam custo + imposto do produto automaticamente
+- Estoque centralizado (input INLINE no card edita o estoque shared)
+- Margem real por venda passa a ser calculada
+- KPIs "X pedidos sem custo" / "X anúncios sem vínculo" caem
+- Sugestão automática de OC (compras) considera demanda agregada de todos os listings linkados
+
+📦 **Criar produtos a partir de anúncios** — botão cyan "Criar Produtos":
+- Outro caminho: anúncio que ainda NÃO existe no catálogo → cria products row + já vincula
+- Multi-conta OK: cada anúncio carrega seu seller_id
+
+🔄 **Sincronizar ML** (botão topo direito): re-puxa anúncios das contas conectadas. Idempotente.
+
+**Health score** (gauge no card): 80+ = verde, 60-79 = amber, <60 = vermelho. Reflete preço competitivo + estoque + fotos + campanha + variações + reputação. Click no card abre detalhe.
+
+**Multi-conta**: badge colorido por conta (palette baseada em seller_id). Vincular anúncio de uma conta NÃO afeta anúncios da outra — \`account_id\` é a chave que separa.`,
+    tags: ['anúncios', 'listings', 'ml', 'vinculo', 'bulk-link', 'multi-conta', 'product_listings'],
+  },
+  {
     routes:   ['/dashboard/creative'],
     category: 'creative',
     title:    'IA Criativo — lista de produtos criativos',
@@ -1888,6 +1934,55 @@ Sprint 6 fecha L3. Próximo: L4 (score consolidado + copiloto + bulk).`,
 
 **Atalho no sidebar**: "Health Score" → /dashboard/listings/scores.`,
     tags: ['listings', 'health-score', 'consolidado', 'insights', 'recommendation', 'multi-conta'],
+  },
+  {
+    routes:   ['/dashboard/listings/bulk'],
+    category: 'listing-center',
+    title:    'Ações em massa — apply/resolve/snooze em lote (Sprint 8 / fecha L4)',
+    content:  `Tela \`/dashboard/listings/bulk\` mostra **histórico de bulk actions** com progress bar em tempo real (polling 3s enquanto status ∈ pending/validating/executing).
+
+**4 operações suportadas no MVP:**
+
+1. **\`apply_price_suggestions\`** — aplica price_to_win em lote. Acionado pelo botão "Aplicar em lote" na tela /pricing (selecionar checkboxes nos cards). Modes:
+   - \`safe\` (default): pula items abaixo do custo ou abaixo da margem mínima
+   - \`best_effort\`: força aplicação (= mode 'force' do apply individual)
+   - \`dry_run\`: simula sem aplicar — útil pra preview antes de comprometer
+
+2. **\`resolve_tasks_manual\`** — bulk update de tasks pra status='resolved_manual'
+
+3. **\`snooze_tasks\`** — adia N tasks por X dias (default 7)
+
+4. **\`dismiss_tasks\`** — descarta N tasks com motivo
+
+**Endpoints (auth, todos retornam 202 + bulk_action_id):**
+- \`POST /listings/bulk/apply-prices\` body=\`{seller_id, item_ids[], apply_mode?}\`
+- \`POST /listings/bulk/resolve-tasks\` body=\`{seller_id, task_ids[], notes?}\`
+- \`POST /listings/bulk/snooze-tasks\` body=\`{seller_id, task_ids[], days?}\`
+- \`POST /listings/bulk/dismiss-tasks\` body=\`{seller_id, task_ids[], reason?}\`
+- \`GET  /listings/bulk/actions?seller_id=&limit=\` — lista histórico
+- \`GET  /listings/bulk/actions/:id\` — detalhe com results[]
+
+**Execução**: fire-and-forget. UI polls a cada 3s enquanto action está ativa. Pricing apply tem pacing 300ms entre items pra não saturar ML. Bulk de tasks é UPDATE em batches de 100.
+
+**Auditoria**: results[] guarda \`{ item_id_or_task_id, status: applied|failed|skipped, message?, new_price? }\` por item. Permite reconstruir histórico exato de quem aplicou o quê.
+
+**Quando ML rejeita** (price abaixo do custo, automação ativa bloqueia edit, etc.): status='skipped' com message explicativa. UI mostra em chip amarelo.
+
+**Atalho no sidebar**: "Ações em massa" → /dashboard/listings/bulk.
+
+## Comandos pro copiloto (KB inteligente)
+
+O copilot flutuante reconhece comandos como:
+- "Aplique sugestões de preço nos top 20 anúncios saudáveis"
+- "Adie todas as tarefas de qualidade baixa por 7 dias"
+- "Mostre o histórico de bulk actions de hoje"
+- "Quais anúncios estão perdendo Buy Box agora?"
+- "Liste anúncios sem custo cadastrado que estão bloqueando NF-e"
+
+O copilot delega cada query via API GET correspondente (tasks?type=, suggestions?buy_box_status=, fiscal?blocked_only=true, health?max_score=) e ações via POST bulk/*.
+
+Sprint 8 fecha L4 e o módulo F10 inteiro. Próximo: refinamentos pós-feedback do usuário.`,
+    tags: ['listings', 'bulk-actions', 'auditoria', 'copilot', 'multi-conta'],
   },
 ]
 

@@ -396,6 +396,103 @@ export class MlListingController {
     return this.svc.health().getOne(user.orgId, itemId)
   }
 
+  // ── Bulk actions (Sprint 8 / L4) ─────────────────────────────────────────
+
+  @Post('bulk/apply-prices')
+  @HttpCode(HttpStatus.ACCEPTED)
+  bulkApplyPrices(
+    @ReqUser() user: AuthUser,
+    @Body() body: { seller_id: number; item_ids: string[]; apply_mode?: 'safe' | 'best_effort' | 'dry_run' },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    if (!Array.isArray(body.item_ids) || body.item_ids.length === 0) {
+      throw new BadRequestException('item_ids[] obrigatório')
+    }
+    return this.svc.bulk().startBulkAction({
+      orgId: user.orgId, sellerId: Number(body.seller_id), userId: user.id,
+      action_type: 'apply_price_suggestions',
+      item_ids: body.item_ids,
+      apply_mode: body.apply_mode ?? 'safe',
+    })
+  }
+
+  @Post('bulk/resolve-tasks')
+  @HttpCode(HttpStatus.ACCEPTED)
+  bulkResolveTasks(
+    @ReqUser() user: AuthUser,
+    @Body() body: { seller_id: number; task_ids: string[]; notes?: string },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    if (!Array.isArray(body.task_ids) || body.task_ids.length === 0) {
+      throw new BadRequestException('task_ids[] obrigatório')
+    }
+    return this.svc.bulk().startBulkAction({
+      orgId: user.orgId, sellerId: Number(body.seller_id), userId: user.id,
+      action_type: 'resolve_tasks_manual',
+      task_ids: body.task_ids,
+      notes: body.notes,
+    })
+  }
+
+  @Post('bulk/snooze-tasks')
+  @HttpCode(HttpStatus.ACCEPTED)
+  bulkSnoozeTasks(
+    @ReqUser() user: AuthUser,
+    @Body() body: { seller_id: number; task_ids: string[]; days?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    if (!Array.isArray(body.task_ids) || body.task_ids.length === 0) {
+      throw new BadRequestException('task_ids[] obrigatório')
+    }
+    return this.svc.bulk().startBulkAction({
+      orgId: user.orgId, sellerId: Number(body.seller_id), userId: user.id,
+      action_type: 'snooze_tasks',
+      task_ids: body.task_ids,
+      days: body.days ?? 7,
+    })
+  }
+
+  @Post('bulk/dismiss-tasks')
+  @HttpCode(HttpStatus.ACCEPTED)
+  bulkDismissTasks(
+    @ReqUser() user: AuthUser,
+    @Body() body: { seller_id: number; task_ids: string[]; reason?: string },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    if (!Array.isArray(body.task_ids) || body.task_ids.length === 0) {
+      throw new BadRequestException('task_ids[] obrigatório')
+    }
+    return this.svc.bulk().startBulkAction({
+      orgId: user.orgId, sellerId: Number(body.seller_id), userId: user.id,
+      action_type: 'dismiss_tasks',
+      task_ids: body.task_ids,
+      reason: body.reason,
+    })
+  }
+
+  @Get('bulk/actions')
+  listBulkActions(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.bulk().listActions(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      limit:     limit ? Number(limit) : 50,
+    })
+  }
+
+  @Get('bulk/actions/:id')
+  getBulkAction(@ReqUser() user: AuthUser, @Param('id') id: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.bulk().getAction(user.orgId, id)
+  }
+
   @Post('fiscal/:itemId/fix')
   @HttpCode(HttpStatus.OK)
   fixFiscal(
