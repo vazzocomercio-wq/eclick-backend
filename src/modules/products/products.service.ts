@@ -355,6 +355,108 @@ export class ProductsService {
     if (error) throw new Error(error.message)
   }
 
+  /** Cria N vínculos do MESMO product_id pra N listings em batch. Cada
+   *  listing pode pertencer a uma conta ML diferente (account_id) — o
+   *  caller passa esse campo por listing. Idempotente: se já existe um
+   *  vínculo (product_id + listing_id + platform) ele é marcado como
+   *  `skipped` em vez de duplicar. Usado pela tela
+   *  /catalogo/anuncios/mercadolivre no fluxo "selecionar vários → vincular
+   *  todos a um produto". */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async createVinculosBulk(dto: any): Promise<{
+    created: number
+    skipped: number
+    errors:  number
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    results: Array<{ listing_id: string; status: 'created' | 'skipped' | 'error'; message?: string }>
+  }> {
+    const productId: string = String(dto?.product_id ?? '')
+    const platform:  string = String(dto?.platform ?? 'mercadolivre')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const items: Array<any> = Array.isArray(dto?.items) ? dto.items : []
+    if (!productId || items.length === 0) {
+      throw new Error('product_id e items são obrigatórios')
+    }
+
+    const listingIds = items.map(it => String(it?.listing_id ?? '')).filter(Boolean)
+    if (listingIds.length === 0) {
+      throw new Error('items[].listing_id obrigatório')
+    }
+
+    // 1. Pega vínculos JÁ existentes pra esse product_id + plataforma —
+    //    permite skip idempotente em vez de erro de unique constraint.
+    const { data: existing } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id')
+      .eq('platform', platform)
+      .in('listing_id', listingIds)
+
+    const existingIds = new Set(((existing ?? []) as Array<{ listing_id: string }>).map(r => r.listing_id))
+
+    // 2. Monta rows pra inserir — pula os já existentes
+    const toInsert: Record<string, unknown>[] = []
+    const results: Array<{ listing_id: string; status: 'created' | 'skipped' | 'error'; message?: string }> = []
+    let skipped = 0
+    for (const it of items) {
+      const listingId = String(it?.listing_id ?? '')
+      if (!listingId) continue
+      if (existingIds.has(listingId)) {
+        skipped++
+        results.push({ listing_id: listingId, status: 'skipped', message: 'já vinculado' })
+        continue
+      }
+      toInsert.push({
+        product_id:           productId,
+        platform,
+        listing_id:           listingId,
+        quantity_per_unit:    Number(it?.quantity_per_unit ?? 1),
+        variation_id:         it?.variation_id      ?? null,
+        variation_attributes: it?.variation_attributes ?? null,
+        // account_id armazena o seller_id ML como text — chave de multi-conta
+        account_id:           it?.account_id        ?? null,
+        listing_title:        it?.listing_title     ?? null,
+        listing_price:        it?.listing_price     ?? null,
+        listing_thumbnail:    it?.listing_thumbnail ?? null,
+        listing_permalink:    it?.listing_permalink ?? null,
+        is_active:            true,
+      })
+    }
+
+    if (toInsert.length === 0) {
+      return { created: 0, skipped, errors: 0, results }
+    }
+
+    // 3. Insert em batch único — best-effort. Se algum row falhar (ex:
+    //    unique constraint race), cai pro fallback per-row pra capturar
+    //    erros individuais sem perder os que poderiam ter dado certo.
+    const { data: inserted, error } = await supabaseAdmin
+      .from('product_listings')
+      .insert(toInsert)
+      .select('listing_id')
+
+    if (!error && inserted) {
+      for (const row of inserted as Array<{ listing_id: string }>) {
+        results.push({ listing_id: row.listing_id, status: 'created' })
+      }
+      return { created: inserted.length, skipped, errors: 0, results }
+    }
+
+    // 3b. Fallback per-row pra erro detalhado por linha
+    let created = 0
+    let errors  = 0
+    for (const row of toInsert) {
+      const { error: e } = await supabaseAdmin.from('product_listings').insert(row)
+      if (e) {
+        errors++
+        results.push({ listing_id: String(row.listing_id), status: 'error', message: e.message })
+      } else {
+        created++
+        results.push({ listing_id: String(row.listing_id), status: 'created' })
+      }
+    }
+    return { created, skipped, errors, results }
+  }
+
   async createStockMovement(dto: CreateStockMovementDto, userId?: string | null) {
     try {
       // Resolve stock record (use shared stock if no explicit stockId)

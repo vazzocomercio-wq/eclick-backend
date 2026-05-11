@@ -203,6 +203,18 @@ export class ProductsController {
     return this.products.createVinculo(body)
   }
 
+  // POST /products/vinculos/bulk — cria N vínculos do MESMO produto pra N
+  // listings (cada um pode estar em conta ML diferente). Usado no fluxo da
+  // página /catalogo/anuncios/mercadolivre onde o usuário seleciona vários
+  // anúncios não-vinculados e escolhe um produto pra vincular todos de uma
+  // vez. Resposta inclui per-listing status pra UI mostrar o que deu certo
+  // e o que falhou (ex: vínculo já existia → skip).
+  @Post('vinculos/bulk')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  createVinculosBulk(@Body() body: any) {
+    return this.products.createVinculosBulk(body)
+  }
+
   // DELETE /products/vinculos/:id
   @Delete('vinculos/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
