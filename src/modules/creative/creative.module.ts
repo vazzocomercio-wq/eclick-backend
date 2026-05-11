@@ -8,6 +8,9 @@ import { CreativeVideoPipelineWorker } from './creative-video-pipeline.worker'
 import { CreativeMlPublisherService } from './creative-ml-publisher.service'
 import { CreativeMlSyncWorker } from './creative-ml-sync.worker'
 import { CreativeCleanupWorker } from './creative-cleanup.worker'
+import { CreativePromptTemplatesService } from './creative-prompt-templates.service'
+import { CreativeReferencesService } from './creative-references.service'
+import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
 import { KlingClient } from './kling.client'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
@@ -24,6 +27,10 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     CreativeMlPublisherService,
     CreativeMlSyncWorker,
     CreativeCleanupWorker,
+    // F6 Sprint 2 — Templates + References + Resolution
+    CreativePromptTemplatesService,
+    CreativeReferencesService,
+    CreativeTemplateResolutionService,
     KlingClient,
   ],
   exports: [
@@ -31,6 +38,10 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     CreativeImagePipelineService,
     CreativeVideoPipelineService,
     CreativeMlPublisherService,
+    // F6 Sprint 2 — exposto pro pipeline (Fase 2.3 vai consumir)
+    CreativePromptTemplatesService,
+    CreativeReferencesService,
+    CreativeTemplateResolutionService,
   ],
 })
 export class CreativeModule {}

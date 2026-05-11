@@ -13,6 +13,18 @@ import {
 import { CreativeImagePipelineService } from './creative-image-pipeline.service'
 import { CreativeVideoPipelineService } from './creative-video-pipeline.service'
 import { CreativeMlPublisherService } from './creative-ml-publisher.service'
+import {
+  CreativePromptTemplatesService,
+  TEMPLATE_VARIABLES,
+} from './creative-prompt-templates.service'
+import { CreativeReferencesService } from './creative-references.service'
+import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
+import type { CreatePromptTemplateDto } from './dto/create-prompt-template.dto'
+import type { UpdatePromptTemplateDto } from './dto/update-prompt-template.dto'
+import type { PreviewTemplateDto } from './dto/preview-template.dto'
+import type { CreateReferenceDto } from './dto/create-reference.dto'
+import type { UpdateReferenceDto } from './dto/update-reference.dto'
+import type { UploadReferenceDto } from './dto/upload-reference.dto'
 import type { Marketplace } from './creative.marketplace-rules'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -23,10 +35,13 @@ export class CreativeController {
   private readonly logger = new Logger(CreativeController.name)
 
   constructor(
-    private readonly svc:    CreativeService,
-    private readonly images: CreativeImagePipelineService,
-    private readonly videos: CreativeVideoPipelineService,
-    private readonly mlPub:  CreativeMlPublisherService,
+    private readonly svc:        CreativeService,
+    private readonly images:     CreativeImagePipelineService,
+    private readonly videos:     CreativeVideoPipelineService,
+    private readonly mlPub:      CreativeMlPublisherService,
+    private readonly templates:  CreativePromptTemplatesService,
+    private readonly references: CreativeReferencesService,
+    private readonly resolution: CreativeTemplateResolutionService,
   ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
@@ -456,5 +471,204 @@ export class CreativeController {
   @HttpCode(HttpStatus.OK)
   acknowledgeDegradation(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.acknowledgeDegradation(this.orgOrThrow(u), id, u.id)
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Sprint 2 — Prompt templates (por position)
+  //
+  // ⚠️ Ordem importa: literais (`/variables`, `/match`) DEVEM vir antes
+  // dos catch-all `/:id` pra não serem hijackeados. Nest registra na ordem
+  // de declaração das anotações.
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** GET /creative/prompt-templates/variables — lista de {vars} disponíveis (estático). */
+  @Get('prompt-templates/variables')
+  listTemplateVariables() {
+    return { variables: TEMPLATE_VARIABLES }
+  }
+
+  /** GET /creative/prompt-templates/match?product_id=X — escolhe melhor template pro produto. */
+  @Get('prompt-templates/match')
+  matchTemplateForProduct(@ReqUser() u: ReqUserPayload, @Query('product_id') productId?: string) {
+    if (!productId) throw new BadRequestException('product_id obrigatório')
+    return this.resolution.matchTemplateForProduct(this.orgOrThrow(u), productId)
+  }
+
+  /** GET /creative/prompt-templates — lista templates da org. */
+  @Get('prompt-templates')
+  listPromptTemplates(
+    @ReqUser() u: ReqUserPayload,
+    @Query('search') search?: string,
+    @Query('category_ml_id') categoryMlId?: string,
+  ) {
+    return this.templates.list(this.orgOrThrow(u), { search, category_ml_id: categoryMlId })
+  }
+
+  /** POST /creative/prompt-templates — cria template. */
+  @Post('prompt-templates')
+  createPromptTemplate(@ReqUser() u: ReqUserPayload, @Body() body: CreatePromptTemplateDto) {
+    return this.templates.create(this.orgOrThrow(u), u.id, body)
+  }
+
+  /** GET /creative/prompt-templates/:id — pega template por id. */
+  @Get('prompt-templates/:id')
+  getPromptTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.templates.getById(this.orgOrThrow(u), id)
+  }
+
+  /** PATCH /creative/prompt-templates/:id — atualiza template. */
+  @Patch('prompt-templates/:id')
+  updatePromptTemplate(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: UpdatePromptTemplateDto,
+  ) {
+    return this.templates.update(this.orgOrThrow(u), id, body)
+  }
+
+  /** DELETE /creative/prompt-templates/:id — apaga template (recusa se for default). */
+  @Delete('prompt-templates/:id')
+  deletePromptTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.templates.remove(this.orgOrThrow(u), id)
+  }
+
+  /** POST /creative/prompt-templates/:id/set-default — promove a default da org. */
+  @Post('prompt-templates/:id/set-default')
+  @HttpCode(HttpStatus.OK)
+  setPromptTemplateDefault(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.templates.setDefault(this.orgOrThrow(u), id)
+  }
+
+  /** POST /creative/prompt-templates/:id/clone — duplica template (cópia não-default). */
+  @Post('prompt-templates/:id/clone')
+  @HttpCode(HttpStatus.OK)
+  clonePromptTemplate(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { name?: string },
+  ) {
+    return this.templates.clone(this.orgOrThrow(u), u.id, id, body?.name)
+  }
+
+  /** POST /creative/prompt-templates/:id/preview — renderiza prompts com vars + refs pra um produto. */
+  @Post('prompt-templates/:id/preview')
+  @HttpCode(HttpStatus.OK)
+  previewPromptTemplate(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: PreviewTemplateDto,
+  ) {
+    return this.resolution.previewTemplate(this.orgOrThrow(u), id, body)
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Sprint 2 — Reference library
+  //
+  // Mesma regra: literais (`/upload-url`, `/curated`, `/by-position`) antes
+  // dos `/:id`.
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** POST /creative/references/upload-url — gera signed write URL pra upload. */
+  @Post('references/upload-url')
+  @HttpCode(HttpStatus.OK)
+  issueReferenceUploadUrl(@ReqUser() u: ReqUserPayload, @Body() body: UploadReferenceDto) {
+    return this.references.issueUploadUrl(this.orgOrThrow(u), body)
+  }
+
+  /** GET /creative/references/curated — lista somente curated (compartilhados plataforma). */
+  @Get('references/curated')
+  listCuratedReferences(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
+    return this.references.list(this.orgOrThrow(u), {
+      only_curated: true,
+      limit: limit ? Number(limit) : undefined,
+    })
+  }
+
+  /**
+   * GET /creative/references/by-position?position=N&category_ml_id=Y&product_type=Z
+   * Debug: lista refs que matchariam um position+category+product_type específico.
+   * Útil pro editor de template ver o que iria entrar como ref dinâmica.
+   */
+  @Get('references/by-position')
+  listReferencesByPosition(
+    @ReqUser() u: ReqUserPayload,
+    @Query('position')        positionStr?: string,
+    @Query('category_ml_id')  categoryMlId?: string,
+    @Query('product_type')    productType?: string,
+    @Query('ambient')         ambient?: string,
+    @Query('limit')           limit?: string,
+  ) {
+    const position = positionStr ? Number(positionStr) : undefined
+    if (position !== undefined && (!Number.isInteger(position) || position < 1)) {
+      throw new BadRequestException('position: inteiro >= 1 ou omitido')
+    }
+    return this.references.list(this.orgOrThrow(u), {
+      position,
+      category_ml_id: categoryMlId,
+      product_type:   productType,
+      ambient,
+      include_curated: true,
+      limit: limit ? Number(limit) : undefined,
+    })
+  }
+
+  /** GET /creative/references — lista refs da org (+ curated se include_curated=1). */
+  @Get('references')
+  listReferences(
+    @ReqUser() u: ReqUserPayload,
+    @Query('search')           search?: string,
+    @Query('tags')             tagsCsv?: string,
+    @Query('category_ml_id')   categoryMlId?: string,
+    @Query('product_type')     productType?: string,
+    @Query('ambient')          ambient?: string,
+    @Query('include_inactive') includeInactive?: string,
+    @Query('include_curated')  includeCurated?: string,
+    @Query('limit')            limit?: string,
+  ) {
+    return this.references.list(this.orgOrThrow(u), {
+      search,
+      tags:             tagsCsv ? tagsCsv.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+      category_ml_id:   categoryMlId,
+      product_type:     productType,
+      ambient,
+      include_inactive: includeInactive === 'true' || includeInactive === '1',
+      include_curated:  includeCurated  === 'true' || includeCurated  === '1',
+      limit: limit ? Number(limit) : undefined,
+    })
+  }
+
+  /** POST /creative/references — cria row metadata (após upload completar). */
+  @Post('references')
+  createReference(@ReqUser() u: ReqUserPayload, @Body() body: CreateReferenceDto) {
+    return this.references.create(this.orgOrThrow(u), u.id, body)
+  }
+
+  /** GET /creative/references/:id — pega ref com signed read URL. */
+  @Get('references/:id')
+  getReference(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.references.getById(this.orgOrThrow(u), id, { allowCurated: true })
+  }
+
+  /** PATCH /creative/references/:id — atualiza metadata (não curated). */
+  @Patch('references/:id')
+  updateReference(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: UpdateReferenceDto,
+  ) {
+    return this.references.update(this.orgOrThrow(u), id, body)
+  }
+
+  /** DELETE /creative/references/:id — hard delete + remove do Storage. */
+  @Delete('references/:id')
+  deleteReference(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.references.remove(this.orgOrThrow(u), id)
+  }
+
+  /** POST /creative/references/:id/toggle-active — alterna is_active. */
+  @Post('references/:id/toggle-active')
+  @HttpCode(HttpStatus.OK)
+  toggleReferenceActive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.references.toggleActive(this.orgOrThrow(u), id)
   }
 }
