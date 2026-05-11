@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { AlertSignalsService } from '../../intelligence-hub/alert-signals.service'
+import { MercadolivreService } from '../../mercadolivre/mercadolivre.service'
 import type { SignalDraft } from '../../intelligence-hub/analyzers/analyzers.types'
+
+const ML_BASE = 'https://api.mercadolibre.com'
 
 /**
  * Notifier que cria 1 alert_signal por venda nova com payload rico:
@@ -21,7 +25,10 @@ import type { SignalDraft } from '../../intelligence-hub/analyzers/analyzers.typ
 export class NewSaleNotifierService {
   private readonly logger = new Logger(NewSaleNotifierService.name)
 
-  constructor(private readonly alertSignals: AlertSignalsService) {}
+  constructor(
+    private readonly alertSignals: AlertSignalsService,
+    private readonly ml:           MercadolivreService,
+  ) {}
 
   /** Dispara em fire-and-forget. Falha silenciosa — não derruba o ingest. */
   fireAndForget(orgId: string, sellerId: number, externalOrderId: string | number): void {
@@ -55,11 +62,12 @@ export class NewSaleNotifierService {
     const listingId  = (o.marketplace_listing_id as string | null)
       ?? this.extractFirstListingId(o.raw_data)
 
-    // 2. Compose em paralelo
-    const [trend, ads, conversion] = await Promise.all([
+    // 2. Compose em paralelo (inclui fetch da thumbnail do ML)
+    const [trend, ads, conversion, thumbnail] = await Promise.all([
       this.computeTrend(orgId, sellerId, productId, listingId),
       this.fetchAds(orgId, listingId),
       this.computeConversion(orgId, sellerId, listingId),
+      this.fetchThumbnail(orgId, sellerId, listingId),
     ])
 
     // 3. Valores
@@ -106,6 +114,7 @@ export class NewSaleNotifierService {
         product_id:         productId,
         sku:                o.sku ?? null,
         sold_at:            o.sold_at ?? null,
+        thumbnail,
         values: {
           quantity:        qty,
           unit_price:      unitPrice,
@@ -125,6 +134,52 @@ export class NewSaleNotifierService {
     }
 
     await this.alertSignals.insertMany(orgId, [draft])
+  }
+
+  // ── Thumbnail do ML (com cache em product_listings.listing_thumbnail) ────
+  private async fetchThumbnail(orgId: string, sellerId: number, listingId: string | null): Promise<string | null> {
+    if (!listingId) return null
+
+    // 1. Cache hit em product_listings
+    const { data: cached } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_thumbnail')
+      .eq('listing_id', listingId)
+      .eq('platform', 'mercadolivre')
+      .limit(1)
+      .maybeSingle()
+    const cachedUrl = (cached as { listing_thumbnail: string | null } | null)?.listing_thumbnail
+    if (cachedUrl) return this.upgradeToHttps(cachedUrl)
+
+    // 2. Cache miss → fetch ML + grava no cache pra próximas vendas serem instantâneas
+    try {
+      const { token } = await this.ml.getTokenForOrg(orgId, sellerId)
+      const { data } = await axios.get(`${ML_BASE}/items/${listingId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params:  { attributes: 'id,thumbnail,secure_thumbnail' },
+        timeout: 5000,
+      })
+      const url = data?.secure_thumbnail || data?.thumbnail
+      if (typeof url !== 'string' || !url) return null
+
+      // Atualiza cache (best-effort — não bloqueia retorno)
+      void supabaseAdmin
+        .from('product_listings')
+        .update({ listing_thumbnail: url, updated_at: new Date().toISOString() })
+        .eq('listing_id', listingId)
+        .eq('platform', 'mercadolivre')
+
+      return this.upgradeToHttps(url)
+    } catch (err) {
+      this.logger.debug(`[new-sale-notify] fetchThumbnail ${listingId}: ${(err as Error).message}`)
+      return null
+    }
+  }
+
+  /** ML às vezes devolve thumbnail em http:// — força https pra não ter
+   *  mixed content na UI (Netlify é https). */
+  private upgradeToHttps(url: string): string {
+    return url.startsWith('http://') ? url.replace('http://', 'https://') : url
   }
 
   // ── Trend: vendas 7d vs 7d-14d anteriores do mesmo produto ───────────────
