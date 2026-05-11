@@ -202,18 +202,44 @@ export class OrdersIngestionService {
 
           if (orders.length === 0) continue
 
-          // Fetch shipping costs in parallel (one per order that has shipping)
+          // Fetch shipping costs E shipment FULL em paralelo (1 GET cada).
+          // shipment full traz receiver_address (state/city) que /orders/search
+          // NÃO devolve — sem isso o mapa "Vendas por Região" do dashboard
+          // ficava zerado em pedidos ingeridos pelo aggregator. O webhook
+          // já faz isso em ingestSingleOrder, mas o cron horário sobrescreve
+          // o row no upsert; aqui restabelecemos a paridade.
           const shipIds = [...new Set(orders.map(o => o.shipping?.id).filter(Boolean))] as number[]
           const costMap = new Map<number, number>()
+          const fullMap = new Map<number, Awaited<ReturnType<typeof this.mlClient.fetchShipmentFull>>>()
           if (shipIds.length > 0) {
-            const costResults = await Promise.allSettled(
-              shipIds.map(id => this.mlClient.fetchShipmentCost(token, id)),
-            )
-            stats.apiCalls += shipIds.length
+            const [costResults, fullResults] = await Promise.all([
+              Promise.allSettled(shipIds.map(id => this.mlClient.fetchShipmentCost(token, id))),
+              Promise.allSettled(shipIds.map(id => this.mlClient.fetchShipmentFull(token, id))),
+            ])
+            stats.apiCalls += shipIds.length * 2
             shipIds.forEach((id, idx) => {
-              const r = costResults[idx]
-              costMap.set(id, r.status === 'fulfilled' ? r.value : 0)
+              const c = costResults[idx]
+              costMap.set(id, c.status === 'fulfilled' ? c.value : 0)
+              const f = fullResults[idx]
+              fullMap.set(id, f.status === 'fulfilled' ? f.value : null)
             })
+          }
+          // Injeta dados do shipment full direto no order.shipping pra que
+          // buildOrderRows os persista em raw_data.shipping. Reutiliza o
+          // mesmo padrão do ingestSingleOrder.
+          for (const o of orders) {
+            const sid = o.shipping?.id
+            if (!sid) continue
+            const sh = fullMap.get(sid)
+            if (!sh) continue
+            const shipObj = o.shipping as unknown as Record<string, unknown>
+            shipObj.status                  = sh.status        ?? shipObj.status        ?? null
+            shipObj.substatus               = sh.substatus     ?? shipObj.substatus     ?? null
+            shipObj.logistic_type           = sh.logistic_type ?? shipObj.logistic_type ?? null
+            shipObj.receiver_address        = sh.receiver_address  ?? shipObj.receiver_address  ?? null
+            shipObj.estimated_delivery_date = sh.estimated_delivery_date ?? shipObj.estimated_delivery_date ?? null
+            shipObj.posting_deadline        = sh.posting_deadline        ?? shipObj.posting_deadline        ?? null
+            shipObj.date_created            = sh.date_created            ?? shipObj.date_created            ?? null
           }
 
           // Fetch buyer billing for orders we haven't billed yet (CPF/email/phone).
