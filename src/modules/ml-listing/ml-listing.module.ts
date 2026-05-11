@@ -5,6 +5,8 @@ import { ListingAggregationService } from './services/listing-aggregation.servic
 import { ListingStockScannerService } from './services/listing-stock-scanner.service'
 import { ListingStatusScannerService } from './services/listing-status-scanner.service'
 import { ListingPricingScannerService } from './services/listing-pricing-scanner.service'
+import { ListingAutomationScannerService } from './services/listing-automation-scanner.service'
+import { ListingCatalogScannerService } from './services/listing-catalog-scanner.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 
 /**
@@ -21,6 +23,8 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     ListingStockScannerService,
     ListingStatusScannerService,
     ListingPricingScannerService,
+    ListingAutomationScannerService,
+    ListingCatalogScannerService,
   ],
   exports: [MlListingService, ListingAggregationService],
 })

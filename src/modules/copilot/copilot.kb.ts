@@ -1743,6 +1743,58 @@ Latência: 140 itens (Vazzo) × 200ms ≈ 28s.
 - \`POST /listings/pricing/apply/:itemId\` body=\`{seller_id, mode='safe'|'force', price?}\``,
     tags: ['listings', 'pricing', 'price-to-win', 'buy-box', 'apply', 'multi-conta'],
   },
+  {
+    routes:   ['/dashboard/listings/pricing/automation'],
+    category: 'listing-center',
+    title:    'Automação de preço ML + Catálogo (Sprint 4 / fecha L2)',
+    content:  `**Automação de preço** (\`/pricing-automation/*\` da ML) deixa o ML ajustar o preço sozinho dentro de min_price/max_price configurados.
+
+**Tela** \`/dashboard/listings/pricing/automation\` mostra cards por item com:
+- **Status**: Ativa (verde) / Pausada (amarelo) / Elegível (azul) / Sem regras (cinza)
+- **Regra ativa**: \`INT\` (competitivo dentro do ML) ou \`INT_EXT\` (dentro + fora do ML)
+- **Limites**: min/max em R$
+- **Badge "Bloqueia edição manual"** quando status=ACTIVE — ⚠️ a partir de 18/03/2026 ML rejeita PUT /items/{id} price quando automação ativa.
+- **Pausa por motivo**: se cause=PROMO, é normal (promoção ativa). Outros motivos → \`review_pause\`.
+
+**Filtros**: Todos / Elegíveis / Ativos / Pausados (chips no topo).
+
+**Ações por card** (chamam endpoints POST):
+- **Ativar** (azul, elegíveis): modal pede rule_id + min/max → \`POST /pricing-automation/items/:id/activate\`
+- **Limites** (cyan, ativos): modal pré-preenchido → \`POST /configure\`
+- **Pausar** (amber, ativos): \`POST /pause\`
+- **Retomar** (verde, pausados): chama activate de novo
+- **Desativar** (rose, qualquer automatizado): \`POST /disable\` → DELETE no ML
+
+**Scanner híbrido** (low-cost):
+1. GET /pricing-automation/users/{seller}/items → IDs automatizados (1 call)
+2. Pra cada AUTOMATIZADO: GET /rules + GET /automation (2 calls)
+3. Pra items COM SUGESTÃO de preço em cache (candidatos óbvios): GET /rules (1 call)
+4. Pacing 200ms entre calls
+
+**Recomendação interna** (gerada pelo scanner):
+- \`activate\`: tem rules mas não usa → cria task \`PRICE_AUTOMATION_AVAILABLE\` severity=low
+- \`configure_limits\`: ativa SEM min/max → severity=high (risco de margem)
+- \`review_pause\`: pausada por motivo não-PROMO → severity=medium
+- \`no_action\`: tudo ok
+
+**Card CATALOG_ELIGIBLE** (scanner_catalog, mesmo Sprint 4):
+Aproveita \`catalog_product_id\` já em cache do scanner_pricing. Pra cada item com catálogo: GET /products/{catalog_id}/items → compara nossa posição vs top-3. Cria task quando:
+- Posição > 3 no catálogo
+- Competidor top tem frete grátis E nós não
+- Competidor top usa Full E nós não
+
+**Endpoints (auth):**
+- \`POST /listings/scan/automation\` body=\`{seller_id}\`
+- \`POST /listings/scan/catalog\` body=\`{seller_id}\`
+- \`GET  /listings/pricing/automation?filter=all|eligible|active|paused\`
+- \`POST /listings/pricing/automation/:itemId/activate\` body=\`{seller_id, rule_id?, min_price?, max_price?}\`
+- \`POST /listings/pricing/automation/:itemId/pause\`
+- \`POST /listings/pricing/automation/:itemId/configure\` body=\`{seller_id, min_price, max_price}\`
+- \`POST /listings/pricing/automation/:itemId/disable\`
+
+**Atalhos no sidebar**: "Automação preço" (tela), "Catálogo" (filtro \`?type=CATALOG_ELIGIBLE\` na tela principal).`,
+    tags: ['listings', 'pricing-automation', 'catalogo', 'buy-box', 'multi-conta'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════

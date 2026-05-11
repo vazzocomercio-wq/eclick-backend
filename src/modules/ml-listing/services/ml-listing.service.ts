@@ -4,6 +4,8 @@ import { ListingAggregationService } from './listing-aggregation.service'
 import { ListingStockScannerService } from './listing-stock-scanner.service'
 import { ListingStatusScannerService } from './listing-status-scanner.service'
 import { ListingPricingScannerService } from './listing-pricing-scanner.service'
+import { ListingAutomationScannerService } from './listing-automation-scanner.service'
+import { ListingCatalogScannerService } from './listing-catalog-scanner.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -30,14 +32,17 @@ export class MlListingService {
   private readonly logger = new Logger(MlListingService.name)
 
   constructor(
-    private readonly aggregation:    ListingAggregationService,
-    private readonly stockScanner:   ListingStockScannerService,
-    private readonly statusScanner:  ListingStatusScannerService,
-    private readonly pricingScanner: ListingPricingScannerService,
+    private readonly aggregation:       ListingAggregationService,
+    private readonly stockScanner:      ListingStockScannerService,
+    private readonly statusScanner:     ListingStatusScannerService,
+    private readonly pricingScanner:    ListingPricingScannerService,
+    private readonly automationScanner: ListingAutomationScannerService,
+    private readonly catalogScanner:    ListingCatalogScannerService,
   ) {}
 
-  /** Exposed pra controller invocar direto (apply price). */
-  pricing(): ListingPricingScannerService { return this.pricingScanner }
+  /** Exposed pra controller invocar direto (apply/activate/configure). */
+  pricing():    ListingPricingScannerService    { return this.pricingScanner }
+  automation(): ListingAutomationScannerService { return this.automationScanner }
 
   // ── Tasks ────────────────────────────────────────────────────────────────
 
@@ -245,12 +250,24 @@ export class MlListingService {
       result.api_calls_count     += status.api_calls
 
       const pricing = await this.pricingScanner.scan(orgId, sellerId)
-      // pricing.items_scanned é # itens com sugestão; somamos no total
       result.items_scanned       += pricing.items_scanned
       result.tasks_created       += pricing.tasks_created
       result.tasks_updated       += pricing.tasks_updated
       result.tasks_resolved_auto += pricing.tasks_resolved_auto
       result.api_calls_count     += pricing.api_calls
+
+      // Catalog scanner depende do cache populado por pricingScanner (catalog_product_id)
+      const catalog = await this.catalogScanner.scan(orgId, sellerId)
+      result.tasks_created       += catalog.tasks_created
+      result.tasks_updated       += catalog.tasks_updated
+      result.tasks_resolved_auto += catalog.tasks_resolved_auto
+      result.api_calls_count     += catalog.api_calls
+
+      const automation = await this.automationScanner.scan(orgId, sellerId)
+      result.tasks_created       += automation.tasks_created
+      result.tasks_updated       += automation.tasks_updated
+      result.tasks_resolved_auto += automation.tasks_resolved_auto
+      result.api_calls_count     += automation.api_calls
 
       result.duration_seconds = Math.round((Date.now() - t0) / 1000)
       await this.completeScanLog(log.id, result)
@@ -299,6 +316,54 @@ export class MlListingService {
         tasks_updated: stock.tasks_updated,
         tasks_resolved_auto: stock.tasks_resolved_auto,
         api_calls_count: stock.api_calls,
+        errors_count: 0,
+        duration_seconds: Math.round((Date.now() - t0) / 1000),
+        status: 'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  async runAutomationScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_automation')
+    const t0 = Date.now()
+    try {
+      const a = await this.automationScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type: 'scanner_automation',
+        items_scanned: a.items_scanned,
+        tasks_created: a.tasks_created,
+        tasks_updated: a.tasks_updated,
+        tasks_resolved_auto: a.tasks_resolved_auto,
+        api_calls_count: a.api_calls,
+        errors_count: 0,
+        duration_seconds: Math.round((Date.now() - t0) / 1000),
+        status: 'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  async runCatalogScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_catalog')
+    const t0 = Date.now()
+    try {
+      const c = await this.catalogScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type: 'scanner_catalog',
+        items_scanned: c.items_scanned,
+        tasks_created: c.tasks_created,
+        tasks_updated: c.tasks_updated,
+        tasks_resolved_auto: c.tasks_resolved_auto,
+        api_calls_count: c.api_calls,
         errors_count: 0,
         duration_seconds: Math.round((Date.now() - t0) / 1000),
         status: 'completed',

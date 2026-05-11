@@ -213,4 +213,89 @@ export class MlListingController {
       body.price ? Number(body.price) : undefined,
     )
   }
+
+  // ── Automation scanner + ops (Sprint 4) ──────────────────────────────────
+
+  @Post('scan/automation')
+  @HttpCode(HttpStatus.OK)
+  runAutomationScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runAutomationScan(user.orgId, Number(body.seller_id))
+  }
+
+  @Post('scan/catalog')
+  @HttpCode(HttpStatus.OK)
+  runCatalogScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runCatalogScan(user.orgId, Number(body.seller_id))
+  }
+
+  @Get('pricing/automation')
+  listAutomation(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('filter')    filter?:   'all' | 'eligible' | 'active' | 'paused',
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.automation().listAutomation(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      filter:    filter ?? 'all',
+      limit:     limit ? Number(limit) : 100,
+    })
+  }
+
+  @Post('pricing/automation/:itemId/activate')
+  @HttpCode(HttpStatus.OK)
+  activate(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number; rule_id?: 'INT' | 'INT_EXT'; min_price?: number; max_price?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.automation().activateAutomation(user.orgId, Number(body.seller_id), itemId, body.rule_id ?? 'INT', {
+      min_price: body.min_price, max_price: body.max_price,
+    })
+  }
+
+  @Post('pricing/automation/:itemId/pause')
+  @HttpCode(HttpStatus.OK)
+  pause(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.automation().pauseAutomation(user.orgId, Number(body.seller_id), itemId)
+  }
+
+  @Post('pricing/automation/:itemId/configure')
+  @HttpCode(HttpStatus.OK)
+  configure(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number; min_price: number; max_price: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id || body.min_price == null || body.max_price == null) {
+      throw new BadRequestException('seller_id, min_price, max_price obrigatórios')
+    }
+    return this.svc.automation().configureLimits(user.orgId, Number(body.seller_id), itemId, Number(body.min_price), Number(body.max_price))
+  }
+
+  @Post('pricing/automation/:itemId/disable')
+  @HttpCode(HttpStatus.OK)
+  disable(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+    @Body() body: { seller_id: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.automation().disableAutomation(user.orgId, Number(body.seller_id), itemId)
+  }
 }
