@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
 import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
 import { MessagingService } from '../../messaging/messaging.service'
+import { NewSaleNotifierService } from './new-sale-notifier.service'
 
 interface ProductInfo {
   product_id: string
@@ -50,8 +51,9 @@ export class OrdersIngestionService {
   private lastStats: LastSyncStats = null
 
   constructor(
-    private readonly mlClient:  MercadoLivreClient,
-    private readonly messaging: MessagingService,
+    private readonly mlClient:    MercadoLivreClient,
+    private readonly messaging:   MessagingService,
+    private readonly newSaleNotifier: NewSaleNotifierService,
   ) {}
 
   /** Public — surfaces the last sync result for /sync-stats. */
@@ -157,6 +159,13 @@ export class OrdersIngestionService {
     }
 
     this.logger.log(`[single-ingest] order=${externalOrderId} org=${orgId.slice(0,8)} upserted=${rows.length} em ${Date.now() - t0}ms`)
+
+    // Dispara notificação rica pra UI (fire-and-forget — não atrasa webhook).
+    // Só pra pedidos pagos. Falha silenciosa se algum dado faltar.
+    if (order.status === 'paid') {
+      this.newSaleNotifier.fireAndForget(orgId, sellerId, externalOrderId)
+    }
+
     return { upserted: rows.length, skipped: false }
   }
 
