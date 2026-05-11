@@ -1244,8 +1244,14 @@ const GENERAL_ENTRIES: KbEntry[] = [
 - 🤖 **ATENDENTE IA** — Agentes, Conversas, Conhecimento, Treinamento
 - 📈 **ADS** — ML Ads, etc.
 
+📊 **Cards Faturamento + Lucro Estimado** (linha 2):
+- Período exibido (Hoje / 7d / 30d / Mês atual) controla TODOS os cards
+- **Comparação com período anterior é time-clamped** — pra HOJE, mostra ontem ATÉ O MESMO HORÁRIO (não o dia inteiro de ontem). Pra mês, compara mesmo dia/hora do mês passado. Apples-to-apples sempre.
+- **Meta do período** abaixo do comparativo: barra de progresso com % atingido. Lê do módulo /dashboard/metas (tipo='revenue' mensal vira meta diária ÷ dias_no_mês). Sem meta configurada → "Definir meta →".
+- Cores da barra: <50% red, 50-75% amber, 75-100% cyan/verde, ≥100% verde brilhante.
+
 Use o copiloto flutuante (canto inferior direito) pra dúvidas sobre qualquer tela.`,
-    tags: ['general', 'dashboard', 'navigation'],
+    tags: ['general', 'dashboard', 'navigation', 'metas', 'kpis'],
   },
 ]
 
@@ -1987,6 +1993,101 @@ Sprint 8 fecha L4 e o módulo F10 inteiro. Próximo: refinamentos pós-feedback 
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// Onda 13 — F11 ML Executive Dashboard IA (Sprint 1 — E1 Foundation + Agregação)
+// ════════════════════════════════════════════════════════════════════════
+
+const EXECUTIVE_DASHBOARD_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/executive', '/dashboard/executive/sales', '/dashboard/executive/refresh-logs'],
+    category: 'executive-dashboard',
+    title:    'ML Executive Dashboard — visão consolidada da operação',
+    content:  `**F11 ML Executive Dashboard IA** é a tela "home" do operador. Em 30 segundos o lojista sabe **como está a operação ML hoje**: vendas, anúncios ativos, qualidade, campanhas, tarefas pendentes do Listing Center, alto-impacto financeiro. Atualiza a cada 15 min via cron + invalidação em tempo real via Socket.IO \`order:invalidate\` em vendas.
+
+**Diferença vs F10 Listing Center:**
+- F10 responde "o que fazer hoje neste anúncio?" (lista priorizada de tarefas por SKU)
+- F11 responde "como está minha operação?" (KPIs executivos + gráficos)
+
+**O que o E1 (Sprint 1) entrega:**
+
+KPIs no card grid:
+- **Vendas 7d** — count + GMV (\`SUM(sale_price × quantity)\`) + delta vs período anterior
+- **Vendas hoje** — count + GMV em tempo real (Socket.IO subscriber em \`order:invalidate\` invalida cache parcial)
+- **Anúncios ativos** — produtos com pelo menos 1 \`product_listings\` em \`platform='mercadolivre'\` e \`is_active=true\` (fonte da verdade do ML real, não \`catalog_status\` interno)
+- **Qualidade baixa (F7)** — count de \`ml_quality_snapshots\` com \`ml_score < 60\` ou \`has_exposure_penalty=true\` ou \`pending_count > 0\`
+- **Campanhas ativas (F8)** — \`ml_campaigns.status='started'\` + recomendações pendentes + oportunidades altas (\`opportunity_score ≥ 80\`)
+- **Recomendações de alto impacto (F10)** — count e valor total em BRL das \`ml_listing_tasks\` com severity ∈ {critical, high} e \`estimated_impact_brl > 0\`
+
+Cards futuros (E2-E4, próximas camadas — placeholders nullable hoje):
+- E2 **Reputação** — gauge grande, Mercado Líder level, histórico 90d, alerta de risco
+- E3 **Logística** — atrasos, Flex ativo, Full storage, envios pra despachar hoje
+- E4 **Visitas + Conversão** — visitas 7d, taxa de conversão, top items "muita visita, pouca venda"
+
+**Como funciona internamente:**
+
+\`v_dashboard_aggregated_metrics\` (VIEW SQL) — single source of truth do agregado:
+- Lê **dados reais** de F7 \`ml_quality_snapshots\`, F8 \`ml_campaigns\`/\`ml_campaign_recommendations\`, F10 \`ml_listing_tasks\`, e do core \`orders\`/\`products\`/\`product_listings\`
+- **Não duplica lógica.** Se F7 mudar critério de qualidade, dashboard reflete na próxima consulta — sem deploy
+- Multi-conta natural via CROSS JOIN LATERAL em \`ml_connections\` (Vazzo tem 2 sellers: VAZZO_ + ESLAR_)
+
+\`DashboardRefreshService\` (cron \`*/15 * * * *\`):
+- Para cada org com ML conectado, para cada \`seller_id\`, lê da VIEW + snapshots E2/E3/E4 e faz UPSERT em \`ml_dashboard_summary\`
+- Cache permite UI carregar instantâneo. Header mostra "Atualizado há X min" + botão "Atualizar agora"
+- Socket.IO subscriber em \`order:invalidate\` re-roda só a parte de vendas (~3s do bipe à UI, sem esperar 15 min)
+- Logs em \`ml_dashboard_refresh_logs\` (refresh_type, status, duration_ms, api_calls_count)
+
+**Custo:** **$0/mês em IA** — só lê do Postgres. Sem LLM, sem chamadas extra ao ML.
+
+**Tabelas (Sprint 1 — migration 20260542):**
+- \`ml_dashboard_summary\` — cache de 1 row por (org, seller_id) com todos os KPIs
+- \`ml_sales_daily\` — histórico diário (gráfico 7d/30d), agregação por \`platform='mercadolivre'\`
+- \`ml_dashboard_refresh_logs\` — auditoria
+
+**Próximas camadas no roadmap:**
+- E2 (Sprint 3-4) — Reputação via \`/users/{id}\` + Mercado Líder + histórico
+- E3 (Sprint 5-7) — Logística: \`/shipments/{id}/delays\`, Flex, Full
+- E4 (Sprint 8) — Visitas via \`/users/{id}/items_visits\` + conversão`,
+    tags: ['executive-dashboard', 'home', 'kpis', 'agregacao', 'realtime', 'multi-conta'],
+  },
+  {
+    routes:   ['/dashboard/executive/reputation'],
+    category: 'executive-dashboard',
+    title:    'Reputação Mercado Livre — gauge + métricas + histórico',
+    content:  `**F11 E2 — Reputação** mostra o estado da reputação do seller no ML em tempo quase real (sync 1×/hora). Dados vêm de \`GET /users/{id}\` → \`seller_reputation\`.
+
+**Componentes:**
+- **Level badge gigante** com cor do \`level_id\` (5_green=Platinum, 4_light_green=Gold, 3_yellow=Mercado Líder, 2_orange=sem nível, 1_red/0_red=vermelho)
+- **3 cards de métrica** (Reclamações / Cancelamentos / Atrasos de envio) cada com:
+  - Taxa atual em % (rate ML é fração 0-1, multiplicada por 100 só na UI)
+  - Limite Mercado Líder MLB (1% / 0.5% / 6%)
+  - Status verde/amarelo/vermelho conforme thresholds amber (0.8% / 0.4% / 5%)
+  - Barra de progresso até o limite
+  - Trend ↑ improving / → stable / ↓ degrading (comparando snapshot anterior)
+- **Risk alert amber** se alguma métrica ≥ threshold amber. Lista quais critérios bateram (\`risk_reasons[]\`).
+- **3 sparklines** dos últimos até 90 dias (SVG inline sem chart lib).
+- **Ratings dos compradores** (positivas / neutras / negativas).
+- **Seletor de conta** quando org tem >1 seller ML conectado.
+- **Botão "Sincronizar agora"** dispara \`POST /executive/reputation/sync\` (manual além do cron horário).
+
+**Gotchas importantes (vide \`reference_ml_api_shapes_f11\`):**
+- API ML usa \`claims\` (NÃO \`complaints\`). Schema da tabela e UI usam \`claims_rate\`/\`claims_count\`.
+- \`period\` é string \`"60 days"\` com espaço — não \`"60d"\`.
+- Limites e thresholds calibrados pra MLB. Outros sites podem ter limites diferentes.
+
+**Endpoints (backend):**
+- \`GET /executive/reputation\` — current de todas as contas da org
+- \`GET /executive/reputation/history?seller_id=X&days=90\` — série temporal
+- \`POST /executive/reputation/sync\` — manual (todas as contas) ou \`?seller_id=X\`
+
+**Tabelas:**
+- \`ml_seller_reputation_snapshots\` (histórico, reutilizada do ml-vertical com colunas estendidas)
+- \`ml_seller_reputation_current\` (cache do mais recente + trend)
+
+Trend = \`unknown\` na primeira sync; vira \`improving\`/\`stable\`/\`degrading\` quando há snapshot anterior pra comparar.`,
+    tags: ['executive-dashboard', 'reputation', 'mercado-lider', 'risk', 'trend'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
@@ -2005,6 +2106,7 @@ export const KB: KbEntry[] = [
   ...ML_CAMPAIGNS_ENTRIES,
   ...ML_POSTSALE_INTELLIGENCE_ENTRIES,
   ...ML_LISTING_ENTRIES,
+  ...EXECUTIVE_DASHBOARD_ENTRIES,
   ...OPS_ENTRIES,
   ...COPILOT_PAGE_ENTRIES,
   ...MULTI_ACCOUNT_ENTRIES,
