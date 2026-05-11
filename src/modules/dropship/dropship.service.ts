@@ -1194,22 +1194,26 @@ export class DropshipService {
       //    a) order.product_id (já resolvido na ingestão)
       //    b) listing_id em raw_data → product_listings → product_id
       //       (mais robusto que SKU — listing nunca muda; cobre múltiplos
-       //       anúncios com SKUs distintos vinculados ao mesmo produto)
+      //       anúncios com SKUs distintos vinculados ao mesmo produto)
       //    c) order.sku == products.sku literal (master_sku)
       const resolved = await this.resolveProductForOrder(orgId, order)
       const productId = resolved.productId
-      const productSupplyType = resolved.supplyType
 
       if (!productId) { skipped++; continue }
-      if (productSupplyType !== 'dropship') { skipped++; continue }
 
-      // 5. Buscar supplier_products
+      // 5. Buscar supplier_products — SE existir vínculo ativo nessa
+      //    combinação supplier+product, o pedido É dropship. Não usamos
+      //    products.supply_type pra isso porque essa coluna é origem
+      //    geográfica (nacional|importado|hibrido), não vínculo de
+      //    fornecimento. supplier_products é a fonte da verdade.
       const { data: pp } = await supabaseAdmin
         .from('supplier_products')
         .select('id, supplier_sku, master_sku, unit_cost, partner_packaging_cost, partner_handling_cost')
         .eq('supplier_id', supplierId)
         .eq('product_id', productId)
         .maybeSingle()
+
+      if (!pp) { skipped++; continue }   // produto não vinculado a esse fornecedor = não é dropship desta conta
 
       const cost = pp
         ? Number(pp.unit_cost) + Number(pp.partner_packaging_cost ?? 0) + Number(pp.partner_handling_cost ?? 0)
