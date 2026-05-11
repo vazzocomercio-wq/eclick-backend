@@ -1824,6 +1824,38 @@ Aproveita \`catalog_product_id\` já em cache do scanner_pricing. Pra cada item 
 **Importante**: atributos fiscais ficam no ANÚNCIO (PUT /items/{id}), não no produto do catálogo. Mesmo item migrado de produto pode ter atributos diferentes do esperado.`,
     tags: ['listings', 'fiscal', 'nfe', 'ncm', 'gtin', 'compliance', 'multi-conta'],
   },
+  {
+    routes:   ['/dashboard/listings/policy'],
+    category: 'listing-center',
+    title:    'Política & motivos de pausa (Sprint 6 / fecha L3)',
+    content:  `Tela \`/dashboard/listings/policy\` mostra anúncios pausados/inativos **agrupados por motivo específico** com sugestão de correção pra cada categoria.
+
+**12 categorias** (severity-sorted):
+- **critical**: \`policy_violation\` (anúncio viola política — contestar) · \`restricted_product\` (produto restrito pelo ML)
+- **high**: \`moderation_pending\` (aguardar análise) · \`out_of_stock\` (repor estoque)
+- **medium**: \`image_problem\` (foto não atende) · \`description_problem\` (termos proibidos/links) · \`price_problem\` (valor inválido) · \`category_problem\` (categoria errada) · \`incomplete_required_fields\` (atributos faltando)
+- **low**: \`paused_by_seller\` (pausa voluntária) · \`expired\` (validade venceu) · \`unknown\`
+
+**Como classifica**: o status scanner (\`POST /listings/scan/status\`) inspeciona \`sub_status\` + \`tags\` do item e mapeia pra uma das categorias acima. Salva tudo em \`ml_listing_pause_classifications\` (1 row por item).
+
+**Campos**: pause_category, pause_severity, is_self_solvable, suggested_fix, paused_since, days_paused, item meta (title, price, sold_quantity) pra UI sem re-fetch.
+
+**Endpoints (auth):**
+- \`GET /listings/policy/by-category?seller_id=\` — agrupado, com até 50 amostras por categoria
+- \`GET /listings/policy/critical?seller_id=\` — só policy_violation + restricted_product
+- \`GET /listings/policy?seller_id=&category=&limit=\` — lista filtrada
+
+**Tela**: cards collapsible por categoria com:
+- Pill severity colorida
+- Contador + descrição + fix sugerido
+- Click expande → lista os itens (link pra anúncio + ML + dias parado + vendas)
+- Badge "Resolvível" pra itens com is_self_solvable=true (operador consegue corrigir sem ML)
+
+**Atalho no sidebar**: "Política & motivos" → /dashboard/listings/policy.
+
+Sprint 6 fecha L3. Próximo: L4 (score consolidado + copiloto + bulk).`,
+    tags: ['listings', 'policy', 'pause-classification', 'compliance', 'multi-conta'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════

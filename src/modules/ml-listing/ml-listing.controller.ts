@@ -334,6 +334,35 @@ export class MlListingController {
     })
   }
 
+  // ── Policy (Sprint 6 / L3) ───────────────────────────────────────────────
+
+  @Get('policy/by-category')
+  policyByCategory(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.policyByCategory(user.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
+  @Get('policy/critical')
+  policyCritical(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.policyCritical(user.orgId, sellerId ? Number(sellerId) : undefined)
+  }
+
+  @Get('policy')
+  policyList(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('category')  category?:  string,
+    @Query('limit')     limit?:     string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.policyList(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      category,
+      limit:     limit ? Number(limit) : 200,
+    })
+  }
+
   @Post('fiscal/:itemId/fix')
   @HttpCode(HttpStatus.OK)
   fixFiscal(

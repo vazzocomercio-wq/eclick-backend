@@ -495,6 +495,72 @@ export class MlListingService {
     return data ?? []
   }
 
+  /** Sprint 6 — agrupa pausados por categoria (UI: dashboard policy). */
+  async policyByCategory(orgId: string, sellerId?: number) {
+    let q = supabaseAdmin
+      .from('ml_listing_pause_classifications')
+      .select('pause_category, pause_severity, ml_item_id, item_title, item_price, item_sold_quantity, days_paused, is_self_solvable, suggested_fix')
+      .eq('organization_id', orgId)
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    q = q.order('pause_severity', { ascending: true })
+         .order('days_paused', { ascending: false, nullsFirst: false })
+         .limit(2000)
+
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+
+    type Row = {
+      pause_category: string; pause_severity: string
+      ml_item_id: string; item_title: string | null; item_price: number | null
+      item_sold_quantity: number | null; days_paused: number | null
+      is_self_solvable: boolean; suggested_fix: string | null
+    }
+    const rows = (data ?? []) as Row[]
+
+    // Agrupa
+    const groups: Record<string, { count: number; severity: string; suggested_fix: string | null; items: Row[] }> = {}
+    for (const r of rows) {
+      const k = r.pause_category ?? 'unknown'
+      if (!groups[k]) groups[k] = { count: 0, severity: r.pause_severity, suggested_fix: r.suggested_fix, items: [] }
+      groups[k].count++
+      groups[k].items.push(r)
+    }
+    // Sort categorias por severity → critical first
+    const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 } as Record<string, number>
+    return Object.entries(groups)
+      .map(([category, g]) => ({ category, ...g, items: g.items.slice(0, 50) /* sample */ }))
+      .sort((a, b) => (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99))
+  }
+
+  /** Sprint 6 — só os casos críticos (policy_violation, restricted_product). */
+  async policyCritical(orgId: string, sellerId?: number) {
+    let q = supabaseAdmin
+      .from('ml_listing_pause_classifications')
+      .select('*')
+      .eq('organization_id', orgId)
+      .in('pause_category', ['policy_violation', 'restricted_product'])
+    if (sellerId != null) q = q.eq('seller_id', sellerId)
+    q = q.order('days_paused', { ascending: false, nullsFirst: false }).limit(500)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return data ?? []
+  }
+
+  /** Sprint 6 — lista filtrada por categoria específica. */
+  async policyList(orgId: string, opts: { seller_id?: number; category?: string; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 1000)
+    let q = supabaseAdmin
+      .from('ml_listing_pause_classifications')
+      .select('*')
+      .eq('organization_id', orgId)
+    if (opts.seller_id != null) q = q.eq('seller_id', opts.seller_id)
+    if (opts.category)          q = q.eq('pause_category', opts.category)
+    q = q.order('days_paused', { ascending: false, nullsFirst: false }).limit(limit)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return data ?? []
+  }
+
   /** Tasks de um anúncio específico (visão consolidada). */
   async listTasksByItem(orgId: string, itemId: string) {
     const { data, error } = await supabaseAdmin

@@ -59,6 +59,9 @@ export class ListingStatusScannerService {
         const result = await this.upsertInactiveTask(orgId, sellerId, item, reason)
         if (result === 'created') created++
         else if (result === 'updated') updated++
+
+        // Sprint 6 — popula pause_classifications com categoria específica
+        await this.upsertPauseClassification(orgId, sellerId, item)
       } catch (err) {
         this.logger.warn(`[status-scanner] /items/${itemId}: ${(err as Error).message}`)
       }
@@ -211,6 +214,156 @@ export class ListingStatusScannerService {
       return 0
     }
     return data?.length ?? 0
+  }
+
+  /** L3 Sprint 6 — categorização fina por motivo de pausa. Espelha as
+   *  categorias do CHECK em ml_listing_pause_classifications. */
+  private classifyCategory(item: {
+    status: string
+    sub_status?: string[]
+    tags?: string[]
+  }): {
+    category: 'out_of_stock' | 'paused_by_seller' | 'moderation_pending' |
+              'policy_violation' | 'image_problem' | 'description_problem' |
+              'price_problem' | 'category_problem' | 'restricted_product' |
+              'incomplete_required_fields' | 'expired' | 'unknown'
+    severity: 'critical' | 'high' | 'medium' | 'low'
+    is_self_solvable: boolean
+    suggested_fix: string
+  } {
+    const subs = (item.sub_status ?? []).map(s => String(s).toLowerCase())
+    const tags = (item.tags ?? []).map(t => String(t).toLowerCase())
+    const all = [...subs, ...tags]
+
+    // Critical — violações de política / produtos restritos
+    if (all.some(s => s.includes('policy') || s.includes('infraction'))) {
+      return {
+        category: 'policy_violation', severity: 'critical', is_self_solvable: false,
+        suggested_fix: 'Anúncio viola política ML — abrir contestação ou remover',
+      }
+    }
+    if (all.some(s => s.includes('restricted'))) {
+      return {
+        category: 'restricted_product', severity: 'critical', is_self_solvable: false,
+        suggested_fix: 'Produto restrito pelo ML — verificar regras de categoria',
+      }
+    }
+
+    // High — moderação pendente
+    if (all.some(s => s.includes('moderation'))) {
+      return {
+        category: 'moderation_pending', severity: 'high', is_self_solvable: false,
+        suggested_fix: 'Aguardar análise ML ou abrir contestação',
+      }
+    }
+
+    // High — sem estoque (acionável)
+    if (subs.includes('out_of_stock') || tags.includes('out_of_stock')) {
+      return {
+        category: 'out_of_stock', severity: 'high', is_self_solvable: true,
+        suggested_fix: 'Repor estoque no Catálogo ou pausar definitivamente',
+      }
+    }
+
+    // Medium — problemas de conteúdo
+    if (all.some(s => s.includes('image') || s.includes('picture') || s.includes('photo'))) {
+      return {
+        category: 'image_problem', severity: 'medium', is_self_solvable: true,
+        suggested_fix: 'Atualizar foto principal (mínimo 500px, fundo branco)',
+      }
+    }
+    if (all.some(s => s.includes('description') || s.includes('desc'))) {
+      return {
+        category: 'description_problem', severity: 'medium', is_self_solvable: true,
+        suggested_fix: 'Revisar descrição (sem links, contatos ou termos proibidos)',
+      }
+    }
+    if (all.some(s => s.includes('price') && !s.includes('automation'))) {
+      return {
+        category: 'price_problem', severity: 'medium', is_self_solvable: true,
+        suggested_fix: 'Revisar preço — valor inválido ou fora do range permitido',
+      }
+    }
+    if (all.some(s => s.includes('category'))) {
+      return {
+        category: 'category_problem', severity: 'medium', is_self_solvable: true,
+        suggested_fix: 'Mover anúncio pra categoria correta',
+      }
+    }
+    if (all.some(s => s.includes('required') || s.includes('attribute') || s.includes('mandatory'))) {
+      return {
+        category: 'incomplete_required_fields', severity: 'medium', is_self_solvable: true,
+        suggested_fix: 'Preencher atributos obrigatórios (ficha técnica)',
+      }
+    }
+
+    // Low — pausas voluntárias / closed comum
+    if (subs.includes('expired') || tags.includes('expired')) {
+      return {
+        category: 'expired', severity: 'low', is_self_solvable: true,
+        suggested_fix: 'Anúncio expirou — relistar se quiser continuar vendendo',
+      }
+    }
+    if (item.status === 'closed') {
+      return {
+        category: 'paused_by_seller', severity: 'low', is_self_solvable: true,
+        suggested_fix: 'Reativar se ainda quer vender, ou descartar',
+      }
+    }
+    if (item.status === 'paused' && subs.length === 0 && tags.length === 0) {
+      return {
+        category: 'paused_by_seller', severity: 'low', is_self_solvable: true,
+        suggested_fix: 'Pausado manualmente — reativar quando desejado',
+      }
+    }
+
+    return {
+      category: 'unknown', severity: 'medium', is_self_solvable: false,
+      suggested_fix: `Investigar motivo (sub_status: ${(item.sub_status ?? []).join(', ') || '-'})`,
+    }
+  }
+
+  private async upsertPauseClassification(orgId: string, sellerId: number, item: {
+    id: string
+    status: string
+    sub_status?: string[]
+    tags?: string[]
+    warnings?: unknown
+    title?: string
+    price?: number
+    sold_quantity?: number
+    date_created?: string
+    last_updated?: string
+  }): Promise<void> {
+    const cls = this.classifyCategory(item)
+    const pausedSince = item.last_updated ?? item.date_created ?? null
+    const daysPaused = pausedSince
+      ? Math.floor((Date.now() - new Date(pausedSince).getTime()) / 86400_000)
+      : null
+
+    const { error } = await supabaseAdmin.from('ml_listing_pause_classifications').upsert({
+      organization_id:    orgId,
+      seller_id:          sellerId,
+      ml_item_id:         item.id,
+      ml_status:          item.status,
+      ml_sub_status:      item.sub_status ?? [],
+      ml_tags:            item.tags ?? [],
+      ml_warnings:        item.warnings ?? null,
+      pause_category:     cls.category,
+      pause_severity:     cls.severity,
+      is_self_solvable:   cls.is_self_solvable,
+      suggested_fix:      cls.suggested_fix,
+      paused_since:       pausedSince,
+      days_paused:        daysPaused,
+      item_title:         item.title ?? null,
+      item_price:         item.price ?? null,
+      item_sold_quantity: item.sold_quantity ?? null,
+      fetched_at:         new Date().toISOString(),
+    }, { onConflict: 'organization_id,seller_id,ml_item_id' })
+
+    if (error) {
+      this.logger.warn(`[status-scanner] pause_class upsert ${item.id}: ${error.message}`)
+    }
   }
 
   /** Classificação genérica v1 — refinada em L3 pra categorias específicas. */
