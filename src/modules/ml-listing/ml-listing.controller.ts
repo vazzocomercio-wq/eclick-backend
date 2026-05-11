@@ -363,6 +363,39 @@ export class MlListingController {
     })
   }
 
+  // ── Health Scores (Sprint 7 / L4) ────────────────────────────────────────
+
+  @Post('health/calculate')
+  @HttpCode(HttpStatus.OK)
+  calculateHealth(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.health().calculateAll(user.orgId, Number(body.seller_id))
+  }
+
+  @Get('health')
+  listHealth(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('min_score') minScore?: string,
+    @Query('max_score') maxScore?: string,
+    @Query('limit')     limit?:    string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.health().list(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      min_score: minScore ? Number(minScore) : undefined,
+      max_score: maxScore ? Number(maxScore) : undefined,
+      limit:     limit ? Number(limit) : 100,
+    })
+  }
+
+  @Get('health/:itemId')
+  getHealth(@ReqUser() user: AuthUser, @Param('itemId') itemId: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.health().getOne(user.orgId, itemId)
+  }
+
   @Post('fiscal/:itemId/fix')
   @HttpCode(HttpStatus.OK)
   fixFiscal(

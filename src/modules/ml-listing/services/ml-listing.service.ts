@@ -7,6 +7,7 @@ import { ListingPricingScannerService } from './listing-pricing-scanner.service'
 import { ListingAutomationScannerService } from './listing-automation-scanner.service'
 import { ListingCatalogScannerService } from './listing-catalog-scanner.service'
 import { ListingFiscalScannerService } from './listing-fiscal-scanner.service'
+import { ListingHealthScoreService } from './listing-health-score.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -40,12 +41,14 @@ export class MlListingService {
     private readonly automationScanner: ListingAutomationScannerService,
     private readonly catalogScanner:    ListingCatalogScannerService,
     private readonly fiscalScanner:     ListingFiscalScannerService,
+    private readonly healthScoreSvc:    ListingHealthScoreService,
   ) {}
 
-  /** Exposed pra controller invocar direto (apply/activate/configure/fix). */
+  /** Exposed pra controller invocar direto (apply/activate/configure/fix/score). */
   pricing():    ListingPricingScannerService    { return this.pricingScanner }
   automation(): ListingAutomationScannerService { return this.automationScanner }
   fiscal():     ListingFiscalScannerService     { return this.fiscalScanner }
+  health():     ListingHealthScoreService       { return this.healthScoreSvc }
 
   // ── Tasks ────────────────────────────────────────────────────────────────
 

@@ -1856,6 +1856,39 @@ Aproveita \`catalog_product_id\` já em cache do scanner_pricing. Pra cada item 
 Sprint 6 fecha L3. Próximo: L4 (score consolidado + copiloto + bulk).`,
     tags: ['listings', 'policy', 'pause-classification', 'compliance', 'multi-conta'],
   },
+  {
+    routes:   ['/dashboard/listings/scores'],
+    category: 'listing-center',
+    title:    'Health Score — saúde consolidada por anúncio (Sprint 7 / L4)',
+    content:  `Tela \`/dashboard/listings/scores\` mostra **score 0-100 por anúncio** combinando 6 dimensões em uma só nota:
+
+**Breakdown** (weighted average):
+- \`quality_score\` (peso 25%) — F7 Quality Center (ml_quality_snapshots.ml_score)
+- \`pricing_score\` (peso 20%) — L2 (winning=100, sharing=70, losing=20-55 conforme diff)
+- \`fiscal_score\` (peso 15%) — L3 (% atributos NCM/GTIN/ORIGIN/etc presentes)
+- \`status_score\` (peso 15%) — L1 (100 se active, 0 se paused/closed)
+- \`margin_score\` (peso 15%) — interno (margem do produto vinculado; default 50 se sem dado)
+- \`sales_score\` (peso 10%) — orders dos últimos 30d normalizados pelo p90 da conta
+
+**Insights determinísticos** (sem custo IA pra MVP):
+- \`key_issues[]\`: detecta automaticamente quality_low, price_high, losing_buy_box, fiscal_incomplete, inactive, margin_low, low_sales
+- \`top_recommendation\`: texto direto priorizando bloqueios > exposição > monetização
+- \`top_recommendation_action\`: enum acionável (fix_fiscal | improve_quality | reduce_price | activate_automation | replenish_stock | reactivate | improve_margin | apply_promotion | none)
+
+**Trend**: comparando com cálculo anterior → improving / stable / degrading. \`score_change\` tem o delta numérico.
+
+**Endpoints (auth):**
+- \`POST /listings/health/calculate\` body=\`{seller_id}\` — recalcula tudo (lê todos os caches, ~3s pra Vazzo)
+- \`GET  /listings/health?seller_id=&min_score=&max_score=&limit=\` — lista ordenada por score asc
+- \`GET  /listings/health/:itemId\` — detalhe
+
+**Performance**: motor faz Promise.all de 6 queries SQL (caches existentes) + agregação em memória. ZERO chamadas ML. Pra 381 items do Vazzo: ~3s. Pra 5000 itens: ~10s.
+
+**Tela**: cards com score gigante esquerda + trend icon, breakdown bars coloridas (6 dimensões), recommendation em destaque, chips de issues + action sugerida. Filtros: Críticos (<60) / Todos / Saudáveis (≥80).
+
+**Atalho no sidebar**: "Health Score" → /dashboard/listings/scores.`,
+    tags: ['listings', 'health-score', 'consolidado', 'insights', 'recommendation', 'multi-conta'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════
