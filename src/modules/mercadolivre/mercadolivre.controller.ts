@@ -544,10 +544,14 @@ export class MercadolivreController {
     return this.ml.getListingsVisits(user.orgId!)
   }
 
-  // GET /ml/listings/counts
+  // GET /ml/listings/counts?seller_id=...
   @Get('listings/counts')
-  getListingsCounts(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getListingsCounts(user.orgId!)
+  getListingsCounts(
+    @ReqUser() user: ReqUserPayload,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    const sid = sellerId ? Number(sellerId) : undefined
+    return this.ml.getListingsCounts(user.orgId!, Number.isFinite(sid) ? sid : undefined)
   }
 
   // POST /ml/products/from-listing  { listing_ids: string[]; seller_id?: number }
@@ -592,7 +596,7 @@ export class MercadolivreController {
     )
   }
 
-  // GET /ml/listings?status=active&limit=20&offset=0&q=busca
+  // GET /ml/listings?status=active&limit=20&offset=0&q=busca&seller_id=...
   @Get('listings')
   getListings(
     @ReqUser() user: ReqUserPayload,
@@ -600,7 +604,16 @@ export class MercadolivreController {
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
     @Query('q') q?: string,
+    @Query('seller_id') sellerId?: string,
   ) {
-    return this.ml.getListings(user.orgId!, status ?? 'active', Number(offset ?? 0), Number(limit ?? 20), q)
+    const sid = sellerId ? Number(sellerId) : undefined
+    return this.ml.getListings(
+      user.orgId!,
+      status ?? 'active',
+      Number(offset ?? 0),
+      Number(limit ?? 20),
+      q,
+      Number.isFinite(sid) ? sid : undefined,
+    )
   }
 }

@@ -1503,9 +1503,16 @@ export class MercadolivreService {
     return { items, total }
   }
 
-  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string) {
-    const connections = await this.getAllConnections()
-    if (!connections.length) throw new UnauthorizedException('ML não conectado')
+  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string, sellerIdFilter?: number) {
+    const all = await this.getAllConnections()
+    if (!all.length) throw new UnauthorizedException('ML não conectado')
+
+    // Multi-conta: quando `sellerIdFilter` vem setado, restringe o fan-out
+    // a essa conta. Sem filtro = agrega TODAS as contas conectadas da org.
+    const connections = sellerIdFilter != null
+      ? all.filter(c => c.seller_id === sellerIdFilter)
+      : all
+    if (!connections.length) throw new UnauthorizedException('Conta ML não encontrada nesta organização')
 
     let allItems: any[] = []
     let totalSum = 0
@@ -1542,7 +1549,12 @@ export class MercadolivreService {
   }
 
   async getListingsCounts(orgId: string, sellerIdFilter?: number) {
-    const connections = await this.getAllConnections()
+    const all = await this.getAllConnections()
+    // Quando filtrado por conta, conta SÓ os anúncios dela. Antes esse
+    // param existia mas era ignorado — counts vinham sempre agregados.
+    const connections = sellerIdFilter != null
+      ? all.filter(c => c.seller_id === sellerIdFilter)
+      : all
     const statuses = ['active', 'paused', 'closed', 'under_review']
     const counts: Record<string, number> = { active: 0, paused: 0, closed: 0, under_review: 0 }
 
