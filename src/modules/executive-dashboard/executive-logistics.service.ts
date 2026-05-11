@@ -233,6 +233,7 @@ export class ExecutiveLogisticsService {
 
   async getSummaryForOrg(orgId: string): Promise<Array<{
     seller_id:                          number
+    nickname:                           string | null
     shipments_to_dispatch_today:        number
     shipments_dispatched_today:         number
     open_delays_count:                  number
@@ -243,11 +244,15 @@ export class ExecutiveLogisticsService {
     flex_scan_coverage_pct:             number | null
     last_synced_at:                     string
   }>> {
-    const { data } = await supabaseAdmin
-      .from('ml_logistics_summary')
-      .select('*')
-      .eq('organization_id', orgId)
-    return (data ?? []) as Array<{
+    const [{ data: rows }, { data: conns }] = await Promise.all([
+      supabaseAdmin.from('ml_logistics_summary').select('*').eq('organization_id', orgId),
+      supabaseAdmin.from('ml_connections').select('seller_id, nickname').eq('organization_id', orgId),
+    ])
+    const nicks = new Map<number, string | null>()
+    for (const c of ((conns ?? []) as Array<{ seller_id: number; nickname: string | null }>)) {
+      nicks.set(c.seller_id, c.nickname)
+    }
+    return ((rows ?? []) as Array<{
       seller_id:                   number
       shipments_to_dispatch_today: number
       shipments_dispatched_today:  number
@@ -258,7 +263,7 @@ export class ExecutiveLogisticsService {
       flex_eligible_count:         number
       flex_scan_coverage_pct:      number | null
       last_synced_at:              string
-    }>
+    }>).map(r => ({ ...r, nickname: nicks.get(r.seller_id) ?? null }))
   }
 
   async listOpenDelays(orgId: string, sellerId?: number, limit = 50): Promise<unknown[]> {

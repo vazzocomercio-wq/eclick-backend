@@ -224,12 +224,19 @@ export class ExecutiveReputationService {
   // ── Read ─────────────────────────────────────────────────────────────────
 
   /** Cache (current) de todas as contas da org. */
-  async getCurrentForOrg(orgId: string): Promise<ReputationSnapshot[]> {
-    const { data } = await supabaseAdmin
-      .from('ml_seller_reputation_current')
-      .select('*')
-      .eq('organization_id', orgId)
-    return (data ?? []) as ReputationSnapshot[]
+  async getCurrentForOrg(orgId: string): Promise<Array<ReputationSnapshot & { nickname: string | null }>> {
+    const [{ data: snaps }, { data: conns }] = await Promise.all([
+      supabaseAdmin.from('ml_seller_reputation_current').select('*').eq('organization_id', orgId),
+      supabaseAdmin.from('ml_connections').select('seller_id, nickname').eq('organization_id', orgId),
+    ])
+    const nicks = new Map<number, string | null>()
+    for (const c of ((conns ?? []) as Array<{ seller_id: number; nickname: string | null }>)) {
+      nicks.set(c.seller_id, c.nickname)
+    }
+    return ((snaps ?? []) as ReputationSnapshot[]).map(s => ({
+      ...s,
+      nickname: nicks.get(s.seller_id) ?? null,
+    }))
   }
 
   /** Histórico do seller pros últimos N dias (snapshot_date DESC). */
