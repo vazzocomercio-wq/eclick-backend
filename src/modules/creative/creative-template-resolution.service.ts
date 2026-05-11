@@ -34,9 +34,28 @@ import type {
   PreviewTemplateDto, ResolvedPositionPreview,
 } from './dto/preview-template.dto'
 
+// ── Helpers exportáveis ─────────────────────────────────────────────────────
+
+/**
+ * Remove prefixos "Cor principal:", "Secundária:" etc. que a análise IA vazoa
+ * no campo `creative_products.color`. Fica fora da classe pra ser fácil de
+ * testar isoladamente.
+ */
+export function stripColorPrefix(s: string | null | undefined): string {
+  if (!s) return ''
+  return s
+    .replace(/^(cor principal|cor secund[áa]ria|secund[áa]ria|principal|prim[áa]ria)\s*:\s*/i, '')
+    .trim()
+}
+
 // ── Types locais (espelham creative.service mas evitam circular import) ─────
 
-interface ProductRow {
+/**
+ * Shape mínimo de produto exigido pra resolução de variáveis e refs.
+ * Compatível com CreativeProduct (creative.service) — pipeline pode passar
+ * direto sem adaptação. Exportado pra pipeline ter type-check.
+ */
+export interface ProductRow {
   id:                       string
   organization_id:          string
   name:                     string
@@ -53,7 +72,8 @@ interface ProductRow {
   product_id:               string | null
 }
 
-interface BriefingRow {
+/** Subset do CreativeBriefing requerido pra resolução. */
+export interface BriefingRow {
   id:                  string
   product_id:          string
   environments:        string[] | null
@@ -68,6 +88,25 @@ interface CatalogProductRow {
   category_ml_id:   string | null
 }
 
+/**
+ * Item de referência resolvido. Quando `signed_url=null`, o caller precisa
+ * assinar via `signStorageUrl(storage_bucket, storage_path)` JIT (modo path).
+ * Quando `signed_url` populado, está pronto pra UI (modo signed).
+ */
+export interface ReferenceResolved {
+  /** Identificador estável: 'product:<uuid>' | 'logo:<briefingId>' | DB uuid (refs). */
+  id:             string
+  name:           string
+  storage_bucket: 'creative' | 'creative-references'
+  storage_path:   string
+  /** Populado em modo signed (default). Null em modo path (pipeline). */
+  signed_url:     string | null
+  source:         ResolvedPositionPreview['references'][number]['source']
+  /** Real DB id (creative_reference_images.id) ou null pra product_main/brand_logo. */
+  reference_id:   string | null
+}
+
+/** @deprecated Use `ReferenceResolved`. Mantido pra compat das call sites antigas. */
 export interface ReferenceWithSignedUrl {
   id:           string
   name:         string
@@ -193,8 +232,23 @@ export class CreativeTemplateResolutionService {
     product: ProductRow,
     briefing: BriefingRow | null,
     position: TemplatePositionDto,
-  ): Promise<{ refs: ReferenceWithSignedUrl[]; warnings: string[] }> {
-    const out: ReferenceWithSignedUrl[] = []
+    opts: { returnPaths?: boolean } = {},
+  ): Promise<{ refs: ReferenceResolved[]; warnings: string[] }> {
+    const returnPaths = opts.returnPaths === true
+
+    /** Helper interno: assina (modo signed) ou retorna null (modo path).
+     *  Modo path NUNCA hita o Storage — economiza ~5 chamadas em cada gerar-prompts. */
+    const maybeSign = async (
+      bucket: 'creative' | 'creative-references',
+      path:   string,
+    ): Promise<string | null> => {
+      if (returnPaths) return null
+      if (bucket === 'creative-references') return this.references.signRead(path)
+      // 'creative' (produto/logo) — pipeline antigo já usa 1h TTL
+      return this.signProductImage(path)
+    }
+
+    const out: ReferenceResolved[] = []
     const seen = new Set<string>()
     const warnings: string[] = []
     const catalog = product.product_id ? await this.loadCatalog(orgId, product.product_id) : null
@@ -206,12 +260,20 @@ export class CreativeTemplateResolutionService {
       for (const r of fixedRows) {
         if (seen.has(r.id)) continue
         seen.add(r.id)
-        const url = await this.references.signRead(r.storage_path).catch(() => null)
-        if (!url) {
-          warnings.push(`ref ${r.id} (${r.name}): falha ao assinar URL`)
-          continue
+        try {
+          const url = await maybeSign('creative-references', r.storage_path)
+          out.push({
+            id:             r.id,
+            name:           r.name,
+            storage_bucket: 'creative-references',
+            storage_path:   r.storage_path,
+            signed_url:     url,
+            source:         'fixed_id',
+            reference_id:   r.id,
+          })
+        } catch (e) {
+          warnings.push(`ref ${r.id} (${r.name}): ${(e as Error).message}`)
         }
-        out.push({ id: r.id, name: r.name, storage_path: r.storage_path, signed_url: url, source: 'fixed_id' })
       }
       // IDs não encontrados → warning
       const foundIds = new Set(fixedRows.map(r => r.id))
@@ -226,62 +288,65 @@ export class CreativeTemplateResolutionService {
       r.source === 'position_default' || r.source === 'category_match' || r.source === 'tag_match',
     ).length
 
+    const pushDynamic = async (rows: CreativeReferenceImage[], source: ReferenceResolved['source']) => {
+      for (const r of rows) {
+        if (seen.has(r.id)) continue
+        seen.add(r.id)
+        try {
+          const url = await maybeSign('creative-references', r.storage_path)
+          out.push({
+            id:             r.id,
+            name:           r.name,
+            storage_bucket: 'creative-references',
+            storage_path:   r.storage_path,
+            signed_url:     url,
+            source,
+            reference_id:   r.id,
+          })
+        } catch {
+          continue // ref inacessível — pula silently
+        }
+        if (remainingSlots() === 0) break
+      }
+    }
+
     if (position.reference_match?.by_position_default && remainingSlots() > 0) {
       const rows = await this.queryDynamicRefs(orgId, {
         position: position.position,
         category_ml_id: categoryMlId,
       }, remainingSlots())
-      for (const r of rows) {
-        if (seen.has(r.id)) continue
-        seen.add(r.id)
-        const url = await this.references.signRead(r.storage_path).catch(() => null)
-        if (!url) continue
-        out.push({ id: r.id, name: r.name, storage_path: r.storage_path, signed_url: url, source: 'position_default' })
-        if (remainingSlots() === 0) break
-      }
+      await pushDynamic(rows, 'position_default')
     }
 
     if (position.reference_match?.by_category && categoryMlId && remainingSlots() > 0) {
       const rows = await this.queryDynamicRefs(orgId, { category_ml_id: categoryMlId }, remainingSlots())
-      for (const r of rows) {
-        if (seen.has(r.id)) continue
-        seen.add(r.id)
-        const url = await this.references.signRead(r.storage_path).catch(() => null)
-        if (!url) continue
-        out.push({ id: r.id, name: r.name, storage_path: r.storage_path, signed_url: url, source: 'category_match' })
-        if (remainingSlots() === 0) break
-      }
+      await pushDynamic(rows, 'category_match')
     }
 
     if (position.reference_match?.by_tags && position.reference_match.by_tags.length > 0 && remainingSlots() > 0) {
       const rows = await this.queryDynamicRefs(orgId, { tags: position.reference_match.by_tags }, remainingSlots())
-      for (const r of rows) {
-        if (seen.has(r.id)) continue
-        seen.add(r.id)
-        const url = await this.references.signRead(r.storage_path).catch(() => null)
-        if (!url) continue
-        out.push({ id: r.id, name: r.name, storage_path: r.storage_path, signed_url: url, source: 'tag_match' })
-        if (remainingSlots() === 0) break
-      }
+      await pushDynamic(rows, 'tag_match')
     }
 
-    // 5. Product main image
+    // 5. Product main image (bucket 'creative')
     if (position.use_product_reference) {
       try {
-        const url = await this.signProductImage(product.main_image_storage_path)
+        const url = await maybeSign('creative', product.main_image_storage_path)
         out.push({
-          id:           `product:${product.id}`,
-          name:         product.name,
-          storage_path: product.main_image_storage_path,
-          signed_url:   url,
-          source:       'product_main',
+          id:             `product:${product.id}`,
+          name:           product.name,
+          storage_bucket: 'creative',
+          storage_path:   product.main_image_storage_path,
+          signed_url:     url,
+          source:         'product_main',
+          reference_id:   null,
         })
       } catch (e) {
         warnings.push(`use_product_reference: falha ao assinar imagem do produto: ${(e as Error).message}`)
       }
     }
 
-    // 6. Brand logo
+    // 6. Brand logo (bucket 'creative')
     if (position.use_brand_logo) {
       if (!briefing) {
         warnings.push('use_brand_logo: nenhum briefing fornecido — logo não disponível')
@@ -289,13 +354,15 @@ export class CreativeTemplateResolutionService {
         warnings.push('use_brand_logo: briefing.use_logo=false ou logo_storage_path vazio')
       } else {
         try {
-          const url = await this.signProductImage(briefing.logo_storage_path)
+          const url = await maybeSign('creative', briefing.logo_storage_path)
           out.push({
-            id:           `logo:${briefing.id}`,
-            name:         'Logo da marca',
-            storage_path: briefing.logo_storage_path,
-            signed_url:   url,
-            source:       'brand_logo',
+            id:             `logo:${briefing.id}`,
+            name:           'Logo da marca',
+            storage_bucket: 'creative',
+            storage_path:   briefing.logo_storage_path,
+            signed_url:     url,
+            source:         'brand_logo',
+            reference_id:   null,
           })
         } catch (e) {
           warnings.push(`use_brand_logo: falha ao assinar logo: ${(e as Error).message}`)
@@ -304,6 +371,32 @@ export class CreativeTemplateResolutionService {
     }
 
     return { refs: out, warnings }
+  }
+
+  /**
+   * Assina um path no bucket informado. Usa o cache do CreativeReferencesService
+   * pra `creative-references` (50min TTL); pra `creative` faz sign direto
+   * (sem cache — UI consome assets do `creative` por outras rotas com cache próprio).
+   *
+   * Exposto pra pipeline assinar JIT a partir das refs persistidas em
+   * generation_metadata sem regerar o cache toda vez.
+   */
+  async signStorageUrl(
+    bucket: 'creative' | 'creative-references',
+    storagePath: string,
+    ttlSec = 3600,
+  ): Promise<string> {
+    if (bucket === 'creative-references') {
+      return this.references.signRead(storagePath) // já tem cache TTL 50min
+    }
+    const { data, error } = await supabaseAdmin
+      .storage
+      .from('creative')
+      .createSignedUrl(storagePath, ttlSec)
+    if (error || !data?.signedUrl) {
+      throw new BadRequestException(`signStorageUrl(${bucket}, ${storagePath}): ${error?.message ?? 'falhou'}`)
+    }
+    return data.signedUrl
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -377,13 +470,17 @@ export class CreativeTemplateResolutionService {
       prompt_resolved,
       negative_prompt,
       aspect_ratio,
-      references:         refs.map(r => ({
-        id:           r.id,
-        name:         r.name,
-        storage_path: r.storage_path,
-        signed_url:   r.signed_url,
-        source:       r.source,
-      })),
+      // Preview SEMPRE roda em modo signed (returnPaths=false default), então
+      // signed_url está populado. Defensivo: filtra entradas sem URL.
+      references:         refs
+        .filter(r => r.signed_url !== null)
+        .map(r => ({
+          id:           r.id,
+          name:         r.name,
+          storage_path: r.storage_path,
+          signed_url:   r.signed_url as string,
+          source:       r.source,
+        })),
       variables_resolved: vars,
       warnings,
     }
@@ -521,17 +618,25 @@ export class CreativeTemplateResolutionService {
    * "Branco/Preto"   → ["Branco", "Preto"]
    * "Branco fosco"   → ["Branco fosco", ""]
    * undefined        → ["", ""]
+   *
+   * Aplica `stripColorPrefix` em cada parte pra remover prefixos como
+   * "Cor principal:", "Secundária:" etc — VisionPrompt costuma devolver
+   * strings prosa ("Cor principal: dourado/champagne...") e isso vazaria
+   * pros prompts finais.
    */
   private splitColors(raw: string): [string, string] {
     if (!raw) return ['', '']
-    const splitters = [/\s+e\s+/i, /\s*\/\s*/, /\s*,\s*/, /\s*\+\s*/]
+    const splitters = [/\s+e\s+/i, /\s*\/\s*/, /\s*,\s*/, /\s*\+\s*/, /\s*;\s*/]
     for (const re of splitters) {
       if (re.test(raw)) {
         const parts = raw.split(re).map(s => s.trim()).filter(Boolean)
-        return [parts[0] ?? '', parts[1] ?? '']
+        return [
+          stripColorPrefix(parts[0] ?? ''),
+          stripColorPrefix(parts[1] ?? ''),
+        ]
       }
     }
-    return [raw.trim(), '']
+    return [stripColorPrefix(raw), '']
   }
 
   /**

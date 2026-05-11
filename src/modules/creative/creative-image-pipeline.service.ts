@@ -4,6 +4,15 @@ import { LlmService } from '../ai/llm.service'
 import { CreativeService, type CreativeProduct, type CreativeBriefing } from './creative.service'
 import { buildImagePromptsRequest } from './creative.prompts'
 import type { Marketplace } from './creative.marketplace-rules'
+import {
+  CreativeTemplateResolutionService,
+  type ProductRow,
+  type BriefingRow,
+} from './creative-template-resolution.service'
+import type {
+  TemplatePositionDto, AspectRatio,
+} from './dto/template-position.dto'
+import type { CreativeImagePromptTemplate } from './creative-prompt-templates.service'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -84,8 +93,9 @@ export class CreativeImagePipelineService {
   private processing = new Set<string>()
 
   constructor(
-    private readonly llm:      LlmService,
-    private readonly creative: CreativeService,
+    private readonly llm:        LlmService,
+    private readonly creative:   CreativeService,
+    private readonly resolution: CreativeTemplateResolutionService,
   ) {}
 
   // ════════════════════════════════════════════════════════════════════════
@@ -414,6 +424,19 @@ export class CreativeImagePipelineService {
     return (data as CreativeImageJob) ?? null
   }
 
+  /**
+   * F6 Sprint 2.3 — Pipeline template-driven com fallback LLM.
+   *
+   * Ordem de tentativa:
+   *   1. `matchTemplateForProduct` → se org tem template (default, por categoria
+   *      ou most_recent), usa `buildPromptsFromTemplate` (rich metadata,
+   *      refs por position resolvidas e persistidas como paths).
+   *   2. Senão (org sem nenhum template), fallback pro fluxo antigo —
+   *      `buildPromptsFromLlm` que reusa briefing.image_prompts OR Sonnet on-demand.
+   *
+   * `creative_image_jobs.prompts_metadata.source` indica qual caminho rodou.
+   * Cada `creative_images.generation_metadata.source` também marca o caminho.
+   */
   private async generatePrompts(job: CreativeImageJob): Promise<void> {
     const product  = await this.creative.getProduct(job.organization_id, job.product_id)
     const briefing = await this.creative.getBriefing(job.organization_id, job.briefing_id)
@@ -423,23 +446,190 @@ export class CreativeImagePipelineService {
       .update({ status: 'generating_prompts', updated_at: new Date().toISOString() })
       .eq('id', job.id)
 
-    // Reaproveita a base editavel de prompts do briefing quando preenchida
-    // (bloco 3 do workflow). Falha pra Sonnet on-demand quando vazia.
-    const baseImagePrompts = briefing.image_prompts ?? []
-    let prompts: string[] = []
+    // 1. Tenta template-driven
+    let rowsToInsert: Array<{ prompt_text: string; generation_metadata: Record<string, unknown> }> | null = null
     let promptsMetadata: Record<string, unknown> = {}
     let promptsCostUsd = 0
 
+    const matched = await this.resolution.matchTemplateForProduct(job.organization_id, job.product_id)
+    if (matched && matched.template.positions.length > 0) {
+      this.logger.log(
+        `[creative.image] job ${job.id} usando template "${matched.template.name}" ` +
+        `(reason=${matched.match_reason})`,
+      )
+      rowsToInsert = await this.buildPromptsFromTemplate(
+        matched.template,
+        product,
+        briefing,
+        job.requested_count,
+      )
+      promptsMetadata = {
+        source: 'template',
+        template: {
+          template_id:   matched.template.id,
+          template_name: matched.template.name,
+          match_reason:  matched.match_reason,
+          matched_category_ml_id: matched.matched_category_ml_id ?? null,
+          positions_in_template:  matched.template.positions.length,
+          positions_used:         rowsToInsert.length,
+        },
+        generated_at: new Date().toISOString(),
+      }
+    }
+
+    // 2. Fallback LLM (org sem template ou template vazio)
+    if (!rowsToInsert) {
+      const fallback = await this.buildPromptsFromLlm(job, product, briefing, job.requested_count)
+      rowsToInsert    = fallback.rows
+      promptsMetadata = fallback.metadata
+      promptsCostUsd  = fallback.costUsd
+    }
+
+    if (rowsToInsert.length === 0) {
+      throw new Error('Nenhum prompt válido (template sem positions + LLM falhou)')
+    }
+
+    // Insere creative_images por prompt
+    const rows = rowsToInsert.map((d, i) => ({
+      job_id:              job.id,
+      product_id:          job.product_id,
+      organization_id:     job.organization_id,
+      position:            i + 1,
+      prompt_text:         d.prompt_text,
+      generation_metadata: d.generation_metadata,
+      status:              'pending' as const,
+    }))
+    const { error: insertErr } = await supabaseAdmin.from('creative_images').insert(rows)
+    if (insertErr) throw new Error(`creative_images.insert: ${insertErr.message}`)
+
+    // Atualiza job
+    await supabaseAdmin
+      .from('creative_image_jobs')
+      .update({
+        status:            'generating_images',
+        prompts_generated: rowsToInsert.map(r => r.prompt_text),
+        prompts_metadata:  promptsMetadata,
+        total_cost_usd:    promptsCostUsd,
+        updated_at:        new Date().toISOString(),
+      })
+      .eq('id', job.id)
+
+    this.logger.log(
+      `[creative.image] job ${job.id} prompts: ${rowsToInsert.length} gerados — ` +
+      `source=${promptsMetadata.source} cost=$${promptsCostUsd}`,
+    )
+  }
+
+  /**
+   * Constrói prompts a partir de um template. Cada position vira 1 row com:
+   *   - prompt_text: prompt interpolado + negative prompt anexado como "Avoid: ..."
+   *   - generation_metadata.references: array de { storage_bucket, storage_path }
+   *     prontas pra generateOneImage assinar JIT
+   *
+   * Se template tem menos positions que count, gera só as disponíveis (log warning).
+   */
+  private async buildPromptsFromTemplate(
+    template: CreativeImagePromptTemplate,
+    product: CreativeProduct,
+    briefing: CreativeBriefing,
+    count: number,
+  ): Promise<Array<{ prompt_text: string; generation_metadata: Record<string, unknown> }>> {
+    // Ordena por position asc, pega N primeiras
+    const positions: TemplatePositionDto[] = [...template.positions]
+      .sort((a, b) => a.position - b.position)
+      .slice(0, count)
+
+    if (positions.length < count) {
+      this.logger.warn(
+        `[creative.image] template "${template.name}" tem ${template.positions.length} positions; ` +
+        `pedido ${count}. Vai gerar apenas ${positions.length}.`,
+      )
+    }
+
+    // Adapta produto e briefing pros tipos do resolution (compatíveis por estrutura)
+    const productRow:  ProductRow  = product  as unknown as ProductRow
+    const briefingRow: BriefingRow = briefing as unknown as BriefingRow
+
+    return Promise.all(positions.map(async pos => {
+      const vars = this.resolution.buildVariables(productRow, briefingRow, pos)
+      const promptInterpolated = this.resolution.interpolate(pos.prompt_template, vars)
+      const negativeInterpolated = pos.negative_prompt
+        ? this.resolution.interpolate(pos.negative_prompt, vars)
+        : null
+      const finalPrompt = negativeInterpolated
+        ? `${promptInterpolated}\n\nAvoid: ${negativeInterpolated}`
+        : promptInterpolated
+
+      // Resolve refs em modo path (não assina — pipeline assina JIT)
+      const { refs, warnings } = await this.resolution.resolveReferencesForPosition(
+        template.organization_id,
+        productRow,
+        briefingRow,
+        pos,
+        { returnPaths: true },
+      )
+
+      const aspect_ratio: AspectRatio = pos.aspect_ratio ?? '1:1'
+
+      return {
+        prompt_text: finalPrompt,
+        generation_metadata: {
+          source: 'template',
+          template_id:        template.id,
+          template_position:  pos.position,
+          position_name:      pos.name,
+          negative_prompt:    pos.negative_prompt ?? null,
+          aspect_ratio,
+          references: refs.map(r => ({
+            mode:            'path',
+            source:          r.source,
+            storage_bucket:  r.storage_bucket,
+            storage_path:    r.storage_path,
+            reference_id:    r.reference_id,
+            name:            r.name,
+          })),
+          variables_resolved: vars,
+          warnings,
+        },
+      }
+    }))
+  }
+
+  /**
+   * Fallback do fluxo Sprint 1: reusa briefing.image_prompts ou gera N prompts
+   * via LlmService (Claude Sonnet) on-demand. Lógica idêntica ao código anterior;
+   * isolada em método separado pra clareza do pipeline.
+   */
+  private async buildPromptsFromLlm(
+    job: CreativeImageJob,
+    product: CreativeProduct,
+    briefing: CreativeBriefing,
+    count: number,
+  ): Promise<{
+    rows:     Array<{ prompt_text: string; generation_metadata: Record<string, unknown> }>
+    metadata: Record<string, unknown>
+    costUsd:  number
+  }> {
+    const baseImagePrompts = briefing.image_prompts ?? []
+    let prompts: string[] = []
+    let metadata: Record<string, unknown>
+    let costUsd = 0
+
     if (baseImagePrompts.length > 0) {
-      // Distribui base entre N posicoes (round-robin se base < requested).
-      prompts = Array.from({ length: job.requested_count }, (_, i) => baseImagePrompts[i % baseImagePrompts.length])
-      promptsMetadata = { source: 'briefing.image_prompts', base_count: baseImagePrompts.length }
+      // Round-robin se base < requested
+      prompts = Array.from({ length: count }, (_, i) => baseImagePrompts[i % baseImagePrompts.length])
+      metadata = {
+        source:       'llm_fallback',
+        fallback_via: 'briefing.image_prompts',
+        base_count:   baseImagePrompts.length,
+        generated_at: new Date().toISOString(),
+      }
     } else {
       const out = await this.llm.generateText({
         orgId:      job.organization_id,
         feature:    'creative_image_prompts',
         userPrompt: buildImagePromptsRequest({
-          product:  {
+          product: {
             name:            product.name,
             category:        product.category,
             brand:           product.brand,
@@ -461,55 +651,36 @@ export class CreativeImagePipelineService {
             communication_tone: briefing.communication_tone,
             image_count:        briefing.image_count,
           },
-          count: job.requested_count,
+          count,
         }),
         jsonMode:  true,
         maxTokens: 4000,
         creative:  { productId: product.id, operation: 'prompt_generation' },
       })
 
-      prompts = parsePromptsArray(out.text, job.requested_count)
-      promptsMetadata = {
-        source:        'on_demand',
+      prompts = parsePromptsArray(out.text, count)
+      metadata = {
+        source:        'llm_fallback',
+        fallback_via:  'sonnet_on_demand',
         provider:      out.provider,
         model:         out.model,
         input_tokens:  out.inputTokens,
         output_tokens: out.outputTokens,
         cost_usd:      out.costUsd,
         latency_ms:    out.latencyMs,
+        generated_at:  new Date().toISOString(),
       }
-      promptsCostUsd = out.costUsd
+      costUsd = out.costUsd
     }
 
-    if (prompts.length === 0) {
-      throw new Error('Nenhum prompt valido (base do briefing vazia + LLM falhou)')
-    }
-
-    // Insere uma row creative_images por prompt (status pending)
-    const rows = prompts.map((prompt, i) => ({
-      job_id:           job.id,
-      product_id:       job.product_id,
-      organization_id:  job.organization_id,
-      position:         i + 1,
-      prompt_text:      prompt,
-      status:           'pending' as const,
+    const rows = prompts.map(p => ({
+      prompt_text: p,
+      generation_metadata: {
+        source: 'llm_fallback',
+      } as Record<string, unknown>,
     }))
-    const { error: insertErr } = await supabaseAdmin.from('creative_images').insert(rows)
-    if (insertErr) throw new Error(`creative_images.insert: ${insertErr.message}`)
 
-    // Atualiza job
-    await supabaseAdmin
-      .from('creative_image_jobs')
-      .update({
-        status:            'generating_images',
-        prompts_generated: prompts,
-        prompts_metadata:  promptsMetadata,
-        total_cost_usd:    promptsCostUsd,
-        updated_at:        new Date().toISOString(),
-      })
-      .eq('id', job.id)
-
-    this.logger.log(`[creative.image] job ${job.id} prompts: ${prompts.length} gerados — cost=$${promptsCostUsd}`)
+    return { rows, metadata, costUsd }
   }
 
   private async generatePendingImages(jobId: string): Promise<void> {
@@ -540,12 +711,23 @@ export class CreativeImagePipelineService {
     }
   }
 
-  /** Gera 1 imagem: signed URL → gpt-image-1 → upload Storage → update row. */
+  /**
+   * Gera 1 imagem.
+   *
+   * Sprint 2.3 — lê `generation_metadata` pra decidir as fontes:
+   *   - Modo template (meta.references existe): itera refs, assina JIT
+   *     via signStorageUrl (cada ref tem storage_bucket + storage_path).
+   *     Format vem de meta.aspect_ratio.
+   *   - Modo fallback (meta.references ausente/vazia): mantém o fluxo Sprint 1
+   *     — main_image + briefing.logo se aplicável. Format fixo 'square'.
+   *
+   * Em ambos os modos, `meta` é preservado e enriquecido com provider/model/
+   * cost/latency depois da chamada da LLM.
+   */
   private async generateOneImage(img: CreativeImage): Promise<void> {
-    const product = await this.creative.getProduct(img.organization_id, img.product_id)
-    // Carrega briefing pra pegar logo (se use_logo+logo_storage_path)
-    const job = await this.getJobById(img.job_id)
-    const briefing = job ? await this.creative.getBriefing(img.organization_id, job.briefing_id) : null
+    const meta: Record<string, unknown> = (img.generation_metadata ?? {}) as Record<string, unknown>
+    const refs = Array.isArray(meta.references) ? meta.references as Array<Record<string, unknown>> : []
+    const aspectRatio = typeof meta.aspect_ratio === 'string' ? meta.aspect_ratio : '1:1'
 
     await supabaseAdmin
       .from('creative_images')
@@ -553,12 +735,24 @@ export class CreativeImagePipelineService {
       .eq('id', img.id)
 
     try {
-      // Signed URL pra OpenAI fetchar a imagem do produto (10min TTL — passa por edits)
-      const sourceUrls: string[] = [
-        await this.creative.signImage(product.main_image_storage_path, 600),
-      ]
-      if (briefing?.use_logo && briefing.logo_storage_path) {
-        sourceUrls.push(await this.creative.signImage(briefing.logo_storage_path, 600))
+      let sourceUrls: string[]
+
+      if (refs.length > 0) {
+        // Modo template: assina cada ref persistida no metadata
+        sourceUrls = await Promise.all(refs.map(async r => {
+          const bucket = (r.storage_bucket as 'creative' | 'creative-references') ?? 'creative'
+          const path   = r.storage_path as string
+          return this.resolution.signStorageUrl(bucket, path, 600)
+        }))
+      } else {
+        // Modo fallback Sprint 1: main image + logo opcional
+        const product = await this.creative.getProduct(img.organization_id, img.product_id)
+        const job = await this.getJobById(img.job_id)
+        const briefing = job ? await this.creative.getBriefing(img.organization_id, job.briefing_id) : null
+        sourceUrls = [await this.creative.signImage(product.main_image_storage_path, 600)]
+        if (briefing?.use_logo && briefing.logo_storage_path) {
+          sourceUrls.push(await this.creative.signImage(briefing.logo_storage_path, 600))
+        }
       }
 
       const out = await this.llm.generateImage({
@@ -566,7 +760,7 @@ export class CreativeImagePipelineService {
         feature:         'creative_image',
         prompt:          img.prompt_text,
         sourceImageUrls: sourceUrls,
-        format:          'square', // 1024x1024 — marketplace-safe; resize no front se precisar
+        format:          mapAspectRatioToFormat(aspectRatio),
         n:               1,
         creative:        { productId: img.product_id, imageId: img.id, operation: 'image_generation' },
       })
@@ -574,7 +768,6 @@ export class CreativeImagePipelineService {
       const first = out.images[0]
       if (!first?.b64) throw new Error('gpt-image-1 não retornou b64')
 
-      // Upload pra bucket creative
       const buffer = Buffer.from(first.b64, 'base64')
       const storagePath = `${img.organization_id}/${img.product_id}/images/${img.id}.png`
       const { error: upErr } = await supabaseAdmin.storage
@@ -582,26 +775,32 @@ export class CreativeImagePipelineService {
         .upload(storagePath, buffer, { contentType: 'image/png', upsert: true, cacheControl: '3600' })
       if (upErr) throw new Error(`storage.upload: ${upErr.message}`)
 
+      // Preserva meta (template info, refs, vars) e enriquece com resultado da geração
       await supabaseAdmin
         .from('creative_images')
         .update({
           status:       'ready',
           storage_path: storagePath,
           generation_metadata: {
-            provider:      out.provider,
-            model:         out.model,
-            cost_usd:      out.costUsd,
-            latency_ms:    out.latencyMs,
-            fallback_used: out.fallbackUsed,
+            ...meta,
+            provider:           out.provider,
+            model:              out.model,
+            cost_usd:           out.costUsd,
+            latency_ms:         out.latencyMs,
+            fallback_used:      out.fallbackUsed,
+            source_image_count: sourceUrls.length,
+            generated_at:       new Date().toISOString(),
           },
           error_message: null,
           updated_at:    new Date().toISOString(),
         })
         .eq('id', img.id)
 
-      // Update job: total_cost + completed_count
       await this.bumpJobAfterImage(img.job_id, out.costUsd, true)
-      this.logger.log(`[creative.image] img ${img.id} pos=${img.position} ✓ — cost=$${out.costUsd}`)
+      this.logger.log(
+        `[creative.image] img ${img.id} pos=${img.position} ✓ — ` +
+        `srcs=${sourceUrls.length} ratio=${aspectRatio} cost=$${out.costUsd}`,
+      )
     } catch (e: unknown) {
       const msg = (e as Error).message
       await supabaseAdmin
@@ -757,6 +956,30 @@ export class CreativeImagePipelineService {
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n))
+}
+
+/**
+ * Mapeia aspect ratio do template (1:1, 4:5, 16:9, 9:16) pro formato aceito
+ * pelo LlmService.generateImage.
+ *
+ * Notas:
+ *   - gpt-image-1 aceita 3 formatos: square (1024×1024), story (1024×1536),
+ *     wide (1536×1024)
+ *   - 4:5 e 9:16 caem ambos em 'story' (vertical próximo)
+ *   - 16:9 → 'wide' (horizontal)
+ *   - 1:1 ou desconhecido → 'square' (default seguro)
+ */
+function mapAspectRatioToFormat(aspectRatio: string): 'square' | 'story' | 'wide' {
+  switch (aspectRatio) {
+    case '4:5':
+    case '9:16':
+      return 'story'
+    case '16:9':
+      return 'wide'
+    case '1:1':
+    default:
+      return 'square'
+  }
 }
 
 function parsePromptsArray(text: string, expected: number): string[] {
