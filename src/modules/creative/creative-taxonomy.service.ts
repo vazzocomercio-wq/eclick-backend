@@ -59,6 +59,7 @@ export class CreativeTaxonomyService {
         label:           dto.label.trim(),
         sort_order:      dto.sort_order ?? 1000,
         is_default:      false,
+        linked_position: dto.linked_position ?? null,
         created_by:      userId,
       })
       .select('*')
@@ -66,6 +67,11 @@ export class CreativeTaxonomyService {
 
     if (error) {
       if (error.code === '23505') {
+        // Pode ser (org,kind,value) duplicado OU (org,position) duplicado
+        const msg = (error.message ?? '').toLowerCase()
+        if (msg.includes('linked_position') || msg.includes('ux_taxonomy_position_per_org')) {
+          throw new ConflictException(`posição ${dto.linked_position} já está linkada a outro ambiente`)
+        }
         throw new ConflictException(`taxonomy "${dto.value}" já existe para kind=${dto.kind}`)
       }
       throw new BadRequestException(`create taxonomy: ${error.message}`)
@@ -121,6 +127,17 @@ export class CreativeTaxonomyService {
       }
       patch.sort_order = dto.sort_order
     }
+    if (dto.linked_position !== undefined) {
+      if (dto.linked_position !== null) {
+        if (!Number.isInteger(dto.linked_position) || dto.linked_position < 1 || dto.linked_position > 11) {
+          throw new BadRequestException('linked_position: int 1..11 ou null')
+        }
+        if (existing.kind !== 'ambient') {
+          throw new BadRequestException('linked_position só é permitido em kind=ambient')
+        }
+      }
+      patch.linked_position = dto.linked_position
+    }
 
     if (Object.keys(patch).length === 0) return existing
 
@@ -134,6 +151,10 @@ export class CreativeTaxonomyService {
 
     if (error) {
       if (error.code === '23505') {
+        const msg = (error.message ?? '').toLowerCase()
+        if (msg.includes('linked_position') || msg.includes('ux_taxonomy_position_per_org')) {
+          throw new ConflictException(`posição ${dto.linked_position} já está linkada a outro ambiente`)
+        }
         throw new ConflictException(`taxonomy value duplicado`)
       }
       throw new BadRequestException(`update taxonomy: ${error.message}`)
@@ -181,6 +202,14 @@ export class CreativeTaxonomyService {
     if (dto.sort_order !== undefined) {
       if (typeof dto.sort_order !== 'number' || !Number.isInteger(dto.sort_order) || dto.sort_order < 0) {
         throw new BadRequestException('sort_order: int >= 0')
+      }
+    }
+    if (dto.linked_position !== undefined && dto.linked_position !== null) {
+      if (!Number.isInteger(dto.linked_position) || dto.linked_position < 1 || dto.linked_position > 11) {
+        throw new BadRequestException('linked_position: int 1..11 ou null')
+      }
+      if (dto.kind !== 'ambient') {
+        throw new BadRequestException('linked_position só é permitido em kind=ambient')
       }
     }
   }

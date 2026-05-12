@@ -13,16 +13,18 @@
 export type TaxonomyKind = 'ambient' | 'product_type'
 
 export interface CreateTaxonomyDto {
-  kind:        TaxonomyKind
-  value:       string         // snake_case key, único por (org, kind)
-  label:       string         // display name
-  sort_order?: number         // default 1000 (final da lista user)
+  kind:             TaxonomyKind
+  value:            string         // snake_case key, único por (org, kind)
+  label:            string         // display name
+  sort_order?:      number         // default 1000 (final da lista user)
+  linked_position?: number | null  // 1..11 — só kind='ambient' (constraint DB)
 }
 
 export interface UpdateTaxonomyDto {
-  value?:      string
-  label?:      string
-  sort_order?: number
+  value?:           string
+  label?:           string
+  sort_order?:      number
+  linked_position?: number | null  // explicit null = desliga link
 }
 
 /** Row do DB devolvido pra cliente. */
@@ -34,6 +36,7 @@ export interface TaxonomyOption {
   label:            string
   sort_order:       number
   is_default:       boolean
+  linked_position:  number | null   // 1..11 ou null
   created_at:       string
   updated_at:       string
 }
