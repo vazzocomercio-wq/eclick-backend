@@ -716,14 +716,14 @@ export class CreativeController {
     return this.taxonomy.create(this.orgOrThrow(u), u.id, body)
   }
 
-  /** PATCH /creative/taxonomy/:id — atualiza custom da org (não-default). */
+  /** PATCH /creative/taxonomy/:id — atualiza. Se default, faz clone-on-modify. */
   @Patch('taxonomy/:id')
   updateTaxonomy(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
     @Body() body: UpdateTaxonomyDto,
   ) {
-    return this.taxonomy.update(this.orgOrThrow(u), id, body)
+    return this.taxonomy.update(this.orgOrThrow(u), id, u.id, body)
   }
 
   /** DELETE /creative/taxonomy/:id — apaga custom da org (não-default). */

@@ -37,6 +37,8 @@ export interface TaxonomyOption {
   sort_order:       number
   is_default:       boolean
   linked_position:  number | null   // 1..11 ou null
+  /** UUID do default global que essa cópia sobrescreve (clone-on-modify). null = não sobrescreve. */
+  overrides_default_id: string | null
   created_at:       string
   updated_at:       string
   /** Marcado true só quando list(include_hidden=true). Indica que a org ocultou. */

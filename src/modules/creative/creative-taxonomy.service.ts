@@ -48,18 +48,29 @@ export class CreativeTaxonomyService {
     if (error) throw new BadRequestException(`list taxonomy: ${error.message}`)
     const rows = (data ?? []) as TaxonomyOption[]
 
-    // Carrega ocultas dessa org e marca/filtra
+    // 1. Identifica quais defaults essa org sobrescreveu (clone-on-modify)
+    //    → omite o default original quando há override
+    const overriddenDefaultIds = new Set<string>()
+    for (const r of rows) {
+      if (r.organization_id === orgId && r.overrides_default_id) {
+        overriddenDefaultIds.add(r.overrides_default_id)
+      }
+    }
+
+    // 2. Carrega ocultas dessa org pra marcar/filtrar
     const { data: hidden } = await supabaseAdmin
       .from('creative_taxonomy_hidden')
       .select('taxonomy_id')
       .eq('organization_id', orgId)
     const hiddenSet = new Set((hidden ?? []).map((h: { taxonomy_id: string }) => h.taxonomy_id))
 
+    // 3. Filtra: remove defaults sobrescritos; aplica hidden conforme flag
+    const filtered = rows.filter(r => !overriddenDefaultIds.has(r.id))
+
     if (opts.include_hidden) {
-      // Marca campo hidden=true mas mantém na lista
-      return rows.map(r => ({ ...r, hidden: hiddenSet.has(r.id) }))
+      return filtered.map(r => ({ ...r, hidden: hiddenSet.has(r.id) }))
     }
-    return rows.filter(r => !hiddenSet.has(r.id))
+    return filtered.filter(r => !hiddenSet.has(r.id))
   }
 
   // ── Hide / Unhide (per org soft-delete) ─────────────────────────────────
@@ -147,12 +158,95 @@ export class CreativeTaxonomyService {
     return row
   }
 
+  // ── Clone-on-modify (default → org copy) ───────────────────────────────
+
+  /**
+   * Cria uma cópia org-owned de um default global, aplicando o patch dto.
+   * Marca `overrides_default_id` apontando pro original — o `list()` filtra
+   * o default original quando há override pra mesma org.
+   *
+   * Idempotente: se já existe um override desse default pra essa org,
+   * faz UPDATE nele em vez de criar novo (constraint UNIQUE garante).
+   */
+  private async cloneDefaultAndApply(
+    orgId:    string,
+    userId:   string,
+    original: TaxonomyOption,
+    dto:      UpdateTaxonomyDto,
+  ): Promise<TaxonomyOption> {
+    // Verifica se já existe override
+    const { data: existing } = await supabaseAdmin
+      .from('creative_taxonomy_options')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('overrides_default_id', original.id)
+      .maybeSingle()
+
+    if (existing) {
+      // Já existe override → faz UPDATE nele (recursivo, mas agora não é default)
+      return this.update(orgId, (existing as TaxonomyOption).id, userId, dto)
+    }
+
+    // Cria nova cópia merged com o patch
+    const inserts = {
+      organization_id:      orgId,
+      kind:                 original.kind,
+      value:                typeof dto.value === 'string' && VALUE_REGEX.test(dto.value)
+                              ? dto.value.trim()
+                              : original.value,
+      label:                typeof dto.label === 'string' && dto.label.trim()
+                              ? dto.label.trim()
+                              : original.label,
+      sort_order:           typeof dto.sort_order === 'number' && Number.isInteger(dto.sort_order) && dto.sort_order >= 0
+                              ? dto.sort_order
+                              : original.sort_order,
+      is_default:           false,
+      linked_position:      dto.linked_position !== undefined
+                              ? dto.linked_position
+                              : original.linked_position,
+      overrides_default_id: original.id,
+      created_by:           userId,
+    }
+
+    // Valida linked_position se vai aplicar
+    if (inserts.linked_position !== null) {
+      if (original.kind !== 'ambient') {
+        throw new BadRequestException('linked_position só é permitido em kind=ambient')
+      }
+      if (!Number.isInteger(inserts.linked_position) || inserts.linked_position < 1 || inserts.linked_position > 11) {
+        throw new BadRequestException('linked_position: int 1..11 ou null')
+      }
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_taxonomy_options')
+      .insert(inserts)
+      .select('*')
+      .single()
+
+    if (error) {
+      if (error.code === '23505') {
+        const msg = (error.message ?? '').toLowerCase()
+        if (msg.includes('linked_position') || msg.includes('ux_taxonomy_position_per_org')) {
+          throw new ConflictException(`posição ${inserts.linked_position} já está linkada a outro ambiente`)
+        }
+        throw new ConflictException('já existe uma opção com esse value para sua org')
+      }
+      throw new BadRequestException(`clone default: ${error.message}`)
+    }
+    return data as TaxonomyOption
+  }
+
   // ── Update ──────────────────────────────────────────────────────────────
 
-  async update(orgId: string, id: string, dto: UpdateTaxonomyDto): Promise<TaxonomyOption> {
+  async update(orgId: string, id: string, userId: string, dto: UpdateTaxonomyDto): Promise<TaxonomyOption> {
     const existing = await this.getById(orgId, id)
+
+    // ── Clone-on-modify: se for default global, cria uma cópia org-owned ──
+    // O frontend pode editar/linkar defaults transparentemente — backend
+    // resolve o clone por baixo. UI nem percebe.
     if (existing.is_default || existing.organization_id === null) {
-      throw new ForbiddenException('opções padrão não podem ser editadas')
+      return this.cloneDefaultAndApply(orgId, userId, existing, dto)
     }
 
     const patch: Record<string, unknown> = {}
