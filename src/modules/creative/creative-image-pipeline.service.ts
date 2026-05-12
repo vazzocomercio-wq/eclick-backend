@@ -964,6 +964,109 @@ export class CreativeImagePipelineService {
     return { jobsFailed, imagesFailed }
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // F6 — Test single position (editor de template)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Gera UMA imagem isolada pra uma position específica, sem criar job/row
+   * em `creative_images`. Resultado vai pro Storage em prefixo `tests/` com
+   * TTL curto (limpeza periódica). Usado pelo editor de template ("Testar
+   * slot") pra iterar visual sem rodar as 11 imagens toda vez.
+   */
+  async testSinglePosition(
+    orgId: string,
+    templateId: string,
+    position: number,
+    dto: { product_id: string; briefing_id?: string },
+  ): Promise<{
+    test_image_url:  string
+    test_image_path: string
+    prompt_text:     string
+    references_used: Array<{ name: string; signed_url: string; source: string }>
+    cost_usd:        number
+    latency_ms:      number
+    provider:        string
+    model:           string
+    fallback_used:   boolean
+    warnings:        string[]
+  }> {
+    if (!dto?.product_id) throw new BadRequestException('product_id obrigatório')
+    if (!Number.isInteger(position) || position < 1) {
+      throw new BadRequestException('position: inteiro >= 1')
+    }
+
+    // 1. Resolve position via previewTemplate (já carrega template, product, briefing,
+    //    refs com signed URLs prontas pro LLM).
+    const preview = await this.resolution.previewTemplate(orgId, templateId, {
+      product_id:  dto.product_id,
+      briefing_id: dto.briefing_id,
+      positions:   [position],
+    })
+
+    const resolved = preview.positions[0]
+    if (!resolved) {
+      throw new BadRequestException(`position ${position} não existe no template ${templateId}`)
+    }
+
+    // 2. Monta prompt final com negativos anexados (mesmo padrão do pipeline)
+    const finalPrompt = resolved.negative_prompt
+      ? `${resolved.prompt_resolved}\n\nAvoid: ${resolved.negative_prompt}`
+      : resolved.prompt_resolved
+
+    const sourceUrls = resolved.references
+      .map(r => r.signed_url)
+      .filter((u): u is string => typeof u === 'string' && u.length > 0)
+
+    // 3. Gera via LlmService (Gemini NB primary + OpenAI fallback)
+    const out = await this.llm.generateImage({
+      orgId,
+      feature:         'creative_image',
+      prompt:          finalPrompt,
+      sourceImageUrls: sourceUrls,
+      format:          mapAspectRatioToFormat(resolved.aspect_ratio ?? '1:1'),
+      n:               1,
+      creative:        { productId: dto.product_id, operation: 'template_slot_test' },
+    })
+
+    const first = out.images[0]
+    if (!first?.b64) throw new BadRequestException('LLM não retornou b64')
+
+    // 4. Upload pro Storage em prefixo de testes (limpa via cron — F6 cleanup)
+    const buffer = Buffer.from(first.b64, 'base64')
+    const stamp = Date.now()
+    const storagePath = `tests/${orgId}/${templateId}/pos-${position}/${stamp}.png`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from('creative')
+      .upload(storagePath, buffer, { contentType: 'image/png', upsert: true, cacheControl: '600' })
+    if (upErr) throw new BadRequestException(`storage.upload: ${upErr.message}`)
+
+    // 5. Assina URL TTL 1h e retorna
+    const signedUrl = await this.resolution.signStorageUrl('creative', storagePath, 3600)
+
+    this.logger.log(
+      `[creative.image.test] org=${orgId} template=${templateId} pos=${position} ✓ ` +
+      `srcs=${sourceUrls.length} cost=$${out.costUsd} latency=${out.latencyMs}ms`,
+    )
+
+    return {
+      test_image_url:  signedUrl,
+      test_image_path: storagePath,
+      prompt_text:     finalPrompt,
+      references_used: resolved.references.map(r => ({
+        name:       r.name,
+        signed_url: r.signed_url,
+        source:     r.source,
+      })),
+      cost_usd:      out.costUsd,
+      latency_ms:    out.latencyMs,
+      provider:      out.provider,
+      model:         out.model,
+      fallback_used: out.fallbackUsed,
+      warnings:      resolved.warnings,
+    }
+  }
+
   /** Re-conta approved/rejected do job (após user aprovar/rejeitar). */
   async recountJob(jobId: string): Promise<void> {
     const { data } = await supabaseAdmin

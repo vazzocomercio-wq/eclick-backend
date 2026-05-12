@@ -23,6 +23,7 @@ import { CreativeTaxonomyService } from './creative-taxonomy.service'
 import type { CreatePromptTemplateDto } from './dto/create-prompt-template.dto'
 import type { UpdatePromptTemplateDto } from './dto/update-prompt-template.dto'
 import type { PreviewTemplateDto } from './dto/preview-template.dto'
+import type { TestTemplatePositionDto } from './dto/test-template-position.dto'
 import type { CreateReferenceDto } from './dto/create-reference.dto'
 import type { UpdateReferenceDto } from './dto/update-reference.dto'
 import type { UploadReferenceDto } from './dto/upload-reference.dto'
@@ -584,6 +585,27 @@ export class CreativeController {
     @Body() body: PreviewTemplateDto,
   ) {
     return this.resolution.previewTemplate(this.orgOrThrow(u), id, body)
+  }
+
+  /**
+   * POST /creative/prompt-templates/:id/positions/:position/test
+   * Gera UMA imagem isolada pra essa position. Não persiste em creative_images
+   * — sobe pro Storage em prefixo `tests/` e retorna signed URL TTL 1h.
+   * Usado pelo editor de template ("Testar slot") pra iterar visual rápido.
+   */
+  @Post('prompt-templates/:id/positions/:position/test')
+  @HttpCode(HttpStatus.OK)
+  testPromptTemplatePosition(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Param('position') positionStr: string,
+    @Body() body: TestTemplatePositionDto,
+  ) {
+    const position = Number(positionStr)
+    if (!Number.isInteger(position) || position < 1) {
+      throw new BadRequestException('position: inteiro >= 1')
+    }
+    return this.images.testSinglePosition(this.orgOrThrow(u), id, position, body)
   }
 
   // ════════════════════════════════════════════════════════════════════════

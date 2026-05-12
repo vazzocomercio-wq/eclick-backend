@@ -302,6 +302,49 @@ const CREATIVE_ENTRIES: KbEntry[] = [
     tags: ['creative', 'images', 'pipeline'],
   },
   {
+    routes:   ['/dashboard/creative/templates', '/dashboard/creative/templates/new', '/dashboard/creative/templates/[id]'],
+    category: 'creative',
+    title:    'Templates de imagens IA — controle visual da geração',
+    content: `**Esteira editável de geração de imagens.** Cada template define N slots (posições) — cada slot tem um prompt curto + até 10 imagens de inspiração visual + regras de match dinâmico. A IA usa essas refs como moodboard direto, não só texto.
+
+**Filosofia**: refs visuais carregam a estética, prompt só ancora diretrizes não-negociáveis (logo, hierarquia, fidelidade ao produto). Prompt longo (>900 chars) compete com refs e degrada resultado — UI mostra contador.
+
+**Lista** (\`/templates\`): cards de templates da org. Badge "default" no ativo. Multi-categoria ML — 1 template atende lista de \`category_ml_ids[]\`. Match no momento da geração: \`category_exact\` > \`org_default\` > \`most_recent\`.
+
+**Editor por slot** (\`/templates/[id]\`):
+- Header colapsível por slot: #N · Nome · badge "X refs" · botão **Testar** · botão deletar
+- Drag-drop pra reordenar slots (renumera 1..N automático)
+- **Testar slot** → modal escolhe produto → gera 1 imagem isolada (POST \`/prompt-templates/:id/positions/:N/test\`). Não cria job, só upload temporário em \`creative/tests/\`. ~15-40s.
+- **Grid visual de refs** dentro do card: thumbnails das refs vinculadas + drop-zone pra upload direto no slot + botão "Da galeria" pra picker multiselect.
+- Upload no slot cria \`creative_reference_images\` com tags automáticas \`slot:N\` + slug do nome + \`default_for_positions:[N]\`.
+- **Reference match** accordion configura fallback dinâmico (by_category, by_position_default, by_tags) quando refs fixas vazias.
+- Variáveis interpoláveis: \`{product_name}\`, \`{material}\`, \`{primary_color}\`, \`{dimensions}\`, \`{ambient_label}\`, \`{commercial_differentials}\`, etc — chips clicáveis inserem no cursor.
+
+**Botão "Testar slot"** é a chave da iteração rápida: ajusta prompt OU troca refs → testa só esse slot → sem rodar as 11. Custo ~$0.04 por teste.
+
+**Quando criar template novo**: por categoria de produto (Lustres / Pendentes / Abajures separados). Multi-select de categorias ML define quais produtos caem nesse template. Sem template match → fallback Claude Sonnet gera prompts on-demand (qualidade inferior).`,
+    tags: ['creative', 'template', 'editor', 'references', 'slot-test', 'image-generation', 'prompt'],
+  },
+  {
+    routes:   ['/dashboard/creative/references'],
+    category: 'creative',
+    title:    'Galeria de referências — moodboard da org',
+    content: `**Pool de imagens de inspiração usadas em geração IA.** Refs ficam na tabela \`creative_reference_images\` e são selecionadas dinamicamente por:
+- Slot específico via \`use_reference_ids[]\` no template (upload pelo editor de template já vincula)
+- Categoria ML via \`category_ml_ids[]\` (match com produto)
+- Tags via \`tags[]\` (configurado em \`reference_match.by_tags\`)
+- Position default via \`default_for_positions[]\` (ex: ref serve slots #3 e #5)
+
+**Curated**: refs com \`is_curated=true\` são compartilhadas pela plataforma — todas as orgs podem usar mas não editar. Sua org só edita as próprias.
+
+**Upload**: drag-drop OU file picker → signed URL → PUT direto Storage → metadata row. Drawer editor edita tags/categoria/posições após criar.
+
+**Bulk actions**: ativar/desativar/apagar várias de uma vez. Filtros por tag, categoria, ambiente, ativo.
+
+**Vínculo com template**: upload pelo editor de template (\`/templates/[id]\`) já vem com \`default_for_positions\` correto. Aqui na galeria você ajusta refs já existentes.`,
+    tags: ['creative', 'references', 'gallery', 'upload', 'moodboard'],
+  },
+  {
     routes:   ['/dashboard/creative/[productId]/videos/[jobId]'],
     category: 'creative',
     title:    'Pipeline de vídeos (Kling)',
