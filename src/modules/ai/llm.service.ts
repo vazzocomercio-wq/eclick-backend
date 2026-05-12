@@ -622,8 +622,12 @@ export class LlmService {
         form.append('model',  args.model)
         form.append('prompt', args.prompt.slice(0, 32_000))
         form.append('size',   size)
+        // OpenAI /v1/images/edits exige 'image[]' quando há MÚLTIPLAS refs.
+        // Field 'image' simples aceita só 1; com várias retorna
+        // 400 duplicate_parameter. Bug pré-Sprint 3 (sempre falhou com >1 ref).
+        const fieldName = refs.length > 1 ? 'image[]' : 'image'
         for (const r of refs) {
-          form.append('image', r.buffer, { filename: `source_${r.idx}.jpg`, contentType: r.mimeType })
+          form.append(fieldName, r.buffer, { filename: `source_${r.idx}.jpg`, contentType: r.mimeType })
         }
         try {
           const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
