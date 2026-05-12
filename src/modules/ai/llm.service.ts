@@ -1,7 +1,8 @@
 import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
 import * as FormData from 'form-data'
-import sharp from 'sharp'
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const sharp = require('sharp') as typeof import('sharp')
 import { supabaseAdmin } from '../../common/supabase'
 import { retryWithBackoff } from '../../common/retry'
 import { CredentialsService } from '../credentials/credentials.service'
