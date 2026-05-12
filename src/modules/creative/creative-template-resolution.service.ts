@@ -213,9 +213,13 @@ export class CreativeTemplateResolutionService {
       ? template.positions.filter(p => wantedPositions.has(p.position))
       : template.positions
 
+    // Pré-carrega mapa value→label dos ambientes pra todas as positions
+    // (1 query em vez de 11 dentro do loop)
+    const ambientLabels = await this.loadAmbientLabels(orgId)
+
     const resolved: ResolvedPositionPreview[] = []
     for (const tp of filtered) {
-      resolved.push(await this.resolvePosition(orgId, product, briefing, tp))
+      resolved.push(await this.resolvePosition(orgId, product, briefing, tp, ambientLabels))
     }
 
     return {
@@ -433,11 +437,18 @@ export class CreativeTemplateResolutionService {
   /**
    * Constrói o dicionário de variáveis pra um produto + briefing + position.
    * Exposto pra debug (preview retorna isso) e usado internamente em resolvePosition.
+   *
+   * `ambientLabels` é um mapa value→label da taxonomy (kind='ambient'). Quando
+   * o ambient_label vai vir de `briefing.environments[0]` (que é VALUE),
+   * traduzimos pra LABEL legível ("sala_estar" → "Sala de estar"). Fallback
+   * pro próprio value se não achar mapping. Mapa opcional — passa o pré-carregado
+   * de `loadAmbientLabels(orgId)` pra evitar query repetida em cada position.
    */
   buildVariables(
     product: ProductRow,
     briefing: BriefingRow | null,
     position: TemplatePositionDto,
+    ambientLabels?: Map<string, string>,
   ): Record<string, string> {
     const a = (product.ai_analysis ?? {}) as Record<string, unknown>
     const colorRaw = product.color ?? (typeof a.detected_color === 'string' ? a.detected_color : '')
@@ -445,7 +456,24 @@ export class CreativeTemplateResolutionService {
     const material = product.material ?? (typeof a.detected_material === 'string' ? a.detected_material : '')
     const keyParts = Array.isArray(a.key_parts) ? (a.key_parts as unknown[]).filter(p => typeof p === 'string') : []
     const usageCtx = Array.isArray(a.possible_uses) ? (a.possible_uses as unknown[]).filter(p => typeof p === 'string') : []
-    const ambientLabel = position.ambient_hint ?? briefing?.environments?.[0] ?? briefing?.custom_environment ?? ''
+
+    // ambient_label: prioridade preview→briefing→custom
+    // - position.ambient_hint   = string livre do template (já é legível)
+    // - briefing.environments[0] = VALUE da taxonomy → traduz pra LABEL via mapa
+    // - briefing.custom_environment = string livre (já é legível)
+    let ambientLabel = position.ambient_hint ?? ''
+    if (!ambientLabel && briefing?.environments && briefing.environments.length > 0) {
+      const v = briefing.environments[0]
+      // 'custom' é sentinel — pega custom_environment
+      if (v === 'custom') {
+        ambientLabel = briefing.custom_environment ?? ''
+      } else {
+        ambientLabel = ambientLabels?.get(v) ?? v
+      }
+    }
+    if (!ambientLabel && briefing?.custom_environment) {
+      ambientLabel = briefing.custom_environment
+    }
 
     return {
       product_name:             product.name ?? '',
@@ -463,6 +491,48 @@ export class CreativeTemplateResolutionService {
     }
   }
 
+  /**
+   * Carrega mapa value→label de ambientes da taxonomy (defaults + customs da org).
+   * Cache em memória curto (60s) — chamada quente em pipeline.generatePrompts
+   * que loopa 10+ positions; sem cache geraria queries duplicadas.
+   *
+   * Estratégia simples: ordena por organization_id NULLS FIRST → defaults primeiro,
+   * customs depois. `map.set(value, label)` no segundo passe SOBRESCREVE o default,
+   * implementando override transparentemente.
+   */
+  async loadAmbientLabels(orgId: string): Promise<Map<string, string>> {
+    const cacheKey = `ambient:${orgId}`
+    const cached = this.ambientLabelsCache.get(cacheKey)
+    const now = Date.now()
+    if (cached && cached.expiresAt > now) return cached.map
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_taxonomy_options')
+      .select('value, label, organization_id')
+      .eq('kind', 'ambient')
+      .or(`organization_id.is.null,organization_id.eq.${orgId}`)
+      .order('organization_id', { ascending: true, nullsFirst: true })  // defaults primeiro
+
+    if (error) {
+      this.logger.warn(`loadAmbientLabels: ${error.message}`)
+      return new Map()
+    }
+
+    const map = new Map<string, string>()
+    for (const r of (data ?? []) as Array<{ value: string; label: string }>) {
+      map.set(r.value, r.label)  // overrides org sobrescrevem defaults automaticamente
+    }
+    this.ambientLabelsCache.set(cacheKey, { map, expiresAt: now + 60_000 })
+    return map
+  }
+
+  /** Limpa cache (útil pra testes). */
+  clearAmbientLabelsCache(): void {
+    this.ambientLabelsCache.clear()
+  }
+
+  private ambientLabelsCache = new Map<string, { map: Map<string, string>; expiresAt: number }>()
+
   // ════════════════════════════════════════════════════════════════════════
   // Internals
   // ════════════════════════════════════════════════════════════════════════
@@ -472,8 +542,10 @@ export class CreativeTemplateResolutionService {
     product: ProductRow,
     briefing: BriefingRow | null,
     tp: TemplatePositionDto,
+    ambientLabels?: Map<string, string>,
   ): Promise<ResolvedPositionPreview> {
-    const vars = this.buildVariables(product, briefing, tp)
+    const labels = ambientLabels ?? await this.loadAmbientLabels(orgId)
+    const vars = this.buildVariables(product, briefing, tp, labels)
     const prompt_resolved = this.interpolate(tp.prompt_template, vars)
     const negative_prompt = tp.negative_prompt ? this.interpolate(tp.negative_prompt, vars) : undefined
     const { refs, warnings } = await this.resolveReferencesForPosition(orgId, product, briefing, tp)

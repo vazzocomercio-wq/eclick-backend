@@ -550,8 +550,11 @@ export class CreativeImagePipelineService {
     const productRow:  ProductRow  = product  as unknown as ProductRow
     const briefingRow: BriefingRow = briefing as unknown as BriefingRow
 
+    // Pré-carrega mapa value→label dos ambientes (1 query pra todas as positions)
+    const ambientLabels = await this.resolution.loadAmbientLabels(productRow.organization_id)
+
     return Promise.all(positions.map(async pos => {
-      const vars = this.resolution.buildVariables(productRow, briefingRow, pos)
+      const vars = this.resolution.buildVariables(productRow, briefingRow, pos, ambientLabels)
       const promptInterpolated = this.resolution.interpolate(pos.prompt_template, vars)
       const negativeInterpolated = pos.negative_prompt
         ? this.resolution.interpolate(pos.negative_prompt, vars)
