@@ -756,11 +756,25 @@ export class LlmService {
         })
       }
 
+      // Mapeia formato interno → aspectRatio aceito pelo Gemini
+      const geminiAspectRatio =
+        args.format === 'square' ? '1:1' :
+        args.format === 'story'  ? '9:16' :
+        args.format === 'wide'   ? '16:9' : '1:1'
+
       const payload = {
         contents: [{ parts }],
-        // Gemini image preview models: pedem response_modalities pra emitir IMAGE
+        // Configuração crítica pra modelos image-preview (Nano Banana):
+        // - responseModalities precisa ['TEXT','IMAGE'] (só IMAGE retorna só texto)
+        // - responseFormat.image obriga emissão de inline_data com a imagem
         generationConfig: {
-          responseModalities: ['IMAGE'],
+          responseModalities: ['TEXT', 'IMAGE'],
+          responseFormat: {
+            image: {
+              aspectRatio: geminiAspectRatio,
+              imageSize:   '2K',  // NB2 suporta '4K' nativo; '2K' já é alto sem custo extra
+            },
+          },
         },
       }
 
