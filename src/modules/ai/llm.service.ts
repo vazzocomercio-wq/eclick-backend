@@ -548,13 +548,17 @@ export class LlmService {
       } catch (primaryError) {
         // Fallback inter-provider (ex: google → openai) se config.fallback existir
         if (config.fallback && config.fallback.provider !== config.primary.provider) {
+          const primaryErrMsg = (primaryError as Error).message ?? 'unknown'
           this.logger.warn(
             `[llm.image] primary ${config.primary.provider}/${config.primary.model} falhou: ` +
-            `${(primaryError as Error).message?.slice(0, 200)} — tentando fallback ` +
+            `${primaryErrMsg.slice(0, 800)} — tentando fallback ` +
             `${config.fallback.provider}/${config.fallback.model}`,
           )
           try {
-            result = await tryProvider(config.fallback.provider, config.fallback.model, true)
+            const fallbackResult = await tryProvider(config.fallback.provider, config.fallback.model, true)
+            // Persiste o erro do primary no resultado pra diagnóstico via SQL
+            // (sem isso, fallback success silencia o erro do primary no log).
+            result = { ...fallbackResult, primaryError: primaryErrMsg.slice(0, 500) }
             return result
           } catch (fallbackError) {
             // Joga o erro original do primary (mais informativo)

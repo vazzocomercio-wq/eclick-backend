@@ -791,6 +791,7 @@ export class CreativeImagePipelineService {
             cost_usd:           out.costUsd,
             latency_ms:         out.latencyMs,
             fallback_used:      out.fallbackUsed,
+            primary_error:      out.primaryError ?? null,
             source_image_count: sourceUrls.length,
             generated_at:       new Date().toISOString(),
           },

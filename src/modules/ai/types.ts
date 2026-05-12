@@ -80,7 +80,8 @@ export interface GenerateImageOutput {
   model:        string
   costUsd:      number
   latencyMs:    number
-  fallbackUsed: boolean   // Sprint 3 Gemini: true quando primary falhou e fallback foi usado
+  fallbackUsed: boolean       // Sprint 3 Gemini: true quando primary falhou e fallback foi usado
+  primaryError?: string       // Sprint 3 debug: msg do primary que falhou (quando fallbackUsed=true)
 }
 
 /** Merged view: settings + isDefault flag. Used by GET /ai/settings. */
