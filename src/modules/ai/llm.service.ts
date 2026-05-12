@@ -760,25 +760,15 @@ export class LlmService {
         })
       }
 
-      // Mapeia formato interno → aspectRatio aceito pelo Gemini
-      const geminiAspectRatio =
-        args.format === 'square' ? '1:1' :
-        args.format === 'story'  ? '9:16' :
-        args.format === 'wide'   ? '16:9' : '1:1'
-
+      // Configuração mínima pra image-preview models (NB2/NB1):
+      // - responseModalities = ['TEXT','IMAGE'] é OBRIGATÓRIO (só 'IMAGE' faz
+      //   modelo gerar texto descritivo em vez de imagem real)
+      // - responseFormat NÃO existe no generation_config (causa 400 INVALID_ARGUMENT).
+      //   Aspect ratio é controlado via prompt + tamanho retornado é default 1024×1024.
       const payload = {
         contents: [{ parts }],
-        // Configuração crítica pra modelos image-preview (Nano Banana):
-        // - responseModalities precisa ['TEXT','IMAGE'] (só IMAGE retorna só texto)
-        // - responseFormat.image obriga emissão de inline_data com a imagem
         generationConfig: {
           responseModalities: ['TEXT', 'IMAGE'],
-          responseFormat: {
-            image: {
-              aspectRatio: geminiAspectRatio,
-              imageSize:   '2K',  // NB2 suporta '4K' nativo; '2K' já é alto sem custo extra
-            },
-          },
         },
       }
 
