@@ -22,8 +22,16 @@ const IMAGE_PRICING: Record<string, number> = {
   'flux-pro':                          0.050, // referencial — não usado nesta sprint
 }
 
-/** Modelos Gemini em ordem de preferência (model_fallback_chain interna). */
-const GEMINI_MODEL_CHAIN = ['gemini-3.1-flash-image-preview', 'gemini-2.5-flash-image'] as const
+/**
+ * Modelos Gemini em ordem de preferência (model_fallback_chain interna).
+ *
+ * 2026-05-12: NB2 (gemini-3.1-flash-image-preview) está com 503/timeout
+ * crônico ("high demand"). NB1 (gemini-2.5-flash-image) responde em 6-7s
+ * com inlineData camelCase. Chain coloca NB1 primeiro até NB2 estabilizar
+ * em prod no Google. NB2 fica como upgrade futuro (4K nativo, preço extra
+ * de $0.006/img).
+ */
+const GEMINI_MODEL_CHAIN = ['gemini-2.5-flash-image', 'gemini-3.1-flash-image-preview'] as const
 
 const FORMAT_SIZE: Record<Exclude<ImageFormat, 'custom'>, string> = {
   square: '1024x1024',  // 1:1  — 1080×1080 lógico

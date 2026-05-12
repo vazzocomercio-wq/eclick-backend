@@ -99,8 +99,8 @@ export const FEATURE_REGISTRY = {
   },
   creative_image: {
     label:       'Geração de imagem (Creative)',
-    description: 'Gemini Nano Banana 2 (gemini-3.1-flash-image-preview) com fallback gpt-image-1 — multi-image edit + 4K nativo',
-    primary:     { provider: 'google', model: 'gemini-3.1-flash-image-preview' },
+    description: 'Gemini Nano Banana (gemini-2.5-flash-image) com fallback gpt-image-1 — multi-image edit confirmado 2026-05-12. NB2 fica como fallback interno (503 high demand).',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
   // E3a: pipeline de vídeos
