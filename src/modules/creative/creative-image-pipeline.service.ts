@@ -360,6 +360,7 @@ export class CreativeImagePipelineService {
   /** Atomicamente reivindica o próximo job 'queued'. Retorna null se não há.
    *  Single-worker assumido — race tolerável com `eq('status','queued')` no UPDATE. */
   async claimNextJob(): Promise<CreativeImageJob | null> {
+    // 1. Prioriza jobs NOVOS (queued) — fluxo principal
     const { data: queued } = await supabaseAdmin
       .from('creative_image_jobs')
       .select('id')
@@ -367,7 +368,26 @@ export class CreativeImagePipelineService {
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle()
-    if (!queued) return null
+
+    // 2. Se não há queued, procura jobs em generating_images COM imagens
+    //    pending ainda esperando — caso típico de regenerate(): o regen
+    //    reseta job pra generating_images e cria nova row creative_images
+    //    em status='pending'. Sem essa retomada, regen fica órfã pra sempre.
+    if (!queued) {
+      const { data: resumable } = await supabaseAdmin
+        .from('creative_image_jobs')
+        .select('*, creative_images!inner(id)')
+        .eq('status', 'generating_images')
+        .eq('creative_images.status', 'pending')
+        .order('updated_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      if (resumable) {
+        // Já está em generating_images — só retorna pra processJob retomar
+        return resumable as CreativeImageJob
+      }
+      return null
+    }
 
     const { data: claimed, error } = await supabaseAdmin
       .from('creative_image_jobs')
