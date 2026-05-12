@@ -1116,9 +1116,16 @@ export class DropshipService {
         .select('id')
       for (const org of orgs ?? []) {
         try {
+          // Passo 1 — identifica pedidos novos como dropship
           const r = await this.identifyDropshipOrders(org.id)
           if (r.identified > 0) {
             this.logger.log(`[identify] org=${org.id} processed=${r.processed} identified=${r.identified}`)
+          }
+          // Passo 2 — avança status dos já identificados pra eligible_for_oc
+          // (ou cancelled, conforme o estado do pedido no marketplace)
+          const p = await this.promoteIdentifications(org.id)
+          if (p.promoted > 0 || p.cancelled > 0) {
+            this.logger.log(`[promote] org=${org.id} promoted=${p.promoted} cancelled=${p.cancelled}`)
           }
         } catch (e) {
           this.logger.warn(`[identify] org=${org.id} erro: ${e instanceof Error ? e.message : e}`)
@@ -1127,6 +1134,99 @@ export class DropshipService {
     } catch (e) {
       this.logger.error(`[identify] tick failed: ${e instanceof Error ? e.message : e}`)
     }
+  }
+
+  /**
+   * Promove identifications no estado `identified` pro próximo passo do fluxo:
+   *  - Se o pedido foi cancelado/refundado no marketplace → `cancelled`
+   *  - Se o pedido foi enviado (shipping_status shipped/delivered) → `eligible_for_oc`
+   *  - Caso contrário (paid sem envio confirmado) → `awaiting_shipment`
+   *
+   * O cron das 22h só gera OC pra identifications em `eligible_for_oc` ou
+   * `shipped_confirmed`. Sem esse promoter, todos ficam parados em
+   * `identified` e nenhuma OC é criada (caso real ontem: 67 pedidos
+   * identified, 0 OCs geradas).
+   */
+  async promoteIdentifications(orgId: string): Promise<{
+    checked: number
+    promoted: number
+    awaiting: number
+    cancelled: number
+  }> {
+    // Pega identifications em estado intermediário (identified ou awaiting_shipment)
+    const { data: idents } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('id, order_id, marketplace_status, shipping_status, dropship_status')
+      .eq('organization_id', orgId)
+      .in('dropship_status', ['identified', 'awaiting_shipment'])
+      .limit(500)
+
+    if (!idents || idents.length === 0) {
+      return { checked: 0, promoted: 0, awaiting: 0, cancelled: 0 }
+    }
+
+    // Re-fetch status atualizado dos orders (pode ter mudado desde a identificação)
+    const orderIds = idents.map(i => i.order_id).filter(Boolean) as string[]
+    const { data: orders } = await supabaseAdmin
+      .from('orders')
+      .select('id, status, shipping_status')
+      .in('id', orderIds)
+    const orderMap = new Map<string, { status: string | null; shipping_status: string | null }>(
+      (orders ?? []).map(o => [o.id, { status: o.status as string | null, shipping_status: o.shipping_status as string | null }]),
+    )
+
+    let promoted = 0, awaiting = 0, cancelled = 0
+    const promoteIds:  string[] = []
+    const awaitingIds: string[] = []
+    const cancelIds:   string[] = []
+
+    for (const i of idents) {
+      const cur = orderMap.get(i.order_id) ?? { status: i.marketplace_status, shipping_status: i.shipping_status }
+      const orderStatus = cur.status ?? i.marketplace_status
+      const shipping    = cur.shipping_status ?? i.shipping_status
+
+      if (orderStatus === 'cancelled' || orderStatus === 'invalid') {
+        cancelIds.push(i.id)
+        cancelled++
+      } else if (
+        shipping === 'shipped' || shipping === 'delivered' ||
+        shipping === 'in_transit' || shipping === 'ready_to_ship'
+      ) {
+        // Já saiu da nossa mão (ou está pronto) → seguro pedir do parceiro
+        promoteIds.push(i.id)
+        promoted++
+      } else if (i.dropship_status === 'identified') {
+        // Ainda em handling/pending → status intermediário
+        awaitingIds.push(i.id)
+        awaiting++
+      }
+    }
+
+    // Batch updates (idempotentes)
+    if (promoteIds.length > 0) {
+      await supabaseAdmin
+        .from('dropship_order_identifications')
+        .update({ dropship_status: 'eligible_for_oc', updated_at: new Date().toISOString() })
+        .in('id', promoteIds)
+    }
+    if (awaitingIds.length > 0) {
+      await supabaseAdmin
+        .from('dropship_order_identifications')
+        .update({ dropship_status: 'awaiting_shipment', updated_at: new Date().toISOString() })
+        .in('id', awaitingIds)
+    }
+    if (cancelIds.length > 0) {
+      await supabaseAdmin
+        .from('dropship_order_identifications')
+        .update({
+          dropship_status: 'cancelled',
+          hold_reason: 'Pedido cancelado no marketplace',
+          updated_at: new Date().toISOString(),
+        })
+        .in('id', cancelIds)
+    }
+
+    return { checked: idents.length, promoted, awaiting, cancelled }
   }
 
   async identifyDropshipOrders(orgId: string): Promise<{ processed: number; identified: number; skipped: number }> {
