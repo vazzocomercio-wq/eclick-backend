@@ -19,12 +19,14 @@ import {
 } from './creative-prompt-templates.service'
 import { CreativeReferencesService } from './creative-references.service'
 import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
+import { CreativeTaxonomyService } from './creative-taxonomy.service'
 import type { CreatePromptTemplateDto } from './dto/create-prompt-template.dto'
 import type { UpdatePromptTemplateDto } from './dto/update-prompt-template.dto'
 import type { PreviewTemplateDto } from './dto/preview-template.dto'
 import type { CreateReferenceDto } from './dto/create-reference.dto'
 import type { UpdateReferenceDto } from './dto/update-reference.dto'
 import type { UploadReferenceDto } from './dto/upload-reference.dto'
+import type { CreateTaxonomyDto, UpdateTaxonomyDto, TaxonomyKind } from './dto/taxonomy.dto'
 import type { Marketplace } from './creative.marketplace-rules'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -42,6 +44,7 @@ export class CreativeController {
     private readonly templates:  CreativePromptTemplatesService,
     private readonly references: CreativeReferencesService,
     private readonly resolution: CreativeTemplateResolutionService,
+    private readonly taxonomy:   CreativeTaxonomyService,
   ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
@@ -670,5 +673,43 @@ export class CreativeController {
   @HttpCode(HttpStatus.OK)
   toggleReferenceActive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.references.toggleActive(this.orgOrThrow(u), id)
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Sprint 2 patch — Taxonomia customizável (ambient / product_type)
+  //
+  // Defaults globais (org_id=NULL) seedados via migration 20260554.
+  // Cada org pode adicionar/editar/apagar SUAS opções; defaults read-only.
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** GET /creative/taxonomy?kind=ambient|product_type — lista defaults + org's. */
+  @Get('taxonomy')
+  listTaxonomy(@ReqUser() u: ReqUserPayload, @Query('kind') kind: string) {
+    if (kind !== 'ambient' && kind !== 'product_type') {
+      throw new BadRequestException('kind: ambient | product_type')
+    }
+    return this.taxonomy.list(this.orgOrThrow(u), kind as TaxonomyKind)
+  }
+
+  /** POST /creative/taxonomy — cria custom da org. */
+  @Post('taxonomy')
+  createTaxonomy(@ReqUser() u: ReqUserPayload, @Body() body: CreateTaxonomyDto) {
+    return this.taxonomy.create(this.orgOrThrow(u), u.id, body)
+  }
+
+  /** PATCH /creative/taxonomy/:id — atualiza custom da org (não-default). */
+  @Patch('taxonomy/:id')
+  updateTaxonomy(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: UpdateTaxonomyDto,
+  ) {
+    return this.taxonomy.update(this.orgOrThrow(u), id, body)
+  }
+
+  /** DELETE /creative/taxonomy/:id — apaga custom da org (não-default). */
+  @Delete('taxonomy/:id')
+  deleteTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.taxonomy.remove(this.orgOrThrow(u), id)
   }
 }
