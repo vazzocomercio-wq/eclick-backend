@@ -40,11 +40,27 @@ import type {
  * Remove prefixos "Cor principal:", "Secundária:" etc. que a análise IA vazoa
  * no campo `creative_products.color`. Fica fora da classe pra ser fácil de
  * testar isoladamente.
+ *
+ * Versão agressiva (Fase 2.5): aplica em qualquer posição do token (não só
+ * início), remove parênteses descritivos tipo "(estrutura metálica)", e
+ * colapsa whitespace múltiplo. Trata também o caso de prefixo no MEIO do
+ * token (ex.: "champagne fosco; Secundária: branco" quebrou em "/" antes
+ * do "Secundária:" — o resíduo ainda contém o prefixo, e a regex global
+ * agora pega).
  */
 export function stripColorPrefix(s: string | null | undefined): string {
   if (!s) return ''
   return s
-    .replace(/^(cor principal|cor secund[áa]ria|secund[áa]ria|principal|prim[áa]ria)\s*:\s*/i, '')
+    .replace(/(?:^|\s|;|,)\s*(cor principal|cor secund[áa]ria|secund[áa]ria|principal|prim[áa]ria)\s*:\s*/gi, ' ')
+    .trim()
+}
+
+/** Normaliza um token de cor: tira prefixos, parênteses descritivos e whitespace. */
+export function normalizeColorToken(s: string | null | undefined): string {
+  if (!s) return ''
+  return stripColorPrefix(s)
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\s+/g, ' ')
     .trim()
 }
 
@@ -614,29 +630,28 @@ export class CreativeTemplateResolutionService {
   // ── Pure helpers ─────────────────────────────────────────────────────────
 
   /**
-   * "Branco e cinza" → ["Branco", "cinza"]
-   * "Branco/Preto"   → ["Branco", "Preto"]
-   * "Branco fosco"   → ["Branco fosco", ""]
-   * undefined        → ["", ""]
+   * Quebra string de cor (vazoada da análise IA) em [primary, secondary].
    *
-   * Aplica `stripColorPrefix` em cada parte pra remover prefixos como
-   * "Cor principal:", "Secundária:" etc — VisionPrompt costuma devolver
-   * strings prosa ("Cor principal: dourado/champagne...") e isso vazaria
-   * pros prompts finais.
+   * Fase 2.5 — agressiva: separa por TODOS os splitters de uma vez (não só
+   * o primeiro que casa), aplica `normalizeColorToken` (tira prefixos
+   * "Cor principal:" / "Secundária:" + parênteses descritivos) e descarta
+   * tokens vazios.
+   *
+   * Exemplos:
+   *   "Cor principal: dourado/champagne fosco (estrutura metálica); Secundária: branco leitoso (globo de vidro)"
+   *     → ["dourado", "champagne fosco", "branco leitoso"] (3 tokens)
+   *     → primary="dourado", secondary="champagne fosco" (terceiro é descartado por enquanto)
+   *   "Branco e cinza" → ["Branco", "cinza"]
+   *   "Branco/Preto"   → ["Branco", "Preto"]
+   *   "Branco fosco"   → ["Branco fosco", ""]
    */
   private splitColors(raw: string): [string, string] {
     if (!raw) return ['', '']
-    const splitters = [/\s+e\s+/i, /\s*\/\s*/, /\s*,\s*/, /\s*\+\s*/, /\s*;\s*/]
-    for (const re of splitters) {
-      if (re.test(raw)) {
-        const parts = raw.split(re).map(s => s.trim()).filter(Boolean)
-        return [
-          stripColorPrefix(parts[0] ?? ''),
-          stripColorPrefix(parts[1] ?? ''),
-        ]
-      }
-    }
-    return [stripColorPrefix(raw), '']
+    const tokens = raw
+      .split(/[;,/+]|\s+(?:e|and)\s+/i)
+      .map(s => normalizeColorToken(s))
+      .filter(Boolean)
+    return [tokens[0] ?? '', tokens[1] ?? '']
   }
 
   /**
