@@ -734,6 +734,27 @@ export class MercadolivreService {
     }
   }
 
+  /** Lista listing_types disponíveis em MLB (Free/Gold Especial/Gold Pro/Premium).
+   *  Endpoint público (`/sites/MLB/listing_types`). Cache em memória 1h —
+   *  raramente muda. */
+  async getListingTypes(): Promise<Array<{ id: string; name: string }>> {
+    const cached = (this as { _ltCache?: { exp: number; data: Array<{ id: string; name: string }> } })._ltCache
+    const now = Date.now()
+    if (cached && cached.exp > now) return cached.data
+    try {
+      const { data } = await axios.get<Array<{ id: string; name: string; site_id: string; configuration?: unknown }>>(
+        `${ML_BASE}/sites/MLB/listing_types`,
+        { timeout: 10_000 },
+      )
+      const out = Array.isArray(data) ? data.map(d => ({ id: d.id, name: d.name })) : [];
+      (this as { _ltCache?: { exp: number; data: Array<{ id: string; name: string }> } })._ltCache =
+        { exp: now + 60 * 60 * 1000, data: out }
+      return out
+    } catch {
+      return []
+    }
+  }
+
   /** Lista atributos de uma categoria. Endpoint público. */
   async getCategoryAttributes(categoryId: string): Promise<Array<{
     id:                    string

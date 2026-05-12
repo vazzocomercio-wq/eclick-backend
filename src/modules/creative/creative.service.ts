@@ -1100,6 +1100,14 @@ export class CreativeService {
   }
 
   /**
+   * Lista listing_types do ML (Free, Gold Especial, Gold Pro, Premium…).
+   * Endpoint público, cache 1h via MercadolivreService.
+   */
+  async listMlListingTypes(): Promise<Array<{ id: string; name: string }>> {
+    return this.mercadolivre.getListingTypes()
+  }
+
+  /**
    * Sub-sprint B (prep): retorna attributes REAIS de uma categoria ML.
    * UI usa pra montar ficha técnica ML-compatible.
    */

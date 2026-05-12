@@ -249,6 +249,13 @@ export class CreativeController {
     return this.svc.getMlCategoryAttributes(id)
   }
 
+  /** GET /ml/listing-types — modalidades de anúncio MLB (Free/Gold Especial/Pro). */
+  @Get('ml/listing-types')
+  listMlListingTypes(@ReqUser() u: ReqUserPayload) {
+    this.orgOrThrow(u)
+    return this.svc.listMlListingTypes()
+  }
+
   @Post('listings/:id/variant')
   @HttpCode(HttpStatus.OK)
   createVariant(
