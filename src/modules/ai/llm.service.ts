@@ -785,19 +785,38 @@ export class LlmService {
           maxBodyLength: Infinity,
         })
 
-        // Extrai primeira part com inline_data (a imagem gerada)
-        const candidate = res.data.candidates?.[0]
-        const partWithImage = candidate?.content?.parts?.find(p => p.inline_data?.data)
-        if (!partWithImage?.inline_data?.data) {
-          // Pode ter finishReason='SAFETY' ou retorno só texto — joga erro
+        // Aceita inline_data (snake_case) OU inlineData (camelCase — Google retorna assim em alguns endpoints)
+        type GeminiPart = {
+          inline_data?: { mime_type?: string; data?: string }
+          inlineData?:  { mimeType?:  string; data?: string }
+          text?:        string
+        }
+        const candidate = res.data.candidates?.[0] as { content?: { parts?: GeminiPart[] }; finishReason?: string } | undefined
+        const parts = (candidate?.content?.parts ?? []) as GeminiPart[]
+        const partWithImage = parts.find(p => p.inline_data?.data || p.inlineData?.data)
+        const imageData = partWithImage?.inline_data?.data ?? partWithImage?.inlineData?.data
+        if (!imageData) {
           const reason = candidate?.finishReason ?? 'no_image_in_response'
-          const textPart = candidate?.content?.parts?.find(p => p.text)?.text
+          // Persiste FORMA COMPLETA do response pra debug (truncado em 500 chars)
+          // — sem isso, finishReason=STOP sem text é cego pra diagnóstico
+          const debugDump = JSON.stringify({
+            finishReason: reason,
+            n_parts: parts.length,
+            parts_summary: parts.map(p => ({
+              has_inline_data: !!p.inline_data?.data,
+              has_inlineData:  !!p.inlineData?.data,
+              has_text:        !!p.text,
+              text_preview:    p.text?.slice(0, 80),
+              keys:            Object.keys(p),
+            })),
+            top_keys: Object.keys(res.data ?? {}),
+          })
           throw new HttpException(
-            `gemini ${model}: sem imagem no response (finishReason=${reason}${textPart ? `, text="${textPart.slice(0, 120)}"` : ''})`,
+            `gemini ${model}: sem imagem no response — ${debugDump.slice(0, 700)}`,
             HttpStatus.BAD_GATEWAY,
           )
         }
-        return { b64: partWithImage.inline_data.data, modelUsed: model }
+        return { b64: imageData, modelUsed: model }
       } catch (e) {
         return this.enrichAxiosError(e, `gemini/${model}`)
       }
