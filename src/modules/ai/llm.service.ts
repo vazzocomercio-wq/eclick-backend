@@ -504,33 +504,67 @@ export class LlmService {
     let errorMessage: string | null = null
     let result: GenerateImageOutput | null = null
 
-    try {
-      if (config.primary.provider === 'flux' as Provider || config.primary.model.startsWith('flux')) {
-        // Flux stub (sprint F5-3 implementa de verdade)
+    const sourceUrls = input.sourceImageUrls?.length
+      ? input.sourceImageUrls
+      : (input.sourceImageUrl ? [input.sourceImageUrl] : [])
+
+    /**
+     * Dispara 1 chamada num provider. Retorna o resultado ou joga erro.
+     * Usado tanto pro primary quanto pro fallback (Gemini → OpenAI).
+     */
+    const tryProvider = async (
+      provider: Provider, model: string, fallbackUsed: boolean,
+    ): Promise<GenerateImageOutput> => {
+      if (provider === 'flux' as Provider || model.startsWith('flux')) {
         throw new HttpException(
-          'Flux ainda não implementado — sprint F5-3. Use openai/gpt-image-1 enquanto isso.',
+          'Flux ainda não implementado — use openai ou google.',
           HttpStatus.NOT_IMPLEMENTED,
         )
       }
-      if (config.primary.provider === 'openai') {
-        const sourceUrls = input.sourceImageUrls?.length
-          ? input.sourceImageUrls
-          : (input.sourceImageUrl ? [input.sourceImageUrl] : [])
-        result = await this.callOpenAIImage({
-          model:           config.primary.model,
-          orgId:           input.orgId,
-          prompt:          input.prompt,
-          sourceImageUrls: sourceUrls,
-          format:          input.format,
-          customSize:      input.customSize,
-          n,
-          t0,
+      if (provider === 'openai') {
+        const out = await this.callOpenAIImage({
+          model, orgId: input.orgId, prompt: input.prompt,
+          sourceImageUrls: sourceUrls, format: input.format,
+          customSize: input.customSize, n, t0,
         })
-        return result
+        return fallbackUsed ? { ...out, fallbackUsed: true } : out
       }
-      throw new BadRequestException(`Provider ${config.primary.provider} não suporta geração de imagem`)
+      if (provider === 'google') {
+        const out = await this.callGeminiImage({
+          model, orgId: input.orgId, prompt: input.prompt,
+          sourceImageUrls: sourceUrls, format: input.format,
+          customSize: input.customSize, n, t0,
+        })
+        return fallbackUsed ? { ...out, fallbackUsed: true } : out
+      }
+      throw new BadRequestException(`Provider ${provider} não suporta geração de imagem`)
+    }
+
+    try {
+      try {
+        result = await tryProvider(config.primary.provider, config.primary.model, false)
+        return result
+      } catch (primaryError) {
+        // Fallback inter-provider (ex: google → openai) se config.fallback existir
+        if (config.fallback && config.fallback.provider !== config.primary.provider) {
+          this.logger.warn(
+            `[llm.image] primary ${config.primary.provider}/${config.primary.model} falhou: ` +
+            `${(primaryError as Error).message?.slice(0, 200)} — tentando fallback ` +
+            `${config.fallback.provider}/${config.fallback.model}`,
+          )
+          try {
+            result = await tryProvider(config.fallback.provider, config.fallback.model, true)
+            return result
+          } catch (fallbackError) {
+            // Joga o erro original do primary (mais informativo)
+            errorMessage = `primary ${config.primary.provider}/${config.primary.model}: ${this.errorStatus(primaryError)} | fallback ${config.fallback.provider}/${config.fallback.model}: ${this.errorStatus(fallbackError)}`
+            throw fallbackError
+          }
+        }
+        throw primaryError
+      }
     } catch (e) {
-      errorMessage = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
+      errorMessage = errorMessage ?? `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
       throw e
     } finally {
       // Log SEMPRE (AI-ABS-2 pattern)
@@ -652,6 +686,166 @@ export class LlmService {
   // TODO sprint futura — implementar quando houver conta Flux ativa pra teste real.
   // private async callFluxImage(...) — POST https://api.bfl.ai/v1/flux-pro
   //   + polling /v1/get_result. Mantido fora pra evitar ship sem teste.
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Gemini Nano Banana 2 — gemini-3.1-flash-image-preview
+  //
+  // API ref: https://ai.google.dev/gemini-api/docs/image-generation
+  // - Endpoint: POST /v1beta/models/{model}:generateContent
+  // - Auth: ?key={GEMINI_API_KEY}
+  // - Multi-image via parts inline_data (até ~16 refs)
+  // - Response: candidates[0].content.parts[].inline_data.data (base64 PNG)
+  // - Model fallback chain interna: NB2 preview → NB1 estável quando quota/unavail
+  // ════════════════════════════════════════════════════════════════════════
+
+  private async callGeminiImage(args: {
+    model:           string
+    orgId:           string
+    prompt:          string
+    sourceImageUrls: string[]
+    format:          ImageFormat
+    customSize?:     { width: number; height: number }
+    n:               number
+    t0:              number
+  }): Promise<GenerateImageOutput> {
+    const keyName = 'GEMINI_API_KEY'
+    // 1) Tenta credentials per-org → 2) global service-account → 3) env fallback
+    const key =
+      (await this.credentials.getDecryptedKey(args.orgId, 'google', keyName).catch(() => null))
+      ?? (await this.credentials.getDecryptedKey(null, 'google', keyName).catch(() => null))
+      ?? process.env.GEMINI_API_KEY_DEFAULT
+      ?? null
+    if (!key) {
+      throw new BadRequestException(
+        `${keyName} não configurada (verificar credentials_service ou GEMINI_API_KEY_DEFAULT em env)`,
+      )
+    }
+
+    // Pre-processa refs em paralelo (mesma normalização do OpenAI:
+    // resize 1024 inside + removeAlpha + JPEG quality 85)
+    const refs = args.sourceImageUrls.length > 0
+      ? await Promise.all(
+          args.sourceImageUrls.map((url, idx) =>
+            this.preprocessReference(url, idx).catch(e =>
+              this.enrichAxiosError(e, `download source[${idx}]`),
+            ),
+          ),
+        )
+      : []
+
+    /**
+     * Tenta gerar 1 imagem com 1 modelo específico do chain.
+     * Joga erro enriquecido se falhar — caller decide se cai pro próximo.
+     */
+    const callOneWithModel = async (model: string): Promise<{ b64: string; modelUsed: string }> => {
+      const url = GEMINI_URL_TPL.replace('{model}', encodeURIComponent(model)) + `?key=${key}`
+
+      // Constrói parts: [text-prompt, ...refs como inline_data]
+      const parts: Array<Record<string, unknown>> = [{ text: args.prompt.slice(0, 32_000) }]
+      for (const r of refs) {
+        parts.push({
+          inline_data: {
+            mime_type: r.mimeType,
+            data:      r.buffer.toString('base64'),
+          },
+        })
+      }
+
+      const payload = {
+        contents: [{ parts }],
+        // Gemini image preview models: pedem response_modalities pra emitir IMAGE
+        generationConfig: {
+          responseModalities: ['IMAGE'],
+        },
+      }
+
+      try {
+        const res = await axios.post<{
+          candidates?: Array<{
+            content?: { parts?: Array<{ inline_data?: { mime_type?: string; data?: string }; text?: string }> }
+            finishReason?: string
+          }>
+        }>(url, payload, {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 90_000,
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        })
+
+        // Extrai primeira part com inline_data (a imagem gerada)
+        const candidate = res.data.candidates?.[0]
+        const partWithImage = candidate?.content?.parts?.find(p => p.inline_data?.data)
+        if (!partWithImage?.inline_data?.data) {
+          // Pode ter finishReason='SAFETY' ou retorno só texto — joga erro
+          const reason = candidate?.finishReason ?? 'no_image_in_response'
+          const textPart = candidate?.content?.parts?.find(p => p.text)?.text
+          throw new HttpException(
+            `gemini ${model}: sem imagem no response (finishReason=${reason}${textPart ? `, text="${textPart.slice(0, 120)}"` : ''})`,
+            HttpStatus.BAD_GATEWAY,
+          )
+        }
+        return { b64: partWithImage.inline_data.data, modelUsed: model }
+      } catch (e) {
+        return this.enrichAxiosError(e, `gemini/${model}`)
+      }
+    }
+
+    /**
+     * 1 chamada com fallback chain de modelos.
+     * Tenta cada modelo da chain — se for quota/unavailable cai pro próximo.
+     * Erros não-recuperáveis (auth, payload) são repassados direto.
+     */
+    const callOne = async (): Promise<{ b64: string; modelUsed: string }> => {
+      // Se user pediu um modelo específico não-default, usa só ele (sem chain)
+      const chain: readonly string[] =
+        GEMINI_MODEL_CHAIN.includes(args.model as typeof GEMINI_MODEL_CHAIN[number])
+          ? GEMINI_MODEL_CHAIN.slice(GEMINI_MODEL_CHAIN.indexOf(args.model as typeof GEMINI_MODEL_CHAIN[number]))
+          : [args.model]
+
+      let lastError: unknown
+      for (const m of chain) {
+        try {
+          return await callOneWithModel(m)
+        } catch (e) {
+          lastError = e
+          const status = (e as { response?: { status?: number } })?.response?.status
+          // Cai pro próximo só em quota/rate/unavailable
+          if (status === 429 || status === 503 || status === 404) {
+            this.logger.warn(`[llm.image.gemini] ${m} → status ${status}, tentando próximo modelo`)
+            continue
+          }
+          throw e
+        }
+      }
+      throw lastError
+    }
+
+    // Paraleliza N imagens (Gemini retorna 1 por call)
+    const settled = await Promise.allSettled(
+      Array.from({ length: args.n }, () =>
+        retryWithBackoff(callOne, { maxRetries: 2, baseMs: 1500, label: 'gemini.image' }),
+      ),
+    )
+    const results = settled
+      .filter((r): r is PromiseFulfilledResult<{ b64: string; modelUsed: string }> => r.status === 'fulfilled')
+      .map(r => r.value)
+    if (results.length === 0) {
+      const reason = (settled[0] as PromiseRejectedResult | undefined)?.reason
+      throw reason ?? new HttpException('Gemini image gen falhou em todas as N tentativas', HttpStatus.BAD_GATEWAY)
+    }
+
+    // Usa o modelo da primeira imagem pra pricing/relatório (todas geralmente iguais)
+    const modelUsed = results[0].modelUsed
+    const perImage = IMAGE_PRICING[modelUsed] ?? 0
+    return {
+      images:       results.map(r => ({ b64: r.b64 })),
+      provider:     'google',
+      model:        modelUsed,
+      costUsd:      Math.round(results.length * perImage * 1_000_000) / 1_000_000,
+      latencyMs:    Date.now() - args.t0,
+      fallbackUsed: false,
+    }
+  }
 
   private async logImageUsage(
     out:           GenerateImageOutput,

@@ -99,9 +99,9 @@ export const FEATURE_REGISTRY = {
   },
   creative_image: {
     label:       'Geração de imagem (Creative)',
-    description: 'gpt-image-1 com sourceImageUrl da imagem do produto',
-    primary:     { provider: 'openai', model: 'gpt-image-1' },
-    fallback:    null,
+    description: 'Gemini Nano Banana 2 (gemini-3.1-flash-image-preview) com fallback gpt-image-1 — multi-image edit + 4K nativo',
+    primary:     { provider: 'google', model: 'gemini-3.1-flash-image-preview' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
   // E3a: pipeline de vídeos
   creative_video_prompts: {
@@ -203,6 +203,6 @@ export const FEATURE_REGISTRY = {
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
 
-export type Provider = 'anthropic' | 'openai'
+export type Provider = 'anthropic' | 'openai' | 'google'
 
 export const FEATURE_KEYS = Object.keys(FEATURE_REGISTRY) as FeatureKey[]
