@@ -805,7 +805,16 @@ export class CreativeImagePipelineService {
         `srcs=${sourceUrls.length} ratio=${aspectRatio} cost=$${out.costUsd}`,
       )
     } catch (e: unknown) {
-      const msg = (e as Error).message
+      // Captura mensagem mais rica quando vier de axios (extrai response.data
+      // que tem o motivo real do 400 da API — OpenAI/Gemini retornam JSON detalhado).
+      const err = e as { message?: string; response?: { status?: number; data?: unknown }; isAxiosError?: boolean }
+      let msg = err.message ?? 'erro desconhecido'
+      if (err.response?.data !== undefined) {
+        const dataStr = typeof err.response.data === 'string'
+          ? err.response.data
+          : JSON.stringify(err.response.data)
+        msg = `[${err.response.status ?? '?'}] ${msg} — ${dataStr.slice(0, 800)}`
+      }
       await supabaseAdmin
         .from('creative_images')
         .update({

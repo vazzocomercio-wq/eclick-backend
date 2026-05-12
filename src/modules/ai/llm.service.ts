@@ -559,6 +559,22 @@ export class LlmService {
       ? `${args.customSize?.width ?? 1024}x${args.customSize?.height ?? 1024}`
       : FORMAT_SIZE[args.format]
 
+    // Enriquece axios errors com response.data antes de jogar — sem isso
+    // o retryWithBackoff/Promise.allSettled perdem o detalhe e fica só
+    // "Request failed with status code 400".
+    const enrichAxiosError = (e: unknown, ctx: string): never => {
+      const err = e as { message?: string; response?: { status?: number; data?: unknown }; isAxiosError?: boolean }
+      if (err.response?.data !== undefined) {
+        const dataStr = typeof err.response.data === 'string'
+          ? err.response.data
+          : JSON.stringify(err.response.data)
+        const enriched = new Error(`${ctx} [${err.response.status ?? '?'}] ${err.message ?? 'erro'} — ${dataStr.slice(0, 800)}`) as Error & { response?: typeof err.response }
+        enriched.response = err.response
+        throw enriched
+      }
+      throw e
+    }
+
     // gpt-image-1 não aceita n>1 — paralelizamos
     const callOne = async (): Promise<{ url?: string; b64?: string }> => {
       if (args.sourceImageUrls.length > 0) {
@@ -567,8 +583,12 @@ export class LlmService {
         // logo (e referências futuras).
         const buffers = await Promise.all(
           args.sourceImageUrls.map(async (url, idx) => {
-            const r = await axios.get<ArrayBuffer>(url, { responseType: 'arraybuffer', timeout: 30_000 })
-            return { idx, buf: Buffer.from(r.data) }
+            try {
+              const r = await axios.get<ArrayBuffer>(url, { responseType: 'arraybuffer', timeout: 30_000 })
+              return { idx, buf: Buffer.from(r.data) }
+            } catch (e) {
+              return enrichAxiosError(e, `download source[${idx}]`)
+            }
           }),
         )
         const form = new FormData()
@@ -578,29 +598,37 @@ export class LlmService {
         for (const b of buffers) {
           form.append('image', b.buf, { filename: `source_${b.idx}.png`, contentType: 'image/png' })
         }
+        try {
+          const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
+            OPENAI_IMG_EDT, form,
+            {
+              headers: { 'Authorization': `Bearer ${key}`, ...form.getHeaders() },
+              timeout: 90_000,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity,
+            },
+          )
+          const d0 = res.data.data?.[0] ?? {}
+          return { url: d0.url, b64: d0.b64_json }
+        } catch (e) {
+          return enrichAxiosError(e, 'openai/images/edits')
+        }
+      }
+
+      try {
         const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
-          OPENAI_IMG_EDT, form,
+          OPENAI_IMG_GEN,
+          { model: args.model, prompt: args.prompt.slice(0, 32_000), size, n: 1 },
           {
-            headers: { 'Authorization': `Bearer ${key}`, ...form.getHeaders() },
+            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
             timeout: 90_000,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
           },
         )
         const d0 = res.data.data?.[0] ?? {}
         return { url: d0.url, b64: d0.b64_json }
+      } catch (e) {
+        return enrichAxiosError(e, 'openai/images/generations')
       }
-
-      const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
-        OPENAI_IMG_GEN,
-        { model: args.model, prompt: args.prompt.slice(0, 32_000), size, n: 1 },
-        {
-          headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-          timeout: 90_000,
-        },
-      )
-      const d0 = res.data.data?.[0] ?? {}
-      return { url: d0.url, b64: d0.b64_json }
     }
 
     // Cada callOne ganha retry com backoff exponencial pra absorver
