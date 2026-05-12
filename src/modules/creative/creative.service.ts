@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, ConflictException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import {
   PRODUCT_ANALYSIS_PROMPT,
   buildListingPrompt,
@@ -142,7 +143,35 @@ export interface CreateBriefingDto {
 export class CreativeService {
   private readonly logger = new Logger(CreativeService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly mercadolivre: MercadolivreService,
+  ) {}
+
+  /**
+   * Chama predict_category do ML pra um título e retorna categoria ML real + attributes.
+   * Best-effort: falhas (sem internet, ML down, título vazio) retornam null sem
+   * quebrar o fluxo de geração de listing. Logs warning.
+   */
+  private async predictMlCategory(title: string, targetMarketplace: string): Promise<{
+    category_ml_id:          string | null
+    attributes_ml_suggested: Array<{ id: string; name: string; value_id?: string; value_name?: string }>
+  }> {
+    // Só roda pra ML — outros marketplaces ficam pra sprints futuras
+    if (targetMarketplace !== 'mercado_livre') {
+      return { category_ml_id: null, attributes_ml_suggested: [] }
+    }
+    try {
+      const r = await this.mercadolivre.predictCategory(title)
+      return {
+        category_ml_id:          r.category_id,
+        attributes_ml_suggested: r.attributes ?? [],
+      }
+    } catch (e) {
+      this.logger.warn(`[predictMlCategory] falhou pra "${title.slice(0, 60)}": ${(e as Error).message}`)
+      return { category_ml_id: null, attributes_ml_suggested: [] }
+    }
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // PRODUCTS
@@ -848,6 +877,10 @@ export class CreativeService {
 
     const fields = normalizeListingFields(parsed)
 
+    // Sub-sprint A: chama predict_category do ML pra ter categoria REAL (MLB...)
+    // em vez do texto livre que o LLM inventa. Best-effort: null se ML offline.
+    const mlPred = await this.predictMlCategory(fields.title, briefing.target_marketplace)
+
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
       .insert({
@@ -862,6 +895,8 @@ export class CreativeService {
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
+        category_ml_id:           mlPred.category_ml_id,
+        attributes_ml_suggested:  mlPred.attributes_ml_suggested,
         faq:                      fields.faq,
         commercial_differentials: fields.commercial_differentials,
         marketplace_variants:     {},
@@ -979,6 +1014,9 @@ export class CreativeService {
     if (!parsed) throw new BadRequestException('LLM retornou JSON inválido — tente novamente')
     const fields = normalizeListingFields(parsed)
 
+    // Sub-sprint A: predict_category na regeneração também (título pode ter mudado)
+    const mlPred = await this.predictMlCategory(fields.title, briefing.target_marketplace)
+
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
       .insert({
@@ -993,6 +1031,8 @@ export class CreativeService {
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
+        category_ml_id:           mlPred.category_ml_id,
+        attributes_ml_suggested:  mlPred.attributes_ml_suggested,
         faq:                      fields.faq,
         commercial_differentials: fields.commercial_differentials,
         marketplace_variants:     {},
@@ -1032,6 +1072,56 @@ export class CreativeService {
       .single()
     if (error) throw new BadRequestException(`approveListing: ${error.message}`)
     return data as CreativeListing
+  }
+
+  /**
+   * Sub-sprint A: força re-predict da categoria ML pra um listing.
+   * Útil quando user edita o título e quer atualizar a categoria sugerida.
+   * Atualiza category_ml_id + attributes_ml_suggested no listing.
+   */
+  async refreshMlCategory(orgId: string, listingId: string): Promise<CreativeListing> {
+    const listing = await this.getListing(orgId, listingId)
+    const briefing = await this.getBriefing(orgId, listing.briefing_id)
+    const mlPred = await this.predictMlCategory(listing.title, briefing.target_marketplace)
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_listings')
+      .update({
+        category_ml_id:          mlPred.category_ml_id,
+        attributes_ml_suggested: mlPred.attributes_ml_suggested,
+        updated_at:              new Date().toISOString(),
+      })
+      .eq('organization_id', orgId)
+      .eq('id', listingId)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`refreshMlCategory: ${error.message}`)
+    return data as CreativeListing
+  }
+
+  /**
+   * Sub-sprint B (prep): retorna attributes REAIS de uma categoria ML.
+   * UI usa pra montar ficha técnica ML-compatible.
+   */
+  async getMlCategoryAttributes(categoryId: string): Promise<Array<{
+    id:                string
+    name:              string
+    value_type:        string
+    required:          boolean
+    value_max_length?: number
+    values?:           Array<{ id: string; name: string }>
+    hint?:             string
+  }>> {
+    const attrs = await this.mercadolivre.getCategoryAttributes(categoryId)
+    return attrs.map(a => ({
+      id:                a.id,
+      name:              a.name,
+      value_type:        a.value_type,
+      required:          a.tags?.required === true || a.tags?.catalog_required === true,
+      value_max_length:  a.value_max_length,
+      values:            a.values,
+      hint:              a.hint,
+    }))
   }
 
   /** Gera variante do listing pra outro marketplace. Não cria row nova —

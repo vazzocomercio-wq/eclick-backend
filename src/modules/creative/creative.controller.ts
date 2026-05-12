@@ -234,6 +234,21 @@ export class CreativeController {
     return this.svc.approveListing(this.orgOrThrow(u), id, u.id)
   }
 
+  /** POST /listings/:id/refresh-ml-category — força re-predict da categoria ML. */
+  @Post('listings/:id/refresh-ml-category')
+  @HttpCode(HttpStatus.OK)
+  refreshMlCategory(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.refreshMlCategory(this.orgOrThrow(u), id)
+  }
+
+  /** GET /ml/categories/:id/attributes-detail — retorna attributes formatados
+   *  com flag `required` calculada (sub-sprint B vai usar pra ficha técnica). */
+  @Get('ml/categories/:id/attributes-detail')
+  getMlCategoryAttributesDetail(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    this.orgOrThrow(u) // só checa que user tem org (endpoint não precisa do orgId)
+    return this.svc.getMlCategoryAttributes(id)
+  }
+
   @Post('listings/:id/variant')
   @HttpCode(HttpStatus.OK)
   createVariant(
