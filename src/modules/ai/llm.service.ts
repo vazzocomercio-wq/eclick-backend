@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
 import * as FormData from 'form-data'
+import sharp from 'sharp'
 import { supabaseAdmin } from '../../common/supabase'
 import { retryWithBackoff } from '../../common/retry'
 import { CredentialsService } from '../credentials/credentials.service'
@@ -11,11 +12,17 @@ const ANTHROPIC_URL  = 'https://api.anthropic.com/v1/messages'
 const OPENAI_URL     = 'https://api.openai.com/v1/chat/completions'
 const OPENAI_IMG_GEN = 'https://api.openai.com/v1/images/generations'
 const OPENAI_IMG_EDT = 'https://api.openai.com/v1/images/edits'
+const GEMINI_URL_TPL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
 
 const IMAGE_PRICING: Record<string, number> = {
-  'gpt-image-1': 0.040,    // standard quality, USD/imagem
-  'flux-pro':    0.050,    // referencial — não usado nesta sprint
+  'gpt-image-1':                       0.040,
+  'gemini-3.1-flash-image-preview':    0.045, // Nano Banana 2 — preview, 4K nativo
+  'gemini-2.5-flash-image':            0.039, // Nano Banana 1 — estável, fallback
+  'flux-pro':                          0.050, // referencial — não usado nesta sprint
 }
+
+/** Modelos Gemini em ordem de preferência (model_fallback_chain interna). */
+const GEMINI_MODEL_CHAIN = ['gemini-3.1-flash-image-preview', 'gemini-2.5-flash-image'] as const
 
 const FORMAT_SIZE: Record<Exclude<ImageFormat, 'custom'>, string> = {
   square: '1024x1024',  // 1:1  — 1080×1080 lógico
@@ -559,35 +566,20 @@ export class LlmService {
       ? `${args.customSize?.width ?? 1024}x${args.customSize?.height ?? 1024}`
       : FORMAT_SIZE[args.format]
 
-    // Enriquece axios errors com response.data antes de jogar — sem isso
-    // o retryWithBackoff/Promise.allSettled perdem o detalhe e fica só
-    // "Request failed with status code 400".
-    const enrichAxiosError = (e: unknown, ctx: string): never => {
-      const err = e as { message?: string; response?: { status?: number; data?: unknown }; isAxiosError?: boolean }
-      if (err.response?.data !== undefined) {
-        const dataStr = typeof err.response.data === 'string'
-          ? err.response.data
-          : JSON.stringify(err.response.data)
-        const enriched = new Error(`${ctx} [${err.response.status ?? '?'}] ${err.message ?? 'erro'} — ${dataStr.slice(0, 800)}`) as Error & { response?: typeof err.response }
-        enriched.response = err.response
-        throw enriched
-      }
-      throw e
-    }
-
     // gpt-image-1 não aceita n>1 — paralelizamos
     const callOne = async (): Promise<{ url?: string; b64?: string }> => {
       if (args.sourceImageUrls.length > 0) {
-        // Modo edit: download de todas as sources em paralelo. gpt-image-1
-        // aceita até 16 imagens por chamada — usamos pra passar produto +
-        // logo (e referências futuras).
-        const buffers = await Promise.all(
+        // Modo edit: pre-processa cada ref (resize 1024 + removeAlpha + JPEG)
+        // antes de enviar. Resolve dois problemas que matavam multi-image:
+        //   (a) PNGs com canal alpha → gpt-image-1 interpreta como mask (conflito)
+        //   (b) PNGs grandes (3MB+) estouravam limite total do multipart
+        // Pós-fix típico: 3.6MB PNG RGBA → 250-400KB JPEG RGB.
+        const refs = await Promise.all(
           args.sourceImageUrls.map(async (url, idx) => {
             try {
-              const r = await axios.get<ArrayBuffer>(url, { responseType: 'arraybuffer', timeout: 30_000 })
-              return { idx, buf: Buffer.from(r.data) }
+              return await this.preprocessReference(url, idx)
             } catch (e) {
-              return enrichAxiosError(e, `download source[${idx}]`)
+              return this.enrichAxiosError(e, `download source[${idx}]`)
             }
           }),
         )
@@ -595,8 +587,8 @@ export class LlmService {
         form.append('model',  args.model)
         form.append('prompt', args.prompt.slice(0, 32_000))
         form.append('size',   size)
-        for (const b of buffers) {
-          form.append('image', b.buf, { filename: `source_${b.idx}.png`, contentType: 'image/png' })
+        for (const r of refs) {
+          form.append('image', r.buffer, { filename: `source_${r.idx}.jpg`, contentType: r.mimeType })
         }
         try {
           const res = await axios.post<{ data: Array<{ url?: string; b64_json?: string }> }>(
@@ -611,7 +603,7 @@ export class LlmService {
           const d0 = res.data.data?.[0] ?? {}
           return { url: d0.url, b64: d0.b64_json }
         } catch (e) {
-          return enrichAxiosError(e, 'openai/images/edits')
+          return this.enrichAxiosError(e, 'openai/images/edits')
         }
       }
 
@@ -627,7 +619,7 @@ export class LlmService {
         const d0 = res.data.data?.[0] ?? {}
         return { url: d0.url, b64: d0.b64_json }
       } catch (e) {
-        return enrichAxiosError(e, 'openai/images/generations')
+        return this.enrichAxiosError(e, 'openai/images/generations')
       }
     }
 
@@ -695,5 +687,63 @@ export class LlmService {
     } catch (e) {
       this.logger.warn(`[llm.logImageUsage] insert falhou: ${(e as Error).message}`)
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Image preprocessing — usado por callOpenAIImage e callGeminiImage
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Download + normalização de uma signed URL pra enviar a um motor de imagem.
+   * Aplica 3 transformações que destravam multi-image edit em ambos os motores:
+   *   1. removeAlpha — gpt-image-1 interpreta canal alpha como mask quando há
+   *      várias imagens; PNGs do ChatGPT vêm RGBA e quebram silenciosamente
+   *   2. resize 1024×1024 inside (sem upscale) — modelos enxergam semântica/
+   *      estilo, não pixel; refs maiores só estouram payload sem ganho
+   *   3. JPEG quality 85 + mozjpeg — reduz 3MB PNG RGBA → 200-400KB JPEG
+   *
+   * Retorna idx pra preservar ordem original quando chamado em Promise.all.
+   */
+  private async preprocessReference(
+    signedUrl: string,
+    idx: number,
+  ): Promise<{ idx: number; buffer: Buffer; mimeType: 'image/jpeg' }> {
+    const r = await axios.get<ArrayBuffer>(signedUrl, {
+      responseType: 'arraybuffer',
+      timeout: 30_000,
+    })
+    const original = Buffer.from(r.data)
+    const processed = await sharp(original)
+      .removeAlpha()
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer()
+    this.logger.debug(
+      `[llm.preprocess] ref[${idx}]: ${original.length}B → ${processed.length}B ` +
+      `(${Math.round((1 - processed.length / original.length) * 100)}% redução)`,
+    )
+    return { idx, buffer: processed, mimeType: 'image/jpeg' }
+  }
+
+  /**
+   * Enriquece axios errors com response.data antes de re-lançar.
+   * Sem isso, retryWithBackoff/Promise.allSettled perdem o detalhe e fica só
+   * "Request failed with status code 400" — diagnóstico cego.
+   *
+   * Preserva o error.response pra callers que precisem inspecionar status.
+   */
+  private enrichAxiosError(e: unknown, ctx: string): never {
+    const err = e as { message?: string; response?: { status?: number; data?: unknown }; isAxiosError?: boolean }
+    if (err.response?.data !== undefined) {
+      const dataStr = typeof err.response.data === 'string'
+        ? err.response.data
+        : JSON.stringify(err.response.data)
+      const enriched = new Error(
+        `${ctx} [${err.response.status ?? '?'}] ${err.message ?? 'erro'} — ${dataStr.slice(0, 800)}`,
+      ) as Error & { response?: typeof err.response }
+      enriched.response = err.response
+      throw enriched
+    }
+    throw e
   }
 }
