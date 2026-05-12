@@ -31,7 +31,11 @@ export class CreativeTaxonomyService {
 
   // ── List ────────────────────────────────────────────────────────────────
 
-  async list(orgId: string, kind: TaxonomyKind): Promise<TaxonomyOption[]> {
+  async list(
+    orgId: string,
+    kind: TaxonomyKind,
+    opts: { include_hidden?: boolean } = {},
+  ): Promise<TaxonomyOption[]> {
     this.assertKind(kind)
     const { data, error } = await supabaseAdmin
       .from('creative_taxonomy_options')
@@ -42,7 +46,51 @@ export class CreativeTaxonomyService {
       .order('label',      { ascending: true })
 
     if (error) throw new BadRequestException(`list taxonomy: ${error.message}`)
-    return (data ?? []) as TaxonomyOption[]
+    const rows = (data ?? []) as TaxonomyOption[]
+
+    // Carrega ocultas dessa org e marca/filtra
+    const { data: hidden } = await supabaseAdmin
+      .from('creative_taxonomy_hidden')
+      .select('taxonomy_id')
+      .eq('organization_id', orgId)
+    const hiddenSet = new Set((hidden ?? []).map((h: { taxonomy_id: string }) => h.taxonomy_id))
+
+    if (opts.include_hidden) {
+      // Marca campo hidden=true mas mantém na lista
+      return rows.map(r => ({ ...r, hidden: hiddenSet.has(r.id) }))
+    }
+    return rows.filter(r => !hiddenSet.has(r.id))
+  }
+
+  // ── Hide / Unhide (per org soft-delete) ─────────────────────────────────
+
+  async hideForOrg(orgId: string, userId: string, taxonomyId: string): Promise<{ ok: true }> {
+    // Confirma que a taxonomia existe e é visível pra essa org
+    const opt = await this.getById(orgId, taxonomyId)
+    // Defaults globais OU customs da org — qualquer um pode ser ocultado
+    // (custom da org poderia simplesmente DELETE, mas hide também funciona)
+    if (opt.organization_id !== null && !opt.is_default && opt.organization_id === orgId) {
+      // É custom da própria org — preferimos delete real, mas se chamarem hide ainda funciona
+    }
+
+    const { error } = await supabaseAdmin
+      .from('creative_taxonomy_hidden')
+      .upsert(
+        { organization_id: orgId, taxonomy_id: taxonomyId, hidden_by: userId },
+        { onConflict: 'organization_id,taxonomy_id' },
+      )
+    if (error) throw new BadRequestException(`hide taxonomy: ${error.message}`)
+    return { ok: true }
+  }
+
+  async unhideForOrg(orgId: string, taxonomyId: string): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin
+      .from('creative_taxonomy_hidden')
+      .delete()
+      .eq('organization_id', orgId)
+      .eq('taxonomy_id', taxonomyId)
+    if (error) throw new BadRequestException(`unhide taxonomy: ${error.message}`)
+    return { ok: true }
   }
 
   // ── Create ──────────────────────────────────────────────────────────────

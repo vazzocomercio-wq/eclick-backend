@@ -39,4 +39,6 @@ export interface TaxonomyOption {
   linked_position:  number | null   // 1..11 ou null
   created_at:       string
   updated_at:       string
+  /** Marcado true só quando list(include_hidden=true). Indica que a org ocultou. */
+  hidden?:          boolean
 }

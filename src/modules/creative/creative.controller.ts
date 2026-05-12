@@ -682,13 +682,32 @@ export class CreativeController {
   // Cada org pode adicionar/editar/apagar SUAS opções; defaults read-only.
   // ════════════════════════════════════════════════════════════════════════
 
-  /** GET /creative/taxonomy?kind=ambient|product_type — lista defaults + org's. */
+  /** GET /creative/taxonomy?kind=ambient|product_type[&include_hidden=1] */
   @Get('taxonomy')
-  listTaxonomy(@ReqUser() u: ReqUserPayload, @Query('kind') kind: string) {
+  listTaxonomy(
+    @ReqUser() u: ReqUserPayload,
+    @Query('kind') kind: string,
+    @Query('include_hidden') includeHidden?: string,
+  ) {
     if (kind !== 'ambient' && kind !== 'product_type') {
       throw new BadRequestException('kind: ambient | product_type')
     }
-    return this.taxonomy.list(this.orgOrThrow(u), kind as TaxonomyKind)
+    return this.taxonomy.list(this.orgOrThrow(u), kind as TaxonomyKind, {
+      include_hidden: includeHidden === '1' || includeHidden === 'true',
+    })
+  }
+
+  /** POST /creative/taxonomy/:id/hide — oculta da org (soft-delete reversível). */
+  @Post('taxonomy/:id/hide')
+  @HttpCode(HttpStatus.OK)
+  hideTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.taxonomy.hideForOrg(this.orgOrThrow(u), u.id, id)
+  }
+
+  /** DELETE /creative/taxonomy/:id/hide — desfaz hide (mostra de novo). */
+  @Delete('taxonomy/:id/hide')
+  unhideTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.taxonomy.unhideForOrg(this.orgOrThrow(u), id)
   }
 
   /** POST /creative/taxonomy — cria custom da org. */
