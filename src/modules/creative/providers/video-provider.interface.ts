@@ -30,6 +30,9 @@ export interface VideoModelOption {
   supportedDurations: number[]
   /** Suporta input de último frame (tail_image / lastFrame) nativamente? */
   supportsTailImage: boolean
+  /** Suporta movimento de câmera explícito (parâmetro nativo)? Quando false,
+   *  motion deve ser descrito no prompt. */
+  supportsCameraControl: boolean
   /** Preço em USD por duração (chave = duração em segundos). */
   pricing:      Record<number, number>
 }

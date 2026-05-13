@@ -52,19 +52,33 @@ const PRICING: Record<KlingModel, Record<KlingDuration, number>> = {
   'kling-v1-6':        { '5': 0.18, '10': 0.36 },
 }
 
+/**
+ * Quais modelos aceitam `camera_control`. Apenas v1.x (modo std) suporta.
+ * Modelos v2.x retornam "Camera control is not supported by the current model"
+ * — pra eles, o movimento de câmera deve vir DESCRITO no prompt.
+ */
+const MODELS_WITH_CAMERA_CONTROL: ReadonlySet<KlingModel> = new Set([
+  'kling-v1-6',
+])
+
+export function modelSupportsCameraControl(model: KlingModel): boolean {
+  return MODELS_WITH_CAMERA_CONTROL.has(model)
+}
+
 /** Catálogo público pra UI escolher modelo + duração. */
 export const KLING_MODEL_OPTIONS: Array<{
-  value:     KlingModel
-  label:     string
-  badge?:    string
-  hasAudio:  boolean
-  pricing:   { '5': number; '10': number }
+  value:                  KlingModel
+  label:                  string
+  badge?:                 string
+  hasAudio:               boolean
+  supportsCameraControl:  boolean
+  pricing:                { '5': number; '10': number }
 }> = [
-  { value: 'kling-v2-6',        label: 'Kling v2.6',        badge: 'Novo · com áudio', hasAudio: true,  pricing: PRICING['kling-v2-6'] },
-  { value: 'kling-v2-1-master', label: 'Kling v2.1 Master', badge: 'Premium',          hasAudio: false, pricing: PRICING['kling-v2-1-master'] },
-  { value: 'kling-v2-5',        label: 'Kling v2.5',        hasAudio: false,                            pricing: PRICING['kling-v2-5'] },
-  { value: 'kling-v2-1',        label: 'Kling v2.1',        badge: 'Padrão',           hasAudio: false, pricing: PRICING['kling-v2-1'] },
-  { value: 'kling-v1-6',        label: 'Kling v1.6',        badge: 'Econômico',        hasAudio: false, pricing: PRICING['kling-v1-6'] },
+  { value: 'kling-v2-6',        label: 'Kling v2.6',        badge: 'Novo · com áudio', hasAudio: true,  supportsCameraControl: false, pricing: PRICING['kling-v2-6'] },
+  { value: 'kling-v2-1-master', label: 'Kling v2.1 Master', badge: 'Premium',          hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-1-master'] },
+  { value: 'kling-v2-5',        label: 'Kling v2.5',                                   hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-5'] },
+  { value: 'kling-v2-1',        label: 'Kling v2.1',        badge: 'Padrão',           hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-1'] },
+  { value: 'kling-v1-6',        label: 'Kling v1.6',        badge: 'Econômico',        hasAudio: false, supportsCameraControl: true,  pricing: PRICING['kling-v1-6'] },
 ]
 
 /** Controle de câmera — pra "câmera em direção ao produto" usar zoom positivo (zoom_in). */
@@ -152,14 +166,23 @@ export class KlingClient {
       body.mode = input.mode
     }
 
-    // camera_control: padrão zoom_in (câmera em direção ao produto)
-    const cam = input.cameraControl ?? {
-      type:   'simple' as const,
-      config: { zoom: 5 },
-    }
-    body.camera_control = {
-      type:   cam.type,
-      ...(cam.config && { config: cam.config }),
+    // camera_control: apenas em modelos que suportam (v1.x std). Em v2.x o
+    // parâmetro é rejeitado pela API ("Camera control is not supported by
+    // the current model") — pra esses, motion vem descrito no prompt.
+    if (modelSupportsCameraControl(input.modelName)) {
+      const cam = input.cameraControl ?? {
+        type:   'simple' as const,
+        config: { zoom: 5 },
+      }
+      body.camera_control = {
+        type:   cam.type,
+        ...(cam.config && { config: cam.config }),
+      }
+    } else if (input.cameraControl) {
+      this.logger.warn(
+        `[kling.submit] camera_control solicitado mas modelo ${input.modelName} não suporta — ignorando. ` +
+        `Garanta que o prompt descreve o movimento desejado.`,
+      )
     }
 
     try {

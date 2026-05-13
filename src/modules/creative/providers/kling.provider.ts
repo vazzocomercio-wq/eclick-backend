@@ -33,15 +33,16 @@ export class KlingProvider implements VideoProvider {
 
   listModels(): VideoModelOption[] {
     return KLING_MODEL_OPTIONS.map(m => ({
-      id:                 m.value,
-      label:              m.label,
-      badge:              m.badge,
-      provider:           'kling' as const,
-      quality:            this.qualityOf(m.value),
-      hasAudio:           m.hasAudio,
-      supportedDurations: [5, 10],
-      supportsTailImage:  false,
-      pricing:            { 5: m.pricing['5'], 10: m.pricing['10'] },
+      id:                    m.value,
+      label:                 m.label,
+      badge:                 m.badge,
+      provider:              'kling' as const,
+      quality:               this.qualityOf(m.value),
+      hasAudio:              m.hasAudio,
+      supportedDurations:    [5, 10],
+      supportsTailImage:     false,
+      supportsCameraControl: m.supportsCameraControl,
+      pricing:               { 5: m.pricing['5'], 10: m.pricing['10'] },
     }))
   }
 
