@@ -65,6 +65,11 @@ export interface CreativeBriefing {
   video_prompts:       string[] | null
   marketplace_rules:   Record<string, unknown>
   is_active:           boolean
+  /** F6: tipo de produto (template de imagens). NULL = auto-match por categoria ML. */
+  template_id:         string | null
+  /** F6: posições/slots do template que serão geradas (1 imagem por slot).
+   *  Array vazio = usa N primeiras conforme image_count antigo. */
+  selected_positions:  number[]
   created_at:          string
   updated_at:          string
 }
@@ -137,6 +142,10 @@ export interface CreateBriefingDto {
   image_prompts?:      string[]
   video_prompts?:      string[]
   image_format?:       string
+  /** F6: tipo de produto (template) escolhido. NULL/omit = auto-match. */
+  template_id?:        string | null
+  /** F6: slots do template selecionados (1 imagem por slot). */
+  selected_positions?: number[]
 }
 
 @Injectable()
@@ -531,6 +540,37 @@ export class CreativeService {
     await this.getProduct(orgId, productId) // tenant check
     if (!dto.target_marketplace) throw new BadRequestException('target_marketplace obrigatório')
 
+    // F6: valida template_id + selected_positions (se passados)
+    const templateId = dto.template_id ?? null
+    let selectedPositions: number[] = []
+    if (templateId) {
+      const { data: tpl, error: tplErr } = await supabaseAdmin
+        .from('creative_image_prompt_templates')
+        .select('id, positions')
+        .eq('id', templateId)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      if (tplErr) throw new BadRequestException(`validar template: ${tplErr.message}`)
+      if (!tpl) throw new BadRequestException('template_id inválido ou não pertence à org')
+
+      if (dto.selected_positions && dto.selected_positions.length > 0) {
+        if (!Array.isArray(dto.selected_positions) || dto.selected_positions.some(p => !Number.isInteger(p) || p < 1)) {
+          throw new BadRequestException('selected_positions: array de inteiros >= 1')
+        }
+        const validPositions = new Set(
+          (tpl.positions as Array<{ position: number }>).map(p => p.position),
+        )
+        const invalid = dto.selected_positions.filter(p => !validPositions.has(p))
+        if (invalid.length > 0) {
+          throw new BadRequestException(`selected_positions inválidas pra esse template: ${invalid.join(', ')}`)
+        }
+        // Dedup + ordena
+        selectedPositions = [...new Set(dto.selected_positions)].sort((a, b) => a - b)
+      }
+    } else if (dto.selected_positions && dto.selected_positions.length > 0) {
+      throw new BadRequestException('selected_positions exige template_id')
+    }
+
     // Desativa briefings anteriores do mesmo produto (mantém só o ativo)
     await supabaseAdmin
       .from('creative_briefings')
@@ -539,6 +579,11 @@ export class CreativeService {
       .eq('is_active', true)
 
     const rules = getMarketplaceRules(dto.target_marketplace)
+    // Se selected_positions preenchido, image_count vira N (1 por slot)
+    const imageCount = selectedPositions.length > 0
+      ? selectedPositions.length
+      : (dto.image_count ?? 10)
+
     const { data, error } = await supabaseAdmin
       .from('creative_briefings')
       .insert({
@@ -554,12 +599,14 @@ export class CreativeService {
         logo_url:           dto.logo_url ?? null,
         logo_storage_path:  dto.logo_storage_path ?? null,
         communication_tone: dto.communication_tone ?? 'vendedor',
-        image_count:        dto.image_count ?? 10,
+        image_count:        imageCount,
         image_format:       dto.image_format ?? '1200x1200',
         image_prompts:      dto.image_prompts ?? null,
         video_prompts:      dto.video_prompts ?? null,
         marketplace_rules:  rules as unknown as Record<string, unknown>,
         is_active:          true,
+        template_id:        templateId,
+        selected_positions: selectedPositions,
       })
       .select('*')
       .single()

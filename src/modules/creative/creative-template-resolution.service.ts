@@ -181,6 +181,19 @@ export class CreativeTemplateResolutionService {
     return { template: templates[0], match_reason: 'most_recent' }
   }
 
+  /**
+   * F6: pega template explícito por id (sem lógica de match).
+   * Usado pelo pipeline quando `briefing.template_id` está preenchido pelo user.
+   * Retorna null se não existir ou não pertencer à org (pipeline então cai no match auto).
+   */
+  async getTemplateById(orgId: string, templateId: string): Promise<CreativeImagePromptTemplate | null> {
+    try {
+      return await this.templates.getById(orgId, templateId)
+    } catch {
+      return null
+    }
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   // 2. Preview template — main public entry point
   // ════════════════════════════════════════════════════════════════════════

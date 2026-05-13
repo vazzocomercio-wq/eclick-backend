@@ -471,26 +471,59 @@ export class CreativeImagePipelineService {
     let promptsMetadata: Record<string, unknown> = {}
     let promptsCostUsd = 0
 
-    const matched = await this.resolution.matchTemplateForProduct(job.organization_id, job.product_id)
-    if (matched && matched.template.positions.length > 0) {
+    // F6: briefing pode persistir template_id + selected_positions explicitamente.
+    // Prioridade:
+    //   1. briefing.template_id preenchido → usa esse template
+    //   2. senão, matchTemplateForProduct (auto-match por categoria)
+    // Quando selected_positions tem itens, filtra só esses slots; senão N primeiras.
+    let templateUsed: { id: string; name: string; match_reason: string; matched_category_ml_id?: string | null } | null = null
+    let templatePositions: number[] | null = null  // null = "N primeiras"
+
+    if (briefing.template_id) {
+      const explicit = await this.resolution.getTemplateById(job.organization_id, briefing.template_id)
+      if (explicit && explicit.positions.length > 0) {
+        templateUsed = {
+          id:           explicit.id,
+          name:         explicit.name,
+          match_reason: 'briefing_explicit',
+        }
+        if (briefing.selected_positions && briefing.selected_positions.length > 0) {
+          templatePositions = briefing.selected_positions
+        }
+        rowsToInsert = await this.buildPromptsFromTemplate(
+          explicit, product, briefing, job.requested_count, templatePositions,
+        )
+      }
+    }
+
+    if (!rowsToInsert) {
+      const matched = await this.resolution.matchTemplateForProduct(job.organization_id, job.product_id)
+      if (matched && matched.template.positions.length > 0) {
+        templateUsed = {
+          id:                     matched.template.id,
+          name:                   matched.template.name,
+          match_reason:           matched.match_reason,
+          matched_category_ml_id: matched.matched_category_ml_id ?? null,
+        }
+        rowsToInsert = await this.buildPromptsFromTemplate(
+          matched.template, product, briefing, job.requested_count, null,
+        )
+      }
+    }
+
+    if (rowsToInsert && templateUsed) {
       this.logger.log(
-        `[creative.image] job ${job.id} usando template "${matched.template.name}" ` +
-        `(reason=${matched.match_reason})`,
-      )
-      rowsToInsert = await this.buildPromptsFromTemplate(
-        matched.template,
-        product,
-        briefing,
-        job.requested_count,
+        `[creative.image] job ${job.id} usando template "${templateUsed.name}" ` +
+        `(reason=${templateUsed.match_reason}, positions=${templatePositions ? templatePositions.join(',') : 'first-N'})`,
       )
       promptsMetadata = {
         source: 'template',
         template: {
-          template_id:   matched.template.id,
-          template_name: matched.template.name,
-          match_reason:  matched.match_reason,
-          matched_category_ml_id: matched.matched_category_ml_id ?? null,
-          positions_in_template:  matched.template.positions.length,
+          template_id:            templateUsed.id,
+          template_name:          templateUsed.name,
+          match_reason:           templateUsed.match_reason,
+          matched_category_ml_id: templateUsed.matched_category_ml_id ?? null,
+          selected_positions:     templatePositions ?? null,
           positions_used:         rowsToInsert.length,
         },
         generated_at: new Date().toISOString(),
@@ -553,17 +586,33 @@ export class CreativeImagePipelineService {
     product: CreativeProduct,
     briefing: CreativeBriefing,
     count: number,
+    /** F6: lista explícita de positions a usar (filtra). NULL = "N primeiras" legado. */
+    selectedPositions: number[] | null,
   ): Promise<Array<{ prompt_text: string; generation_metadata: Record<string, unknown> }>> {
-    // Ordena por position asc, pega N primeiras
-    const positions: TemplatePositionDto[] = [...template.positions]
-      .sort((a, b) => a.position - b.position)
-      .slice(0, count)
+    let positions: TemplatePositionDto[]
 
-    if (positions.length < count) {
-      this.logger.warn(
-        `[creative.image] template "${template.name}" tem ${template.positions.length} positions; ` +
-        `pedido ${count}. Vai gerar apenas ${positions.length}.`,
-      )
+    if (selectedPositions && selectedPositions.length > 0) {
+      // F6 — modo seleção explícita: filtra só os slots escolhidos pelo briefing
+      const allByPos = new Map(template.positions.map(p => [p.position, p]))
+      positions = selectedPositions
+        .map(n => allByPos.get(n))
+        .filter((p): p is TemplatePositionDto => p !== undefined)
+        // Mantém ordem requerida pelo user (já vem ordenada do service)
+      if (positions.length === 0) {
+        this.logger.warn(
+          `[creative.image] template "${template.name}": nenhuma das positions [${selectedPositions.join(',')}] existe. Fallback pra N primeiras.`,
+        )
+        positions = [...template.positions].sort((a, b) => a.position - b.position).slice(0, count)
+      }
+    } else {
+      // Modo legado: ordena por position asc, pega N primeiras
+      positions = [...template.positions].sort((a, b) => a.position - b.position).slice(0, count)
+      if (positions.length < count) {
+        this.logger.warn(
+          `[creative.image] template "${template.name}" tem ${template.positions.length} positions; ` +
+          `pedido ${count}. Vai gerar apenas ${positions.length}.`,
+        )
+      }
     }
 
     // Adapta produto e briefing pros tipos do resolution (compatíveis por estrutura)
