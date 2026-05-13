@@ -9,6 +9,23 @@ import type { Marketplace } from './creative.marketplace-rules'
 import { extractLastFrame, concatVideos } from '../../common/ffmpeg'
 import { adaptImageForVideo, type TargetAspect } from './image-adapter'
 
+/**
+ * Negative prompt universal pra vídeos — anti-CGI-effects que viram
+ * propaganda enganosa em marketplace (Kling e Veo aceitam, Sora ignora).
+ *
+ * Foco: prevenir IA de inventar efeitos visuais que o produto real não
+ * produz (raios de arco-íris num abajur comum, faíscas mágicas, etc).
+ */
+const VIDEO_NEGATIVE_PROMPT = [
+  'prismatic refraction', 'rainbow scatter', 'rainbow light', 'rainbow beam',
+  'sparkles', 'magical glow', 'glowing halo', 'aura', 'light pulsing',
+  'color shifting light', 'floating bokeh', 'drifting particles unrelated to scene',
+  'magical mist', 'atmospheric haze added artificially', 'fake sparkle',
+  'unrealistic light beams', 'cgi effects', 'fantasy effects',
+  'changing product shape', 'changing product color', 'modified product',
+  'text overlay', 'watermark', 'logo overlay', 'caption',
+].join(', ')
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 export type VideoJobStatus =
@@ -342,7 +359,7 @@ export class CreativeVideoPipelineService {
   /** Prompt padrão por movimento de câmera (usado quando user não passa custom). */
   private defaultMotionPrompt(motion: string, product?: CreativeProduct): string {
     const subject = product ? this.describeTargetSubject(product) : 'the product'
-    const base = `The camera focus stays locked on ${subject} throughout the entire clip — never panning to, zooming into, or shifting focus onto any other furniture, fixtures, lamps, appliances, plants, or decor visible in the scene. ${subject.charAt(0).toUpperCase() + subject.slice(1)} remains perfectly still and identical to the source image — same shape, color, material, finish. Subtle parallax on background elements. Maintain photorealistic quality.`
+    const base = `The camera focus stays locked on ${subject} throughout the entire clip — never panning to, zooming into, or shifting focus onto any other furniture, fixtures, lamps, appliances, plants, or decor visible in the scene. ${subject.charAt(0).toUpperCase() + subject.slice(1)} remains perfectly still and identical to the source image — same shape, color, material, finish. The product behaves realistically as in real life — NO invented effects like prismatic refractions, rainbow scatter, sparkles, floating bokeh particles, light pulsing, glowing halos, color-shifting light, or magical atmospheric mist. Only natural specular highlights and shadows shifting from camera motion. Subtle parallax on background elements. Photorealistic, marketplace-accurate quality.`
     const motionMap: Record<string, string> = {
       'dolly-in':  `Smooth camera dolly forward toward ${subject}, gradual zoom-in revealing its detail. ` + base,
       'dolly-out': `Smooth camera dolly backward starting from ${subject}, gradually revealing the surrounding environment while keeping ${subject} centered. ` + base,
@@ -377,11 +394,7 @@ export class CreativeVideoPipelineService {
    */
   private wrapWithProductFocus(promptText: string, product: CreativeProduct): string {
     const subject = this.describeTargetSubject(product)
-    const prefix = `[CAMERA FOCUS LOCK] The target product is "${product.name}" — ${subject}, centered in the source frame. The camera must keep this exact item as the SOLE focal subject for the entire clip. Do not pan or focus on other items visible in the scene. `
-    // Se prompt já contém o nome do produto, evita duplicar com prefix gigante
-    if (promptText.toLowerCase().includes(product.name.toLowerCase().slice(0, 20))) {
-      return prefix + promptText
-    }
+    const prefix = `[CAMERA FOCUS LOCK] The target product is "${product.name}" — ${subject}, centered in the source frame. The camera must keep this exact item as the SOLE focal subject for the entire clip. Do not pan or focus on other items visible in the scene. [REALISM LOCK] Show the product behaving as it actually does in real life. NO invented effects: no prismatic refractions or rainbow scatter, no sparkles or magical bokeh particles, no light pulsing on its own, no glowing halos, no color-shifting light, no atmospheric mist not present in the source. Only realistic specular highlights and natural shadow shifts from the camera motion. Marketplace-accurate. `
     return prefix + promptText
   }
 
@@ -909,12 +922,13 @@ export class CreativeVideoPipelineService {
       // F6: dispatch via registry — escolhe Kling ou Flow baseado no model_name prefix.
       const provider = this.registry.resolve(video.model_name)
       const { taskId } = await provider.submit({
-        imageUrl:    adaptedSourceUrl,
-        prompt:      video.prompt_text,
-        duration:    Number(video.duration_seconds),
-        aspectRatio: video.aspect_ratio,
-        modelId:     video.model_name,
-        orgId:       video.organization_id, // Flow usa pra resolver per-org credentials
+        imageUrl:       adaptedSourceUrl,
+        prompt:         video.prompt_text,
+        negativePrompt: VIDEO_NEGATIVE_PROMPT, // anti-CGI-effects (Kling/Veo respeitam)
+        duration:       Number(video.duration_seconds),
+        aspectRatio:    video.aspect_ratio,
+        modelId:         video.model_name,
+        orgId:           video.organization_id, // Flow usa pra resolver per-org credentials
       })
 
       await supabaseAdmin

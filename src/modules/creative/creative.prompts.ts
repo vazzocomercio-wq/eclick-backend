@@ -323,6 +323,33 @@ ${b.custom_prompt ? `\n## ADDITIONAL USER INSTRUCTION\n${b.custom_prompt.slice(0
 - DO NOT change product shape, color, or appearance
 - DO NOT pan to / zoom to / focus on any OTHER products or scene elements (other lamps,
   furniture, appliances, plants, fixtures). Even if visually appealing, they are background.
+
+## FUNCTIONAL REALISM (mandatory — marketplace truth-in-advertising)
+The video shows the product behaving as it ACTUALLY behaves in real life. Customers will
+see this video and expect the real product to behave the same way. Anything you describe
+that doesn't match physical reality becomes false advertising.
+
+❌ NEVER describe these unless the product's CORE function explicitly produces them:
+   - Prismatic refractions / rainbow light scatter (only for actual prisms or crystal balls used as prisms)
+   - Sparkles, light pinpoints, glowing facets in unrealistic colors
+   - Floating particles / bokeh drifting upward (only if physically justified — steam from cooking,
+     smoke from incense, dust in a sunbeam shaft, etc.)
+   - Light pulsing on its own / lamps brightening and dimming hypnotically (real lamps stay constant)
+   - Anything magical, glowing auras, halos, light beams shooting outward
+   - Color-shifting light when the product has a fixed temperature (3000K stays 3000K)
+   - Mist, fog, atmospheric haze that wasn't part of the source image
+
+✅ ALLOWED motion / effects:
+   - Slow camera move (dolly, pan, tilt, orbit, push-in/out)
+   - Natural lighting (golden hour shift, soft cloud passing, candle flicker if appropriate)
+   - Subtle specular highlights that already exist sliding across surfaces from camera motion
+   - Realistic micro-actions: hand entering frame, food steaming, fabric draping, drink pouring
+   - Reflections / shadows shifting as the camera moves (geometry, not magic)
+   - Dust motes in a sunbeam (only if scene has visible sunbeam)
+
+Translation: pretend you're shooting B-roll with a real camera and a real product.
+If a sober cinematographer wouldn't film it that way, don't write it.
+
 - Avoid generic adjectives — use concrete cinematographic terms
 
 Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comments:
