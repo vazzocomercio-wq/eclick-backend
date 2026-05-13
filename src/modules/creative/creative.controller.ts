@@ -20,6 +20,7 @@ import {
 import { CreativeReferencesService } from './creative-references.service'
 import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
 import { CreativeTaxonomyService } from './creative-taxonomy.service'
+import { VideoProviderRegistry } from './providers/video-provider.registry'
 import type { CreatePromptTemplateDto } from './dto/create-prompt-template.dto'
 import type { UpdatePromptTemplateDto } from './dto/update-prompt-template.dto'
 import type { PreviewTemplateDto } from './dto/preview-template.dto'
@@ -38,14 +39,15 @@ export class CreativeController {
   private readonly logger = new Logger(CreativeController.name)
 
   constructor(
-    private readonly svc:        CreativeService,
-    private readonly images:     CreativeImagePipelineService,
-    private readonly videos:     CreativeVideoPipelineService,
-    private readonly mlPub:      CreativeMlPublisherService,
-    private readonly templates:  CreativePromptTemplatesService,
-    private readonly references: CreativeReferencesService,
-    private readonly resolution: CreativeTemplateResolutionService,
-    private readonly taxonomy:   CreativeTaxonomyService,
+    private readonly svc:           CreativeService,
+    private readonly images:        CreativeImagePipelineService,
+    private readonly videos:        CreativeVideoPipelineService,
+    private readonly mlPub:         CreativeMlPublisherService,
+    private readonly templates:     CreativePromptTemplatesService,
+    private readonly references:    CreativeReferencesService,
+    private readonly resolution:    CreativeTemplateResolutionService,
+    private readonly taxonomy:      CreativeTaxonomyService,
+    private readonly videoRegistry: VideoProviderRegistry,
   ) {}
 
   private orgOrThrow(u: ReqUserPayload): string {
@@ -361,6 +363,36 @@ export class CreativeController {
     },
   ) {
     return this.videos.createJob(this.orgOrThrow(u), u.id, body)
+  }
+
+  /**
+   * F6: gera UM vídeo longo (15-30s) a partir de uma imagem aprovada.
+   * Pipeline encadeia 2-3 parts Kling automaticamente.
+   */
+  @Post('video-jobs/from-image')
+  @HttpCode(HttpStatus.OK)
+  createChainedVideoFromImage(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      product_id:              string
+      briefing_id:             string
+      listing_id?:             string
+      source_image_id:         string
+      target_duration_seconds: number
+      aspect_ratio?:           '1:1' | '16:9' | '9:16'
+      model_name?:             'kling-v2-1' | 'kling-v2-1-master' | 'kling-v2-5' | 'kling-v2-6' | 'kling-v1-6'
+      camera_motion?:          'dolly-in' | 'dolly-out' | 'pan-left' | 'pan-right' | 'tilt-up' | 'tilt-down' | 'orbit' | 'static'
+      max_cost_usd?:           number
+      prompt?:                 string
+    },
+  ) {
+    return this.videos.createChainedJobFromImage(this.orgOrThrow(u), u.id, body)
+  }
+
+  /** F6: lista de modelos de vídeo disponíveis (Kling + Flow se configurado). */
+  @Get('video-jobs/models')
+  listVideoModels() {
+    return this.videoRegistry.listAllModels()
   }
 
   @Get('video-jobs/:id')

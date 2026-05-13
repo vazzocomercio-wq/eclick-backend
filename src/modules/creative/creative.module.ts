@@ -13,6 +13,9 @@ import { CreativeReferencesService } from './creative-references.service'
 import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
 import { CreativeTaxonomyService } from './creative-taxonomy.service'
 import { KlingClient } from './kling.client'
+import { KlingProvider } from './providers/kling.provider'
+import { FlowProvider } from './providers/flow.provider'
+import { VideoProviderRegistry } from './providers/video-provider.registry'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 
@@ -34,6 +37,10 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     CreativeTemplateResolutionService,
     CreativeTaxonomyService,
     KlingClient,
+    // F6 Sprint B/C — abstração multi-provider de vídeo (Kling + Flow stub)
+    KlingProvider,
+    FlowProvider,
+    VideoProviderRegistry,
   ],
   exports: [
     CreativeService,

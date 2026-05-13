@@ -5,6 +5,7 @@ import { CreativeService, type CreativeProduct } from './creative.service'
 import { buildVideoPromptsRequest } from './creative.prompts'
 import { KlingClient, type KlingModel, type KlingDuration, type KlingAspectRatio } from './kling.client'
 import type { Marketplace } from './creative.marketplace-rules'
+import { extractLastFrame, concatVideos } from '../../common/ffmpeg'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,10 @@ export interface CreativeVideoJob {
   completed_at:        string | null
   created_at:          string
   updated_at:          string
+  // F6: chain (vídeos longos 15s+)
+  target_duration_seconds: number | null
+  source_provider:        'kling' | 'flow' | null
+  camera_motion:          string | null
 }
 
 export interface CreativeVideo {
@@ -77,6 +82,15 @@ export interface CreativeVideo {
   created_at:           string
   updated_at:           string
   signed_video_url?:    string | null
+  // F6: chain fields
+  parent_video_id:      string | null
+  chain_position:       number | null
+  chain_total:          number | null
+  is_chain_master:      boolean
+  chain_master_id:      string | null
+  provider:             'kling' | 'flow'
+  quality:              string | null
+  source_frame_path:    string | null
 }
 
 interface CreateVideoJobDto {
@@ -89,6 +103,26 @@ interface CreateVideoJobDto {
   aspect_ratio?:     '1:1' | '16:9' | '9:16'
   model_name?:       KlingModel
   max_cost_usd?:     number
+}
+
+/** F6: input pra gerar UM vídeo longo (15s+) a partir de uma imagem aprovada.
+ *  Pipeline encadeia 2-3 partes Kling (5 ou 10s cada) e concatena no final. */
+export interface CreateChainedVideoFromImageDto {
+  product_id:        string
+  briefing_id:       string
+  listing_id?:       string
+  /** Obrigatório — imagem aprovada que vira first_frame do 1º part da chain. */
+  source_image_id:   string
+  /** Duração total alvo em segundos (15, 20, 25, 30). Pipeline calcula parts. */
+  target_duration_seconds: number
+  aspect_ratio?:     '1:1' | '16:9' | '9:16'
+  model_name?:       KlingModel
+  /** Movimento de câmera padrão pra todos os parts. Default: dolly-in (zoom em direção ao produto). */
+  camera_motion?:    'dolly-in' | 'dolly-out' | 'pan-left' | 'pan-right' | 'tilt-up' | 'tilt-down' | 'orbit' | 'static'
+  /** Cap de custo. Default $5. */
+  max_cost_usd?:     number
+  /** Prompt customizado opcional pra todos os parts. */
+  prompt?:           string
 }
 
 @Injectable()
@@ -155,6 +189,145 @@ export class CreativeVideoPipelineService {
     if (error) throw new BadRequestException(`createVideoJob: ${error.message}`)
     this.logger.log(`[creative.video] job ${data.id} criado — count=${count} ${duration}s ${aspect} ${model} maxCost=$${maxCost}`)
     return data as CreativeVideoJob
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // F6: CHAINED VIDEO (15s+) — gera UM vídeo longo a partir de imagem aprovada
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Cria um job que vai gerar UM vídeo longo (15-30s) encadeando parts Kling.
+   *
+   * Fluxo do pipeline:
+   *   1. Este método cria o job + a 1ª part (chain_position=1) com source_image_id
+   *   2. Worker submete part 1 → quando ready, baixa MP4 do Storage
+   *   3. ffmpeg extrai last frame → upload PNG pro Storage
+   *   4. Cria part 2 (chain_position=2) com source_frame_path apontando pro PNG
+   *   5. Repete até completar target_duration
+   *   6. Quando última part ready: ffmpeg concatena todos parts em 1 MP4 → cria master
+   */
+  async createChainedJobFromImage(
+    orgId: string, userId: string, dto: CreateChainedVideoFromImageDto,
+  ): Promise<CreativeVideoJob> {
+    const product  = await this.creative.getProduct(orgId, dto.product_id)
+    const briefing = await this.creative.getBriefing(orgId, dto.briefing_id)
+    if (briefing.product_id !== product.id) {
+      throw new BadRequestException('briefing não pertence a esse produto')
+    }
+    if (!dto.source_image_id) {
+      throw new BadRequestException('source_image_id obrigatório pra vídeo encadeado')
+    }
+
+    // Valida source image
+    const { data: srcImg } = await supabaseAdmin
+      .from('creative_images')
+      .select('id, product_id, organization_id, status, storage_path')
+      .eq('id', dto.source_image_id)
+      .maybeSingle()
+    if (!srcImg || (srcImg as { organization_id: string }).organization_id !== orgId) {
+      throw new BadRequestException('source_image_id não encontrado')
+    }
+    if ((srcImg as { product_id: string }).product_id !== product.id) {
+      throw new BadRequestException('source_image pertence a outro produto')
+    }
+    const srcStatus = (srcImg as { status: string }).status
+    if (srcStatus !== 'ready' && srcStatus !== 'approved') {
+      throw new BadRequestException(`source_image precisa estar ready ou approved, atual: ${srcStatus}`)
+    }
+
+    const targetDuration = clamp(dto.target_duration_seconds, 5, 60)
+    const aspect       = dto.aspect_ratio ?? mapAspectFromBriefing(briefing.image_format)
+    const model: KlingModel = dto.model_name ?? 'kling-v2-6'
+    const cameraMotion = dto.camera_motion ?? 'dolly-in'
+    const maxCost = Math.max(0.5, Math.min(20, dto.max_cost_usd ?? 5.0))
+
+    // Calcula partes — Kling só faz 5 ou 10s. Algoritmo guloso: mete o máximo
+    // de 10s seguido de 5s se sobrar. Ex: 15 → [10, 5]; 20 → [10, 10]; 25 → [10, 10, 5]; 30 → [10, 10, 10]
+    const parts: number[] = []
+    let remaining = targetDuration
+    while (remaining > 0) {
+      const slice = remaining >= 10 ? 10 : 5
+      parts.push(slice)
+      remaining -= slice
+    }
+    const chainTotal = parts.length
+
+    if (chainTotal > 5) {
+      throw new BadRequestException(`target_duration_seconds ${targetDuration} resulta em ${chainTotal} parts (max 5). Use até 30s.`)
+    }
+
+    // 1. Cria job
+    const { data: jobData, error: jobErr } = await supabaseAdmin
+      .from('creative_video_jobs')
+      .insert({
+        organization_id:         orgId,
+        product_id:              product.id,
+        briefing_id:             briefing.id,
+        listing_id:              dto.listing_id ?? null,
+        source_image_id:         dto.source_image_id,
+        user_id:                 userId,
+        status:                  'generating_videos',  // pula generating_prompts, já temos prompt
+        requested_count:         chainTotal,
+        duration_seconds:        parts[0],             // duration da 1ª part (refs antigos)
+        aspect_ratio:            aspect,
+        model_name:              model,
+        max_cost_usd:            maxCost,
+        target_duration_seconds: targetDuration,
+        source_provider:         'kling',
+        camera_motion:           cameraMotion,
+        prompts_generated:       [],
+        prompts_metadata:        { source: 'chain_from_image', chain_total: chainTotal, parts },
+      })
+      .select('*')
+      .single()
+    if (jobErr) throw new BadRequestException(`createChainedJob: ${jobErr.message}`)
+    const job = jobData as CreativeVideoJob
+
+    // 2. Resolve prompt (custom > video_prompts[0] > template padrão)
+    const baseVideoPrompts = briefing.video_prompts ?? []
+    const promptText = (dto.prompt?.trim() || baseVideoPrompts[0] || this.defaultMotionPrompt(cameraMotion))
+
+    // 3. Cria SÓ a 1ª part (próximas viram criadas conforme advance)
+    const { error: vidErr } = await supabaseAdmin
+      .from('creative_videos')
+      .insert({
+        job_id:           job.id,
+        product_id:       product.id,
+        organization_id:  orgId,
+        position:         1,
+        prompt_text:      promptText,
+        status:           'pending',
+        duration_seconds: parts[0],
+        aspect_ratio:     aspect,
+        model_name:       model,
+        source_image_id:  dto.source_image_id,
+        chain_position:   1,
+        chain_total:      chainTotal,
+        is_chain_master:  false,
+        provider:         'kling',
+      })
+    if (vidErr) throw new BadRequestException(`createChainedJob.videoInsert: ${vidErr.message}`)
+
+    this.logger.log(
+      `[creative.video.chain] job ${job.id} criado — target=${targetDuration}s parts=[${parts.join(',')}] motion=${cameraMotion} model=${model}`,
+    )
+    return job
+  }
+
+  /** Prompt padrão por movimento de câmera (usado quando user não passa custom). */
+  private defaultMotionPrompt(motion: string): string {
+    const base = 'Cinematic camera movement, smooth and subtle. The product remains perfectly still and identical to the source image — same shape, color, material, finish. Subtle parallax on background elements. Maintain photorealistic quality.'
+    const motionMap: Record<string, string> = {
+      'dolly-in':  'Smooth camera dolly forward toward the product, gradual zoom-in revealing detail. ' + base,
+      'dolly-out': 'Smooth camera dolly backward, gradually revealing the surrounding environment. ' + base,
+      'pan-left':  'Smooth camera pan to the left, gentle parallax. ' + base,
+      'pan-right': 'Smooth camera pan to the right, gentle parallax. ' + base,
+      'tilt-up':   'Smooth camera tilt upward. ' + base,
+      'tilt-down': 'Smooth camera tilt downward. ' + base,
+      'orbit':     'Smooth orbital camera movement around the product. ' + base,
+      'static':    'Subtle ambient motion, camera holds steady. ' + base,
+    }
+    return motionMap[motion] ?? motionMap['dolly-in']
   }
 
   async getJob(orgId: string, jobId: string): Promise<CreativeVideoJob> {
@@ -381,8 +554,11 @@ export class CreativeVideoPipelineService {
       if (!job) return
       if (job.status === 'completed' || job.status === 'cancelled' || job.status === 'failed') return
 
-      // Etapa 1: prompts
-      if (!job.prompts_generated || job.prompts_generated.length === 0) {
+      // F6: chain mode bypassa generatePrompts (já temos prompt da chain)
+      const isChainJob = (job.target_duration_seconds ?? 0) > 0
+
+      // Etapa 1: prompts (só pro modo legado)
+      if (!isChainJob && (!job.prompts_generated || job.prompts_generated.length === 0)) {
         await this.generatePrompts(job)
         return // próximo tick faz o submit
       }
@@ -401,6 +577,16 @@ export class CreativeVideoPipelineService {
 
       // Etapa 4: pollear gerando
       await this.pollGeneratingVideos(jobId)
+
+      // F6: chain — avança próxima part se a anterior ficou ready
+      if (isChainJob) {
+        await this.advanceChain(jobId)
+      }
+
+      // F6: chain — concatena MP4s e cria master quando todas parts ready
+      if (isChainJob) {
+        await this.tryFinalizeChain(jobId)
+      }
 
       // Etapa 5: finalize se aplicável
       await this.finalizeJob(jobId)
@@ -576,7 +762,11 @@ export class CreativeVideoPipelineService {
   }
 
   private async resolveSourceUrl(video: CreativeVideo): Promise<string> {
-    // Se source_image_id, usa a imagem aprovada; senão main_image_storage_path
+    // F6: prioridade pra source_frame_path (last frame extraído de part anterior na chain)
+    if (video.source_frame_path) {
+      return this.creative.signImage(video.source_frame_path, 600)
+    }
+    // Senão source_image_id (imagem aprovada de marketing)
     if (video.source_image_id) {
       const { data } = await supabaseAdmin
         .from('creative_images')
@@ -586,6 +776,7 @@ export class CreativeVideoPipelineService {
       const path = (data as { storage_path: string | null } | null)?.storage_path
       if (path) return this.creative.signImage(path, 600)
     }
+    // Fallback: main_image do produto
     const product = await this.creative.getProduct(video.organization_id, video.product_id)
     return this.creative.signImage(product.main_image_storage_path, 600)
   }
@@ -708,6 +899,198 @@ export class CreativeVideoPipelineService {
         updated_at:      new Date().toISOString(),
       })
       .eq('id', jobId)
+  }
+
+  /**
+   * F6 chain: avança a próxima part da cadeia quando a anterior ficou ready.
+   * - Detecta última part ready com chain_position < chain_total
+   * - Extrai último frame do MP4 via ffmpeg
+   * - Upload PNG pro Storage
+   * - Cria próxima part pending com source_frame_path apontando pro PNG
+   */
+  private async advanceChain(jobId: string): Promise<void> {
+    // Pega última part ready dessa chain
+    const { data: parts } = await supabaseAdmin
+      .from('creative_videos')
+      .select('*')
+      .eq('job_id', jobId)
+      .eq('is_chain_master', false)
+      .order('chain_position', { ascending: false })
+      .limit(1)
+    const last = (parts as CreativeVideo[] | null)?.[0]
+    if (!last) return
+    if (last.status !== 'ready') return
+    if (!last.chain_position || !last.chain_total) return
+    if (last.chain_position >= last.chain_total) return  // chain completa
+    if (!last.storage_path) return
+
+    const nextPosition = last.chain_position + 1
+    const job = await this.getJobById(jobId)
+    if (!job) return
+
+    // Checa se a próxima part já foi criada (race condition guard)
+    const { count: existing } = await supabaseAdmin
+      .from('creative_videos')
+      .select('id', { count: 'exact', head: true })
+      .eq('job_id', jobId)
+      .eq('chain_position', nextPosition)
+    if ((existing ?? 0) > 0) return
+
+    // Calcula duração da próxima part — algoritmo guloso igual createChain
+    const parts_meta = (job.prompts_metadata?.parts ?? []) as number[]
+    const nextDuration = parts_meta[nextPosition - 1] ?? 5
+
+    this.logger.log(`[chain ${jobId}] avançando ${last.chain_position}→${nextPosition} (${nextDuration}s) — extraindo last frame`)
+
+    try {
+      // Baixa MP4 da part anterior
+      const { data: mp4Blob, error: dlErr } = await supabaseAdmin.storage
+        .from('creative')
+        .download(last.storage_path)
+      if (dlErr || !mp4Blob) throw new Error(`download ${last.storage_path}: ${dlErr?.message ?? 'sem dados'}`)
+      const mp4Buffer = Buffer.from(await mp4Blob.arrayBuffer())
+
+      // Extrai último frame
+      const framePngBuffer = await extractLastFrame(mp4Buffer)
+      const framePath = `${last.organization_id}/${last.product_id}/videos/chain-frames/${last.id}-last.png`
+      const { error: upErr } = await supabaseAdmin.storage
+        .from('creative')
+        .upload(framePath, framePngBuffer, { contentType: 'image/png', upsert: true, cacheControl: '3600' })
+      if (upErr) throw new Error(`upload last frame: ${upErr.message}`)
+
+      // Cria próxima part
+      const { error: insertErr } = await supabaseAdmin
+        .from('creative_videos')
+        .insert({
+          job_id:             jobId,
+          product_id:         last.product_id,
+          organization_id:    last.organization_id,
+          position:           nextPosition,
+          prompt_text:        last.prompt_text,  // reusa o prompt da chain
+          status:             'pending',
+          duration_seconds:   nextDuration,
+          aspect_ratio:       last.aspect_ratio,
+          model_name:         last.model_name,
+          source_frame_path:  framePath,
+          parent_video_id:    last.id,
+          chain_position:     nextPosition,
+          chain_total:        last.chain_total,
+          is_chain_master:    false,
+          provider:           last.provider,
+        })
+      if (insertErr) throw new Error(`insert next part: ${insertErr.message}`)
+
+      this.logger.log(`[chain ${jobId}] part ${nextPosition}/${last.chain_total} criada — pending`)
+    } catch (e: unknown) {
+      const msg = (e as Error).message
+      this.logger.error(`[chain ${jobId}] advance falhou: ${msg}`)
+      // Marca o job como falho — sem next part, não tem como continuar
+      await this.markJobFailed(jobId, `Chain advance: ${msg}`)
+    }
+  }
+
+  /**
+   * F6 chain: quando TODAS parts ready, concatena os MP4s em 1 master via ffmpeg.
+   * Cria row creative_videos is_chain_master=true com storage_path do MP4 final.
+   * Atualiza cada part com chain_master_id apontando pro master.
+   */
+  private async tryFinalizeChain(jobId: string): Promise<void> {
+    // Já tem master? skip
+    const { count: hasMaster } = await supabaseAdmin
+      .from('creative_videos')
+      .select('id', { count: 'exact', head: true })
+      .eq('job_id', jobId)
+      .eq('is_chain_master', true)
+    if ((hasMaster ?? 0) > 0) return
+
+    // Carrega todas parts (não-master) ordenadas por chain_position
+    const { data: parts } = await supabaseAdmin
+      .from('creative_videos')
+      .select('*')
+      .eq('job_id', jobId)
+      .eq('is_chain_master', false)
+      .order('chain_position', { ascending: true })
+    const list = (parts ?? []) as CreativeVideo[]
+    if (list.length === 0) return
+
+    const total = list[0].chain_total
+    if (!total || list.length < total) return  // chain incompleta
+    if (list.some(p => p.status !== 'ready')) return  // alguma part ainda não terminou
+    if (list.some(p => !p.storage_path)) return
+
+    this.logger.log(`[chain ${jobId}] todas ${total} parts ready — concatenando MP4s`)
+
+    try {
+      // Baixa todos MP4s em ordem
+      const buffers: Buffer[] = []
+      for (const p of list) {
+        const { data: blob, error } = await supabaseAdmin.storage
+          .from('creative')
+          .download(p.storage_path!)
+        if (error || !blob) throw new Error(`download part ${p.chain_position}: ${error?.message}`)
+        buffers.push(Buffer.from(await blob.arrayBuffer()))
+      }
+
+      // Concatena via ffmpeg
+      const masterBuffer = await concatVideos(buffers)
+
+      // Upload master
+      const job = await this.getJobById(jobId)
+      if (!job) throw new Error('job desapareceu durante concat')
+
+      // Cria row master ANTES do upload pra ter ID pra usar no path
+      const { data: masterRow, error: mErr } = await supabaseAdmin
+        .from('creative_videos')
+        .insert({
+          job_id:             jobId,
+          product_id:         job.product_id,
+          organization_id:    job.organization_id,
+          position:           total + 1,        // depois das parts no order by
+          prompt_text:        list[0].prompt_text,
+          status:             'ready',
+          duration_seconds:   job.target_duration_seconds ?? list.reduce((s, p) => s + p.duration_seconds, 0),
+          aspect_ratio:       list[0].aspect_ratio,
+          model_name:         list[0].model_name,
+          source_image_id:    job.source_image_id,
+          is_chain_master:    true,
+          chain_total:        total,
+          provider:           list[0].provider,
+          generation_metadata: {
+            type:           'chain_master',
+            parts_ids:      list.map(p => p.id),
+            parts_durations: list.map(p => p.duration_seconds),
+            total_duration_sec: job.target_duration_seconds ?? list.reduce((s, p) => s + p.duration_seconds, 0),
+          },
+        })
+        .select('*')
+        .single()
+      if (mErr) throw new Error(`insert master: ${mErr.message}`)
+      const master = masterRow as CreativeVideo
+
+      const masterPath = `${job.organization_id}/${job.product_id}/videos/${master.id}.mp4`
+      const { error: upErr } = await supabaseAdmin.storage
+        .from('creative')
+        .upload(masterPath, masterBuffer, { contentType: 'video/mp4', upsert: true, cacheControl: '3600' })
+      if (upErr) throw new Error(`upload master: ${upErr.message}`)
+
+      // Atualiza master com path + aponta parts pra ele
+      await supabaseAdmin
+        .from('creative_videos')
+        .update({ storage_path: masterPath, updated_at: new Date().toISOString() })
+        .eq('id', master.id)
+
+      await supabaseAdmin
+        .from('creative_videos')
+        .update({ chain_master_id: master.id, updated_at: new Date().toISOString() })
+        .in('id', list.map(p => p.id))
+
+      this.logger.log(`[chain ${jobId}] master ${master.id} criado — ${masterBuffer.length} bytes, ${master.duration_seconds}s`)
+    } catch (e: unknown) {
+      const msg = (e as Error).message
+      this.logger.error(`[chain ${jobId}] finalize falhou: ${msg}`)
+      // Não marca job como failed — parts individuais funcionam, user pode aprovar elas
+      // separadamente. Master pode ser retentado em próximo tick.
+    }
   }
 
   private async finalizeJob(jobId: string): Promise<void> {
