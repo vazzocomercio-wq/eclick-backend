@@ -16,12 +16,15 @@ import { retryWithBackoff } from '../../common/retry'
  *
  * Endpoint regional: api-singapore.klingai.com (default global).
  *
- * Models válidos (maio/2026):
- *   kling-v2-1         5s  → $0.21    10s  → $0.42   (std default)
- *   kling-v2-1-master  5s  → $0.42    10s  → $0.84   (premium)
- *   kling-v2-5         5s  → $0.30    10s  → $0.60   (std mais recente)
- *   kling-v2-6         5s  → $0.40    10s  → $0.80   (NOVO 2026 — áudio nativo, default)
- *   kling-v1-6         5s  → $0.18    10s  → $0.36   (legacy, mais barato)
+ * Models válidos + pricing API real (fonte: console.kling.com — confirmado 2026-05-13):
+ *   kling-v2-1         5s  → $0.49    10s  → $0.98   (Pro)
+ *   kling-v2-1-master  5s  → $1.40    10s  → $2.80   (Mestre — premium caro!)
+ *   kling-v2-5         5s  → $0.35    10s  → $0.70   (Pro Turbo)
+ *   kling-v2-6         5s  → $0.70    10s  → $1.40   (Pro c/áudio nativo — default)
+ *   kling-v1-6         5s  → $0.49    10s  → $0.98   (Pro c/camera_control included)
+ *
+ * Pricing antigo (subestimado) usava preços do site web/subscription —
+ * a carteira da API é separada e cobra valores acima.
  *
  * Models antigos kling-v1-6-std / kling-v1-6-pro / kling-v2-master foram
  * descontinuados pela Kling em 2026 e retornam erro "model_name is invalid".
@@ -45,11 +48,11 @@ export const KLING_DEFAULT_MODEL: KlingModel = 'kling-v2-6'
 export const KLING_DEFAULT_DURATION: KlingDuration = '10'
 
 const PRICING: Record<KlingModel, Record<KlingDuration, number>> = {
-  'kling-v2-1':        { '5': 0.21, '10': 0.42 },
-  'kling-v2-1-master': { '5': 0.42, '10': 0.84 },
-  'kling-v2-5':        { '5': 0.30, '10': 0.60 },
-  'kling-v2-6':        { '5': 0.40, '10': 0.80 },
-  'kling-v1-6':        { '5': 0.18, '10': 0.36 },
+  'kling-v2-1':        { '5': 0.49, '10': 0.98 },
+  'kling-v2-1-master': { '5': 1.40, '10': 2.80 },
+  'kling-v2-5':        { '5': 0.35, '10': 0.70 },
+  'kling-v2-6':        { '5': 0.70, '10': 1.40 },
+  'kling-v1-6':        { '5': 0.49, '10': 0.98 },
 }
 
 /**
