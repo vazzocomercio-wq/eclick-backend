@@ -21,7 +21,7 @@ export interface VideoModelOption {
   /** Badge curta (ex: "Novo · com áudio") */
   badge?:       string
   /** Provider que oferece esse modelo */
-  provider:     'kling' | 'flow'
+  provider:     'kling' | 'flow' | 'sora'
   /** Categoria pra UI agrupar */
   quality:      VideoQuality
   /** Suporta áudio nativo? */
@@ -81,7 +81,7 @@ export interface VideoTaskStatus {
 
 export interface VideoProvider {
   /** Nome canônico do provider — usado em DB pra rastrear qual gerou. */
-  readonly key: 'kling' | 'flow'
+  readonly key: 'kling' | 'flow' | 'sora'
 
   /** Lista de modelos disponíveis (UI usa pra dropdown). */
   listModels(): VideoModelOption[]
