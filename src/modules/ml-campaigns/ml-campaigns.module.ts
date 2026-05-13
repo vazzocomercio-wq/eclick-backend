@@ -12,6 +12,7 @@ import { MlCampaignsValidatorService } from './ml-campaigns-validator.service'
 import { MlCampaignsApplyService } from './ml-campaigns-apply.service'
 import { MlCampaignsPostAnalysisService } from './ml-campaigns-post-analysis.service'
 import { MlCampaignsAlertsService } from './ml-campaigns-alerts.service'
+import { MlCampaignsSyncCron } from './ml-campaigns-sync.cron'
 import { MlCampaignsController } from './ml-campaigns.controller'
 
 @Module({
@@ -27,6 +28,7 @@ import { MlCampaignsController } from './ml-campaigns.controller'
     MlCampaignsApplyService,
     MlCampaignsPostAnalysisService,
     MlCampaignsAlertsService,
+    MlCampaignsSyncCron,
   ],
   controllers: [MlCampaignsController],
   exports:     [MlCampaignsService, MlCampaignsSyncService, MlCampaignsDecisionService, MlCampaignsApplyService, MlCampaignsPostAnalysisService, MlCampaignsAlertsService],
