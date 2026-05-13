@@ -433,12 +433,21 @@ export class CreativeVideoPipelineService {
       .order('position', { ascending: true })
     if (error) throw new BadRequestException(`listVideosByJob: ${error.message}`)
     const videos = (data ?? []) as CreativeVideo[]
-    return Promise.all(videos.map(async v => ({
+    return Promise.all(videos.map(v => this.withSignedUrl(v)))
+  }
+
+  /**
+   * Anexa `signed_video_url` ao vídeo (TTL 1h). Usado em todos os endpoints
+   * que retornam um CreativeVideo pro frontend — sem isso, ações como
+   * approve/reject perdem a URL e o card visualiza preto.
+   */
+  private async withSignedUrl(v: CreativeVideo): Promise<CreativeVideo> {
+    return {
       ...v,
       signed_video_url: v.storage_path
         ? await this.creative.signImage(v.storage_path, 3600).catch(() => null)
         : null,
-    })))
+    }
   }
 
   async cancelJob(orgId: string, jobId: string): Promise<CreativeVideoJob> {
@@ -579,7 +588,7 @@ export class CreativeVideoPipelineService {
 
   async approveVideo(orgId: string, videoId: string, userId: string): Promise<CreativeVideo> {
     const v = await this.getVideo(orgId, videoId)
-    if (v.status === 'approved') return v
+    if (v.status === 'approved') return this.withSignedUrl(v)
     if (v.status !== 'ready' && v.status !== 'rejected') {
       throw new BadRequestException(`não pode aprovar vídeo com status='${v.status}'`)
     }
@@ -593,12 +602,12 @@ export class CreativeVideoPipelineService {
       .select('*').single()
     if (error) throw new BadRequestException(`approveVideo: ${error.message}`)
     await this.recountJob(v.job_id)
-    return data as CreativeVideo
+    return this.withSignedUrl(data as CreativeVideo)
   }
 
   async rejectVideo(orgId: string, videoId: string, userId: string): Promise<CreativeVideo> {
     const v = await this.getVideo(orgId, videoId)
-    if (v.status === 'rejected') return v
+    if (v.status === 'rejected') return this.withSignedUrl(v)
     const { data, error } = await supabaseAdmin
       .from('creative_videos')
       .update({
@@ -609,7 +618,7 @@ export class CreativeVideoPipelineService {
       .select('*').single()
     if (error) throw new BadRequestException(`rejectVideo: ${error.message}`)
     await this.recountJob(v.job_id)
-    return data as CreativeVideo
+    return this.withSignedUrl(data as CreativeVideo)
   }
 
   /** Bulk regenerate: cria 1 novo vídeo `pending` por vídeo rejeitado do job. */
@@ -688,7 +697,7 @@ export class CreativeVideoPipelineService {
       .eq('id', original.job_id)
       .in('status', ['completed', 'generating_videos', 'failed'])
 
-    return data as CreativeVideo
+    return this.withSignedUrl(data as CreativeVideo)
   }
 
   // ════════════════════════════════════════════════════════════════════════
