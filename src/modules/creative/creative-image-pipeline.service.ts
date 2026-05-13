@@ -542,6 +542,21 @@ export class CreativeImagePipelineService {
       throw new Error('Nenhum prompt válido (template sem positions + LLM falhou)')
     }
 
+    // Defesa contra duplicação: se já existem rows pra esse job (retry do worker,
+    // race condition, generatePrompts chamado 2x), aborta sem inserir de novo.
+    // Sem esse guard, podem aparecer rows fantasmas (position 11 num job de
+    // requested_count=10) que travam o finalizeJob.
+    const { count: existing } = await supabaseAdmin
+      .from('creative_images')
+      .select('id', { count: 'exact', head: true })
+      .eq('job_id', job.id)
+    if ((existing ?? 0) > 0) {
+      this.logger.warn(
+        `[creative.image] job ${job.id} já tem ${existing} creative_images — pulando insert pra evitar duplicação`,
+      )
+      return
+    }
+
     // Insere creative_images por prompt
     const rows = rowsToInsert.map((d, i) => ({
       job_id:              job.id,
@@ -918,16 +933,77 @@ export class CreativeImagePipelineService {
       .eq('id', jobId)
   }
 
+  /**
+   * Janela em minutos pra considerar uma imagem em `generating` como "ghost"
+   * (provavelmente abandonada — crash do worker, race condition, ou Gemini timeout
+   * que não foi capturado). Quando passa desse tempo, finalizeJob marca a row como
+   * failed automaticamente em vez de bloquear a fila esperando.
+   *
+   * 5min é seguro: geração normal de 1 imagem leva 15-40s. Acima de 5min é
+   * sempre patológico.
+   */
+  private readonly GHOST_GENERATING_THRESHOLD_MIN = 5
+
   private async finalizeJob(jobId: string): Promise<void> {
-    // Conta pending restantes (caso algo dê errado, fica em failed)
-    const { count: pendingCount } = await supabaseAdmin
+    // 1. Conta rows ativas (pending OU generating)
+    const { data: active } = await supabaseAdmin
       .from('creative_images')
-      .select('id', { count: 'exact', head: true })
+      .select('id, status, updated_at')
       .eq('job_id', jobId)
       .in('status', ['pending', 'generating'])
 
-    if ((pendingCount ?? 0) > 0) return // ainda tem trabalho
+    const rows = (active ?? []) as Array<{ id: string; status: string; updated_at: string }>
+    if (rows.length === 0) {
+      // Tudo terminou (ready/approved/rejected/failed) — fecha o job
+      return this.markJobCompleted(jobId)
+    }
 
+    // 2. Auto-recover ghost rows: marca como failed as `generating` há muito tempo
+    const ghostCutoff = Date.now() - this.GHOST_GENERATING_THRESHOLD_MIN * 60 * 1000
+    const ghosts = rows.filter(r =>
+      r.status === 'generating' && new Date(r.updated_at).getTime() < ghostCutoff,
+    )
+
+    if (ghosts.length > 0) {
+      this.logger.warn(
+        `[creative.image] job ${jobId}: ${ghosts.length} ghost rows (generating > ${this.GHOST_GENERATING_THRESHOLD_MIN}min) — marcando como failed pra destravar fila`,
+      )
+      await supabaseAdmin
+        .from('creative_images')
+        .update({
+          status:        'failed',
+          error_message: `Ghost row recovery — generating > ${this.GHOST_GENERATING_THRESHOLD_MIN}min sem update (provável worker crash ou timeout LLM não capturado)`,
+          updated_at:    new Date().toISOString(),
+        })
+        .in('id', ghosts.map(g => g.id))
+
+      // Bumpa failed_count do job
+      const { data: job } = await supabaseAdmin
+        .from('creative_image_jobs')
+        .select('failed_count')
+        .eq('id', jobId)
+        .maybeSingle()
+      if (job) {
+        await supabaseAdmin
+          .from('creative_image_jobs')
+          .update({
+            failed_count: (job as { failed_count: number }).failed_count + ghosts.length,
+            updated_at:   new Date().toISOString(),
+          })
+          .eq('id', jobId)
+      }
+
+      // Re-conta: só sobrou trabalho de verdade?
+      const stillActive = rows.length - ghosts.length
+      if (stillActive === 0) return this.markJobCompleted(jobId)
+    }
+
+    // 3. Se sobrou pending/generating recente → ainda tem trabalho legítimo
+    return
+  }
+
+  /** Encerra o job como `completed` (idempotente; respeita cancelled/failed). */
+  private async markJobCompleted(jobId: string): Promise<void> {
     await supabaseAdmin
       .from('creative_image_jobs')
       .update({
@@ -954,10 +1030,14 @@ export class CreativeImagePipelineService {
 
   /** Cleanup: marca jobs zumbis (em 'generating_*' há >jobMaxMinutes) como failed,
    *  e imagens individuais em 'generating' há >imgMaxMinutes como failed.
-   *  Recupera jobs presos por crash do backend mid-execução. */
+   *  Recupera jobs presos por crash do backend mid-execução.
+   *
+   *  Defaults reduzidos pra 30min job / 15min imagem — Gemini NB1 leva 15-40s
+   *  normal, então 15min é seguro pra detectar travadas cedo (antes complementava
+   *  a defesa do finalizeJob que já marca ghost rows em 5min). */
   async cleanupStale(opts: { jobMaxMinutes?: number; imgMaxMinutes?: number } = {}): Promise<{ jobsFailed: number; imagesFailed: number }> {
-    const jobCutoff = new Date(Date.now() - (opts.jobMaxMinutes ?? 60) * 60 * 1000).toISOString()
-    const imgCutoff = new Date(Date.now() - (opts.imgMaxMinutes ?? 30) * 60 * 1000).toISOString()
+    const jobCutoff = new Date(Date.now() - (opts.jobMaxMinutes ?? 30) * 60 * 1000).toISOString()
+    const imgCutoff = new Date(Date.now() - (opts.imgMaxMinutes ?? 15) * 60 * 1000).toISOString()
 
     // Imagens individuais zumbis
     const { data: imgs, error: imgErr } = await supabaseAdmin
