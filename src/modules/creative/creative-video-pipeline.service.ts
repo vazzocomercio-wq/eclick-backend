@@ -7,6 +7,7 @@ import { KlingClient } from './kling.client'
 import { VideoProviderRegistry } from './providers/video-provider.registry'
 import type { Marketplace } from './creative.marketplace-rules'
 import { extractLastFrame, concatVideos } from '../../common/ffmpeg'
+import { adaptImageForVideo, type TargetAspect } from './image-adapter'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -739,12 +740,25 @@ export class CreativeVideoPipelineService {
   private async submitOne(video: CreativeVideo): Promise<void> {
     try {
       // Resolve source URL (signed): preferência por source_image se passado, senão main_image
-      const sourceUrl = await this.resolveSourceUrl(video)
+      const rawSourceUrl = await this.resolveSourceUrl(video)
+
+      // F6: adapta imagem pro aspect alvo (providers de vídeo herdam aspect
+      // da source image — sem isso o vídeo sai no aspect da imagem original).
+      // Se já bate, retorna URL original sem custo.
+      const adaptedSourceUrl = await adaptImageForVideo({
+        sourceUrl:    rawSourceUrl,
+        targetAspect: video.aspect_ratio as TargetAspect,
+        orgId:        video.organization_id,
+        productId:    video.product_id,
+        videoId:      video.id,
+        creative:     this.creative,
+        logger:       this.logger,
+      })
 
       // F6: dispatch via registry — escolhe Kling ou Flow baseado no model_name prefix.
       const provider = this.registry.resolve(video.model_name)
       const { taskId } = await provider.submit({
-        imageUrl:    sourceUrl,
+        imageUrl:    adaptedSourceUrl,
         prompt:      video.prompt_text,
         duration:    Number(video.duration_seconds),
         aspectRatio: video.aspect_ratio,
