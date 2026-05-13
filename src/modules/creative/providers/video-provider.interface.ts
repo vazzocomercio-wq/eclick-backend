@@ -57,8 +57,16 @@ export interface VideoSubmitInput {
     /** Intensidade 0-1 (provider mapeia pra seus valores nativos). */
     intensity?: number
   }
+  /** Org dona da chamada — alguns providers usam pra resolver credenciais per-tenant. */
+  orgId?:          string
   /** Metadados que o provider pode usar (ex: enable_audio=true pra Veo). */
   options?:        Record<string, unknown>
+}
+
+/** Contexto opcional pra calls que não recebem VideoSubmitInput (poll/download).
+ *  Permite providers per-tenant resolverem credenciais. */
+export interface VideoCallContext {
+  orgId?: string
 }
 
 export interface VideoTaskStatus {
@@ -81,11 +89,11 @@ export interface VideoProvider {
   /** Submete um job. Retorna taskId pra polling. */
   submit(input: VideoSubmitInput): Promise<{ taskId: string }>
 
-  /** Pollea status do job. */
-  pollStatus(taskId: string): Promise<VideoTaskStatus>
+  /** Pollea status do job. ctx opcional pra resolver credenciais per-org. */
+  pollStatus(taskId: string, ctx?: VideoCallContext): Promise<VideoTaskStatus>
 
-  /** Baixa o vídeo gerado (Buffer MP4). */
-  download(url: string): Promise<Buffer>
+  /** Baixa o vídeo gerado (Buffer MP4). ctx opcional pra resolver credenciais per-org. */
+  download(url: string, ctx?: VideoCallContext): Promise<Buffer>
 
   /** Estima custo em USD pra esse modelo + duração. */
   estimateCost(modelId: string, duration: number): number

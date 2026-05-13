@@ -18,9 +18,10 @@ import { FlowProvider } from './providers/flow.provider'
 import { VideoProviderRegistry } from './providers/video-provider.registry'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+import { CredentialsModule } from '../credentials/credentials.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule],
+  imports:     [AiModule, MercadolivreModule, CredentialsModule],
   controllers: [CreativeController],
   providers:   [
     CreativeService,

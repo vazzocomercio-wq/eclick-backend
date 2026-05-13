@@ -749,6 +749,7 @@ export class CreativeVideoPipelineService {
         duration:    Number(video.duration_seconds),
         aspectRatio: video.aspect_ratio,
         modelId:     video.model_name,
+        orgId:       video.organization_id, // Flow usa pra resolver per-org credentials
       })
 
       await supabaseAdmin
@@ -815,7 +816,8 @@ export class CreativeVideoPipelineService {
     try {
       // F6: dispatch via registry — Kling vs Flow conforme model prefix
       const provider = this.registry.resolve(video.model_name)
-      const info = await provider.pollStatus(video.external_task_id)
+      const ctx = { orgId: video.organization_id }
+      const info = await provider.pollStatus(video.external_task_id, ctx)
 
       if (info.status === 'submitted' || info.status === 'processing') return // ainda gerando, próximo tick
 
@@ -836,7 +838,7 @@ export class CreativeVideoPipelineService {
         const url = info.videoUrl
         if (!url) throw new Error(`${provider.key} retornou status=succeed mas sem URL`)
 
-        const buffer = await provider.download(url)
+        const buffer = await provider.download(url, ctx)
         const storagePath = `${video.organization_id}/${video.product_id}/videos/${video.id}.mp4`
         const { error: upErr } = await supabaseAdmin.storage
           .from('creative')

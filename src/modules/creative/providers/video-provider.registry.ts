@@ -40,9 +40,8 @@ export class VideoProviderRegistry {
       return this.kling
     }
     if (modelId.startsWith('veo-')) {
-      if (!this.flow.isConfigured()) {
-        throw new BadRequestException('Google Flow/Veo não configurado. Setar GOOGLE_VERTEX_* envs no Railway.')
-      }
+      // FlowProvider.isConfigured() é sempre true (resolução real é async via DB).
+      // Se a key não existir, submit() lança BadRequestException com mensagem clara.
       return this.flow
     }
     throw new BadRequestException(`modelId desconhecido: ${modelId}. Use kling-* ou veo-*.`)

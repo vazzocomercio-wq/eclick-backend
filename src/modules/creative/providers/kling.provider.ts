@@ -23,6 +23,7 @@ import type {
   VideoSubmitInput,
   VideoTaskStatus,
   VideoQuality,
+  VideoCallContext,
 } from './video-provider.interface'
 
 @Injectable()
@@ -62,7 +63,7 @@ export class KlingProvider implements VideoProvider {
     })
   }
 
-  async pollStatus(taskId: string): Promise<VideoTaskStatus> {
+  async pollStatus(taskId: string, _ctx?: VideoCallContext): Promise<VideoTaskStatus> {
     const info = await this.client.getTaskStatus(taskId)
     const firstVideo = info.videos?.[0]
     return {
@@ -74,7 +75,8 @@ export class KlingProvider implements VideoProvider {
     }
   }
 
-  download(url: string): Promise<Buffer> {
+  download(url: string, _ctx?: VideoCallContext): Promise<Buffer> {
+    // Kling usa env vars globais, ctx ignorado.
     return this.client.downloadVideo(url)
   }
 

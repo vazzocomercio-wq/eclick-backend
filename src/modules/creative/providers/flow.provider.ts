@@ -4,7 +4,13 @@
  * Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:predictLongRunning
  * Auth:     header `x-goog-api-key: <GEMINI_API_KEY>`
  *
- * Pegar API key em https://aistudio.google.com/apikey
+ * REUSA a mesma GEMINI_API_KEY já configurada pra Nano Banana (imagens):
+ *   1. Tenta api_credentials per-org (provider='google', key_name='GEMINI_API_KEY')
+ *   2. Fallback api_credentials global (orgId=null)
+ *   3. Fallback env GEMINI_API_KEY_DEFAULT
+ *
+ * Pegar key em https://aistudio.google.com/apikey — uma única key serve
+ * pra Gemini text + Nano Banana imagem + Veo vídeo.
  *
  * Models suportados (maio/2026):
  *   - veo-3.1-fast-generate-preview   ⭐ default (rápido, $0.15/s, áudio nativo)
@@ -20,24 +26,30 @@
  * Limitações:
  *   - Imagem precisa virar base64 (não aceita URL direto)
  *   - URLs de download expiram em ~24h e exigem API key
+ *   - isConfigured() reflete só env (DB lookup é async, sem cache aqui)
  */
 
 import { Injectable, BadRequestException, HttpException, HttpStatus, Logger } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
 import { retryWithBackoff } from '../../../common/retry'
+import { CredentialsService } from '../../credentials/credentials.service'
 import type {
   VideoProvider,
   VideoModelOption,
   VideoSubmitInput,
   VideoTaskStatus,
+  VideoCallContext,
 } from './video-provider.interface'
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta'
+const GEMINI_KEY_NAME = 'GEMINI_API_KEY'
 
 @Injectable()
 export class FlowProvider implements VideoProvider {
   readonly key = 'flow' as const
   private readonly logger = new Logger(FlowProvider.name)
+
+  constructor(private readonly credentials: CredentialsService) {}
 
   /** Pricing API real (Veo 3.1 — confirmar quando bater fatura). */
   private static readonly MODELS: VideoModelOption[] = [
@@ -68,15 +80,20 @@ export class FlowProvider implements VideoProvider {
   ]
 
   listModels(): VideoModelOption[] {
-    return this.isConfigured() ? FlowProvider.MODELS : []
+    // Sempre lista os modelos — resolução real da key é async via DB.
+    // Se nenhuma key tiver sido configurada, submit() falha com mensagem clara.
+    // (CredentialsService check é async, não dá pra usar aqui em listAllModels sync.)
+    return FlowProvider.MODELS
   }
 
   isConfigured(): boolean {
-    return Boolean(process.env.GEMINI_API_KEY)
+    // Confiamos no resolveApiKey async — sempre true pra expor models.
+    // Erros de "não configurada" aparecem no submit com mensagem útil.
+    return true
   }
 
   async submit(input: VideoSubmitInput): Promise<{ taskId: string }> {
-    const apiKey = this.getApiKey()
+    const apiKey = await this.resolveApiKey(input.orgId)
 
     // Validate duration
     const model = FlowProvider.MODELS.find(m => m.id === input.modelId)
@@ -154,8 +171,8 @@ export class FlowProvider implements VideoProvider {
     }
   }
 
-  async pollStatus(taskId: string): Promise<VideoTaskStatus> {
-    const apiKey = this.getApiKey()
+  async pollStatus(taskId: string, ctx?: VideoCallContext): Promise<VideoTaskStatus> {
+    const apiKey = await this.resolveApiKey(ctx?.orgId)
     try {
       const res = await retryWithBackoff(
         () => axios.get<{
@@ -235,8 +252,8 @@ export class FlowProvider implements VideoProvider {
     }
   }
 
-  async download(url: string): Promise<Buffer> {
-    const apiKey = this.getApiKey()
+  async download(url: string, ctx?: VideoCallContext): Promise<Buffer> {
+    const apiKey = await this.resolveApiKey(ctx?.orgId)
     // URIs do Veo dentro do generativelanguage.googleapis.com exigem auth.
     // gs:// URIs precisam de service account — não suportado nessa via.
     if (url.startsWith('gs://')) {
@@ -260,11 +277,30 @@ export class FlowProvider implements VideoProvider {
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
-  private getApiKey(): string {
-    const key = process.env.GEMINI_API_KEY
+  /**
+   * Resolve GEMINI_API_KEY na mesma ordem que o LlmService usa pra Nano Banana:
+   *   1. api_credentials per-org (provider='google', key_name='GEMINI_API_KEY')
+   *   2. api_credentials global (orgId=null)
+   *   3. env GEMINI_API_KEY_DEFAULT (fallback final)
+   *
+   * REUSA a mesma key já configurada pra imagens — não precisa setar nada novo
+   * no Railway se já estava gerando imagem com Gemini/Nano Banana.
+   */
+  private async resolveApiKey(orgId?: string): Promise<string> {
+    let key: string | null = null
+    if (orgId) {
+      key = await this.credentials.getDecryptedKey(orgId, 'google', GEMINI_KEY_NAME).catch(() => null)
+    }
+    if (!key) {
+      key = await this.credentials.getDecryptedKey(null, 'google', GEMINI_KEY_NAME).catch(() => null)
+    }
+    if (!key) {
+      key = process.env.GEMINI_API_KEY_DEFAULT ?? null
+    }
     if (!key) {
       throw new BadRequestException(
-        'GEMINI_API_KEY não configurada. Pegar em https://aistudio.google.com/apikey e setar no Railway.',
+        `${GEMINI_KEY_NAME} não configurada. Verifique api_credentials (provider=google) ou GEMINI_API_KEY_DEFAULT em env. ` +
+        `Mesma key que usa pra Nano Banana (imagens) — pegar em https://aistudio.google.com/apikey.`,
       )
     }
     return key
