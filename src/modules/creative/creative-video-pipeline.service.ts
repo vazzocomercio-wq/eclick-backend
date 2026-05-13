@@ -101,7 +101,7 @@ interface CreateVideoJobDto {
   listing_id?:       string
   source_image_id?:  string                   // se passado, usa imagem aprovada como first frame
   count?:            number                   // 1-5
-  duration_seconds?: 5 | 10
+  duration_seconds?: number                   // validado contra supportedDurations do modelo
   aspect_ratio?:     '1:1' | '16:9' | '9:16'
   model_name?:       string
   max_cost_usd?:     number
@@ -166,10 +166,21 @@ export class CreativeVideoPipelineService {
     }
 
     const count = clamp(dto.count ?? 3, 1, 5)
-    const duration = (dto.duration_seconds ?? 10) as 5 | 10
     const aspect = dto.aspect_ratio ?? mapAspectFromBriefing(briefing.image_format)
-    // F6: aceita modelos Kling OU Veo (Flow) — resolução acontece no submit via registry
+    // F6: aceita modelos Kling, Veo (Flow) ou Sora — resolução acontece no submit via registry
     const model: string = dto.model_name ?? 'kling-v2-6'
+    // Valida duração contra supportedDurations do modelo (cada provider tem suas).
+    const provider = this.registry.resolve(model)
+    const modelOpt = provider.listModels().find(m => m.id === model)
+    const wanted = dto.duration_seconds ?? 10
+    const duration = modelOpt && !modelOpt.supportedDurations.includes(wanted)
+      ? (modelOpt.supportedDurations[0] ?? wanted)
+      : wanted
+    if (modelOpt && wanted !== duration) {
+      this.logger.warn(
+        `[createVideoJob] modelo ${model} não suporta ${wanted}s — ajustando pra ${duration}s (suportadas: ${modelOpt.supportedDurations.join('/')})`,
+      )
+    }
     const maxCost = Math.max(0.5, Math.min(20, dto.max_cost_usd ?? 5.0))
 
     const { data, error } = await supabaseAdmin

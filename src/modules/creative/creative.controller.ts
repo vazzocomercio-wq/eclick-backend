@@ -356,9 +356,11 @@ export class CreativeController {
       listing_id?:       string
       source_image_id?:  string
       count?:            number
-      duration_seconds?: 5 | 10
+      // Validado contra supportedDurations do modelo no pipeline
+      duration_seconds?: number
       aspect_ratio?:     '1:1' | '16:9' | '9:16'
-      // Aceita modelos Kling (5/10s) ou Veo (4/6/8s). Registry roteia no submit.
+      // Aceita modelos Kling (5/10s), Veo (4/6/8s) ou Sora (4/8/12s).
+      // Registry roteia no submit baseado no prefix do model_name.
       model_name?:       string
       max_cost_usd?:     number
     },
