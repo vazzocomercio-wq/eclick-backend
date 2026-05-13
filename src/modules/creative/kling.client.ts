@@ -16,24 +16,69 @@ import { retryWithBackoff } from '../../common/retry'
  *
  * Endpoint regional: api-singapore.klingai.com (default global).
  *
- * Pricing (em USD, atualizar quando Kling mudar):
- *   kling-v1-6-std    5s  → $0.21
- *   kling-v1-6-std   10s  → $0.42
- *   kling-v2-master   5s  → $0.42
- *   kling-v2-master  10s  → $0.84
+ * Models válidos (maio/2026):
+ *   kling-v2-1         5s  → $0.21    10s  → $0.42   (std default)
+ *   kling-v2-1-master  5s  → $0.42    10s  → $0.84   (premium)
+ *   kling-v2-5         5s  → $0.30    10s  → $0.60   (std mais recente)
+ *   kling-v2-6         5s  → $0.40    10s  → $0.80   (NOVO 2026 — áudio nativo, default)
+ *   kling-v1-6         5s  → $0.18    10s  → $0.36   (legacy, mais barato)
+ *
+ * Models antigos kling-v1-6-std / kling-v1-6-pro / kling-v2-master foram
+ * descontinuados pela Kling em 2026 e retornam erro "model_name is invalid".
  */
 
 const KLING_BASE = process.env.KLING_API_BASE ?? 'https://api-singapore.klingai.com'
 const KLING_JWT_TTL_SECONDS = 30 * 60
 
-export type KlingModel = 'kling-v1-6-std' | 'kling-v1-6-pro' | 'kling-v2-master'
+export type KlingModel =
+  | 'kling-v2-1'
+  | 'kling-v2-1-master'
+  | 'kling-v2-5'
+  | 'kling-v2-6'
+  | 'kling-v1-6'
 export type KlingDuration = '5' | '10'
 export type KlingAspectRatio = '1:1' | '16:9' | '9:16'
+export type KlingMode = 'std' | 'pro'
+
+/** Default sugerido: v2-6 com áudio nativo. */
+export const KLING_DEFAULT_MODEL: KlingModel = 'kling-v2-6'
+export const KLING_DEFAULT_DURATION: KlingDuration = '10'
 
 const PRICING: Record<KlingModel, Record<KlingDuration, number>> = {
-  'kling-v1-6-std':   { '5': 0.21, '10': 0.42 },
-  'kling-v1-6-pro':   { '5': 0.49, '10': 0.98 },
-  'kling-v2-master':  { '5': 0.42, '10': 0.84 },
+  'kling-v2-1':        { '5': 0.21, '10': 0.42 },
+  'kling-v2-1-master': { '5': 0.42, '10': 0.84 },
+  'kling-v2-5':        { '5': 0.30, '10': 0.60 },
+  'kling-v2-6':        { '5': 0.40, '10': 0.80 },
+  'kling-v1-6':        { '5': 0.18, '10': 0.36 },
+}
+
+/** Catálogo público pra UI escolher modelo + duração. */
+export const KLING_MODEL_OPTIONS: Array<{
+  value:     KlingModel
+  label:     string
+  badge?:    string
+  hasAudio:  boolean
+  pricing:   { '5': number; '10': number }
+}> = [
+  { value: 'kling-v2-6',        label: 'Kling v2.6',        badge: 'Novo · com áudio', hasAudio: true,  pricing: PRICING['kling-v2-6'] },
+  { value: 'kling-v2-1-master', label: 'Kling v2.1 Master', badge: 'Premium',          hasAudio: false, pricing: PRICING['kling-v2-1-master'] },
+  { value: 'kling-v2-5',        label: 'Kling v2.5',        hasAudio: false,                            pricing: PRICING['kling-v2-5'] },
+  { value: 'kling-v2-1',        label: 'Kling v2.1',        badge: 'Padrão',           hasAudio: false, pricing: PRICING['kling-v2-1'] },
+  { value: 'kling-v1-6',        label: 'Kling v1.6',        badge: 'Econômico',        hasAudio: false, pricing: PRICING['kling-v1-6'] },
+]
+
+/** Controle de câmera — pra "câmera em direção ao produto" usar zoom positivo (zoom_in). */
+export interface KlingCameraControl {
+  type:   'simple' | 'down_back' | 'forward_up' | 'right_turn_forward' | 'left_turn_forward'
+  /** Só quando type='simple'. Valores -10 a 10. */
+  config?: Partial<{
+    horizontal: number
+    vertical:   number
+    pan:        number
+    tilt:       number
+    roll:       number
+    zoom:       number
+  }>
 }
 
 export interface KlingSubmitInput {
@@ -45,6 +90,10 @@ export interface KlingSubmitInput {
   modelName:    KlingModel
   /** 0-1, padrão 0.5. Maior = mais fidelidade ao prompt. */
   cfgScale?:    number
+  /** std (default) ou pro. Não aplica em v2-1-master nem v2-6 (sempre pro). */
+  mode?:        KlingMode
+  /** Camera control (movimento de câmera). Padrão: zoom_in suave. */
+  cameraControl?: KlingCameraControl
 }
 
 export interface KlingTaskInfo {
@@ -97,6 +146,21 @@ export class KlingClient {
       cfg_scale:    input.cfgScale ?? 0.5,
     }
     if (input.negativePrompt) body.negative_prompt = input.negativePrompt
+
+    // mode (std/pro): v2-1-master e v2-6 não aceitam — sempre pro internamente
+    if (input.mode && input.modelName !== 'kling-v2-1-master' && input.modelName !== 'kling-v2-6') {
+      body.mode = input.mode
+    }
+
+    // camera_control: padrão zoom_in (câmera em direção ao produto)
+    const cam = input.cameraControl ?? {
+      type:   'simple' as const,
+      config: { zoom: 5 },
+    }
+    body.camera_control = {
+      type:   cam.type,
+      ...(cam.config && { config: cam.config }),
+    }
 
     try {
       const res = await retryWithBackoff(

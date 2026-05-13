@@ -129,9 +129,9 @@ export class CreativeVideoPipelineService {
     }
 
     const count = clamp(dto.count ?? 3, 1, 5)
-    const duration = (dto.duration_seconds ?? 5) as 5 | 10
+    const duration = (dto.duration_seconds ?? 10) as 5 | 10
     const aspect = dto.aspect_ratio ?? mapAspectFromBriefing(briefing.image_format)
-    const model: KlingModel = dto.model_name ?? 'kling-v2-master'
+    const model: KlingModel = dto.model_name ?? 'kling-v2-6'
     const maxCost = Math.max(0.5, Math.min(20, dto.max_cost_usd ?? 5.0))
 
     const { data, error } = await supabaseAdmin

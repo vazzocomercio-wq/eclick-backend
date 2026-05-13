@@ -356,7 +356,7 @@ export class CreativeController {
       count?:            number
       duration_seconds?: 5 | 10
       aspect_ratio?:     '1:1' | '16:9' | '9:16'
-      model_name?:       'kling-v1-6-std' | 'kling-v1-6-pro' | 'kling-v2-master'
+      model_name?:       'kling-v2-1' | 'kling-v2-1-master' | 'kling-v2-5' | 'kling-v2-6' | 'kling-v1-6'
       max_cost_usd?:     number
     },
   ) {
