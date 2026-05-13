@@ -358,7 +358,8 @@ export class CreativeController {
       count?:            number
       duration_seconds?: 5 | 10
       aspect_ratio?:     '1:1' | '16:9' | '9:16'
-      model_name?:       'kling-v2-1' | 'kling-v2-1-master' | 'kling-v2-5' | 'kling-v2-6' | 'kling-v1-6'
+      // Aceita modelos Kling (5/10s) ou Veo (4/6/8s). Registry roteia no submit.
+      model_name?:       string
       max_cost_usd?:     number
     },
   ) {
@@ -380,7 +381,8 @@ export class CreativeController {
       source_image_id:         string
       target_duration_seconds: number
       aspect_ratio?:           '1:1' | '16:9' | '9:16'
-      model_name?:             'kling-v2-1' | 'kling-v2-1-master' | 'kling-v2-5' | 'kling-v2-6' | 'kling-v1-6'
+      // Aceita modelos Kling ou Veo (veo-3.1-fast-generate-preview etc). Pipeline calcula parts.
+      model_name?:             string
       camera_motion?:          'dolly-in' | 'dolly-out' | 'pan-left' | 'pan-right' | 'tilt-up' | 'tilt-down' | 'orbit' | 'static'
       max_cost_usd?:           number
       prompt?:                 string

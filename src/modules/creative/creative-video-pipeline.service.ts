@@ -3,7 +3,8 @@ import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, type CreativeProduct } from './creative.service'
 import { buildVideoPromptsRequest } from './creative.prompts'
-import { KlingClient, type KlingModel, type KlingDuration, type KlingAspectRatio } from './kling.client'
+import { KlingClient } from './kling.client'
+import { VideoProviderRegistry } from './providers/video-provider.registry'
 import type { Marketplace } from './creative.marketplace-rules'
 import { extractLastFrame, concatVideos } from '../../common/ffmpeg'
 
@@ -37,7 +38,7 @@ export interface CreativeVideoJob {
   requested_count:     number
   duration_seconds:    number
   aspect_ratio:        '1:1' | '16:9' | '9:16'
-  model_name:          KlingModel
+  model_name:          string
   completed_count:     number
   failed_count:        number
   approved_count:      number
@@ -67,7 +68,7 @@ export interface CreativeVideo {
   status:               VideoStatus
   duration_seconds:     number
   aspect_ratio:         '1:1' | '16:9' | '9:16'
-  model_name:           KlingModel
+  model_name:           string
   external_task_id:     string | null
   source_image_id:      string | null
   storage_path:         string | null
@@ -101,7 +102,7 @@ interface CreateVideoJobDto {
   count?:            number                   // 1-5
   duration_seconds?: 5 | 10
   aspect_ratio?:     '1:1' | '16:9' | '9:16'
-  model_name?:       KlingModel
+  model_name?:       string
   max_cost_usd?:     number
 }
 
@@ -116,7 +117,7 @@ export interface CreateChainedVideoFromImageDto {
   /** Duração total alvo em segundos (15, 20, 25, 30). Pipeline calcula parts. */
   target_duration_seconds: number
   aspect_ratio?:     '1:1' | '16:9' | '9:16'
-  model_name?:       KlingModel
+  model_name?:       string
   /** Movimento de câmera padrão pra todos os parts. Default: dolly-in (zoom em direção ao produto). */
   camera_motion?:    'dolly-in' | 'dolly-out' | 'pan-left' | 'pan-right' | 'tilt-up' | 'tilt-down' | 'orbit' | 'static'
   /** Cap de custo. Default $5. */
@@ -133,7 +134,8 @@ export class CreativeVideoPipelineService {
   constructor(
     private readonly llm:      LlmService,
     private readonly creative: CreativeService,
-    private readonly kling:    KlingClient,
+    private readonly kling:    KlingClient,            // mantido pro estimateCost legado em alguns paths
+    private readonly registry: VideoProviderRegistry,  // F6: dispatch multi-provider (Kling / Flow)
   ) {}
 
   // ════════════════════════════════════════════════════════════════════════
@@ -165,7 +167,8 @@ export class CreativeVideoPipelineService {
     const count = clamp(dto.count ?? 3, 1, 5)
     const duration = (dto.duration_seconds ?? 10) as 5 | 10
     const aspect = dto.aspect_ratio ?? mapAspectFromBriefing(briefing.image_format)
-    const model: KlingModel = dto.model_name ?? 'kling-v2-6'
+    // F6: aceita modelos Kling OU Veo (Flow) — resolução acontece no submit via registry
+    const model: string = dto.model_name ?? 'kling-v2-6'
     const maxCost = Math.max(0.5, Math.min(20, dto.max_cost_usd ?? 5.0))
 
     const { data, error } = await supabaseAdmin
@@ -237,23 +240,29 @@ export class CreativeVideoPipelineService {
 
     const targetDuration = clamp(dto.target_duration_seconds, 5, 60)
     const aspect       = dto.aspect_ratio ?? mapAspectFromBriefing(briefing.image_format)
-    const model: KlingModel = dto.model_name ?? 'kling-v2-6'
+    // F6: aceita Kling OU Veo (Flow) — resolução acontece no submit via registry
+    const model: string = dto.model_name ?? 'kling-v2-6'
     const cameraMotion = dto.camera_motion ?? 'dolly-in'
     const maxCost = Math.max(0.5, Math.min(20, dto.max_cost_usd ?? 5.0))
 
-    // Calcula partes — Kling só faz 5 ou 10s. Algoritmo guloso: mete o máximo
-    // de 10s seguido de 5s se sobrar. Ex: 15 → [10, 5]; 20 → [10, 10]; 25 → [10, 10, 5]; 30 → [10, 10, 10]
-    const parts: number[] = []
-    let remaining = targetDuration
-    while (remaining > 0) {
-      const slice = remaining >= 10 ? 10 : 5
-      parts.push(slice)
-      remaining -= slice
+    // Calcula partes — depende do provider:
+    //   Kling [5,10]    → ex: target 15 = [10,5]; 30 = [10,10,10]
+    //   Veo   [4,6,8]   → ex: target 15 ≈ 18 [8,6,4]; 20 = [8,8,4]; 30 ≈ 32 [8,8,8,8]
+    // Pequeno overshoot aceito (sec extras) pra não quebrar UX. Master concat
+    // entrega o vídeo no tamanho real.
+    const provider = this.registry.resolve(model)
+    const modelOpt = provider.listModels().find(m => m.id === model)
+    if (!modelOpt) {
+      throw new BadRequestException(`Modelo ${model} não disponível no provider ${provider.key}.`)
     }
+    const { parts, actualTarget } = computeChainParts(targetDuration, modelOpt.supportedDurations)
     const chainTotal = parts.length
 
     if (chainTotal > 5) {
       throw new BadRequestException(`target_duration_seconds ${targetDuration} resulta em ${chainTotal} parts (max 5). Use até 30s.`)
+    }
+    if (chainTotal === 0) {
+      throw new BadRequestException(`Não foi possível compor ${targetDuration}s com durações suportadas pelo modelo: ${modelOpt.supportedDurations.join('/')}`)
     }
 
     // 1. Cria job
@@ -272,11 +281,11 @@ export class CreativeVideoPipelineService {
         aspect_ratio:            aspect,
         model_name:              model,
         max_cost_usd:            maxCost,
-        target_duration_seconds: targetDuration,
-        source_provider:         'kling',
+        target_duration_seconds: actualTarget,
+        source_provider:         provider.key,
         camera_motion:           cameraMotion,
         prompts_generated:       [],
-        prompts_metadata:        { source: 'chain_from_image', chain_total: chainTotal, parts },
+        prompts_metadata:        { source: 'chain_from_image', chain_total: chainTotal, parts, requested_target: targetDuration, actual_target: actualTarget },
       })
       .select('*')
       .single()
@@ -304,12 +313,12 @@ export class CreativeVideoPipelineService {
         chain_position:   1,
         chain_total:      chainTotal,
         is_chain_master:  false,
-        provider:         'kling',
+        provider:         provider.key,
       })
     if (vidErr) throw new BadRequestException(`createChainedJob.videoInsert: ${vidErr.message}`)
 
     this.logger.log(
-      `[creative.video.chain] job ${job.id} criado — target=${targetDuration}s parts=[${parts.join(',')}] motion=${cameraMotion} model=${model}`,
+      `[creative.video.chain] job ${job.id} criado — target=${targetDuration}s actual=${actualTarget}s parts=[${parts.join(',')}] motion=${cameraMotion} provider=${provider.key} model=${model}`,
     )
     return job
   }
@@ -732,12 +741,14 @@ export class CreativeVideoPipelineService {
       // Resolve source URL (signed): preferência por source_image se passado, senão main_image
       const sourceUrl = await this.resolveSourceUrl(video)
 
-      const { taskId } = await this.kling.submitImage2Video({
+      // F6: dispatch via registry — escolhe Kling ou Flow baseado no model_name prefix.
+      const provider = this.registry.resolve(video.model_name)
+      const { taskId } = await provider.submit({
         imageUrl:    sourceUrl,
         prompt:      video.prompt_text,
-        duration:    String(video.duration_seconds) as KlingDuration,
-        aspectRatio: video.aspect_ratio as KlingAspectRatio,
-        modelName:   video.model_name,
+        duration:    Number(video.duration_seconds),
+        aspectRatio: video.aspect_ratio,
+        modelId:     video.model_name,
       })
 
       await supabaseAdmin
@@ -749,7 +760,7 @@ export class CreativeVideoPipelineService {
         })
         .eq('id', video.id)
 
-      this.logger.log(`[creative.video] vid ${video.id} submetido — task=${taskId}`)
+      this.logger.log(`[creative.video] vid ${video.id} submetido — provider=${provider.key} task=${taskId}`)
     } catch (e: unknown) {
       const msg = (e as Error).message
       await supabaseAdmin
@@ -802,7 +813,9 @@ export class CreativeVideoPipelineService {
   private async pollOne(video: CreativeVideo): Promise<void> {
     if (!video.external_task_id) return
     try {
-      const info = await this.kling.getTaskStatus(video.external_task_id)
+      // F6: dispatch via registry — Kling vs Flow conforme model prefix
+      const provider = this.registry.resolve(video.model_name)
+      const info = await provider.pollStatus(video.external_task_id)
 
       if (info.status === 'submitted' || info.status === 'processing') return // ainda gerando, próximo tick
 
@@ -811,7 +824,7 @@ export class CreativeVideoPipelineService {
           .from('creative_videos')
           .update({
             status: 'failed',
-            error_message: `Kling: ${info.statusMsg ?? 'failed'}`,
+            error_message: `${provider.key}: ${info.statusMsg ?? 'failed'}`,
             updated_at: new Date().toISOString(),
           })
           .eq('id', video.id)
@@ -820,17 +833,17 @@ export class CreativeVideoPipelineService {
       }
 
       if (info.status === 'succeed') {
-        const url = info.videos?.[0]?.url
-        if (!url) throw new Error('Kling retornou status=succeed mas sem URL')
+        const url = info.videoUrl
+        if (!url) throw new Error(`${provider.key} retornou status=succeed mas sem URL`)
 
-        const buffer = await this.kling.downloadVideo(url)
+        const buffer = await provider.download(url)
         const storagePath = `${video.organization_id}/${video.product_id}/videos/${video.id}.mp4`
         const { error: upErr } = await supabaseAdmin.storage
           .from('creative')
           .upload(storagePath, buffer, { contentType: 'video/mp4', upsert: true, cacheControl: '3600' })
         if (upErr) throw new Error(`storage.upload: ${upErr.message}`)
 
-        const cost = this.kling.estimateCost(video.model_name, String(video.duration_seconds) as KlingDuration)
+        const cost = provider.estimateCost(video.model_name, Number(video.duration_seconds))
 
         await supabaseAdmin
           .from('creative_videos')
@@ -838,29 +851,29 @@ export class CreativeVideoPipelineService {
             status:       'ready',
             storage_path: storagePath,
             generation_metadata: {
-              provider:   'kling',
-              model:      video.model_name,
-              duration:   video.duration_seconds,
-              aspect:     video.aspect_ratio,
-              cost_usd:   cost,
-              kling_task: video.external_task_id,
+              provider:    provider.key,
+              model:       video.model_name,
+              duration:    video.duration_seconds,
+              aspect:      video.aspect_ratio,
+              cost_usd:    cost,
+              external_task: video.external_task_id,
             },
             error_message: null,
             updated_at:    new Date().toISOString(),
           })
           .eq('id', video.id)
 
-        // Log direto em ai_usage_log (Kling não passa por LlmService)
+        // Log direto em ai_usage_log (vídeo não passa por LlmService)
         await supabaseAdmin.from('ai_usage_log').insert({
           organization_id:     video.organization_id,
-          provider:            'kling',
+          provider:            provider.key,
           model:               video.model_name,
           feature:             'creative_video',
           tokens_input:        0,
           tokens_output:       0,
           tokens_total:        0,
           cost_usd:            cost,
-          latency_ms:          0, // Kling é async, não dá pra medir client-side
+          latency_ms:          0, // async — não dá pra medir client-side
           fallback_used:       false,
           error_message:       null,
           creative_product_id: video.product_id,
@@ -869,7 +882,7 @@ export class CreativeVideoPipelineService {
         })
 
         await this.bumpJobAfterVideo(video.job_id, cost, true)
-        this.logger.log(`[creative.video] vid ${video.id} pos=${video.position} ✓ cost=$${cost}`)
+        this.logger.log(`[creative.video] vid ${video.id} pos=${video.position} ✓ provider=${provider.key} cost=$${cost}`)
       }
     } catch (e: unknown) {
       const msg = (e as Error).message
@@ -1223,4 +1236,41 @@ function parsePromptsArray(text: string, expected: number): string[] {
 function mapAspectFromBriefing(format: string): '1:1' | '16:9' | '9:16' {
   if (format === '1200x1500') return '9:16' // não exato (4:5) mas mais próximo
   return '1:1' // 1200x1200, 1000x1000, 800x800
+}
+
+/**
+ * Compõe as partes da chain a partir das durações suportadas pelo provider.
+ * Algoritmo guloso: pega a maior duração que cabe, repete. Se sobrar resíduo
+ * menor que a menor duração, adiciona a menor (overshoot aceitável).
+ *
+ * Ex Kling [5,10]:
+ *   target 15 → [10, 5]            actual 15
+ *   target 20 → [10, 10]           actual 20
+ *   target 30 → [10, 10, 10]       actual 30
+ *
+ * Ex Veo [4,6,8]:
+ *   target 8  → [8]                actual 8
+ *   target 15 → [8, 6, 4]          actual 18 (overshoot +3)
+ *   target 20 → [8, 8, 4]          actual 20
+ *   target 30 → [8, 8, 8, 6]       actual 30
+ */
+function computeChainParts(target: number, supportedDurations: number[]): {
+  parts:        number[]
+  actualTarget: number
+} {
+  if (supportedDurations.length === 0) return { parts: [], actualTarget: 0 }
+  const sortedDesc = [...supportedDurations].sort((a, b) => b - a)
+  const smallest   = sortedDesc[sortedDesc.length - 1]
+  const parts: number[] = []
+  let remaining = target
+  while (remaining > 0) {
+    // Encontra a maior duração que cabe no que resta
+    const fitting = sortedDesc.find(d => d <= remaining)
+    const slice   = fitting ?? smallest // se nada cabe, pega a menor e aceita overshoot
+    parts.push(slice)
+    remaining -= slice
+    // Safety: evita loop infinito se algo der errado
+    if (parts.length > 10) break
+  }
+  return { parts, actualTarget: parts.reduce((s, p) => s + p, 0) }
 }
