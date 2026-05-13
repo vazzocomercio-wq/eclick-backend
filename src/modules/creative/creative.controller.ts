@@ -420,6 +420,31 @@ export class CreativeController {
     return this.videos.cancelJob(this.orgOrThrow(u), id)
   }
 
+  /**
+   * F6: sobe o max_cost_usd de um job que travou por "Limite de custo atingido"
+   * e reativa pra worker continuar. Body opcional define quanto subir.
+   */
+  @Post('video-jobs/:id/raise-cost-limit')
+  @HttpCode(HttpStatus.OK)
+  raiseCostLimit(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { multiplier?: number; absolute?: number },
+  ) {
+    return this.videos.raiseCostLimit(this.orgOrThrow(u), id, body)
+  }
+
+  /**
+   * F6: força a finalização de um chain mesmo com parts pending/failed —
+   * concatena só o que está ready, marca o resto como cancelled e cria
+   * o master row. Útil quando cost-cap travou no meio.
+   */
+  @Post('video-jobs/:id/force-finalize')
+  @HttpCode(HttpStatus.OK)
+  forceFinalizeJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.videos.forceFinalize(this.orgOrThrow(u), id)
+  }
+
   @Post('video-jobs/:id/regenerate-rejected')
   @HttpCode(HttpStatus.OK)
   regenerateRejectedVideos(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {

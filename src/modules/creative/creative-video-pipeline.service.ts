@@ -408,6 +408,112 @@ export class CreativeVideoPipelineService {
     return data as CreativeVideoJob
   }
 
+  /**
+   * F6: sobe o max_cost_usd e reativa um job que travou por cost-cap.
+   * Body: { multiplier?: number, absolute?: number }
+   *   - multiplier=2 (default) → dobra o limite atual
+   *   - absolute=X → seta limite pra X exatamente
+   * Reabre o job pra worker continuar processando pending parts.
+   */
+  async raiseCostLimit(
+    orgId: string,
+    jobId: string,
+    opts: { multiplier?: number; absolute?: number } = {},
+  ): Promise<CreativeVideoJob> {
+    const job = await this.getJob(orgId, jobId)
+
+    const newLimit = opts.absolute
+      ? clamp(opts.absolute, 0.5, 100)
+      : clamp((job.max_cost_usd ?? 5) * (opts.multiplier ?? 2), 0.5, 100)
+
+    // Se job tava `failed` ou `cancelled`, reabre. Se completado, mantém.
+    const newStatus: VideoJobStatus =
+      job.status === 'completed' ? 'completed'
+      : 'generating_videos'
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_video_jobs')
+      .update({
+        max_cost_usd:  newLimit,
+        status:        newStatus,
+        error_message: null,
+        completed_at:  newStatus === 'completed' ? job.completed_at : null,
+        updated_at:    new Date().toISOString(),
+      })
+      .eq('organization_id', orgId).eq('id', jobId)
+      .select('*').single()
+    if (error) throw new BadRequestException(`raiseCostLimit: ${error.message}`)
+
+    this.logger.log(`[creative.video] job ${jobId} cost-limit raised: $${job.max_cost_usd} → $${newLimit} (status=${newStatus})`)
+    return data as CreativeVideoJob
+  }
+
+  /**
+   * F6: força finalização de um chain travado — concatena só os parts
+   * `ready`, cancela os pending/failed e cria o master row.
+   *
+   * Útil quando user prefere usar o que já gerou (ex: 16s real em vez de
+   * esperar/pagar pelo terceiro part de um target=20s).
+   */
+  async forceFinalize(orgId: string, jobId: string): Promise<CreativeVideoJob> {
+    const job = await this.getJob(orgId, jobId)
+
+    // Só aceita pra chain jobs com algum part ready
+    if (!job.target_duration_seconds) {
+      throw new BadRequestException('Job não é encadeado (chain) — use cancelar e regerar pra jobs de variações.')
+    }
+
+    const { data: parts, error: listErr } = await supabaseAdmin
+      .from('creative_videos')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('job_id', jobId)
+      .eq('is_chain_master', false)
+      .order('chain_position', { ascending: true })
+    if (listErr) throw new BadRequestException(`forceFinalize.list: ${listErr.message}`)
+
+    const allParts = (parts ?? []) as CreativeVideo[]
+    const readyParts = allParts.filter(p => p.status === 'ready')
+    const stuckParts = allParts.filter(p => p.status === 'pending' || p.status === 'generating' || p.status === 'failed')
+
+    if (readyParts.length === 0) {
+      throw new BadRequestException('Nenhuma parte está pronta — não dá pra finalizar. Use "Cancelar e refazer".')
+    }
+    if (readyParts.length === allParts.length && allParts.every(p => p.status === 'ready')) {
+      // Tudo ready — tryFinalizeChain normal já daria conta
+      await this.tryFinalizeChain(jobId)
+      return this.getJob(orgId, jobId)
+    }
+
+    // Cancela parts não-ready
+    if (stuckParts.length > 0) {
+      await supabaseAdmin
+        .from('creative_videos')
+        .update({
+          status:        'failed',
+          error_message: 'cancelled: force-finalize aceitou as partes prontas',
+          updated_at:    new Date().toISOString(),
+        })
+        .in('id', stuckParts.map(p => p.id))
+    }
+
+    // Atualiza chain_total dos ready pra refletir o novo total efetivo
+    const newTotal = readyParts.length
+    await Promise.all(readyParts.map(p =>
+      supabaseAdmin
+        .from('creative_videos')
+        .update({ chain_total: newTotal, updated_at: new Date().toISOString() })
+        .eq('id', p.id),
+    ))
+
+    this.logger.log(`[creative.video.force-finalize] job ${jobId} finalizando com ${newTotal} parts (cancelados ${stuckParts.length})`)
+
+    // Agora roda tryFinalizeChain — vai ver todos ready e fazer concat
+    await this.tryFinalizeChain(jobId)
+
+    return this.getJob(orgId, jobId)
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   // PER-VIDEO ACTIONS
   // ════════════════════════════════════════════════════════════════════════
