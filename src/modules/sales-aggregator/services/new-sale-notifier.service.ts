@@ -38,6 +38,28 @@ export class NewSaleNotifierService {
   }
 
   private async compose(orgId: string, sellerId: number, externalOrderId: string | number): Promise<void> {
+    // 0. Idempotência — ML manda múltiplos webhooks pra mesmo pedido
+    // (created → paid → shipped → delivered). Sem essa guard, o
+    // ingestSingleOrder dispara o notifier toda vez e geramos 3-5
+    // toasts duplicados pra mesma venda. Caso real Vazzo 2026-05-13:
+    // pedido 2000016418354960 gerou 4 toasts em 50s.
+    // Guard: se já existe um alert_signal category='new_sale' pra esse
+    // order_id nas últimas 24h, skipa silenciosamente.
+    const orderIdStr = String(externalOrderId)
+    const { data: existing } = await supabaseAdmin
+      .from('alert_signals')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('category', 'new_sale')
+      .filter('data->>order_id', 'eq', orderIdStr)
+      .gte('created_at', new Date(Date.now() - 24 * 3600_000).toISOString())
+      .limit(1)
+      .maybeSingle()
+    if (existing) {
+      this.logger.debug(`[new-sale-notify] order=${orderIdStr} já notificado — skip (idempotência)`)
+      return
+    }
+
     // 1. Lê o pedido recém-upsertado
     const { data: order } = await supabaseAdmin
       .from('orders')
