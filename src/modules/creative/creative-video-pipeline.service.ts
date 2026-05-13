@@ -304,9 +304,13 @@ export class CreativeVideoPipelineService {
     if (jobErr) throw new BadRequestException(`createChainedJob: ${jobErr.message}`)
     const job = jobData as CreativeVideoJob
 
-    // 2. Resolve prompt (custom > video_prompts[0] > template padrão)
+    // 2. Resolve prompt (custom > video_prompts[0] > template padrão) e
+    //    aplica wrap "CAMERA FOCUS LOCK" pra evitar IA focar em outros itens da cena.
     const baseVideoPrompts = briefing.video_prompts ?? []
-    const promptText = (dto.prompt?.trim() || baseVideoPrompts[0] || this.defaultMotionPrompt(cameraMotion))
+    const rawPrompt = dto.prompt?.trim() || baseVideoPrompts[0]
+    const promptText = rawPrompt
+      ? this.wrapWithProductFocus(rawPrompt, product)
+      : this.defaultMotionPrompt(cameraMotion, product)
 
     // 3. Cria SÓ a 1ª part (próximas viram criadas conforme advance)
     const { error: vidErr } = await supabaseAdmin
@@ -336,19 +340,49 @@ export class CreativeVideoPipelineService {
   }
 
   /** Prompt padrão por movimento de câmera (usado quando user não passa custom). */
-  private defaultMotionPrompt(motion: string): string {
-    const base = 'Cinematic camera movement, smooth and subtle. The product remains perfectly still and identical to the source image — same shape, color, material, finish. Subtle parallax on background elements. Maintain photorealistic quality.'
+  private defaultMotionPrompt(motion: string, product?: CreativeProduct): string {
+    const subject = product ? this.describeTargetSubject(product) : 'the product'
+    const base = `The camera focus stays locked on ${subject} throughout the entire clip — never panning to, zooming into, or shifting focus onto any other furniture, fixtures, lamps, appliances, plants, or decor visible in the scene. ${subject.charAt(0).toUpperCase() + subject.slice(1)} remains perfectly still and identical to the source image — same shape, color, material, finish. Subtle parallax on background elements. Maintain photorealistic quality.`
     const motionMap: Record<string, string> = {
-      'dolly-in':  'Smooth camera dolly forward toward the product, gradual zoom-in revealing detail. ' + base,
-      'dolly-out': 'Smooth camera dolly backward, gradually revealing the surrounding environment. ' + base,
-      'pan-left':  'Smooth camera pan to the left, gentle parallax. ' + base,
-      'pan-right': 'Smooth camera pan to the right, gentle parallax. ' + base,
-      'tilt-up':   'Smooth camera tilt upward. ' + base,
-      'tilt-down': 'Smooth camera tilt downward. ' + base,
-      'orbit':     'Smooth orbital camera movement around the product. ' + base,
-      'static':    'Subtle ambient motion, camera holds steady. ' + base,
+      'dolly-in':  `Smooth camera dolly forward toward ${subject}, gradual zoom-in revealing its detail. ` + base,
+      'dolly-out': `Smooth camera dolly backward starting from ${subject}, gradually revealing the surrounding environment while keeping ${subject} centered. ` + base,
+      'pan-left':  `Smooth camera pan to the left with gentle parallax — ${subject} stays the visual anchor. ` + base,
+      'pan-right': `Smooth camera pan to the right with gentle parallax — ${subject} stays the visual anchor. ` + base,
+      'tilt-up':   `Smooth camera tilt upward following ${subject}. ` + base,
+      'tilt-down': `Smooth camera tilt downward following ${subject}. ` + base,
+      'orbit':     `Smooth orbital camera movement around ${subject}. ` + base,
+      'static':    `Subtle ambient motion, camera holds steady on ${subject}. ` + base,
     }
     return motionMap[motion] ?? motionMap['dolly-in']
+  }
+
+  /**
+   * Constrói descritor curto do produto-alvo pra usar em prompts ("the gold
+   * pendant lamp", "the velvet armchair"). Inclui cor + material + categoria
+   * quando disponíveis pra ancorar a IA visualmente no item correto.
+   */
+  private describeTargetSubject(product: CreativeProduct): string {
+    const a = (product.ai_analysis ?? {}) as Record<string, unknown>
+    const color = product.color ?? (a.detected_color as string | undefined) ?? ''
+    const material = product.material ?? (a.detected_material as string | undefined) ?? ''
+    const descriptors = [color, material].filter(Boolean).join(' ').trim()
+    const category = product.category || 'product'
+    return descriptors ? `the ${descriptors} ${category}` : `the ${category}`
+  }
+
+  /**
+   * Prepend "camera focus lock" prefix em qualquer prompt de vídeo de chain —
+   * mesmo quando o user mandou prompt custom ou veio do briefing.video_prompts,
+   * a primeira linha lembra a IA de manter foco no produto-alvo.
+   */
+  private wrapWithProductFocus(promptText: string, product: CreativeProduct): string {
+    const subject = this.describeTargetSubject(product)
+    const prefix = `[CAMERA FOCUS LOCK] The target product is "${product.name}" — ${subject}, centered in the source frame. The camera must keep this exact item as the SOLE focal subject for the entire clip. Do not pan or focus on other items visible in the scene. `
+    // Se prompt já contém o nome do produto, evita duplicar com prefix gigante
+    if (promptText.toLowerCase().includes(product.name.toLowerCase().slice(0, 20))) {
+      return prefix + promptText
+    }
+    return prefix + promptText
   }
 
   async getJob(orgId: string, jobId: string): Promise<CreativeVideoJob> {

@@ -269,15 +269,30 @@ export function buildVideoPromptsRequest(input: VideoPromptsBuilderInput): strin
     ? 'neutral (default)'
     : b.environments.map(e => e === 'custom' ? (b.custom_environment ?? 'neutral') : e).join(', ')
 
+  const colorVal = p.color ?? (p.ai_analysis?.detected_color as string | undefined) ?? ''
+  const materialVal = p.material ?? (p.ai_analysis?.detected_material as string | undefined) ?? ''
+  const productDescriptors = [colorVal, materialVal].filter(Boolean).join(' ')
+  const targetSubject = productDescriptors ? `the ${productDescriptors} ${p.category}` : `the ${p.category}`
+
   return `You are a senior motion-graphics director crafting short product videos for marketplace listings.
 
 The product image will be passed as the FIRST FRAME (image2video). Your prompts describe what HAPPENS during the ${input.durationSec}-second clip — camera motion, ambient lighting changes, micro-actions. The product itself does NOT change shape or color.
 
-## PRODUCT
+## TARGET PRODUCT — CAMERA FOCUS LOCK
 Name:            ${p.name}
+Subject:         ${targetSubject}, centered in the source frame.
+
+⚠️ The camera MUST keep "${p.name}" as the SOLE focal subject for the entire clip.
+The source frame may contain OTHER items (furniture, lamps, appliances, decor,
+plants, fixtures, secondary products). These are CONTEXT ONLY — never let the
+camera pan toward them, zoom into them, focus on them, or treat them as the hero.
+Every camera move, lighting change, or micro-action must serve to showcase
+"${p.name}" — not the surrounding scene.
+
+## PRODUCT DETAILS
 Category:        ${p.category}
-Color:           ${p.color ?? (p.ai_analysis?.detected_color as string | undefined) ?? 'N/A'}
-Material:        ${p.material ?? (p.ai_analysis?.detected_material as string | undefined) ?? 'N/A'}
+Color:           ${colorVal || 'N/A'}
+Material:        ${materialVal || 'N/A'}
 Differentials:   ${(p.differentials ?? []).join(', ') || 'N/A'}
 
 ## AI VISUAL ANALYSIS
@@ -292,19 +307,22 @@ Duration:        ${input.durationSec}s
 ${b.custom_prompt ? `\n## ADDITIONAL USER INSTRUCTION\n${b.custom_prompt.slice(0, 1500)}\n` : ''}
 
 ## VARIATION STRATEGY (cycle through, ${input.count} total)
-1. Cinemagraph hero — subtle motion (dust particles, light shift), product centered, camera barely moves
-2. Slow zoom-in detail — camera slowly approaches, reveals texture/finish
-3. Product rotation — turntable feel, 360° if possible in ${input.durationSec}s
-4. Hands present — hands gently enter frame, lift or rotate the product
-5. Action / use — context of use (cooking, organizing, applying, etc.)
+1. Cinemagraph hero — subtle motion (dust particles, light shift), ${targetSubject} centered, camera barely moves
+2. Slow zoom-in detail — camera slowly approaches ${targetSubject}, reveals texture/finish OF IT (never of adjacent items)
+3. Product rotation — turntable feel around ${targetSubject}, 360° if possible in ${input.durationSec}s
+4. Hands present — hands gently enter frame, lift or rotate ${targetSubject} specifically
+5. Action / use — context of use OF ${targetSubject} (cooking under the lamp, etc.) — but ${targetSubject} stays the visual hero
 
 ## RULES
-- Each prompt: 1-3 sentences, English, optimized for Kling image2video
+- Each prompt: 1-3 sentences, English, optimized for image2video
+- EVERY prompt must EXPLICITLY name "${p.name}" or "${targetSubject}" as the focus subject
 - ALWAYS describe motion explicitly (camera move, lighting shift, action)
 - Specify pace: "slow", "smooth", "gentle" — avoid frenetic motion
 - Match visual_style strictly (premium = elegant slow motion; promocional = bolder energy)
 - DO NOT add text, watermarks, logos, or branding overlays
 - DO NOT change product shape, color, or appearance
+- DO NOT pan to / zoom to / focus on any OTHER products or scene elements (other lamps,
+  furniture, appliances, plants, fixtures). Even if visually appealing, they are background.
 - Avoid generic adjectives — use concrete cinematographic terms
 
 Return ONLY a JSON array of exactly ${input.count} strings, no markdown, no comments:
