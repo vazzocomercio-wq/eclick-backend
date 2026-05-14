@@ -1,7 +1,8 @@
-import { Controller, Get, Query, UseGuards, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Body, Param, Query, UseGuards, BadRequestException, HttpCode, HttpStatus } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CategoryResearchService } from './services/category-research.service'
+import { ExistingListingOptimizerService } from './services/existing-listing-optimizer.service'
 
 interface AuthUser { id: string; orgId: string | null }
 
@@ -22,6 +23,7 @@ interface AuthUser { id: string; orgId: string | null }
 export class EOtimizerController {
   constructor(
     private readonly researchSvc: CategoryResearchService,
+    private readonly optimizer:   ExistingListingOptimizerService,
   ) {}
 
   /**
@@ -61,5 +63,50 @@ export class EOtimizerController {
       excludeSellerNicknames,
       refresh:    refresh === 'true',
     })
+  }
+
+  /**
+   * MVP 4 — analisa um anúncio ML existente. Retorna permissões + score atual +
+   * sugestões da IA. NÃO aplica nada (criar registro em listing_optimizations).
+   */
+  @Post('listings/:mlbId/analyze')
+  @HttpCode(HttpStatus.OK)
+  analyzeListing(@ReqUser() user: AuthUser, @Param('mlbId') mlbId: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!mlbId?.trim()) throw new BadRequestException('mlbId obrigatório')
+    return this.optimizer.analyze(user.orgId, mlbId.trim())
+  }
+
+  /**
+   * MVP 4 — aplica as sugestões via PUT /items/{mlbId}. Defesa em
+   * profundidade: re-valida permissões no backend mesmo o frontend
+   * tendo bloqueado.
+   */
+  @Post('listings/optimizations/:optimizationId/apply')
+  @HttpCode(HttpStatus.OK)
+  applyOptimization(
+    @ReqUser() user: AuthUser,
+    @Param('optimizationId') optimizationId: string,
+    @Body() body: {
+      apply_title?:        boolean
+      apply_description?:  boolean
+      apply_attributes?:   boolean
+      custom_title?:       string
+      custom_description?: string
+      custom_attributes?:  Array<{ id: string; value_name: string }>
+    },
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.optimizer.apply(user.orgId, optimizationId, body)
+  }
+
+  /**
+   * MVP 4 — histórico de otimizações da org (pra UI de tracking).
+   */
+  @Get('listings/optimizations/history')
+  optimizationHistory(@ReqUser() user: AuthUser, @Query('limit') limit?: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    const lim = limit ? Math.min(Math.max(1, Number(limit)), 200) : 50
+    return this.optimizer.listHistory(user.orgId, lim)
   }
 }

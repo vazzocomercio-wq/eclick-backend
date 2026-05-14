@@ -3,7 +3,10 @@ import { EOtimizerController } from './e-otimizer.controller'
 import { MlSearchService } from './services/ml-search.service'
 import { CompetitorScorerService } from './services/competitor-scorer.service'
 import { CategoryResearchService } from './services/category-research.service'
+import { MlEditPermissionsService } from './services/ml-edit-permissions.service'
+import { ExistingListingOptimizerService } from './services/existing-listing-optimizer.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+import { AiModule } from '../ai/ai.module'
 
 /**
  * e-Otimizer IA — módulo de otimização SEO de anúncios Mercado Livre.
@@ -18,12 +21,14 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
  *   4. Feedback loop (visits/vendas antes/depois)
  */
 @Module({
-  imports:     [MercadolivreModule],
+  imports:     [MercadolivreModule, AiModule],
   controllers: [EOtimizerController],
   providers:   [
     MlSearchService,
     CompetitorScorerService,
     CategoryResearchService,
+    MlEditPermissionsService,
+    ExistingListingOptimizerService,
   ],
   exports: [
     // Exportado pro Creative consumir no MVP 2
