@@ -148,7 +148,11 @@ export class ProductsCadastroDispatchService {
 
         const dedupKey = `product_cadastro:${p.id}`
         const baseUrl = process.env.FRONTEND_PUBLIC_URL ?? 'https://app.eclick.app.br'
-        const deeplink = `${baseUrl}/dashboard/produtos/${p.id}/editar`
+        // Deeplink aponta pra IA Criativo do produto: operador completa
+        // dados, gera imagens, gera listing e publica direto no ML — tudo
+        // numa tela só. Sem isso, ia pro editor básico e ele tinha que
+        // navegar manualmente até o Criativo.
+        const deeplink = `${baseUrl}/dashboard/creative/${p.id}?source=cadastro`
 
         const bridgeRes = await this.bridge.createCampaignCard({
           organization_id: activeOrgId,
