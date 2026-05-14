@@ -476,7 +476,7 @@ export class CreativeImagePipelineService {
     //   1. briefing.template_id preenchido → usa esse template
     //   2. senão, matchTemplateForProduct (auto-match por categoria)
     // Quando selected_positions tem itens, filtra só esses slots; senão N primeiras.
-    let templateUsed: { id: string; name: string; match_reason: string; matched_category_ml_id?: string | null } | null = null
+    let templateUsed: { id: string; name: string; match_reason: string; matched_category_ml_id?: string | null; matched_category_text?: string | null } | null = null
     let templatePositions: number[] | null = null  // null = "N primeiras"
 
     if (briefing.template_id) {
@@ -504,6 +504,7 @@ export class CreativeImagePipelineService {
           name:                   matched.template.name,
           match_reason:           matched.match_reason,
           matched_category_ml_id: matched.matched_category_ml_id ?? null,
+          matched_category_text:  matched.matched_category_text ?? null,
         }
         rowsToInsert = await this.buildPromptsFromTemplate(
           matched.template, product, briefing, job.requested_count, null,
@@ -523,6 +524,7 @@ export class CreativeImagePipelineService {
           template_name:          templateUsed.name,
           match_reason:           templateUsed.match_reason,
           matched_category_ml_id: templateUsed.matched_category_ml_id ?? null,
+          matched_category_text:  templateUsed.matched_category_text ?? null,
           selected_positions:     templatePositions ?? null,
           positions_used:         rowsToInsert.length,
         },

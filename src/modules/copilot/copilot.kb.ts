@@ -309,7 +309,13 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 **Filosofia**: refs visuais carregam a estética, prompt só ancora diretrizes não-negociáveis (logo, hierarquia, fidelidade ao produto). Prompt longo (>900 chars) compete com refs e degrada resultado — UI mostra contador.
 
-**Lista** (\`/templates\`): cards de templates da org. Badge "default" no ativo. Multi-categoria ML — 1 template atende lista de \`category_ml_ids[]\`. Match no momento da geração: \`category_exact\` > \`org_default\` > \`most_recent\`.
+**Lista** (\`/templates\`): cards de templates da org. Badge "default" no ativo. Multi-categoria ML — 1 template atende lista de \`category_ml_ids[]\`. Match no momento da geração, em ordem:
+1. \`category_exact\` — produto vinculado ao catálogo + \`catalog.category_ml_id\` ∈ \`template.category_ml_ids[]\`. Empate vai pro template MAIS específico (menor array).
+2. \`category_text\` — casa \`creative_products.category\` (texto livre digitado pelo user no wizard) contra \`template.name\` por substring case-insensitive sem acento. "Pendente Pequeno" ganha de "Pendente" quando user digita "pendente pequeno" (mais longo = mais específico).
+3. \`org_default\` — fallback no template com \`is_default=true\`.
+4. \`most_recent\` — último criado.
+
+\`brand_voice\` no template + \`category_ml_ids[]\` são **obrigatórios** pra auto-pick funcionar bem. Plantão: produto novo sem \`product_id\` (não vinculado ao catálogo) só dá match via \`category_text\` — então preenche o campo "Categoria" no wizard com o tipo do produto (Plafon, Arandela…).
 
 **Editor por slot** (\`/templates/[id]\`):
 - Header colapsível por slot: #N · Nome · badge "X refs" · botão **Testar** · botão deletar

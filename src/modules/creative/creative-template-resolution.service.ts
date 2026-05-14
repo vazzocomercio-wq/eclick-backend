@@ -133,8 +133,20 @@ export interface ReferenceWithSignedUrl {
 
 export interface MatchedTemplate {
   template:        CreativeImagePromptTemplate
-  match_reason:    'category_exact' | 'org_default' | 'most_recent' | 'none'
+  match_reason:    'category_exact' | 'category_text' | 'org_default' | 'most_recent' | 'none'
   matched_category_ml_id?: string
+  /** Quando match_reason='category_text', traz o texto que casou (ex: "Plafon"). */
+  matched_category_text?: string
+}
+
+/** Normaliza string pra comparação fuzzy: lowercase, sem acento, trim. */
+function normalizeText(s: string | null | undefined): string {
+  if (!s) return ''
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .trim()
 }
 
 @Injectable()
@@ -165,19 +177,46 @@ export class CreativeTemplateResolutionService {
     const templates = await this.templates.list(orgId)
     if (templates.length === 0) return null
 
-    // 1. Category exact
+    // 1. Category exact — prioriza template MAIS específico (menor category_ml_ids[].length)
+    //    pra que ex.: produto em MLB189195 pegue "Plafon" (1 ID) em vez de "Esteira Vazzo" (3 IDs).
+    //    Empate em tamanho cai no order do list() (is_default desc, created_at desc).
+    //    Hoje cobre só produtos com `product_id` vinculado a catalog_products.
     if (categoryMlId) {
-      const byCategory = templates.find(t => t.category_ml_ids.includes(categoryMlId))
-      if (byCategory) {
-        return { template: byCategory, match_reason: 'category_exact', matched_category_ml_id: categoryMlId }
+      const candidates = templates.filter(t => t.category_ml_ids.includes(categoryMlId))
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.category_ml_ids.length - b.category_ml_ids.length)
+        return { template: candidates[0], match_reason: 'category_exact', matched_category_ml_id: categoryMlId }
       }
     }
 
-    // 2. Org default
+    // 2. Category text — casa `product.category` (campo texto livre digitado pelo user no wizard)
+    //    contra `template.name` por substring case-insensitive sem acento.
+    //    Ex: user digita "Plafon LED" → casa template "Plafon".
+    //    Prioriza match mais ESPECÍFICO (template.name mais longo entre os que dão match),
+    //    pra "Pendente Pequeno" ganhar de "Pendente" quando o user digitar "pendente pequeno".
+    const productCatNorm = normalizeText(product.category)
+    if (productCatNorm) {
+      const textMatches = templates
+        .map(t => ({ template: t, nameNorm: normalizeText(t.name) }))
+        .filter(({ nameNorm }) => nameNorm.length > 0 && (
+          productCatNorm.includes(nameNorm) || nameNorm.includes(productCatNorm)
+        ))
+      if (textMatches.length > 0) {
+        // Mais longo primeiro (mais específico)
+        textMatches.sort((a, b) => b.nameNorm.length - a.nameNorm.length)
+        return {
+          template: textMatches[0].template,
+          match_reason: 'category_text',
+          matched_category_text: product.category,
+        }
+      }
+    }
+
+    // 3. Org default
     const byDefault = templates.find(t => t.is_default)
     if (byDefault) return { template: byDefault, match_reason: 'org_default' }
 
-    // 3. Most recent (list já vem ordenado por is_default desc, created_at desc)
+    // 4. Most recent (list já vem ordenado por is_default desc, created_at desc)
     return { template: templates[0], match_reason: 'most_recent' }
   }
 
