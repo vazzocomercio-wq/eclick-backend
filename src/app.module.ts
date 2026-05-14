@@ -66,6 +66,7 @@ import { FinanceiroModule } from './modules/financeiro/financeiro.module'
 import { MlListingModule } from './modules/ml-listing/ml-listing.module'
 import { ExecutiveDashboardModule } from './modules/executive-dashboard/executive-dashboard.module'
 import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/visits-scanner.module'
+import { EOtimizerModule } from './modules/e-otimizer/e-otimizer.module'
 
 @Module({
   imports: [
@@ -134,6 +135,7 @@ import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/vi
     MlListingModule,
     ExecutiveDashboardModule,
     VisitsScannerModule,
+    EOtimizerModule,
   ],
   controllers: [AppController],
   providers: [AppService],
