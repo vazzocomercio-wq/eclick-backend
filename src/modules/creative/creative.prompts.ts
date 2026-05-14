@@ -57,11 +57,61 @@ export interface ListingPromptInput {
   }
   /** Instrução de ajuste para regenerações (opcional). */
   refinement?: string
+  /** e-Otimizer IA: research da categoria ML pra alimentar LLM com padrões reais. */
+  ml_research?: {
+    category_ml_id:   string
+    category_name:    string
+    top_keywords:     Array<{
+      keyword:    string
+      frequency:  number
+      sources_mlb: string[]
+      recommend:  'use' | 'use_if_true' | 'avoid'
+    }>
+    title_pattern: {
+      avg_length:      number
+      median_length:   number
+      top_first_words: Array<{ word: string; count: number }>
+      examples:        string[]
+    }
+    attributes_stats: Array<{
+      attribute_id:   string
+      attribute_name: string
+      fill_rate:      number
+      top_values:     Array<{ value: string; count: number }>
+      is_required:    boolean
+    }>
+    competitors_top5: Array<{
+      title:           string
+      price:           number
+      sold_quantity:   number
+      power_seller:    string | null
+      catalog_listing: boolean
+    }>
+    price_stats: {
+      median: number; avg: number; p25: number; p75: number
+    }
+  }
 }
+
+/**
+ * e-Otimizer IA — regras duras pra IA não inventar dados.
+ * Exportadas e referenciadas no prompt sempre que ml_research é passado.
+ */
+export const HARD_RULES_FORBIDDEN = [
+  'inventar potência, voltagem, watts, dimensões não informadas no produto',
+  'inventar cor, material, marca ou modelo que não constam',
+  'usar keyword de produto diferente (ex: "cromado" pra produto "dourado")',
+  'mudar a categoria implícita do produto',
+  'prometer recurso inexistente (resistente à água, antiqueda, etc) sem evidência',
+  'copiar título exato de concorrente — sempre adaptar',
+  'usar superlativos falsos ("melhor do mundo", "único", "número 1")',
+  'prometer prazos, garantias ou condições não informadas',
+] as const
 
 export function buildListingPrompt(input: ListingPromptInput): string {
   const rules = getMarketplaceRules(input.briefing.target_marketplace)
   const p = input.product
+  const r = input.ml_research
 
   return `Você é um copywriter especialista em anúncios de marketplace brasileiro.
 
@@ -86,10 +136,10 @@ ${input.briefing.communication_tone}
 
 ## ESTILO VISUAL
 ${input.briefing.visual_style}
-
+${r ? buildResearchSection(r) : ''}
 ## REGRAS DO MARKETPLACE
 ${rules.title_rules}
-- Título: máximo ${rules.max_title_chars} caracteres
+- Título: máximo ${rules.max_title_chars} caracteres${r ? ` (média da categoria: ${r.title_pattern.avg_length})` : ''}
 - Descrição: entre 500 e ${Math.min(rules.max_description_chars, 2000)} caracteres
 - Bullets: entre 5 e 7
 - Estilo de bullet: ${describeBulletStyle(rules.bullet_style)}
@@ -97,11 +147,14 @@ ${rules.title_rules}
 - Palavras-chave: 10 a 15, relevantes para busca no marketplace
 - FAQ: 5 perguntas reais que compradores fariam
 
-## REGRAS DE QUALIDADE (NÃO NEGOCIÁVEIS)
-- NÃO inventar especificações que não existem no produto
-- NÃO usar superlativos falsos ("melhor do mundo", "único", "número 1")
-- NÃO prometer prazos, garantias ou condições que não foram informadas
-- SER honesto com as características reais visíveis na imagem ou nos dados
+## REGRAS DURAS (NÃO NEGOCIÁVEIS)
+${HARD_RULES_FORBIDDEN.map((rule, i) => `${i + 1}. NUNCA ${rule}`).join('\n')}
+${r ? `
+## DIRETRIZ DE USO DAS KEYWORDS DO MERCADO
+- Keywords marcadas "use" (>50% dos top): USE no título E na descrição quando o produto realmente tem essa característica
+- Keywords marcadas "use_if_true": só use SE o produto tem essa característica de verdade (ex: "LED" só se for LED)
+- Keywords marcadas "avoid": ignore — são ruído da cauda
+` : ''}
 ${input.refinement ? `\n## AJUSTE SOLICITADO\n${input.refinement}` : ''}
 
 Retorne APENAS um JSON válido (sem markdown, sem texto fora do JSON):
@@ -117,6 +170,48 @@ Retorne APENAS um JSON válido (sem markdown, sem texto fora do JSON):
   "faq":                      [{ "q": "...", "a": "..." }],
   "commercial_differentials": ["diferencial 1", "diferencial 2", "..."]
 }
+`
+}
+
+/**
+ * Constrói a seção "## ANÁLISE DE MERCADO ML — DADOS REAIS" do prompt.
+ * Inclui top 5 títulos, keywords com sources, padrão de título e
+ * atributos obrigatórios — pra LLM gerar baseado em padrões empíricos
+ * em vez de "imaginar" boas práticas de SEO.
+ */
+function buildResearchSection(r: NonNullable<ListingPromptInput['ml_research']>): string {
+  const topKw = r.top_keywords.slice(0, 15)
+  const attrsRequired = r.attributes_stats.filter(a => a.is_required).slice(0, 10)
+  const attrsTopFilled = r.attributes_stats
+    .filter(a => !a.is_required && a.fill_rate >= 0.5)
+    .slice(0, 10)
+
+  return `
+## ANÁLISE DE MERCADO ML — DADOS REAIS DA CATEGORIA "${r.category_name}"
+
+### Top 5 anúncios concorrentes (analisados):
+${r.competitors_top5.map((c, i) =>
+  `${i + 1}. "${c.title}" — R$ ${c.price.toFixed(2)} · ${c.sold_quantity} vendas${c.power_seller ? ` · ${c.power_seller}` : ''}${c.catalog_listing ? ' · catálogo' : ''}`
+).join('\n')}
+
+### Padrão de título da categoria:
+- Tamanho médio: ${r.title_pattern.avg_length} chars (mediana: ${r.title_pattern.median_length})
+- Primeiras palavras mais comuns: ${r.title_pattern.top_first_words.map(w => `"${w.word}" (${w.count}x)`).join(', ')}
+
+### Keywords que aparecem nos top 20 (com frequência):
+${topKw.map(kw =>
+  `- "${kw.keyword}" — ${kw.frequency} dos top 20 → ${kw.recommend.toUpperCase()}`
+).join('\n')}
+
+### Preço de mercado (R$):
+- Mediana: ${r.price_stats.median.toFixed(2)}
+- Faixa P25-P75: ${r.price_stats.p25.toFixed(2)} a ${r.price_stats.p75.toFixed(2)}
+${attrsRequired.length > 0 ? `
+### Atributos OBRIGATÓRIOS da categoria (ML exige):
+${attrsRequired.map(a => `- ${a.attribute_name} (${a.attribute_id}) — preencher na technical_sheet${a.top_values.length > 0 ? `; top valores: ${a.top_values.slice(0, 3).map(v => `"${v.value}"`).join(', ')}` : ''}`).join('\n')}` : ''}
+${attrsTopFilled.length > 0 ? `
+### Atributos RECOMENDADOS (preenchidos em ≥50% dos top, ajudam SEO):
+${attrsTopFilled.map(a => `- ${a.attribute_name} — ${Math.round(a.fill_rate * 100)}% dos top preenchem${a.top_values.length > 0 ? `; ex: ${a.top_values.slice(0, 3).map(v => `"${v.value}"`).join(', ')}` : ''}`).join('\n')}` : ''}
 `
 }
 

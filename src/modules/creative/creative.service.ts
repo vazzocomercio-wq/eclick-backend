@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenEx
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { CategoryResearchService } from '../e-otimizer/services/category-research.service'
 import {
   PRODUCT_ANALYSIS_PROMPT,
   buildListingPrompt,
@@ -92,6 +93,9 @@ export interface CreativeListing {
   marketplace_variants:     Record<string, unknown>
   version:                  number
   parent_listing_id:        string | null
+  /** ML category ID (preenchido via predict_category) — usado pelo e-Otimizer */
+  category_ml_id?:          string | null
+  attributes_ml_suggested?: Array<{ id: string; name: string; value_id?: string; value_name?: string }>
   generation_metadata:      Record<string, unknown>
   status:                   'draft' | 'generating' | 'review' | 'approved' | 'published' | 'archived'
   approved_at:              string | null
@@ -155,6 +159,7 @@ export class CreativeService {
   constructor(
     private readonly llm: LlmService,
     private readonly mercadolivre: MercadolivreService,
+    private readonly research: CategoryResearchService,
   ) {}
 
   /**
@@ -891,6 +896,17 @@ export class CreativeService {
       throw new BadRequestException('briefing pertence a outro produto')
     }
 
+    // e-Otimizer IA: detecta categoria ML PRIMEIRO + roda research da categoria
+    // pra alimentar a LLM com padrões reais. Best-effort — se ML cair, gera
+    // sem research (fallback ao comportamento antigo).
+    const earlyMlPred = await this.predictMlCategory(product.name, briefing.target_marketplace)
+    const mlResearch  = await this.buildMlResearchForPrompt({
+      orgId,
+      categoryMlId: earlyMlPred.category_ml_id,
+      product,
+      marketplace:  briefing.target_marketplace,
+    })
+
     const promptInput: ListingPromptInput = {
       product: {
         name:            product.name,
@@ -908,6 +924,7 @@ export class CreativeService {
         visual_style:       briefing.visual_style,
         communication_tone: briefing.communication_tone,
       },
+      ml_research: mlResearch ?? undefined,
     }
 
     const out = await this.llm.generateText({
@@ -924,9 +941,9 @@ export class CreativeService {
 
     const fields = normalizeListingFields(parsed)
 
-    // Sub-sprint A: chama predict_category do ML pra ter categoria REAL (MLB...)
-    // em vez do texto livre que o LLM inventa. Best-effort: null se ML offline.
+    // Refina categoria com o título gerado (mais preciso que o nome do produto)
     const mlPred = await this.predictMlCategory(fields.title, briefing.target_marketplace)
+    const finalCategoryMlId = mlPred.category_ml_id ?? earlyMlPred.category_ml_id
 
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
@@ -942,7 +959,7 @@ export class CreativeService {
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
-        category_ml_id:           mlPred.category_ml_id,
+        category_ml_id:           finalCategoryMlId,
         attributes_ml_suggested:  mlPred.attributes_ml_suggested,
         faq:                      fields.faq,
         commercial_differentials: fields.commercial_differentials,
@@ -957,6 +974,19 @@ export class CreativeService {
           cost_usd:      out.costUsd,
           latency_ms:    out.latencyMs,
           fallback_used: out.fallbackUsed,
+          // e-Otimizer IA: rastreabilidade — quais anúncios serviram de base
+          seo_sources: mlResearch ? {
+            category_ml_id: mlResearch.category_ml_id,
+            top_keywords_used: mlResearch.top_keywords.slice(0, 15).map(k => ({
+              keyword:    k.keyword,
+              frequency:  k.frequency,
+              sources_mlb: k.sources_mlb,
+              recommend:  k.recommend,
+            })),
+            competitors_analyzed: mlResearch.competitors_top5.map(c => c.title),
+            avg_title_length: mlResearch.title_pattern.avg_length,
+            price_median:     mlResearch.price_stats.median,
+          } : null,
         },
         status: 'review',
       })
@@ -964,6 +994,78 @@ export class CreativeService {
       .single()
     if (error) throw new BadRequestException(`generateListing.insert: ${error.message}`)
     return data as CreativeListing
+  }
+
+  /**
+   * e-Otimizer IA — chama CategoryResearchService e mapeia pro shape esperado
+   * pelo ListingPromptInput. Best-effort: se categoria não foi detectada ou
+   * research falhou, retorna null e a LLM gera sem research data (fallback).
+   */
+  private async buildMlResearchForPrompt(args: {
+    orgId:        string
+    categoryMlId: string | null
+    product:      CreativeProduct
+    marketplace:  string
+  }): Promise<ListingPromptInput['ml_research']> {
+    if (!args.categoryMlId || args.marketplace !== 'mercado_livre') return undefined
+    try {
+      const query = args.product.name
+        .split(/\s+/).slice(0, 5).join(' ')
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .trim()
+      if (!query) return undefined
+
+      const userKeywords = [
+        args.product.name,
+        args.product.brand ?? '',
+        args.product.color ?? '',
+        args.product.material ?? '',
+        args.product.category,
+      ].flatMap(t => t.toLowerCase().split(/\s+/)).filter(Boolean)
+
+      const research = await this.research.research({
+        orgId:        args.orgId,
+        categoryId:   args.categoryMlId,
+        query,
+        userKeywords,
+        excludeSellerNicknames: ['VAZZO_'],
+      })
+
+      return {
+        category_ml_id:   research.category_ml_id,
+        category_name:    research.category_name,
+        top_keywords:     research.top_keywords.map(k => ({
+          keyword:    k.keyword,
+          frequency:  k.frequency,
+          sources_mlb: k.sources_mlb,
+          recommend:  k.recommend,
+        })),
+        title_pattern: {
+          avg_length:      research.title_pattern.avg_length,
+          median_length:   research.title_pattern.median_length,
+          top_first_words: research.title_pattern.top_first_words,
+          examples:        research.title_pattern.examples,
+        },
+        attributes_stats: research.attributes_stats,
+        competitors_top5: research.competitors_analyzed.slice(0, 5).map(c => ({
+          title:           c.title,
+          price:           c.price,
+          sold_quantity:   c.sold_quantity,
+          power_seller:    c.power_seller_status,
+          catalog_listing: c.catalog_listing,
+        })),
+        price_stats: {
+          median: research.price_stats.median,
+          avg:    research.price_stats.avg,
+          p25:    research.price_stats.p25,
+          p75:    research.price_stats.p75,
+        },
+      }
+    } catch (e) {
+      this.logger.warn(`[generateListing] research falhou (gerando sem dados de mercado): ${(e as Error).message}`)
+      return undefined
+    }
   }
 
   async listListingsByProduct(orgId: string, productId: string): Promise<CreativeListing[]> {
@@ -1028,6 +1130,20 @@ export class CreativeService {
     const product  = await this.getProduct(orgId, previous.product_id)
     const briefing = await this.getBriefing(orgId, previous.briefing_id)
 
+    // e-Otimizer IA: reaproveita category_ml_id já detectada na versão anterior
+    // (evita re-predict que custa call ML) OU re-detecta se ausente.
+    let categoryMlId = previous.category_ml_id
+    if (!categoryMlId) {
+      const pred = await this.predictMlCategory(product.name, briefing.target_marketplace)
+      categoryMlId = pred.category_ml_id
+    }
+    const mlResearch = await this.buildMlResearchForPrompt({
+      orgId,
+      categoryMlId,
+      product,
+      marketplace: briefing.target_marketplace,
+    })
+
     const promptInput: ListingPromptInput = {
       product: {
         name:            product.name,
@@ -1046,6 +1162,7 @@ export class CreativeService {
         communication_tone: briefing.communication_tone,
       },
       refinement: refinement?.trim() || undefined,
+      ml_research: mlResearch ?? undefined,
     }
 
     const out = await this.llm.generateText({
@@ -1061,8 +1178,9 @@ export class CreativeService {
     if (!parsed) throw new BadRequestException('LLM retornou JSON inválido — tente novamente')
     const fields = normalizeListingFields(parsed)
 
-    // Sub-sprint A: predict_category na regeneração também (título pode ter mudado)
+    // Refina categoria com novo título
     const mlPred = await this.predictMlCategory(fields.title, briefing.target_marketplace)
+    const finalCategoryMlId = mlPred.category_ml_id ?? categoryMlId
 
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
@@ -1078,7 +1196,7 @@ export class CreativeService {
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
-        category_ml_id:           mlPred.category_ml_id,
+        category_ml_id:           finalCategoryMlId,
         attributes_ml_suggested:  mlPred.attributes_ml_suggested,
         faq:                      fields.faq,
         commercial_differentials: fields.commercial_differentials,
@@ -1094,6 +1212,19 @@ export class CreativeService {
           latency_ms:    out.latencyMs,
           fallback_used: out.fallbackUsed,
           refinement:    refinement ?? null,
+          // e-Otimizer IA: rastreabilidade
+          seo_sources: mlResearch ? {
+            category_ml_id: mlResearch.category_ml_id,
+            top_keywords_used: mlResearch.top_keywords.slice(0, 15).map(k => ({
+              keyword:    k.keyword,
+              frequency:  k.frequency,
+              sources_mlb: k.sources_mlb,
+              recommend:  k.recommend,
+            })),
+            competitors_analyzed: mlResearch.competitors_top5.map(c => c.title),
+            avg_title_length: mlResearch.title_pattern.avg_length,
+            price_median:     mlResearch.price_stats.median,
+          } : null,
         },
         status: 'review',
       })

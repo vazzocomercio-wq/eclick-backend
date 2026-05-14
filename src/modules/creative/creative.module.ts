@@ -20,9 +20,10 @@ import { VideoProviderRegistry } from './providers/video-provider.registry'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { CredentialsModule } from '../credentials/credentials.module'
+import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule, CredentialsModule],
+  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule],
   controllers: [CreativeController],
   providers:   [
     CreativeService,
