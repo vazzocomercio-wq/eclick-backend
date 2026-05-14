@@ -106,8 +106,33 @@ export class ProductsCadastroDispatchService {
           .in('status', ['open', 'in_progress'])
           .maybeSingle()
         if (existing) {
-          skippedExisting++
-          continue
+          // Verifica se o deal ainda existe no Active (user pode ter deletado
+          // manualmente). Se sumiu, marca o assignment como cancelled e segue
+          // pra criar novo card.
+          const dealId = (existing as { active_deal_id: string | null }).active_deal_id
+          let dealStillExists = false
+          if (dealId) {
+            const { data: deal } = await supabaseAdmin
+              .schema('active')
+              .from('deals')
+              .select('id')
+              .eq('id', dealId)
+              .maybeSingle()
+            dealStillExists = !!deal
+          }
+          if (dealStillExists) {
+            skippedExisting++
+            continue
+          }
+          // Deal sumiu do Active — cancela assignment órfão e prossegue
+          await supabaseAdmin
+            .from('product_operator_assignments')
+            .update({
+              status:      'cancelled',
+              updated_at:  new Date().toISOString(),
+            })
+            .eq('id', (existing as { id: string }).id)
+          this.log.log(`[cadastro-dispatch] assignment órfão cancelado pra produto=${p.id} (deal ${dealId} sumiu do Active)`)
         }
 
         // Avalia missing fields
