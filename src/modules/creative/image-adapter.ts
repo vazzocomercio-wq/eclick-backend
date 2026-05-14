@@ -45,6 +45,10 @@ export interface AdaptImageArgs {
   /** CreativeService pra assinar a URL final. */
   creative:     CreativeService
   logger?:      Logger
+  /** Quando provider exige dimensões EXATAS (ex: Sora 2 720x1280),
+   *  força resize após crop. Sem isso só ajusta aspect. */
+  targetWidth?:  number
+  targetHeight?: number
 }
 
 /**
@@ -57,9 +61,10 @@ export interface AdaptImageArgs {
  * @returns URL assinada pronta pra mandar pro provider de vídeo
  */
 export async function adaptImageForVideo(args: AdaptImageArgs): Promise<string> {
-  const { sourceUrl, targetAspect, orgId, productId, videoId, creative, logger } = args
+  const { sourceUrl, targetAspect, orgId, productId, videoId, creative, logger, targetWidth, targetHeight } = args
 
   const target = ASPECT_RATIOS[targetAspect]
+  const needsExactSize = !!(targetWidth && targetHeight)
 
   // 1. Download
   const res = await axios.get<ArrayBuffer>(sourceUrl, {
@@ -75,53 +80,66 @@ export async function adaptImageForVideo(args: AdaptImageArgs): Promise<string> 
     throw new Error('sharp: imagem sem dimensões legíveis')
   }
   const actual = meta.width / meta.height
+  const aspectMatches = Math.abs(actual - target) / target < ASPECT_TOLERANCE
 
-  // 3. Skip se já bate
-  if (Math.abs(actual - target) / target < ASPECT_TOLERANCE) {
+  // 3. Skip se aspect bate E provider não exige tamanho exato
+  if (aspectMatches && !needsExactSize) {
     logger?.log(`[image-adapter] ${meta.width}x${meta.height} já é ${targetAspect}, sem crop`)
     return sourceUrl
   }
+  // Se aspect bate mas precisa de tamanho exato, ainda pode pular o crop e ir direto pro resize
+  if (aspectMatches && needsExactSize && meta.width === targetWidth && meta.height === targetHeight) {
+    logger?.log(`[image-adapter] ${meta.width}x${meta.height} já é ${targetWidth}x${targetHeight}, sem mudança`)
+    return sourceUrl
+  }
 
-  // 4. Calcula crop centralizado
+  // 4. Calcula crop centralizado (sempre roda quando não bate aspect, ou pra normalizar antes do resize)
   let cropWidth: number
   let cropHeight: number
   let left: number
   let top: number
   if (actual > target) {
-    // Imagem mais larga que alvo → corta os lados (mantém altura)
     cropHeight = meta.height
     cropWidth  = Math.round(meta.height * target)
     left = Math.round((meta.width - cropWidth) / 2)
     top  = 0
-  } else {
-    // Imagem mais alta que alvo → corta topo e base (mantém largura)
+  } else if (actual < target) {
     cropWidth  = meta.width
     cropHeight = Math.round(meta.width / target)
     left = 0
     top  = Math.round((meta.height - cropHeight) / 2)
+  } else {
+    // Aspect bate, sem crop necessário — mas vai resize pra dimensões exatas
+    cropWidth  = meta.width
+    cropHeight = meta.height
+    left = 0
+    top  = 0
   }
 
-  const cropped = await sharp(buf)
-    .extract({ left, top, width: cropWidth, height: cropHeight })
-    .jpeg({ quality: 92 })
-    .toBuffer()
+  // 5. Pipeline sharp: extract → resize (se exigido) → jpeg
+  let pipeline = sharp(buf).extract({ left, top, width: cropWidth, height: cropHeight })
+  if (needsExactSize) {
+    pipeline = pipeline.resize(targetWidth, targetHeight, { fit: 'fill' })
+  }
+  const finalBuf = await pipeline.jpeg({ quality: 92 }).toBuffer()
 
-  // 5. Upload na pasta de sources do vídeo
+  // 6. Upload na pasta de sources do vídeo
   const storagePath = `${orgId}/${productId}/videos/sources/${videoId}.jpg`
   const { error } = await supabaseAdmin.storage
     .from('creative')
-    .upload(storagePath, cropped, {
+    .upload(storagePath, finalBuf, {
       contentType:  'image/jpeg',
       upsert:       true,
       cacheControl: '3600',
     })
   if (error) throw new Error(`image-adapter.upload: ${error.message}`)
 
+  const finalDims = needsExactSize ? `${targetWidth}x${targetHeight}` : `${cropWidth}x${cropHeight}`
   logger?.log(
-    `[image-adapter] crop ${meta.width}x${meta.height}(${actual.toFixed(2)}) → ` +
-    `${cropWidth}x${cropHeight}(${targetAspect}) saved=${storagePath}`,
+    `[image-adapter] ${meta.width}x${meta.height}(${actual.toFixed(2)}) → ` +
+    `${finalDims}(${targetAspect}) saved=${storagePath}`,
   )
 
-  // 6. Assina URL final
+  // 7. Assina URL final
   return creative.signImage(storagePath, 600)
 }

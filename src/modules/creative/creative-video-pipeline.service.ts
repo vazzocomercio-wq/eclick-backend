@@ -10,6 +10,16 @@ import { extractLastFrame, concatVideos } from '../../common/ffmpeg'
 import { adaptImageForVideo, type TargetAspect } from './image-adapter'
 
 /**
+ * Sora 2 exige imagem com dimensões EXATAS conforme o `size` param.
+ * Outros providers (Kling, Veo) toleram qualquer tamanho dentro do aspect.
+ */
+const SORA_EXACT_DIMS: Record<'1:1' | '16:9' | '9:16', { width: number; height: number }> = {
+  '1:1':  { width: 720,  height: 720  },
+  '16:9': { width: 1280, height: 720  },
+  '9:16': { width: 720,  height: 1280 },
+}
+
+/**
  * Negative prompt universal pra vídeos — anti-CGI-effects que viram
  * propaganda enganosa em marketplace (Kling e Veo aceitam, Sora ignora).
  *
@@ -912,12 +922,18 @@ export class CreativeVideoPipelineService {
 
   private async submitOne(video: CreativeVideo): Promise<void> {
     try {
+      // Resolve provider primeiro pra saber se exige dims exatas (Sora 2)
+      const provider = this.registry.resolve(video.model_name)
+      const exactDims = provider.key === 'sora'
+        ? SORA_EXACT_DIMS[video.aspect_ratio as '1:1' | '16:9' | '9:16']
+        : undefined
+
       // Resolve source URL (signed): preferência por source_image se passado, senão main_image
       const rawSourceUrl = await this.resolveSourceUrl(video)
 
       // F6: adapta imagem pro aspect alvo (providers de vídeo herdam aspect
       // da source image — sem isso o vídeo sai no aspect da imagem original).
-      // Se já bate, retorna URL original sem custo.
+      // Sora exige resize pra dimensões exatas; Kling/Veo só precisam do aspect.
       const adaptedSourceUrl = await adaptImageForVideo({
         sourceUrl:    rawSourceUrl,
         targetAspect: video.aspect_ratio as TargetAspect,
@@ -926,10 +942,9 @@ export class CreativeVideoPipelineService {
         videoId:      video.id,
         creative:     this.creative,
         logger:       this.logger,
+        targetWidth:  exactDims?.width,
+        targetHeight: exactDims?.height,
       })
-
-      // F6: dispatch via registry — escolhe Kling ou Flow baseado no model_name prefix.
-      const provider = this.registry.resolve(video.model_name)
       const { taskId } = await provider.submit({
         imageUrl:       adaptedSourceUrl,
         prompt:         video.prompt_text,
