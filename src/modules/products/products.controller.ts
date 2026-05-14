@@ -7,6 +7,7 @@ import { ProductsImportService } from './products-import.service'
 import { ProductsCompletenessService } from './products-completeness.service'
 import { MlCategoryRequirementsService } from './ml-category-requirements.service'
 import { ProductsCadastroDispatchService, type DispatchInput } from './products-cadastro-dispatch.service'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
@@ -27,7 +28,37 @@ export class ProductsController {
     private readonly completeness: ProductsCompletenessService,
     private readonly mlReq: MlCategoryRequirementsService,
     private readonly cadastroDispatch: ProductsCadastroDispatchService,
+    private readonly activeResolver:   ActiveResolverService,
   ) {}
+
+  // ── Active config dropdowns (sessão 2026-05-14) ────────────────────────
+  // Endpoints que populam os dropdowns do modal "Despachar pra operador"
+  // sem o user precisar copiar UUIDs do schema active.* na mão.
+
+  /** GET /products/active-config/agents — lista members ativos+convidados da org Active */
+  @Get('active-config/agents')
+  listActiveAgents(@ReqUser() u: ReqUserPayload) {
+    if (!u.id) throw new BadRequestException('userId ausente')
+    return this.activeResolver.listAgents(u.id)
+  }
+
+  /** GET /products/active-config/pipelines — lista pipelines da org Active */
+  @Get('active-config/pipelines')
+  listActivePipelines(@ReqUser() u: ReqUserPayload) {
+    if (!u.id) throw new BadRequestException('userId ausente')
+    return this.activeResolver.listPipelines(u.id)
+  }
+
+  /** GET /products/active-config/pipelines/:id/stages — lista stages de um pipeline */
+  @Get('active-config/pipelines/:pipelineId/stages')
+  listActivePipelineStages(
+    @ReqUser() u: ReqUserPayload,
+    @Param('pipelineId') pipelineId: string,
+  ) {
+    if (!u.id) throw new BadRequestException('userId ausente')
+    if (!pipelineId?.trim()) throw new BadRequestException('pipelineId obrigatório')
+    return this.activeResolver.listStages(u.id, pipelineId.trim())
+  }
 
   // ── F4 (2026-05-14) — Despacho pra operador (cards no Active CRM) ──────
 
