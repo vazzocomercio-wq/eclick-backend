@@ -371,7 +371,35 @@ export function buildVideoPromptsRequest(input: VideoPromptsBuilderInput): strin
 
   return `You are a senior motion-graphics director crafting short product videos for marketplace listings.
 
-The product image will be passed as the FIRST FRAME (image2video). Your prompts describe what HAPPENS during the ${input.durationSec}-second clip — camera motion, ambient lighting changes, micro-actions. The product itself does NOT change shape or color.
+The product image will be passed as the FIRST FRAME (image2video). Your prompts describe what HAPPENS during the ${input.durationSec}-second clip — camera motion, ambient lighting changes, micro-actions.
+
+## 🚨 ABSOLUTE RULES — NEVER NEGOTIABLE, NO EXCEPTIONS
+
+These rules override every other instruction in this prompt. If any creative idea
+conflicts with these rules, DROP THE IDEA. There are zero acceptable exceptions.
+
+1. **NEVER alter the product's SHAPE, FORMAT, GEOMETRY, or SILHOUETTE.**
+   The product in the final frame must be visually identical to the source frame.
+   No morphing, no elongating, no widening, no extra elements growing out of it,
+   no parts disappearing, no surface details changing.
+
+2. **NEVER alter the product's COLOR, MATERIAL, or FINISH.**
+   A brushed gold lamp stays brushed gold. A white surface stays white. Same
+   reflectivity, same texture, same tone, frame 1 to frame N.
+
+3. **NEVER add effects that are not part of the product's REAL physical function.**
+   If the product is a lamp that emits warm 3000K light, the video shows warm
+   3000K light — not pulsing colors, not prismatic rainbows, not glowing auras,
+   not light beams shooting outward, not magical sparkles. Whatever the product
+   does NOT do in real life, it MUST NOT do in this video.
+
+4. **The customer who watches this video will receive the EXACT product shown.**
+   Anything you depict that the physical product can't replicate becomes false
+   advertising. When in doubt, choose the duller, more honest motion.
+
+These three rules apply to EVERY prompt you generate, EVERY frame, EVERY variation.
+
+---
 
 ## TARGET PRODUCT — CAMERA FOCUS LOCK
 Name:            ${p.name}
