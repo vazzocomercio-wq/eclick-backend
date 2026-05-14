@@ -88,12 +88,36 @@ export class ProductsController {
   }
 
   /** GET /products/completeness-summary — KPIs agregados pra dashboard.
-   *  Retorna { total, incomplete_count, by_missing, sample_incomplete[] }. */
+   *  Retorna { total, incomplete_count, by_missing, sample_incomplete[] }.
+   *  Aceita filtros (2026-05-14): stock_min, stock_max, search, sort, sample_size. */
   @Get('completeness-summary')
-  async completenessSummary(@ReqUser() u: ReqUserPayload, @Query('limit') limitRaw?: string) {
+  async completenessSummary(
+    @ReqUser() u: ReqUserPayload,
+    @Query('limit')       limitRaw?:      string,
+    @Query('sample_size') sampleSizeRaw?: string,
+    @Query('stock_min')   stockMinRaw?:   string,
+    @Query('stock_max')   stockMaxRaw?:   string,
+    @Query('search')      search?:        string,
+    @Query('sort')        sortRaw?:       string,
+  ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    const limit = Math.min(Math.max(parseInt(limitRaw ?? '500', 10) || 500, 50), 2000)
-    return this.completeness.evaluateBulk(u.orgId, limit)
+    const parseOpt = (s?: string): number | undefined => {
+      if (!s) return undefined
+      const n = parseInt(s, 10)
+      return Number.isFinite(n) ? n : undefined
+    }
+    const limit       = Math.min(Math.max(parseOpt(limitRaw) ?? 500, 50), 2000)
+    const sampleSize  = Math.min(Math.max(parseOpt(sampleSizeRaw) ?? 200, 10), 500)
+    const sort: 'stock_desc' | 'stock_asc' | 'name' | undefined =
+      sortRaw === 'stock_desc' || sortRaw === 'stock_asc' || sortRaw === 'name' ? sortRaw : undefined
+    return this.completeness.evaluateBulk(u.orgId, {
+      limit,
+      sample_size: sampleSize,
+      stock_min:   parseOpt(stockMinRaw),
+      stock_max:   parseOpt(stockMaxRaw),
+      search:      search?.trim() || undefined,
+      sort,
+    })
   }
 
   /** GET /products/ml-category-requirements?category_id=MLB... — required attrs */

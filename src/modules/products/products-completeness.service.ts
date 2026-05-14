@@ -143,25 +143,63 @@ export class ProductsCompletenessService {
     return { removed_tag: removedTag, result }
   }
 
-  /** Bulk evaluation pra dashboard / cron — paraleliza fetch de categorias. */
-  async evaluateBulk(orgId: string, limit = 500): Promise<{
+  /** Bulk evaluation pra dashboard / cron — paraleliza fetch de categorias.
+   *  Opções de filtro (2026-05-14): stock_min/max, search por nome+sku, sort
+   *  por stock asc/desc — usados pela tela `/produtos/operacao-cadastro` pra
+   *  gestor priorizar quem cadastrar primeiro. */
+  async evaluateBulk(orgId: string, optsOrLimit: number | {
+    limit?:      number
+    sample_size?: number
+    stock_min?:   number
+    stock_max?:   number
+    search?:      string
+    sort?:        'stock_desc' | 'stock_asc' | 'name'
+  } = 500): Promise<{
     total:                number
     incomplete_count:     number
     by_missing:           Record<string, number>  // campo → quantos produtos faltam ele
-    sample_incomplete:    Array<{ id: string; sku: string | null; name: string; missing: string[] }>
+    sample_incomplete:    Array<{ id: string; sku: string | null; name: string; missing: string[]; stock: number | null }>
   }> {
-    const { data: products, error } = await supabaseAdmin
+    // Compat: assinatura antiga `evaluateBulk(orgId, 500)` continua válida.
+    const opts = typeof optsOrLimit === 'number' ? { limit: optsOrLimit } : optsOrLimit
+    const limit = Math.min(Math.max(opts.limit ?? 500, 50), 2000)
+    const sampleSize = Math.min(Math.max(opts.sample_size ?? 200, 10), 500)
+
+    let q = supabaseAdmin
       .from('products')
-      .select('id, sku, name, brand, cost_price, my_price, price, weight_kg, width_cm, length_cm, height_cm, photo_urls, description, category_ml_id, gtin, attributes, ml_title, tags')
+      .select('id, sku, name, brand, cost_price, my_price, price, stock, weight_kg, width_cm, length_cm, height_cm, photo_urls, description, category_ml_id, gtin, attributes, ml_title, tags')
       .eq('organization_id', orgId)
       .or('tags.cs.{cadastro_pendente},catalog_status.eq.incomplete')
-      .limit(limit)
+
+    // Filtros de estoque — útil pra priorizar produtos com volume real
+    if (opts.stock_min != null && Number.isFinite(opts.stock_min)) {
+      q = q.gte('stock', opts.stock_min)
+    }
+    if (opts.stock_max != null && Number.isFinite(opts.stock_max)) {
+      q = q.lte('stock', opts.stock_max)
+    }
+
+    // Busca textual (mesma lógica do listPaginated)
+    if (opts.search?.trim()) {
+      const s = opts.search.trim().replace(/%/g, '')
+      q = q.or(`name.ilike.%${s}%,sku.ilike.%${s}%,brand.ilike.%${s}%`)
+    }
+
+    // Ordenação
+    if (opts.sort === 'stock_desc')      q = q.order('stock', { ascending: false, nullsFirst: false })
+    else if (opts.sort === 'stock_asc')  q = q.order('stock', { ascending: true,  nullsFirst: true  })
+    else if (opts.sort === 'name')       q = q.order('name',  { ascending: true })
+    else                                  q = q.order('updated_at', { ascending: false })
+
+    q = q.limit(limit)
+
+    const { data: products, error } = await q
 
     if (error) throw new Error(error.message)
-    const rows = (products ?? []) as ProductForCheck[]
+    const rows = (products ?? []) as Array<ProductForCheck & { stock?: number | null }>
 
     const byMissing: Record<string, number> = {}
-    const sample: Array<{ id: string; sku: string | null; name: string; missing: string[] }> = []
+    const sample: Array<{ id: string; sku: string | null; name: string; missing: string[]; stock: number | null }> = []
     let incomplete = 0
 
     // Pré-carrega required attrs em batch
@@ -183,12 +221,13 @@ export class ProductsCompletenessService {
         for (const m of allMissing) {
           byMissing[m] = (byMissing[m] ?? 0) + 1
         }
-        if (sample.length < 20) {
+        if (sample.length < sampleSize) {
           sample.push({
             id:      p.id ?? '',
             sku:     p.sku ?? null,
             name:    p.name ?? '',
             missing: allMissing,
+            stock:   (p.stock ?? null) as number | null,
           })
         }
       }
