@@ -59,7 +59,10 @@ export class ProductsService {
   }
 
   /** Server-side pagination + filtering pra DataTable view do /produtos.
-   * quick_filter: 'all'|'active'|'paused'|'no_stock'|'critical'|'in_ads'|'no_ads' */
+   * quick_filter: 'all'|'active'|'paused'|'no_stock'|'critical'|'stock_high'|
+   *               'in_ads'|'no_ads'|'cadastro_pendente'
+   * stock_min/stock_max: range numérico (independente do quick_filter).
+   * Útil pra priorizar cadastro de produtos com estoque grande primeiro. */
   async listPaginated(orgId: string | null, opts: {
     page?:        number
     per_page?:    number
@@ -67,11 +70,15 @@ export class ProductsService {
     quick_filter?: string
     sort_by?:     string
     sort_dir?:    'asc' | 'desc'
+    stock_min?:   number
+    stock_max?:   number
   }): Promise<{ data: unknown[]; total: number; page: number; per_page: number }> {
     const page    = Math.max(opts.page ?? 1, 1)
     const perPage = Math.min(Math.max(opts.per_page ?? 25, 1), 200)
     const offset  = (page - 1) * perPage
-    const sortBy  = opts.sort_by ?? 'created_at'
+    // Whitelist de colunas sort-by pra evitar SQL injection via PostgREST
+    const SORTABLE = new Set(['created_at', 'updated_at', 'name', 'sku', 'stock', 'price', 'my_price', 'cost_price'])
+    const sortBy  = opts.sort_by && SORTABLE.has(opts.sort_by) ? opts.sort_by : 'created_at'
     const ascending = opts.sort_dir === 'asc'
 
     // Set de listings em campanha ativa pra os filtros in_ads / no_ads
@@ -96,6 +103,11 @@ export class ProductsService {
       case 'paused':   q = q.eq('status', 'paused'); break
       case 'no_stock': q = q.or('stock.eq.0,stock.is.null'); break
       case 'critical': q = q.gt('stock', 0).lte('stock', 5); break
+      case 'stock_high':
+        // 2026-05-14: estoque alto (>10). Útil pra priorizar cadastro de
+        // produtos que já têm volume — completam-se primeiro pra virar venda.
+        q = q.gt('stock', 10)
+        break
       case 'incomplete':
       case 'cadastro_pendente':
         // F2/F3 (2026-05-14): produtos com tag cadastro_pendente OU catalog_status='incomplete'
@@ -109,6 +121,14 @@ export class ProductsService {
         if (adsListingIds && adsListingIds.size > 0) q = q.or(`ml_listing_id.is.null,ml_listing_id.not.in.(${[...adsListingIds].join(',')})`)
         // se sem campanhas ativas, todos sem ads → sem filtro adicional
         break
+    }
+
+    // Range numérico de estoque — combina com quick_filter (ex: cadastro_pendente + stock>50)
+    if (opts.stock_min != null && Number.isFinite(opts.stock_min)) {
+      q = q.gte('stock', opts.stock_min)
+    }
+    if (opts.stock_max != null && Number.isFinite(opts.stock_max)) {
+      q = q.lte('stock', opts.stock_max)
     }
 
     const { data, count, error } = await q

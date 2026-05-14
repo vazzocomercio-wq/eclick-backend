@@ -323,9 +323,16 @@ export class ProductsController {
     @Query('quick_filter') quickFilter?: string,
     @Query('sort_by')      sortBy?:      string,
     @Query('sort_dir')     sortDir?:     string,
+    @Query('stock_min')    stockMin?:    string,
+    @Query('stock_max')    stockMax?:    string,
   ) {
-    const paginated = page || perPage || search || quickFilter || sortBy
+    const paginated = page || perPage || search || quickFilter || sortBy || stockMin || stockMax
     if (!paginated) return this.products.getAll(user.orgId)
+    const parseIntOpt = (s?: string): number | undefined => {
+      if (!s) return undefined
+      const n = parseInt(s, 10)
+      return Number.isFinite(n) ? n : undefined
+    }
     return this.products.listPaginated(user.orgId, {
       page:         page ? Number(page) : undefined,
       per_page:     perPage ? Number(perPage) : undefined,
@@ -333,6 +340,8 @@ export class ProductsController {
       quick_filter: quickFilter,
       sort_by:      sortBy,
       sort_dir:     sortDir === 'asc' ? 'asc' : sortDir === 'desc' ? 'desc' : undefined,
+      stock_min:    parseIntOpt(stockMin),
+      stock_max:    parseIntOpt(stockMax),
     })
   }
 
