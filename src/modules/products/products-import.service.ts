@@ -165,21 +165,30 @@ export class ProductsImportService {
       }
     }
 
-    // Quais SKUs já existem? — 1 query batch
+    // Quais SKUs já existem? — chunks de 200 (PostgREST tem limite de URL
+    // ~16KB; planilhas com 2k+ linhas excediam num único .in() e retornavam 0).
+    // Aceita numéricos (raw:true do XLSX traz SKUs puramente numéricos como number).
     const skus = rows
       .map(r => this.extractField(r, mapping, 'sku'))
-      .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+      .filter(s => s != null && String(s).trim() !== '')
       .map(s => String(s).trim())
     const uniqueSkus = [...new Set(skus)]
     const existing = new Set<string>()
     if (uniqueSkus.length > 0) {
-      const { data } = await supabaseAdmin
-        .from('products')
-        .select('sku')
-        .eq('organization_id', orgId)
-        .in('sku', uniqueSkus)
-      for (const r of (data ?? []) as Array<{ sku: string | null }>) {
-        if (r.sku) existing.add(r.sku)
+      for (let i = 0; i < uniqueSkus.length; i += 200) {
+        const chunk = uniqueSkus.slice(i, i + 200)
+        const { data, error } = await supabaseAdmin
+          .from('products')
+          .select('sku')
+          .eq('organization_id', orgId)
+          .in('sku', chunk)
+        if (error) {
+          this.log.warn(`[products-import] dryRun lookup chunk falhou: ${error.message}`)
+          continue
+        }
+        for (const r of (data ?? []) as Array<{ sku: string | null }>) {
+          if (r.sku) existing.add(r.sku)
+        }
       }
     }
 
@@ -271,10 +280,10 @@ export class ProductsImportService {
       }
     }
 
-    // Pré-fetch SKUs existentes
+    // Pré-fetch SKUs existentes (aceita numéricos vindos do XLSX raw:true)
     const skusInSheet = rows
       .map(r => this.extractField(r, mapping, 'sku'))
-      .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+      .filter(s => s != null && String(s).trim() !== '')
       .map(s => String(s).trim())
     const uniqueSkus = [...new Set(skusInSheet)]
     const existingSet = new Set<string>()
