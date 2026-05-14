@@ -2248,11 +2248,81 @@ A variante com \`date_from/date_to\` ISO retorna **400 BAD REQUEST** ("Invalid r
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// F1-F5 (2026-05-14) — Importer de planilha + Operação de Cadastro
+// ════════════════════════════════════════════════════════════════════════
+
+const CADASTRO_OPS_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/produtos/importar'],
+    category: 'catalogo',
+    title:    'Importar planilha de produtos (cadastro em massa)',
+    content: `**Upload de planilha CSV/XLSX pra cadastrar produtos em lote.**
+
+**Como funciona** (idempotente por SKU):
+1. Arraste a planilha (.xlsx/.xls/.csv até 10MB) ou clique pra selecionar
+2. Sistema faz **dry-run**: mostra preview com quantos serão cadastrados vs. quantos já existem (pulados)
+3. Confirma → cadastra apenas SKUs novos. Marca cada produto novo com tag **cadastro_pendente** + \`catalog_status='incomplete'\`
+
+**Colunas reconhecidas** (case-insensitive, sem acento):
+- **Obrigatórias**: SKU/Código + Nome
+- Opcionais: Marca, GTIN/EAN, Categoria, Custo, Preço, Peso, Largura, Comprimento, Altura, NCM, Estoque, Descrição
+- Variantes aceitas: "Cod", "Cód", "Referência", "EAN GTIN", "Preço Venda" etc.
+
+**Boas práticas**:
+- Baixe o **template oficial** (botão no header) pra garantir cabeçalhos corretos
+- SKU duplicado dentro da própria planilha = erro na linha (apenas 1 é cadastrado)
+- Histórico de imports fica em \`product_import_batches\` (botão "Histórico")
+
+**Próximo passo**: produtos novos aparecem em \`/dashboard/produtos?quick_filter=cadastro_pendente\`. Gestor pode despachar pro operador via \`/dashboard/produtos/operacao-cadastro\`.
+
+**Endpoint**: \`POST /products/import\` (multipart/form-data, FileInterceptor)`,
+    tags: ['import', 'upload', 'planilha', 'xlsx', 'csv', 'cadastro_pendente', 'sku', 'bulk'],
+  },
+  {
+    routes:   ['/dashboard/produtos/operacao-cadastro'],
+    category: 'catalogo',
+    title:    'Operação de Cadastro — gestor despacha produtos pendentes pro operador',
+    content: `**Tela do gestor pra despachar tarefas de cadastro pro operador (Active CRM).**
+
+**Fluxo completo**:
+1. **Aba "Pendentes"** — lista produtos com tag \`cadastro_pendente\` (vindos do importer ou que perderam dado essencial)
+2. Sistema mostra **breakdown de campos faltando** (top 12 mais frequentes — ex: "Custo: 47 produtos", "GTIN: 32 produtos")
+3. Gestor seleciona produtos via checkbox (até 100 por dispatch) + clica "Despachar pra operador"
+4. Modal pede: **UUID do operador** (user no Active), **pipeline_id + stage_id** (funil "Operação de Cadastro"), prazo, prioridade, notas
+5. Backend chama \`activeBridge.createCampaignCard()\` 1× por produto → **cria 1 card no kanban Active** com task + missing_fields no metadata
+6. **Idempotência**: \`dedup_key = 'product_cadastro:<product_id>'\` — não duplica cards do mesmo produto
+
+**Aba "Despachados"** — auditoria local em \`product_operator_assignments\` (status: open / in_progress / completed / cancelled)
+
+**Critério "apto a anunciar"** (definição em \`ProductsCompletenessService\`):
+- **Universal**: sku, name, brand, cost_price, my_price, weight_kg, dimensões, ≥1 foto, description ≥80 chars, category_ml_id, ml_title
+- **ML-categoria dinâmica**: pega \`tags.required\` de \`/categories/{id}/attributes\` do ML (cache 7d em \`ml_category_attributes\`) e valida \`product.attributes[attr_id]\`
+- Se tudo OK → remove tag \`cadastro_pendente\` automaticamente (catalog_status = 'ready')
+
+**Cron diário 8h BRT**: re-avalia completeness de todo org com pendentes; emite \`alert_signal\` categoria \`catalog_incomplete\` se ainda houver (severidade escala com count).
+
+**Callback reverso**: quando operador completa task no Active → Active chama \`POST /products/cadastro-callback\` no SaaS → assignment vira completed + produto re-avaliado.
+
+**Config necessária** (env Railway SaaS):
+- \`ACTIVE_AUTOMATION_BRIDGE_URL\` + \`ACTIVE_AUTOMATION_BRIDGE_SECRET\`
+- Pipeline + stage criados manualmente no Active (template "operacao_cadastro" disponível)
+
+**Endpoints**:
+- \`GET /products/completeness-summary\` — KPIs + sample (até 500)
+- \`POST /products/dispatch-to-operator\` — body: { product_ids[], operator_user_id, pipeline_id, stage_id, due_date, task_priority, notes }
+- \`GET /products/operator-assignments?status=open\` — lista assignments
+- \`POST /products/cadastro-callback\` — webhook do Active (auth shared secret)`,
+    tags: ['operacao_cadastro', 'kanban', 'active', 'crm', 'dispatch', 'operador', 'task', 'pipeline', 'completeness'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
 export const KB: KbEntry[] = [
   ...GENERAL_ENTRIES,
+  ...CADASTRO_OPS_ENTRIES,
   ...CATALOG_ENTRIES,
   ...CREATIVE_ENTRIES,
   ...PUBLIC_ENTRIES,

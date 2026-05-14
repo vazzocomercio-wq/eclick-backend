@@ -1,12 +1,20 @@
-import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Controller, Get, Put, Patch, Delete, Post, Param, Body, Query, UseGuards, UseInterceptors, UploadedFile, HttpCode, HttpStatus, BadRequestException, NotFoundException, Res } from '@nestjs/common'
+import { FileInterceptor } from '@nestjs/platform-express'
+import type { Response } from 'express'
 import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMovementDto, UpdateStockDto } from './products.service'
 import { ProductsEnrichmentService } from './products-enrichment.service'
+import { ProductsImportService } from './products-import.service'
+import { ProductsCompletenessService } from './products-completeness.service'
+import { MlCategoryRequirementsService } from './ml-category-requirements.service'
+import { ProductsCadastroDispatchService, type DispatchInput } from './products-cadastro-dispatch.service'
 import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
 interface ReqUserPayload { id: string; orgId: string | null }
+
+type UploadedXlsxFile = { originalname: string; size: number; buffer: Buffer; mimetype: string }
 
 @Controller('products')
 @UseGuards(SupabaseAuthGuard)
@@ -15,7 +23,151 @@ export class ProductsController {
     private readonly products: ProductsService,
     private readonly creative: CreativeService,
     private readonly enrichment: ProductsEnrichmentService,
+    private readonly importer: ProductsImportService,
+    private readonly completeness: ProductsCompletenessService,
+    private readonly mlReq: MlCategoryRequirementsService,
+    private readonly cadastroDispatch: ProductsCadastroDispatchService,
   ) {}
+
+  // ── F4 (2026-05-14) — Despacho pra operador (cards no Active CRM) ──────
+
+  /** POST /products/dispatch-to-operator — gestor seleciona N produtos +
+   *  configura operador/pipeline; cria 1 card no Active por produto. */
+  @Post('dispatch-to-operator')
+  @HttpCode(HttpStatus.OK)
+  dispatchToOperator(@ReqUser() u: ReqUserPayload, @Body() body: DispatchInput) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.cadastroDispatch.dispatch(u.orgId, u.id, body)
+  }
+
+  /** GET /products/operator-assignments?status=open&operator=... */
+  @Get('operator-assignments')
+  listOperatorAssignments(
+    @ReqUser() u: ReqUserPayload,
+    @Query('status') status?: string,
+    @Query('operator') operator?: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '100', 10) || 100, 1), 500)
+    return this.cadastroDispatch.list(u.orgId, { status, operator, limit })
+  }
+
+  /** POST /products/cadastro-callback — webhook do Active quando task completa.
+   *  Auth via shared secret (mesmo X-Automation-Bridge-Token reverso). */
+  @Post('cadastro-callback')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  async cadastroCallback(@Body() body: { task_id?: string; secret?: string }) {
+    const expected = process.env.ACTIVE_CALLBACK_SECRET ?? process.env.ACTIVE_AUTOMATION_BRIDGE_SECRET
+    if (!expected || body?.secret !== expected) {
+      throw new BadRequestException('secret inválido')
+    }
+    if (!body.task_id) throw new BadRequestException('task_id obrigatório')
+    return this.cadastroDispatch.markCompletedByTaskId(body.task_id)
+  }
+
+  // ── F2 (2026-05-14) — Completeness check (universal + ML dinâmico) ─────
+
+  /** GET /products/:id/completeness — avalia produto vs requisitos ML.
+   *  Retorna { ready_for_ml, complete, missing_universal[], missing_ml_attrs[] }. */
+  @Get(':id/completeness')
+  async getCompleteness(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const product = await this.products.getById(id)
+    return this.completeness.evaluate(product as any)
+  }
+
+  /** POST /products/:id/refresh-completeness — re-avalia + remove tag
+   *  'cadastro_pendente' se ficou completo (ou readiciona se voltou). */
+  @Post(':id/refresh-completeness')
+  @HttpCode(HttpStatus.OK)
+  async refreshCompleteness(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.completeness.refreshAndCleanupTag(id)
+  }
+
+  /** GET /products/completeness-summary — KPIs agregados pra dashboard.
+   *  Retorna { total, incomplete_count, by_missing, sample_incomplete[] }. */
+  @Get('completeness-summary')
+  async completenessSummary(@ReqUser() u: ReqUserPayload, @Query('limit') limitRaw?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '500', 10) || 500, 50), 2000)
+    return this.completeness.evaluateBulk(u.orgId, limit)
+  }
+
+  /** GET /products/ml-category-requirements?category_id=MLB... — required attrs */
+  @Get('ml-category-requirements')
+  async getMlCategoryRequirements(
+    @ReqUser() u: ReqUserPayload,
+    @Query('category_id') categoryId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!categoryId) throw new BadRequestException('category_id obrigatório (formato MLB...)')
+    return this.mlReq.getRequiredAttrs(categoryId)
+  }
+
+  /** GET /products/incomplete?limit=200 — lista produtos pendentes c/ missing_fields.
+   *  Otimizado pra tela de operação de cadastro (F4). */
+  @Get('incomplete')
+  async listIncomplete(
+    @ReqUser() u: ReqUserPayload,
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '200', 10) || 200, 10), 500)
+    return this.completeness.evaluateBulk(u.orgId, limit)
+  }
+
+  // ── F1 (2026-05-14) — Upload de planilha de produtos ───────────────────
+
+  /** POST /products/import/dry-run — multipart/form-data com file.
+   * Parseia + mapeia colunas + conta criados vs skip, SEM INSERT. */
+  @Post('import/dry-run')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  async importDryRun(
+    @ReqUser() u: ReqUserPayload,
+    @UploadedFile() file: UploadedXlsxFile | undefined,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!file) throw new BadRequestException('arquivo "file" obrigatório (multipart/form-data)')
+    return this.importer.dryRun(u.orgId, file.buffer, file.originalname)
+  }
+
+  /** POST /products/import — executa import real. Cria batch + INSERT.
+   *  Pula SKUs já existentes. Marca novos com tag 'cadastro_pendente'. */
+  @Post('import')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  async importCommit(
+    @ReqUser() u: ReqUserPayload,
+    @UploadedFile() file: UploadedXlsxFile | undefined,
+    @Body() body: { default_tag?: string } | undefined,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!file) throw new BadRequestException('arquivo "file" obrigatório (multipart/form-data)')
+    return this.importer.commit(u.orgId, u.id, file.buffer, file.originalname, file.size, {
+      defaultTag: body?.default_tag,
+    })
+  }
+
+  /** GET /products/import-template — baixa .xlsx template com colunas sugeridas */
+  @Get('import-template')
+  importTemplate(@Res() res: Response) {
+    const buf = this.importer.buildTemplate()
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', 'attachment; filename="eclick-produtos-template.xlsx"')
+    res.send(buf)
+  }
+
+  /** GET /products/import-batches — histórico de uploads */
+  @Get('import-batches')
+  importBatches(@ReqUser() u: ReqUserPayload, @Query('limit') limitRaw?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '50', 10) || 50, 1), 200)
+    return this.importer.listBatches(u.orgId, limit)
+  }
 
   // ── Onda 1 M2 — Enriquecimento AI do catálogo ───────────────────────────
 

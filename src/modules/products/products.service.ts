@@ -96,6 +96,11 @@ export class ProductsService {
       case 'paused':   q = q.eq('status', 'paused'); break
       case 'no_stock': q = q.or('stock.eq.0,stock.is.null'); break
       case 'critical': q = q.gt('stock', 0).lte('stock', 5); break
+      case 'incomplete':
+      case 'cadastro_pendente':
+        // F2/F3 (2026-05-14): produtos com tag cadastro_pendente OU catalog_status='incomplete'
+        q = q.or('catalog_status.eq.incomplete,tags.cs.{cadastro_pendente}')
+        break
       case 'in_ads':
         if (adsListingIds && adsListingIds.size > 0) q = q.in('ml_listing_id', [...adsListingIds])
         else                                          q = q.eq('id', '00000000-0000-0000-0000-000000000000') // forces empty
