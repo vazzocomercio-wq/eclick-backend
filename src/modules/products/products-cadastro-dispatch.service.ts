@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { ProductsCompletenessService } from './products-completeness.service'
 
 /**
@@ -44,8 +45,9 @@ export class ProductsCadastroDispatchService {
   private readonly log = new Logger(ProductsCadastroDispatchService.name)
 
   constructor(
-    private readonly bridge:      ActiveBridgeClient,
-    private readonly completeness: ProductsCompletenessService,
+    private readonly bridge:        ActiveBridgeClient,
+    private readonly activeResolver: ActiveResolverService,
+    private readonly completeness:  ProductsCompletenessService,
   ) {}
 
   /** Despacha N produtos pro operador. Idempotente via dedup_key. */
@@ -59,6 +61,19 @@ export class ProductsCadastroDispatchService {
     }
     if (input.product_ids.length > 100) {
       throw new BadRequestException('Máximo 100 produtos por dispatch.')
+    }
+
+    // SaaS e Active são produtos distintos com orgs separadas. Pipeline +
+    // Stage IDs vêm do Active e pertencem à org Active do dispatcher.
+    // Bridge precisa receber o org_id Active (não o SaaS) pra que a validação
+    // assertStageInOrg() lá no Active passe.
+    let activeOrgId: string
+    try {
+      if (!dispatcherUserId) throw new BadRequestException('dispatcherUserId ausente — não dá pra resolver org Active')
+      const resolved = await this.activeResolver.resolveActiveOrgForUser(dispatcherUserId)
+      activeOrgId = resolved.org_id
+    } catch (e) {
+      throw new BadRequestException(`Não foi possível resolver org no Active CRM: ${(e as Error).message}`)
     }
 
     // Fetch produtos + checa que pertencem ao org
@@ -111,7 +126,7 @@ export class ProductsCadastroDispatchService {
         const deeplink = `${baseUrl}/dashboard/produtos/${p.id}/editar`
 
         const bridgeRes = await this.bridge.createCampaignCard({
-          organization_id: orgId,
+          organization_id: activeOrgId,
           pipeline_id:     input.pipeline_id,
           stage_id:        input.stage_id,
           assigned_to:     input.operator_user_id,
