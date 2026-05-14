@@ -9,6 +9,7 @@ import { ListingCatalogScannerService } from './listing-catalog-scanner.service'
 import { ListingFiscalScannerService } from './listing-fiscal-scanner.service'
 import { ListingHealthScoreService } from './listing-health-score.service'
 import { ListingBulkActionsService } from './listing-bulk-actions.service'
+import { ListingSeoScannerService } from './listing-seo-scanner.service'
 import type { TaskStatus, TaskType, TaskSeverity, ScanType, ListingTask, ListingSummary, ScanResult } from '../ml-listing.types'
 
 interface ListTasksFilters {
@@ -44,6 +45,7 @@ export class MlListingService {
     private readonly fiscalScanner:     ListingFiscalScannerService,
     private readonly healthScoreSvc:    ListingHealthScoreService,
     private readonly bulkActions:       ListingBulkActionsService,
+    private readonly seoScanner:        ListingSeoScannerService,
   ) {}
 
   /** Exposed pra controller invocar direto (apply/activate/configure/fix/score/bulk). */
@@ -284,6 +286,13 @@ export class MlListingService {
       result.tasks_updated       += fiscal.tasks_updated
       result.tasks_resolved_auto += fiscal.tasks_resolved_auto
       result.api_calls_count     += fiscal.api_calls
+
+      const seo = await this.seoScanner.scan(orgId, sellerId)
+      result.items_scanned       += seo.items_scanned
+      result.tasks_created       += seo.tasks_created
+      result.tasks_updated       += seo.tasks_updated
+      result.tasks_resolved_auto += seo.tasks_resolved_auto
+      result.api_calls_count     += seo.api_calls
 
       result.duration_seconds = Math.round((Date.now() - t0) / 1000)
       await this.completeScanLog(log.id, result)
@@ -565,6 +574,98 @@ export class MlListingService {
     const { data, error } = await q
     if (error) throw new Error(error.message)
     return data ?? []
+  }
+
+  // ── SEO Scanner (F10 Passo 2) ────────────────────────────────────────────
+
+  async runSeoScan(orgId: string, sellerId: number): Promise<ScanResult> {
+    const log = await this.startScanLog(orgId, sellerId, 'scanner_seo')
+    const t0 = Date.now()
+    try {
+      const s = await this.seoScanner.scan(orgId, sellerId)
+      const result: ScanResult = {
+        scan_type:           'scanner_seo',
+        items_scanned:       s.items_scanned,
+        tasks_created:       s.tasks_created,
+        tasks_updated:       s.tasks_updated,
+        tasks_resolved_auto: s.tasks_resolved_auto,
+        api_calls_count:     s.api_calls,
+        errors_count:        0,
+        duration_seconds:    Math.round((Date.now() - t0) / 1000),
+        status:              'completed',
+      }
+      await this.completeScanLog(log.id, result)
+      return result
+    } catch (err) {
+      await this.failScanLog(log.id, err as Error)
+      throw err
+    }
+  }
+
+  /** Lista scores SEO ordenado por structural_score asc (piores primeiro). */
+  async listSeoScores(orgId: string, opts: {
+    seller_id?:   number
+    max_score?:   number
+    min_visits?:  number
+    limit?:       number
+    offset?:      number
+  } = {}) {
+    const limit  = Math.min(Math.max(opts.limit ?? 50, 1), 500)
+    const offset = Math.max(opts.offset ?? 0, 0)
+    let q = supabaseAdmin
+      .from('ml_listing_seo_scores')
+      .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
+    if (opts.seller_id != null)   q = q.eq('seller_id', opts.seller_id)
+    if (opts.max_score != null)   q = q.lte('structural_score', opts.max_score)
+    if (opts.min_visits != null)  q = q.gte('visits_30d', opts.min_visits)
+    q = q.order('structural_score', { ascending: true })
+         .order('visits_30d', { ascending: false, nullsFirst: false })
+         .range(offset, offset + limit - 1)
+    const { data, error, count } = await q
+    if (error) throw new Error(error.message)
+    return { scores: data ?? [], total: count ?? 0 }
+  }
+
+  /** Top ROI: visitas × penalidade-de-score. Passo 3. */
+  async listSeoTopOpportunities(orgId: string, opts: { seller_id?: number; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 10, 1), 100)
+    let q = supabaseAdmin
+      .from('ml_listing_seo_scores')
+      .select('ml_item_id, seller_id, title, structural_score, title_score, attributes_score, pictures_score, visits_30d, sold_quantity, price, listing_type_id, last_scanned_at, issues')
+      .eq('organization_id', orgId)
+      .not('visits_30d', 'is', null)
+      .gt('visits_30d', 0)
+      .lt('structural_score', 80)
+    if (opts.seller_id != null) q = q.eq('seller_id', opts.seller_id)
+    // PostgREST não suporta orderBy expressão calc; pega top N por visits e ordena em memória
+    q = q.order('visits_30d', { ascending: false }).limit(limit * 5)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    type Row = {
+      ml_item_id: string; visits_30d: number | null; structural_score: number;
+      title: string | null; sold_quantity: number | null;
+    } & Record<string, unknown>
+    const rows = (data ?? []) as Row[]
+    const scored = rows
+      .map(r => ({
+        ...r,
+        roi_score: (r.visits_30d ?? 0) * (100 - r.structural_score),
+      }))
+      .sort((a, b) => b.roi_score - a.roi_score)
+      .slice(0, limit)
+    return scored
+  }
+
+  async getSeoScoreByItem(orgId: string, mlItemId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('ml_listing_seo_scores')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('ml_item_id', mlItemId)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    return data
   }
 
   /** Tasks de um anúncio específico (visão consolidada). */

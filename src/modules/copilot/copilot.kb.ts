@@ -2033,6 +2033,48 @@ O copilot delega cada query via API GET correspondente (tasks?type=, suggestions
 Sprint 8 fecha L4 e o módulo F10 inteiro. Próximo: refinamentos pós-feedback do usuário.`,
     tags: ['listings', 'bulk-actions', 'auditoria', 'copilot', 'multi-conta'],
   },
+  {
+    routes:   ['/dashboard/listings', '/dashboard/listings/seo-optimizer'],
+    category: 'listing-center',
+    title:    'SEO Scanner — score estrutural diário + Top ROI (Passo 2/3)',
+    content:  `Passo 2 do roadmap SEO: scanner diário calcula **score estrutural 0-100** pra cada anúncio ativo sem chamar LLM (regra cara — usa o e-Otimizer manual pra isso). Roda dentro do \`runFullScan\` (cron 02:30 BRT), portanto sem cron próprio.
+
+**Como o score é calculado** (peso entre parênteses):
+- **Título (40%)**: 0-30 chars = ruim, 30-60 = bom, sweet-spot 50-60 = 95
+- **Atributos (40%)**: lê \`ml_quality_snapshots\` (Sprint F7) — % preenchido entre PI (ficha) + FT (técnico). Penaliza pra ≤40 se ML está marcando \`has_exposure_penalty\`
+- **Fotos (20%)**: <3 = ruim (30), 3-5 = ok (65), ≥6 = ideal (100)
+- Descrição não é scoreada (eviting per-item GET) — pendência v2
+
+Score persistido em \`ml_listing_seo_scores\` com snapshot completo (title, length, pictures_count, attributes_missing, visits_30d, issues[]). UNIQUE \`(org, seller, ml_item_id)\` — upsert por item.
+
+**Quando vira task ml_listing_tasks:**
+- \`SEO_LOW\` — score < 60. Severidade derivada (<30 critical, <50 high, <60 medium)
+- \`SEO_HIGH_VISITS_LOW_SCORE\` — score 60-70 E visits_30d ≥ 100. **Prioridade alta** porque tráfego já existe; otimizar = converter o que está vindo
+
+**Auto-resolve:** se score subiu pra ≥60 após otimização do user, task fecha sozinha na próxima rodada do scanner (status=\`resolved_auto\`).
+
+**Top ROI (Passo 3):** \`GET /listings/seo/top-opportunities?limit=10\` retorna anúncios ordenados por \`visitas_30d × (100 - score)\` — fórmula prioriza alto tráfego E score baixo. UI: card cyan no topo de \`/dashboard/listings\` listando top 5 com deeplink direto pro Optimizer (\`/dashboard/listings/seo-optimizer?mlbId=...\`).
+
+**Endpoints (auth):**
+- \`POST /listings/scan/seo\` body=\`{seller_id}\` — roda scan isolado on-demand
+- \`GET /listings/seo/scores?max_score=&min_visits=&seller_id=&limit=\` — lista paginada (piores primeiro)
+- \`GET /listings/seo/top-opportunities?limit=10\` — Top ROI (visitas × score)
+- \`GET /listings/seo/scores/:itemId\` — score detalhado de 1 anúncio
+
+**Fonte de visitas:** \`ml_item_visits_period\` (populado pelo F11 visits-scanner). Normalizo o período pra escala 30 dias via \`(total_visits / period_days) * 30\`.
+
+**Como pro user usa:**
+1. Sidebar → "Anúncios" → vê widget "Top ROI" no topo do dashboard F10
+2. Click no anúncio → vai direto pro Optimizer com MLB pré-carregado e análise automática
+3. Optimizer aplica IA rica (keywords categoria + research) — DIFERENTE do score estrutural que só mede estrutura
+
+**Por que dois scores divergem (esperado):**
+- Scanner = barato + escalável + sem keywords (ESTRUTURAL)
+- Optimizer e-otimizer = caro + per-item + COM keywords da categoria (RICO)
+
+UI deixa explícito que cada um é uma camada.`,
+    tags: ['listings', 'seo', 'optimizer', 'scanner', 'cron-diario', 'top-roi', 'visitas', 'multi-conta'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════

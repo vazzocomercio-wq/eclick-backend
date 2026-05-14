@@ -21,6 +21,8 @@ export type TaskType =
   | 'SHIPPING_COST_CHANGED'
   | 'BUYER_EXPERIENCE_ISSUE'
   | 'FULL_ELIGIBLE'
+  | 'SEO_LOW'
+  | 'SEO_HIGH_VISITS_LOW_SCORE'
 
 export type TaskSource =
   | 'aggregated_quality'
@@ -35,6 +37,7 @@ export type TaskSource =
   | 'scanner_dimensions'
   | 'scanner_shipping'
   | 'scanner_experience'
+  | 'scanner_seo'
   | 'manual'
 
 export type TaskSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info'
@@ -62,6 +65,7 @@ export type ScanType =
   | 'scanner_dimensions'
   | 'scanner_shipping'
   | 'scanner_experience'
+  | 'scanner_seo'
 
 export interface ListingTask {
   id: string

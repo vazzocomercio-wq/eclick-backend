@@ -10,6 +10,7 @@ import { ListingCatalogScannerService } from './services/listing-catalog-scanner
 import { ListingFiscalScannerService } from './services/listing-fiscal-scanner.service'
 import { ListingHealthScoreService } from './services/listing-health-score.service'
 import { ListingBulkActionsService } from './services/listing-bulk-actions.service'
+import { ListingSeoScannerService } from './services/listing-seo-scanner.service'
 import { ListingScansCron } from './services/listing-scans-cron.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 
@@ -31,6 +32,7 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
     ListingCatalogScannerService,
     ListingFiscalScannerService,
     ListingHealthScoreService,    ListingBulkActionsService,
+    ListingSeoScannerService,
     ListingScansCron,
   ],
   exports: [MlListingService, ListingAggregationService],

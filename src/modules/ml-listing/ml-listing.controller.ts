@@ -164,6 +164,57 @@ export class MlListingController {
     return this.svc.runPricingScan(user.orgId, Number(body.seller_id))
   }
 
+  @Post('scan/seo')
+  @HttpCode(HttpStatus.OK)
+  runSeoScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    if (!body?.seller_id) throw new BadRequestException('seller_id é obrigatório')
+    return this.svc.runSeoScan(user.orgId, Number(body.seller_id))
+  }
+
+  // ── SEO scores (Passo 2) ─────────────────────────────────────────────────
+
+  @Get('seo/scores')
+  listSeoScores(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('max_score') maxScore?: string,
+    @Query('min_visits') minVisits?: string,
+    @Query('offset') offset?: string,
+    @Query('limit')  limit?:  string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listSeoScores(user.orgId, {
+      seller_id:  sellerId  ? Number(sellerId)  : undefined,
+      max_score:  maxScore  ? Number(maxScore)  : undefined,
+      min_visits: minVisits ? Number(minVisits) : undefined,
+      offset:     offset    ? Number(offset)    : 0,
+      limit:      limit     ? Number(limit)     : 50,
+    })
+  }
+
+  @Get('seo/top-opportunities')
+  listSeoTop(
+    @ReqUser() user: AuthUser,
+    @Query('seller_id') sellerId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.listSeoTopOpportunities(user.orgId, {
+      seller_id: sellerId ? Number(sellerId) : undefined,
+      limit:     limit    ? Number(limit)    : 10,
+    })
+  }
+
+  @Get('seo/scores/:itemId')
+  getSeoScore(
+    @ReqUser() user: AuthUser,
+    @Param('itemId') itemId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.svc.getSeoScoreByItem(user.orgId, itemId)
+  }
+
   // ── Pricing — sugestões ──────────────────────────────────────────────────
 
   @Get('pricing/suggestions')
