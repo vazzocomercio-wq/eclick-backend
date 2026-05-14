@@ -36,17 +36,17 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   sku:              ['sku', 'codigo', 'cod', 'codigodoproduto', 'skupai', 'codpai', 'referencia', 'ref'],
   name:             ['nome', 'descricao', 'descricaoproduto', 'produto', 'titulo', 'nomeproduto'],
   brand:            ['marca', 'fabricante'],
-  gtin:             ['gtin', 'ean', 'codigodebarras', 'eangtin'],
+  gtin:             ['gtin', 'ean', 'codigodebarras', 'eangtin', 'gtinean'],
   model:            ['modelo'],
-  category:         ['categoria', 'departamento'],
-  cost_price:       ['custo', 'precocusto', 'custoreal', 'valordecusto', 'preçocusto'],
+  category:         ['categoria', 'departamento', 'grupodeprodutos'],
+  cost_price:       ['custo', 'precocusto', 'precodecusto', 'custoreal', 'valordecusto', 'preçocusto', 'preçodecusto'],
   my_price:         ['preco', 'precovenda', 'valor', 'precovarejo', 'preçovenda'],
-  weight_kg:        ['peso', 'pesokg', 'pesoreal', 'pesokilo'],
-  width_cm:         ['largura', 'larguracm', 'larg'],
-  length_cm:        ['comprimento', 'comprimentocm', 'compr', 'profundidade'],
-  height_cm:        ['altura', 'alturacm', 'alt'],
+  weight_kg:        ['peso', 'pesokg', 'pesoreal', 'pesokilo', 'pesoliquido', 'pesoliquidokg', 'pesobruto', 'pesobrutokg'],
+  width_cm:         ['largura', 'larguracm', 'larg', 'larguradoproduto'],
+  length_cm:        ['comprimento', 'comprimentocm', 'compr', 'profundidade', 'profundidadedoproduto', 'profundidadecm'],
+  height_cm:        ['altura', 'alturacm', 'alt', 'alturadoproduto'],
   ml_title:         ['titulomercadolivre', 'titulomelivre', 'tituloml'],
-  description:      ['descricaolonga', 'observacoes', 'obs', 'detalhes'],
+  description:      ['descricaolonga', 'observacoes', 'obs', 'detalhes', 'descricaocomplementar'],
   ncm:              ['ncm', 'codigoncm', 'codncm'],
   cest:             ['cest', 'codigocest'],
   origem:           ['origem', 'origemfiscal'],
@@ -127,9 +127,11 @@ export class ProductsImportService {
     const sheetName = wb.SheetNames[0]
     if (!sheetName) throw new BadRequestException('Planilha vazia (sem abas).')
     const sheet = wb.Sheets[sheetName]
+    // raw:true mantém números nativos (evita "7.89E+12" do Excel pra GTIN longos).
+    // Strings ficam strings; números, números — parseNumeric/strOrNull lidam com ambos.
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
       defval: '',
-      raw: false,
+      raw: true,
       blankrows: false,
     })
     if (rows.length === 0) throw new BadRequestException('Planilha sem linhas de dados.')
