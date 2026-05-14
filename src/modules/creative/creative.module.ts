@@ -12,6 +12,7 @@ import { CreativePromptTemplatesService } from './creative-prompt-templates.serv
 import { CreativeReferencesService } from './creative-references.service'
 import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
 import { CreativeTaxonomyService } from './creative-taxonomy.service'
+import { CreativeSeoService } from './creative-seo.service'
 import { KlingClient } from './kling.client'
 import { KlingProvider } from './providers/kling.provider'
 import { FlowProvider } from './providers/flow.provider'
@@ -39,6 +40,7 @@ import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
     CreativeReferencesService,
     CreativeTemplateResolutionService,
     CreativeTaxonomyService,
+    CreativeSeoService,
     KlingClient,
     // F6 — abstração multi-provider de vídeo (Kling + Veo/Flow + Sora 2)
     KlingProvider,
@@ -56,6 +58,7 @@ import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
     CreativeReferencesService,
     CreativeTemplateResolutionService,
     CreativeTaxonomyService,
+    CreativeSeoService,
   ],
 })
 export class CreativeModule {}

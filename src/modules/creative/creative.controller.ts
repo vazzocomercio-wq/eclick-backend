@@ -20,6 +20,7 @@ import {
 import { CreativeReferencesService } from './creative-references.service'
 import { CreativeTemplateResolutionService } from './creative-template-resolution.service'
 import { CreativeTaxonomyService } from './creative-taxonomy.service'
+import { CreativeSeoService } from './creative-seo.service'
 import { VideoProviderRegistry } from './providers/video-provider.registry'
 import type { CreatePromptTemplateDto } from './dto/create-prompt-template.dto'
 import type { UpdatePromptTemplateDto } from './dto/update-prompt-template.dto'
@@ -47,6 +48,7 @@ export class CreativeController {
     private readonly references:    CreativeReferencesService,
     private readonly resolution:    CreativeTemplateResolutionService,
     private readonly taxonomy:      CreativeTaxonomyService,
+    private readonly seo:           CreativeSeoService,
     private readonly videoRegistry: VideoProviderRegistry,
   ) {}
 
@@ -235,6 +237,23 @@ export class CreativeController {
   @HttpCode(HttpStatus.OK)
   approveListing(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.approveListing(this.orgOrThrow(u), id, u.id)
+  }
+
+  /**
+   * GET /listings/:id/seo-score?images=N
+   * Análise SEO do listing ANTES de publicar — reusa pesos do scanner ML
+   * (40% título + 40% atributos + 20% pics) mas opera em memória.
+   * `images` opcional: count de imagens aprovadas (vindo do contexto de publish).
+   */
+  @Get('listings/:id/seo-score')
+  scoreListingSeo(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('images') images?: string,
+  ) {
+    const pics = images !== undefined && images !== '' ? Number(images) : null
+    const picturesCount = pics !== null && Number.isFinite(pics) ? Math.max(0, Math.floor(pics)) : null
+    return this.seo.scoreListing(this.orgOrThrow(u), id, picturesCount)
   }
 
   /** POST /listings/:id/refresh-ml-category — força re-predict da categoria ML. */
