@@ -11,8 +11,8 @@
  * Optimizer gera "título sugerido pra clone" — user copia pra novo anúncio.
  */
 
-import { Injectable, Logger } from '@nestjs/common'
-import axios from 'axios'
+import { Injectable, Logger, BadRequestException } from '@nestjs/common'
+import axios, { type AxiosError } from 'axios'
 import { MercadolivreService } from '../../mercadolivre/mercadolivre.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
@@ -64,24 +64,54 @@ export class MlEditPermissionsService {
 
   /**
    * Pega o item via ML API (usando token da org) + decide permissões.
-   * Retorna o item + permissions.
+   * Tenta TODAS as contas ML da org até achar uma que retorne dono do anúncio.
+   * Útil pra orgs com múltiplas contas (ex: Vazzo tem 2 sellers).
    */
   async fetchAndCheck(orgId: string, mlbId: string): Promise<{
     item:        MlItemForPermissions
     permissions: ListingPermissions
   }> {
-    const { token } = await this.mercadolivre.getTokenForOrg(orgId)
-    const { data } = await axios.get<Record<string, unknown>>(`${ML_BASE}/items/${mlbId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 15_000,
-    })
-    const item = this.parseItem(data)
+    const tokens = await this.mercadolivre.getAllTokensForOrg(orgId)
+    if (tokens.length === 0) {
+      throw new BadRequestException('Nenhuma conta Mercado Livre conectada a esta organização. Conecte em Configurações > Integrações.')
+    }
+
+    let item: MlItemForPermissions | null = null
+    let lastError: string | null = null
+    let tokenUsed: string | null = null
+
+    for (const { token } of tokens) {
+      try {
+        const { data } = await axios.get<Record<string, unknown>>(`${ML_BASE}/items/${mlbId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 15_000,
+        })
+        item = this.parseItem(data)
+        tokenUsed = token
+        break
+      } catch (e: unknown) {
+        if (axios.isAxiosError(e)) {
+          const ax = e as AxiosError<{ message?: string; error?: string }>
+          lastError = `ML ${ax.response?.status ?? '?'}: ${ax.response?.data?.message ?? ax.message}`
+          continue
+        }
+        lastError = (e as Error).message
+      }
+    }
+
+    if (!item || !tokenUsed) {
+      throw new BadRequestException(
+        `Não foi possível acessar o anúncio ${mlbId} com nenhuma das suas contas ML. ` +
+        `Verifique se o ID está correto e se a conta dona dele está conectada. ` +
+        `Último erro: ${lastError ?? 'desconhecido'}`,
+      )
+    }
 
     // Description vem em endpoint separado
     try {
       const { data: descData } = await axios.get<{ plain_text?: string; text?: string }>(
         `${ML_BASE}/items/${mlbId}/description`,
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 },
+        { headers: { Authorization: `Bearer ${tokenUsed}` }, timeout: 10_000 },
       )
       item.description = descData.plain_text ?? descData.text ?? ''
     } catch {
