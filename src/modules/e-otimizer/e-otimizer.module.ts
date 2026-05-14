@@ -5,6 +5,8 @@ import { CompetitorScorerService } from './services/competitor-scorer.service'
 import { CategoryResearchService } from './services/category-research.service'
 import { MlEditPermissionsService } from './services/ml-edit-permissions.service'
 import { ExistingListingOptimizerService } from './services/existing-listing-optimizer.service'
+import { FeedbackLoopService } from './services/feedback-loop.service'
+import { FeedbackLoopCronService } from './services/feedback-loop-cron.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { AiModule } from '../ai/ai.module'
 
@@ -29,6 +31,8 @@ import { AiModule } from '../ai/ai.module'
     CategoryResearchService,
     MlEditPermissionsService,
     ExistingListingOptimizerService,
+    FeedbackLoopService,
+    FeedbackLoopCronService,
   ],
   exports: [
     // Exportado pro Creative consumir no MVP 2

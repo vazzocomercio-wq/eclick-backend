@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CategoryResearchService } from './services/category-research.service'
 import { ExistingListingOptimizerService } from './services/existing-listing-optimizer.service'
+import { FeedbackLoopService } from './services/feedback-loop.service'
 
 interface AuthUser { id: string; orgId: string | null }
 
@@ -24,6 +25,7 @@ export class EOtimizerController {
   constructor(
     private readonly researchSvc: CategoryResearchService,
     private readonly optimizer:   ExistingListingOptimizerService,
+    private readonly feedback:    FeedbackLoopService,
   ) {}
 
   /**
@@ -108,5 +110,26 @@ export class EOtimizerController {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const lim = limit ? Math.min(Math.max(1, Number(limit)), 200) : 50
     return this.optimizer.listHistory(user.orgId, lim)
+  }
+
+  /**
+   * MVP 5 — resumo agregado do feedback loop pra dashboard.
+   * Retorna stats de quanto as otimizações estão de fato impactando vendas.
+   */
+  @Get('feedback/summary')
+  feedbackSummary(@ReqUser() user: AuthUser) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.feedback.getSummary(user.orgId)
+  }
+
+  /**
+   * MVP 5 — captura manual de métricas pra uma otimização específica.
+   * Útil pra testar antes do cron diário rodar.
+   */
+  @Post('feedback/:optimizationId/capture')
+  @HttpCode(HttpStatus.OK)
+  captureMetrics(@ReqUser() user: AuthUser, @Param('optimizationId') optId: string) {
+    if (!user.orgId) throw new BadRequestException('Usuário sem org')
+    return this.feedback.captureMetrics(user.orgId, optId)
   }
 }
