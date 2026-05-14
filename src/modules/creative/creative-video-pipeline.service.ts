@@ -640,17 +640,16 @@ export class CreativeVideoPipelineService {
 
     const { data: rejected, error } = await supabaseAdmin
       .from('creative_videos')
-      .select('id, position, prompt_text, product_id, duration_seconds, aspect_ratio, model_name, source_image_id')
+      .select('*')
       .eq('organization_id', orgId)
       .eq('job_id', jobId)
       .eq('status', 'rejected')
     if (error) throw new BadRequestException(`regenerateAllRejected.list: ${error.message}`)
     if (!rejected || rejected.length === 0) return { regenerated: 0, skipped_cost_cap: false }
 
-    const rows = (rejected as Array<{
-      id: string; position: number; prompt_text: string; product_id: string;
-      duration_seconds: number; aspect_ratio: string; model_name: string; source_image_id: string | null
-    }>).map(r => ({
+    // Preserva campos de chain (chain_position, source_frame_path, etc) ao
+    // regenerar — sem isso chain parts viravam standalone e quebravam o concat.
+    const rows = (rejected as CreativeVideo[]).map(r => ({
       job_id:              jobId,
       product_id:          r.product_id,
       organization_id:     orgId,
@@ -662,6 +661,14 @@ export class CreativeVideoPipelineService {
       model_name:          r.model_name,
       source_image_id:     r.source_image_id,
       regenerated_from_id: r.id,
+      // F6: chain fields preservados
+      chain_position:      r.chain_position,
+      chain_total:         r.chain_total,
+      is_chain_master:     r.is_chain_master,
+      chain_master_id:     r.chain_master_id,
+      parent_video_id:     r.parent_video_id,
+      source_frame_path:   r.source_frame_path,
+      provider:            r.provider,
     }))
 
     const { error: insertErr } = await supabaseAdmin.from('creative_videos').insert(rows)
@@ -682,6 +689,8 @@ export class CreativeVideoPipelineService {
     if (job.total_cost_usd >= job.max_cost_usd) {
       throw new BadRequestException('limite de custo do job atingido — crie um novo job')
     }
+    // Preserva campos de chain — sem isso, regenerar uma parte de chain
+    // virava vídeo standalone e quebrava o concat final.
     const { data, error } = await supabaseAdmin
       .from('creative_videos')
       .insert({
@@ -696,6 +705,14 @@ export class CreativeVideoPipelineService {
         model_name:          original.model_name,
         source_image_id:     original.source_image_id,
         regenerated_from_id: original.id,
+        // F6: chain fields — preservar pra retry de parts encadeadas
+        chain_position:      original.chain_position,
+        chain_total:         original.chain_total,
+        is_chain_master:     original.is_chain_master,
+        chain_master_id:     original.chain_master_id,
+        parent_video_id:     original.parent_video_id,
+        source_frame_path:   original.source_frame_path,
+        provider:            original.provider,
       })
       .select('*').single()
     if (error) throw new BadRequestException(`regenerateVideo.insert: ${error.message}`)
