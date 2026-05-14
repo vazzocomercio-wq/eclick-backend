@@ -133,7 +133,7 @@ export class ProductsCadastroDispatchService {
           title:           `Completar cadastro: ${(p as any).name} ${(p as any).sku ? `(${(p as any).sku})` : ''}`.trim(),
           task_title:      taskBody.slice(0, 200),
           due_date:        input.due_date,
-          tags:            ['cadastro_pendente', ...missingFields.slice(0, 5).map(m => m.label.toLowerCase().replace(/\s+/g, '_'))],
+          tags:            ['cadastro_pendente', ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
           metadata: {
             source:          'saas_cadastro',
             product_id:      p.id,
@@ -334,4 +334,66 @@ export class ProductsCadastroDispatchService {
     })
     this.log.log(`[catalog-incomplete-cron] alert emitido org=${orgId} count=${summary.incomplete_count}`)
   }
+}
+
+/**
+ * Mapeia label do campo faltante pra slug-de-tag amigável usando a nomenclatura
+ * que aparece na vitrine do Mercado Livre (em vez de nomes técnicos).
+ *
+ * Ex: "Pelo menos 1 foto" → "fotos"; "Descrição (≥80 chars)" → "descricao".
+ *
+ * Slug normalizado: lowercase, sem acento, sem espaço/parênteses, underscore
+ * apenas entre palavras quando termo composto (raro).
+ */
+const ML_TAG_SLUG_MAP: Record<string, string> = {
+  // Universais (UNIVERSAL_LABELS em products-completeness.service.ts)
+  'sku':                       'sku',
+  'nome':                      'nome',
+  'marca':                     'marca',
+  'custo':                     'preco_custo',
+  'preço':                     'preco',
+  'preço de custo':            'preco_custo',
+  'peso (kg)':                 'peso',
+  'largura':                   'largura',
+  'comprimento':               'comprimento',
+  'altura':                    'altura',
+  'pelo menos 1 foto':         'fotos',
+  'descrição (≥80 chars)':     'descricao',
+  'descrição':                 'descricao',
+  'categoria ml':              'categoria',
+  'categoria':                 'categoria',
+  'título ml':                 'titulo',
+  'título':                    'titulo',
+  // ML attrs comuns (vêm dinâmicos, mas dá pra mapear os top)
+  'cor principal':             'cor',
+  'cor':                       'cor',
+  'material':                  'material',
+  'modelo':                    'modelo',
+  'altura do produto':         'altura',
+  'largura do produto':        'largura',
+  'comprimento do produto':    'comprimento',
+  'profundidade do produto':   'profundidade',
+  'voltagem':                  'voltagem',
+  'potência':                  'potencia',
+  'temperatura de cor':        'temperatura_cor',
+  'tipo de lâmpada':           'tipo_lampada',
+  'condição do item':          'condicao',
+  'unidades por embalagem':    'unidades',
+  'is_kit':                    'kit',
+}
+
+function toMlTagSlug(label: string): string {
+  const normalized = label.trim().toLowerCase()
+  const fromMap = ML_TAG_SLUG_MAP[normalized]
+  if (fromMap) return fromMap
+
+  // Fallback: normaliza removendo acentos, parênteses e símbolos
+  return normalized
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // strip acentos
+    .replace(/[()≥≤<>≠]/g, '')                          // strip símbolos
+    .replace(/[^a-z0-9\s_]/g, '')                       // só letras/dígitos/espaço/underscore
+    .trim()
+    .replace(/\s+/g, '_')                                // espaços → underscore
+    .replace(/_+/g, '_')                                 // underscores duplos → simples
+    .slice(0, 30)                                        // tag não pode ser absurda
 }
