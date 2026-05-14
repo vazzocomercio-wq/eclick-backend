@@ -1245,15 +1245,33 @@ export class CreativeVideoPipelineService {
       .eq('job_id', jobId)
       .eq('is_chain_master', false)
       .order('chain_position', { ascending: true })
-    const list = (parts ?? []) as CreativeVideo[]
-    if (list.length === 0) return
+      .order('created_at', { ascending: false })
+    const allRows = (parts ?? []) as CreativeVideo[]
+    if (allRows.length === 0) return
 
-    const total = list[0].chain_total
-    if (!total || list.length < total) return  // chain incompleta
-    if (list.some(p => p.status !== 'ready')) return  // alguma part ainda não terminou
+    // Dedup por chain_position — mantém a row mais recente que tem chain_position
+    // (regenerated_from substitui original). Ignora standalone (chain_position=null).
+    const byPosition = new Map<number, CreativeVideo>()
+    for (const p of allRows) {
+      if (p.chain_position == null) continue
+      const existing = byPosition.get(p.chain_position)
+      // Já está ordenado por created_at desc — a primeira que cai aqui é a mais nova.
+      // Mas damos preferência absoluta pra rows 'ready' caso a mais nova esteja failed/pending.
+      if (!existing) {
+        byPosition.set(p.chain_position, p)
+      } else if (existing.status !== 'ready' && p.status === 'ready') {
+        byPosition.set(p.chain_position, p)
+      }
+    }
+
+    const total = allRows.find(r => r.chain_total)?.chain_total ?? null
+    if (!total) return
+    const list = Array.from(byPosition.values()).sort((a, b) => (a.chain_position ?? 0) - (b.chain_position ?? 0))
+    if (list.length < total) return  // chain incompleta (falta criar parts)
+    if (list.some(p => p.status !== 'ready')) return  // alguma part efetiva ainda não terminou
     if (list.some(p => !p.storage_path)) return
 
-    this.logger.log(`[chain ${jobId}] todas ${total} parts ready — concatenando MP4s`)
+    this.logger.log(`[chain ${jobId}] todas ${total} parts ready (dedup ${allRows.length}→${list.length}) — concatenando MP4s`)
 
     try {
       // Baixa todos MP4s em ordem
