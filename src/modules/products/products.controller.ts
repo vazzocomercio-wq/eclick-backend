@@ -98,6 +98,26 @@ export class ProductsController {
     return this.cadastroDispatch.markCompletedByTaskId(body.task_id)
   }
 
+  /** POST /products/cadastro-deal-callback — webhook do Active quando um deal
+   *  de cadastro entra em stage terminal (Ganho/Perdido). Cobre o caso de o
+   *  operador arrastar o card direto pra coluna terminal sem completar a task. */
+  @Post('cadastro-deal-callback')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  async cadastroDealCallback(
+    @Body() body: { deal_id?: string; outcome?: string; secret?: string },
+  ) {
+    const expected = process.env.ACTIVE_CALLBACK_SECRET ?? process.env.ACTIVE_AUTOMATION_BRIDGE_SECRET
+    if (!expected || body?.secret !== expected) {
+      throw new BadRequestException('secret inválido')
+    }
+    if (!body.deal_id) throw new BadRequestException('deal_id obrigatório')
+    if (body.outcome !== 'won' && body.outcome !== 'lost') {
+      throw new BadRequestException("outcome deve ser 'won' ou 'lost'")
+    }
+    return this.cadastroDispatch.markByDealTerminal(body.deal_id, body.outcome)
+  }
+
   // ── F2 (2026-05-14) — Completeness check (universal + ML dinâmico) ─────
 
   /** GET /products/:id/completeness — avalia produto vs requisitos ML.

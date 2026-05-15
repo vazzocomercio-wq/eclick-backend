@@ -278,6 +278,56 @@ export class ProductsCadastroDispatchService {
     return { updated: true, product_id: assignment.product_id as string }
   }
 
+  /**
+   * Callback do Active quando um deal de cadastro entra em stage terminal
+   * (POST /products/cadastro-deal-callback).
+   *
+   * Cobre o gap do callback por task: mover o deal direto pra "Ganho"/"Perdido"
+   * no kanban não completa as tasks vinculadas (no caso de "Perdido" não há
+   * cascata nenhuma), então o assignment ficava preso em 'open' pra sempre.
+   *
+   * - outcome 'won'  → assignment vira 'completed' (+ refresh da tag do produto)
+   * - outcome 'lost' → assignment vira 'cancelled'
+   *
+   * Idempotente: só atua em assignments ainda open/in_progress.
+   */
+  async markByDealTerminal(
+    activeDealId: string,
+    outcome: 'won' | 'lost',
+  ): Promise<{ updated: boolean; product_id?: string }> {
+    const { data: assignment } = await supabaseAdmin
+      .from('product_operator_assignments')
+      .select('id, product_id, status')
+      .eq('active_deal_id', activeDealId)
+      .in('status', ['open', 'in_progress'])
+      .maybeSingle()
+    if (!assignment) return { updated: false }
+
+    const nextStatus = outcome === 'won' ? 'completed' : 'cancelled'
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from('product_operator_assignments')
+      .update({
+        status:       nextStatus,
+        completed_at: outcome === 'won' ? now : null,
+        updated_at:   now,
+      })
+      .eq('id', assignment.id as string)
+
+    this.log.log(`[cadastro-dispatch] deal ${activeDealId} → ${outcome}; assignment ${assignment.id} marcado ${nextStatus}`)
+
+    // Won: re-avalia produto pra ver se ficou completo (remove tag se sim)
+    if (outcome === 'won') {
+      try {
+        await this.completeness.refreshAndCleanupTag(assignment.product_id as string)
+      } catch (e) {
+        this.log.warn(`[cadastro-dispatch] refresh tag falhou: ${(e as Error).message}`)
+      }
+    }
+
+    return { updated: true, product_id: assignment.product_id as string }
+  }
+
   // ── Cron diário 8h ─────────────────────────────────────────────────────────
 
   /**
