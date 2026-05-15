@@ -106,25 +106,36 @@ export class ProductsCadastroDispatchService {
           .in('status', ['open', 'in_progress'])
           .maybeSingle()
         if (existing) {
-          // Verifica se o deal ainda existe no Active (user pode ter deletado
-          // manualmente). Se sumiu, marca o assignment como cancelled e segue
-          // pra criar novo card.
+          // Verifica se o deal ainda está ATIVO no Active. Um deal só conta
+          // como "card aberto" se:
+          //   - ainda existe na tabela (user pode ter deletado), E
+          //   - não está em stage terminal — won_at/lost_at nulos. Card movido
+          //     pra "Ganho"/"Perdido" saiu do fluxo de trabalho, então não
+          //     deve bloquear um novo dispatch.
+          // Quando o deal não conta mais, cancela o assignment órfão e segue
+          // pra criar um card novo.
           const dealId = (existing as { active_deal_id: string | null }).active_deal_id
-          let dealStillExists = false
+          let dealStillOpen = false
+          let staleReason = 'deal sumiu do Active'
           if (dealId) {
             const { data: deal } = await supabaseAdmin
               .schema('active')
               .from('deals')
-              .select('id')
+              .select('id, won_at, lost_at')
               .eq('id', dealId)
               .maybeSingle()
-            dealStillExists = !!deal
+            const d = deal as { won_at: string | null; lost_at: string | null } | null
+            if (d) {
+              dealStillOpen = !d.won_at && !d.lost_at
+              if (!dealStillOpen) staleReason = d.won_at ? 'deal movido pra Ganho' : 'deal movido pra Perdido'
+            }
           }
-          if (dealStillExists) {
+          if (dealStillOpen) {
             skippedExisting++
             continue
           }
-          // Deal sumiu do Active — cancela assignment órfão e prossegue
+          // Deal não conta mais (sumiu OU em stage terminal) — cancela o
+          // assignment órfão e prossegue criando card novo.
           await supabaseAdmin
             .from('product_operator_assignments')
             .update({
@@ -132,7 +143,7 @@ export class ProductsCadastroDispatchService {
               updated_at:  new Date().toISOString(),
             })
             .eq('id', (existing as { id: string }).id)
-          this.log.log(`[cadastro-dispatch] assignment órfão cancelado pra produto=${p.id} (deal ${dealId} sumiu do Active)`)
+          this.log.log(`[cadastro-dispatch] assignment órfão cancelado pra produto=${p.id} (${staleReason}: ${dealId})`)
         }
 
         // Avalia missing fields
