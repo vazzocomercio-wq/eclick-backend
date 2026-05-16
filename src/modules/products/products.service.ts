@@ -69,6 +69,69 @@ export class ProductsService {
     return all
   }
 
+  // ── Imposto padrão da organização (cadastro central) ──────────────────────
+
+  /** Lê o imposto padrão central da org. */
+  async getTaxConfig(orgId: string): Promise<{
+    default_tax_percentage: number | null
+    default_tax_on_freight: boolean
+  }> {
+    const { data, error } = await supabaseAdmin
+      .from('organizations')
+      .select('default_tax_percentage, default_tax_on_freight')
+      .eq('id', orgId)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    const row = data as { default_tax_percentage: number | null; default_tax_on_freight: boolean | null } | null
+    return {
+      default_tax_percentage: row?.default_tax_percentage ?? null,
+      default_tax_on_freight: Boolean(row?.default_tax_on_freight),
+    }
+  }
+
+  /**
+   * Salva o imposto padrão central e, conforme `apply`, propaga pros produtos:
+   *   - 'all'        → sobrescreve tax_percentage de TODOS os produtos da org
+   *   - 'only_empty' → preenche só os produtos sem tax_percentage (NULL)
+   *   - 'none'       → só salva o padrão; produtos sem imposto herdam no cálculo
+   */
+  async updateTaxConfig(orgId: string, dto: {
+    tax_percentage: number | null
+    tax_on_freight: boolean
+    apply: 'none' | 'all' | 'only_empty'
+  }): Promise<{ default_tax_percentage: number | null; default_tax_on_freight: boolean; products_updated: number }> {
+    const { error: orgErr } = await supabaseAdmin
+      .from('organizations')
+      .update({
+        default_tax_percentage: dto.tax_percentage,
+        default_tax_on_freight: dto.tax_on_freight,
+      })
+      .eq('id', orgId)
+    if (orgErr) throw new Error(`updateTaxConfig.org: ${orgErr.message}`)
+
+    let productsUpdated = 0
+    if (dto.apply !== 'none') {
+      let q = supabaseAdmin
+        .from('products')
+        .update({
+          tax_percentage: dto.tax_percentage,
+          tax_on_freight: dto.tax_on_freight,
+          updated_at:     new Date().toISOString(),
+        }, { count: 'exact' })
+        .eq('organization_id', orgId)
+      if (dto.apply === 'only_empty') q = q.is('tax_percentage', null)
+      const { count, error } = await q
+      if (error) throw new Error(`updateTaxConfig.products: ${error.message}`)
+      productsUpdated = count ?? 0
+    }
+
+    return {
+      default_tax_percentage: dto.tax_percentage,
+      default_tax_on_freight: dto.tax_on_freight,
+      products_updated:       productsUpdated,
+    }
+  }
+
   /** Server-side pagination + filtering pra DataTable view do /produtos.
    * quick_filter: 'all'|'active'|'paused'|'no_stock'|'critical'|'stock_high'|
    *               'in_ads'|'no_ads'|'cadastro_pendente'

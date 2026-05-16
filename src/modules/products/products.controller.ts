@@ -432,6 +432,34 @@ export class ProductsController {
     return this.products.getLinkedListingIds()
   }
 
+  /** GET /products/tax-config — imposto padrão central da organização. */
+  @Get('tax-config')
+  getTaxConfig(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.products.getTaxConfig(user.orgId)
+  }
+
+  /** PUT /products/tax-config — salva o imposto padrão e, conforme `apply`,
+   *  propaga pros produtos: 'all' = todos, 'only_empty' = só sem imposto,
+   *  'none' = só salva o padrão (produtos sem imposto herdam no cálculo). */
+  @Put('tax-config')
+  updateTaxConfig(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { tax_percentage?: number | null; tax_on_freight?: boolean; apply?: string },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const apply = body.apply === 'all' || body.apply === 'only_empty' ? body.apply : 'none'
+    const pct = body.tax_percentage == null ? null : Number(body.tax_percentage)
+    if (pct != null && (!Number.isFinite(pct) || pct < 0 || pct > 100)) {
+      throw new BadRequestException('tax_percentage deve estar entre 0 e 100')
+    }
+    return this.products.updateTaxConfig(user.orgId, {
+      tax_percentage: pct,
+      tax_on_freight: Boolean(body.tax_on_freight),
+      apply,
+    })
+  }
+
   // POST /products/vinculos
   @Post('vinculos')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
