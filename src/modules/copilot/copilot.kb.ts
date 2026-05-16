@@ -271,16 +271,19 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 1. **Imagens**: drag-and-drop pra ordenar, capa = índice 0, max 10
 2. **Vídeo** (opcional): radio se múltiplos. Upload best-effort.
 3. **Categoria + atributos**: predict automático no título → form dinâmico
-4. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
-5. **Listing type**: free / gold_special / gold_pro
-6. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+4. **Markup / Precificação**: calcula o preço de venda pela margem alvo (ver abaixo)
+5. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
+6. **Listing type**: free / gold_special / gold_pro
+7. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+
+**Painel Markup / Precificação**: dimensiona o preço de venda a partir de 5 entradas — margem de contribuição alvo (%), custo do produto/CMV (R$), custo de venda do marketplace/tarifa (%), imposto (%) e reserva para promoção (%). O preço cheio é calculado para que MESMO numa promoção do tamanho da reserva a margem alvo se mantenha: \`precoPromo = CMV ÷ (1 − tarifa − imposto − margemAlvo)\`, \`precoVenda = precoPromo ÷ (1 − reservaPromo)\`. A tarifa vem pré-preenchida do tipo de anúncio (16% Premium / 11,5% demais) e é editável. Botão "Aplicar como preço" joga o valor no campo Preço. O resultado é reverificado pelo motor canônico de margem — a margem exibida é a real, não a de entrada.
 
 **Publicar**: cria como \`paused\` no ML. Você revisa lá e ativa manualmente. Idempotência via UUID — clique 2x = 1 publicação.
 
 **Histórico de publicações**: cada tentativa fica registrada com status. Botão "sync" force-update do status atual no ML.
 
 **Alerta de degradação**: quando ML rebaixa anúncio (active→inactive/closed/under_review), banner amber aparece. Botão "dispensar alerta" se você já tratou.`,
-    tags: ['creative', 'publish', 'ml'],
+    tags: ['creative', 'publish', 'ml', 'markup', 'precificacao', 'preco', 'margem'],
   },
   {
     routes:   ['/dashboard/creative/[productId]/images/[jobId]'],
