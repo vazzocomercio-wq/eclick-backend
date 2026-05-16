@@ -47,15 +47,26 @@ export class ProductsService {
   constructor(private readonly stock: StockService) {}
 
   async getAll(orgId: string | null) {
-    const query = supabaseAdmin.from('products').select(PRODUCT_FIELDS)
-    // When no org membership, return all products (user is likely sole owner)
-    const { data, error } = await (
-      orgId
-        ? query.eq('organization_id', orgId)
-        : query
-    ).order('created_at', { ascending: false })
-    if (error) throw new Error(error.message)
-    return data ?? []
+    // Supabase/PostgREST corta em 1000 rows por request. Catálogos grandes
+    // (2k+ produtos) ficavam truncados — produtos além do top-1000 sumiam da
+    // listagem (e da busca client-side). Pagina via .range() até esgotar.
+    const PAGE = 1000
+    const all: Record<string, unknown>[] = []
+    for (let offset = 0; ; offset += PAGE) {
+      let query = supabaseAdmin
+        .from('products')
+        .select(PRODUCT_FIELDS)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + PAGE - 1)
+      // When no org membership, return all products (user is likely sole owner)
+      if (orgId) query = query.eq('organization_id', orgId)
+      const { data, error } = await query
+      if (error) throw new Error(error.message)
+      const batch = data ?? []
+      all.push(...(batch as Record<string, unknown>[]))
+      if (batch.length < PAGE) break
+    }
+    return all
   }
 
   /** Server-side pagination + filtering pra DataTable view do /produtos.
