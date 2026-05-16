@@ -371,12 +371,14 @@ export class CreativeMlPublisherService {
 
     // Monta payload final ML.
     // `family_name`: nome da família do produto — obrigatório em algumas
-    // categorias (ex: iluminação). Enviar sempre é seguro; categorias que
-    // não exigem simplesmente ignoram.
-    const familyName = (product.name?.trim() || listing.title).slice(0, 60)
+    // categorias (ex: iluminação). O ML valida que o `title` seja consistente
+    // com o `family_name` (o título precisa começar pelo family_name) — usar
+    // o próprio título como family_name garante a consistência. Categorias
+    // que não exigem simplesmente ignoram o campo.
+    const mlTitle = listing.title.slice(0, 60)
     const mlPayload: Record<string, unknown> = {
-      title:               listing.title.slice(0, 60),
-      family_name:         familyName,
+      title:               mlTitle,
+      family_name:         mlTitle,
       category_id:         categoryId,
       price:               Number(opts.price ?? 0),
       currency_id:         'BRL',
@@ -898,8 +900,11 @@ function extractMlError(e: unknown): { message: string; body: Record<string, unk
     const data = ax.response?.data
     const causeMsg = data?.cause?.map(c => c.message).filter(Boolean).join('; ')
     const msg = data?.message ?? data?.error ?? ax.message ?? 'erro desconhecido'
+    // `message` costuma ser genérico ("body.invalid_fields") enquanto `error`
+    // traz o detalhe útil ("The fields [title] are invalid…"). Junta os dois.
+    const detail = causeMsg || (data?.error && data.error !== msg ? data.error : '')
     return {
-      message: causeMsg ? `${msg}: ${causeMsg}` : msg,
+      message: detail ? `${msg}: ${detail}` : msg,
       body:    (data as unknown as Record<string, unknown>) ?? null,
     }
   }
