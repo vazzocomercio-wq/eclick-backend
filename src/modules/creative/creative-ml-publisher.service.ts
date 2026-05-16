@@ -614,6 +614,18 @@ export class CreativeMlPublisherService {
         .single()
 
       this.logger.log(`[creative.ml.publish] ✓ ${item.id} publicado (status: ${item.status ?? '?'})`)
+
+      // Pós-publicação: propaga os dados do anúncio de volta pro produto do
+      // catálogo vinculado (título ML, descrição, fotos). Fail-isolated — um
+      // erro aqui não desfaz nem invalida a publicação.
+      try {
+        const listing = await this.creative.getListing(orgId, listingId)
+        const creativeProduct = await this.creative.getProduct(orgId, listing.product_id)
+        await this.syncCatalogProductAfterPublish(orgId, creativeProduct, listing, item)
+      } catch (e) {
+        this.logger.warn(`[creative.ml.publish] sync catálogo pós-publish falhou: ${(e as Error).message}`)
+      }
+
       return (updated as CreativePublication) ?? pub
     } catch (e: unknown) {
       const errPayload = extractMlError(e)
@@ -628,6 +640,50 @@ export class CreativeMlPublisherService {
         .eq('id', pub.id)
       this.logger.error(`[creative.ml.publish] ✗ ${errPayload.message}`)
       throw new HttpException(`ML rejeitou: ${errPayload.message}`, HttpStatus.BAD_GATEWAY)
+    }
+  }
+
+  /**
+   * Propaga os dados do anúncio publicado de volta pro produto do catálogo
+   * (`products`) vinculado — fecha o ciclo: o que foi pro ML vira a verdade
+   * do catálogo. Só roda quando o creative_product tem `product_id`.
+   *
+   * Sincroniza: título ML, descrição e fotos (URLs públicas do próprio ML,
+   * que são permanentes). Não desvincula nem cria vínculo aqui — o vínculo
+   * já nasce no fluxo de Novo Anúncio a partir do catálogo.
+   */
+  private async syncCatalogProductAfterPublish(
+    orgId:           string,
+    creativeProduct: { id: string; product_id: string | null },
+    listing:         { title: string; description: string },
+    mlItem:          { pictures?: Array<{ url?: string; secure_url?: string }> },
+  ): Promise<void> {
+    const catalogId = creativeProduct.product_id
+    if (!catalogId) {
+      this.logger.log(`[creative.ml.publish] anúncio sem vínculo de catálogo — sync pulado`)
+      return
+    }
+
+    const photoUrls = (mlItem.pictures ?? [])
+      .map(p => p.secure_url ?? p.url)
+      .filter((u): u is string => !!u)
+
+    const patch: Record<string, unknown> = {
+      ml_title:   listing.title,
+      updated_at: new Date().toISOString(),
+    }
+    if (listing.description?.trim()) patch.description = listing.description
+    if (photoUrls.length > 0)        patch.photo_urls  = photoUrls
+
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update(patch)
+      .eq('id', catalogId)
+      .eq('organization_id', orgId)
+    if (error) {
+      this.logger.warn(`[creative.ml.publish] sync catálogo ${catalogId} falhou: ${error.message}`)
+    } else {
+      this.logger.log(`[creative.ml.publish] catálogo ${catalogId} sincronizado — título + ${photoUrls.length} foto(s)`)
     }
   }
 
