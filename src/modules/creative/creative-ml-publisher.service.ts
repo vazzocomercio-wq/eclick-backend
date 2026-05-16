@@ -349,9 +349,14 @@ export class CreativeMlPublisherService {
       attributesPayload.push({ id: 'SELLER_SKU', value_name: product.sku })
     }
 
-    // Monta payload final ML
+    // Monta payload final ML.
+    // `family_name`: nome da família do produto — obrigatório em algumas
+    // categorias (ex: iluminação). Enviar sempre é seguro; categorias que
+    // não exigem simplesmente ignoram.
+    const familyName = (product.name?.trim() || listing.title).slice(0, 60)
     const mlPayload: Record<string, unknown> = {
       title:               listing.title.slice(0, 60),
+      family_name:         familyName,
       category_id:         categoryId,
       price:               Number(opts.price ?? 0),
       currency_id:         'BRL',
