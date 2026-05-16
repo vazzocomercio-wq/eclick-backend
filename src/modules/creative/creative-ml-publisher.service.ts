@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenEx
 import axios, { AxiosError } from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { MlShippingCostService, type ShippingCostResult } from '../mercadolivre/ml-shipping-cost.service'
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
@@ -138,7 +139,26 @@ export class CreativeMlPublisherService {
   constructor(
     private readonly creative: CreativeService,
     private readonly ml:       MercadolivreService,
+    private readonly shipping: MlShippingCostService,
   ) {}
+
+  /**
+   * Custo do frete grátis pago pelo vendedor pra esse anúncio, dado as
+   * dimensões da embalagem e o preço de venda. Usado pelo painel de markup.
+   * Resolve a conta ML da org. Retorna `null` quando o ML não responde.
+   */
+  async getListingShippingCost(
+    orgId:     string,
+    listingId: string,
+    opts: {
+      lengthCm: number; widthCm: number; heightCm: number
+      weightGrams: number; itemPrice: number
+    },
+  ): Promise<ShippingCostResult | null> {
+    await this.creative.getListing(orgId, listingId)  // tenant check
+    const { token, sellerId } = await this.ml.getTokenForOrg(orgId)
+    return this.shipping.getFreeShippingCost(token, sellerId, opts)
+  }
 
   // ════════════════════════════════════════════════════════════════════════
   // Context — pega listing + produto + imagens/vídeos aprovados + SKU match

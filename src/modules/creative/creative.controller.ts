@@ -575,6 +575,25 @@ export class CreativeController {
     return this.mlPub.publishToMl(this.orgOrThrow(u), u.id, id, body)
   }
 
+  @Post('listings/:id/shipping-cost')
+  @HttpCode(HttpStatus.OK)
+  getListingShippingCost(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: {
+      length_cm: number; width_cm: number; height_cm: number
+      weight_grams: number; item_price: number
+    },
+  ) {
+    return this.mlPub.getListingShippingCost(this.orgOrThrow(u), id, {
+      lengthCm:    Number(body?.length_cm) || 0,
+      widthCm:     Number(body?.width_cm) || 0,
+      heightCm:    Number(body?.height_cm) || 0,
+      weightGrams: Number(body?.weight_grams) || 0,
+      itemPrice:   Number(body?.item_price) || 0,
+    })
+  }
+
   @Get('listings/:id/publications')
   listListingPublications(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.listPublicationsByListing(this.orgOrThrow(u), id)
