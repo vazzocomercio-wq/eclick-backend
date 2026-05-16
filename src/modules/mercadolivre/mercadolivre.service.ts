@@ -1,6 +1,8 @@
 import { Injectable, UnauthorizedException, HttpException, BadRequestException, NotFoundException } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
+import { MlListingPricesService } from './ml-listing-prices.service'
+import { estimateSaleFee } from '../../common/margin'
 
 // redeploy - organization_id now nullable
 const ML_BASE = 'https://api.mercadolibre.com'
@@ -139,6 +141,8 @@ function computePerfStats(
 
 @Injectable()
 export class MercadolivreService {
+  constructor(private readonly listingPrices: MlListingPricesService) {}
+
   // ── OAuth ────────────────────────────────────────────────────────────────
 
   getAuthUrl(redirectUri: string): string {
@@ -1629,8 +1633,42 @@ export class MercadolivreService {
           health_score: null as number | null,
           health_status: null as string | null,
           health_reasons: [] as string[],
+          // Tarifa de venda ESTIMADA (preenchida abaixo via listing_prices).
+          estimated_sale_fee:           null as number | null,
+          estimated_fee_pct:            null as number | null,
+          estimated_fixed_fee:          null as number | null,
+          estimated_free_shipping_cost: null as number | null,
         }
       })
+
+    // Enriquece cada anúncio com a tarifa de venda estimada da categoria
+    // (listing_prices): % + custo fixo, como o ML cobra. Best-effort —
+    // anúncio sem categoria/preço fica sem estimativa. Dedupe por
+    // categoria|tipo|faixa de preço pra minimizar chamadas.
+    const feeKeys = new Map<string, { categoryId: string; listingTypeId: string; price: number }>()
+    const keyOf = (it: { category_id?: string; listing_type_id?: string; price: number }) =>
+      `${it.category_id}|${it.listing_type_id ?? 'gold_special'}|${Math.floor(it.price / 50) * 50}`
+    for (const it of items) {
+      if (!it.category_id || !(it.price > 0)) continue
+      const k = keyOf(it)
+      if (!feeKeys.has(k)) {
+        feeKeys.set(k, { categoryId: it.category_id, listingTypeId: it.listing_type_id ?? 'gold_special', price: it.price })
+      }
+    }
+    const feeByKey = new Map<string, Awaited<ReturnType<MlListingPricesService['getFee']>>>()
+    await Promise.all([...feeKeys.entries()].map(async ([k, params]) => {
+      feeByKey.set(k, await this.listingPrices.getFee(token, params))
+    }))
+    for (const it of items) {
+      if (!it.category_id || !(it.price > 0)) continue
+      const fee = feeByKey.get(keyOf(it))
+      if (fee) {
+        it.estimated_fee_pct            = fee.percentageFee
+        it.estimated_fixed_fee          = fee.fixedFee
+        it.estimated_sale_fee           = estimateSaleFee(it.price, fee.percentageFee, fee.fixedFee)
+        it.estimated_free_shipping_cost = fee.freeShippingCost
+      }
+    }
 
     return { items, total }
   }

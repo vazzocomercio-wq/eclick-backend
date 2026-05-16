@@ -84,3 +84,13 @@ export function estimateSaleFee(price: number, percentageFee: number, fixedFee: 
   const fix = Math.max(0, Number(fixedFee) || 0)
   return round2(p * (pct / 100) + fix)
 }
+
+/**
+ * Fallback GROSSEIRO do percentual de tarifa por tipo de anúncio (escala
+ * 0–100). Usar SÓ quando a tarifa real da categoria (via API `listing_prices`)
+ * não está disponível — é uma média, ignora variação por categoria e custo
+ * fixo. Premium ≈ 16%, demais ≈ 11,5%.
+ */
+export function fallbackFeeRate(listingTypeId: string): number {
+  return listingTypeId === 'gold_pro' || listingTypeId === 'gold_premium' ? 16 : 11.5
+}
