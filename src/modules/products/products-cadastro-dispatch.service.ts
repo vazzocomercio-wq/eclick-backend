@@ -76,6 +76,28 @@ export class ProductsCadastroDispatchService {
       throw new BadRequestException(`Não foi possível resolver org no Active CRM: ${(e as Error).message}`)
     }
 
+    // Resolve o stage de "em andamento" do pipeline — pra onde o card vai
+    // quando o operador confirma que abriu o IA Criativo. Heurística: stage
+    // não-terminal cujo nome casa /andamento|progress/i; fallback = primeiro
+    // stage não-terminal depois do stage inicial. Best-effort: se falhar, o
+    // card ainda é criado, só sem o atalho de auto-move.
+    let inProgressStageId: string | null = null
+    try {
+      const stages = await this.activeResolver.listStages(dispatcherUserId, input.pipeline_id)
+      const nonTerminal = stages
+        .filter(s => !s.is_won && !s.is_lost)
+        .sort((a, b) => a.position - b.position)
+      const byName = nonTerminal.find(s => /andamento|progress/i.test(s.name))
+      if (byName) {
+        inProgressStageId = byName.id
+      } else {
+        const initialPos = nonTerminal.find(s => s.id === input.stage_id)?.position ?? -1
+        inProgressStageId = (nonTerminal.find(s => s.position > initialPos) ?? nonTerminal[0])?.id ?? null
+      }
+    } catch (e) {
+      this.log.warn(`[cadastro-dispatch] não resolvi in_progress stage: ${(e as Error).message}`)
+    }
+
     // Fetch produtos + checa que pertencem ao org
     const { data: products, error } = await supabaseAdmin
       .from('products')
@@ -176,10 +198,16 @@ export class ProductsCadastroDispatchService {
           tags:            ['cadastro_pendente', ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
           metadata: {
             source:          'saas_cadastro',
+            // Marcador estável usado pelo Active pra detectar card de cadastro
+            // (o `source` é sobrescrito pra 'saas:ml-campaigns' no bridge).
+            card_kind:       'product_cadastro',
             product_id:      p.id,
             sku:             (p as any).sku,
             missing_fields:  missingFields,
             deeplink,
+            // Stage pra onde o card vai quando o operador confirma abrir o
+            // IA Criativo. null = pipeline sem stage de andamento detectável.
+            in_progress_stage_id: inProgressStageId,
             priority:        input.task_priority ?? 'normal',
             notes:           input.notes ?? null,
           },
@@ -279,21 +307,23 @@ export class ProductsCadastroDispatchService {
   }
 
   /**
-   * Callback do Active quando um deal de cadastro entra em stage terminal
+   * Callback do Active quando o estado de um deal de cadastro muda
    * (POST /products/cadastro-deal-callback).
    *
-   * Cobre o gap do callback por task: mover o deal direto pra "Ganho"/"Perdido"
-   * no kanban não completa as tasks vinculadas (no caso de "Perdido" não há
-   * cascata nenhuma), então o assignment ficava preso em 'open' pra sempre.
+   * Cobre o gap do callback por task: mover o deal no kanban não completa as
+   * tasks vinculadas (e "Perdido" não tem cascata nenhuma), então o assignment
+   * ficava preso em 'open'. Mapeamento estado do deal → status do assignment:
    *
-   * - outcome 'won'  → assignment vira 'completed' (+ refresh da tag do produto)
-   * - outcome 'lost' → assignment vira 'cancelled'
+   * - 'won'         → 'completed' (+ refresh da tag do produto)
+   * - 'lost'        → 'cancelled'
+   * - 'in_progress' → 'in_progress' (operador começou a trabalhar — só
+   *                    promove a partir de 'open', nunca rebaixa terminal)
    *
    * Idempotente: só atua em assignments ainda open/in_progress.
    */
-  async markByDealTerminal(
+  async syncAssignmentByDealState(
     activeDealId: string,
-    outcome: 'won' | 'lost',
+    state: 'won' | 'lost' | 'in_progress',
   ): Promise<{ updated: boolean; product_id?: string }> {
     const { data: assignment } = await supabaseAdmin
       .from('product_operator_assignments')
@@ -303,21 +333,29 @@ export class ProductsCadastroDispatchService {
       .maybeSingle()
     if (!assignment) return { updated: false }
 
-    const nextStatus = outcome === 'won' ? 'completed' : 'cancelled'
+    // in_progress só promove a partir de 'open' — não re-escreve um assignment
+    // que já está in_progress (evita update redundante a cada movimentação).
+    if (state === 'in_progress' && assignment.status !== 'open') {
+      return { updated: false, product_id: assignment.product_id as string }
+    }
+
+    const nextStatus = state === 'won' ? 'completed'
+                     : state === 'lost' ? 'cancelled'
+                     : 'in_progress'
     const now = new Date().toISOString()
     await supabaseAdmin
       .from('product_operator_assignments')
       .update({
         status:       nextStatus,
-        completed_at: outcome === 'won' ? now : null,
+        completed_at: state === 'won' ? now : null,
         updated_at:   now,
       })
       .eq('id', assignment.id as string)
 
-    this.log.log(`[cadastro-dispatch] deal ${activeDealId} → ${outcome}; assignment ${assignment.id} marcado ${nextStatus}`)
+    this.log.log(`[cadastro-dispatch] deal ${activeDealId} → ${state}; assignment ${assignment.id} marcado ${nextStatus}`)
 
     // Won: re-avalia produto pra ver se ficou completo (remove tag se sim)
-    if (outcome === 'won') {
+    if (state === 'won') {
       try {
         await this.completeness.refreshAndCleanupTag(assignment.product_id as string)
       } catch (e) {

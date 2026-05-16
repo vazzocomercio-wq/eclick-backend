@@ -98,9 +98,9 @@ export class ProductsController {
     return this.cadastroDispatch.markCompletedByTaskId(body.task_id)
   }
 
-  /** POST /products/cadastro-deal-callback — webhook do Active quando um deal
-   *  de cadastro entra em stage terminal (Ganho/Perdido). Cobre o caso de o
-   *  operador arrastar o card direto pra coluna terminal sem completar a task. */
+  /** POST /products/cadastro-deal-callback — webhook do Active quando o estado
+   *  de um deal de cadastro muda (Ganho/Perdido/Em andamento). Cobre o caso de
+   *  o operador mover o card no kanban sem completar a task. */
   @Post('cadastro-deal-callback')
   @Public()
   @HttpCode(HttpStatus.OK)
@@ -112,10 +112,10 @@ export class ProductsController {
       throw new BadRequestException('secret inválido')
     }
     if (!body.deal_id) throw new BadRequestException('deal_id obrigatório')
-    if (body.outcome !== 'won' && body.outcome !== 'lost') {
-      throw new BadRequestException("outcome deve ser 'won' ou 'lost'")
+    if (body.outcome !== 'won' && body.outcome !== 'lost' && body.outcome !== 'in_progress') {
+      throw new BadRequestException("outcome deve ser 'won', 'lost' ou 'in_progress'")
     }
-    return this.cadastroDispatch.markByDealTerminal(body.deal_id, body.outcome)
+    return this.cadastroDispatch.syncAssignmentByDealState(body.deal_id, body.outcome)
   }
 
   // ── F2 (2026-05-14) — Completeness check (universal + ML dinâmico) ─────
