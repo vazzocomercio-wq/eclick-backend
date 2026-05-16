@@ -372,6 +372,22 @@ export class CreativeMlPublisherService {
       attributesPayload.push({ id: 'SELLER_SKU', value_name: product.sku })
     }
 
+    // Dimensões da embalagem (SELLER_PACKAGE_*) — obrigatórias em categorias
+    // com frete (ex: iluminação). Lidas de `creative_products.dimensions`,
+    // que pode trazer valores nus ("420") ou com unidade ("3 kg").
+    const dims = (product.dimensions ?? {}) as Record<string, unknown>
+    const pkgAttrs: Array<[string, number | null, 'cm' | 'g']> = [
+      ['SELLER_PACKAGE_HEIGHT', parsePackageDim(dims.altura,        'length'), 'cm'],
+      ['SELLER_PACKAGE_WIDTH',  parsePackageDim(dims.largura,       'length'), 'cm'],
+      ['SELLER_PACKAGE_LENGTH', parsePackageDim(dims.profundidade,  'length'), 'cm'],
+      ['SELLER_PACKAGE_WEIGHT', parsePackageDim(dims.peso,          'weight'), 'g'],
+    ]
+    for (const [id, val, unit] of pkgAttrs) {
+      if (val != null && !attributesPayload.find(a => a.id === id)) {
+        attributesPayload.push({ id, value_name: `${val} ${unit}` })
+      }
+    }
+
     // Monta payload final ML.
     // `family_name`: nome da família do produto — obrigatório em algumas
     // categorias (ex: iluminação). O ML valida que o `title` seja consistente
@@ -914,6 +930,27 @@ export class CreativeMlPublisherService {
 }
 
 // ── Helpers de erro ──────────────────────────────────────────────────────
+
+/**
+ * Lê uma medida de `creative_products.dimensions` (string que pode vir nua —
+ * "420" — ou com unidade — "3 kg", "0.4 m") e devolve o valor inteiro na
+ * unidade canônica do ML: cm para comprimento, g para peso. Valor nu assume
+ * a unidade canônica (cm / g).
+ */
+function parsePackageDim(raw: unknown, kind: 'length' | 'weight'): number | null {
+  const str = String(raw ?? '').trim().toLowerCase()
+  const m = str.match(/^([\d.,]+)\s*([a-z"]*)$/)
+  if (!m) return null
+  const n = Number(m[1].replace(',', '.'))
+  if (!Number.isFinite(n) || n <= 0) return null
+  const unit = m[2]
+  if (kind === 'length') {
+    const cm = unit === 'm' ? n * 100 : unit === 'mm' ? n / 10 : n  // cm / vazio
+    return Math.round(cm)
+  }
+  const g = unit === 'kg' ? n * 1000 : unit === 'mg' ? n / 1000 : n  // g / vazio
+  return Math.round(g)
+}
 
 /** True quando o ML rejeitou o campo `title` (categoria gera o título). */
 function isTitleFieldRejected(e: unknown): boolean {
