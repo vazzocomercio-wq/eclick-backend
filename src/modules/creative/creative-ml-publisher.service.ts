@@ -495,13 +495,17 @@ export class CreativeMlPublisherService {
       )
     }
 
+    // product_id (creative_products) — vem do listing, NÃO do ml_payload.
+    // Resolvido ANTES do insert porque a coluna é NOT NULL.
+    const listing = await this.creative.getListing(orgId, listingId)
+
     // Cria row 'pending'
     const { data: created, error: createErr } = await supabaseAdmin
       .from('creative_publications')
       .insert({
         organization_id:  orgId,
         listing_id:       listingId,
-        product_id:       (preview.ml_payload.product_id as string) ?? null,
+        product_id:       listing.product_id,
         user_id:          userId,
         marketplace:      'mercado_livre',
         status:           'pending',
@@ -526,15 +530,6 @@ export class CreativeMlPublisherService {
     }
 
     const pub = created as CreativePublication
-    // product_id correto (não vem no payload, busco do listing)
-    const listing = await this.creative.getListing(orgId, listingId)
-    if (pub.product_id !== listing.product_id) {
-      await supabaseAdmin
-        .from('creative_publications')
-        .update({ product_id: listing.product_id })
-        .eq('id', pub.id)
-      pub.product_id = listing.product_id
-    }
 
     // Marca publishing
     await this.setPublicationStatus(pub.id, 'publishing')
@@ -619,7 +614,6 @@ export class CreativeMlPublisherService {
       // catálogo vinculado (título ML, descrição, fotos). Fail-isolated — um
       // erro aqui não desfaz nem invalida a publicação.
       try {
-        const listing = await this.creative.getListing(orgId, listingId)
         const creativeProduct = await this.creative.getProduct(orgId, listing.product_id)
         await this.syncCatalogProductAfterPublish(orgId, creativeProduct, listing, item)
       } catch (e) {
