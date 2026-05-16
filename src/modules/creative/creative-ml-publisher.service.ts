@@ -152,7 +152,7 @@ export class CreativeMlPublisherService {
     listingId: string,
     opts: {
       lengthCm: number; widthCm: number; heightCm: number
-      weightGrams: number; itemPrice: number
+      weightGrams: number; itemPrice: number; listingTypeId: string
     },
   ): Promise<ShippingCostResult | null> {
     await this.creative.getListing(orgId, listingId)  // tenant check

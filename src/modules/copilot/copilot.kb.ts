@@ -280,6 +280,8 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 **Frete no markup**: marcando "Frete grátis por conta do vendedor", o painel busca o custo real do frete no ML (\`GET /users/{seller}/shipping_options/free\`) por largura/altura/profundidade/peso da embalagem — pré-preenchidos do produto. O ML aplica internamente as regras de faixa de preço (o custo dá um salto quando o item passa do valor mínimo de frete grátis); abaixo do mínimo o ML devolve o custo menor da tabela. Como o frete depende do preço e o preço depende do frete, o botão "Buscar custo de frete" itera até convergir. O frete entra como custo na formação do preço. Desmarcado = o comprador paga o frete, custo zero.
 
+**Desconto de frete por reputação**: a chamada de frete passa \`listing_type_id\` — sem ele o ML devolveria o custo BRUTO (sem desconto), superfaturando o frete em até 2× para contas Mercado Líder. Com o \`listing_type_id\`, o ML aplica o desconto de reputação (varia por item, 30–50%) e devolve o custo já líquido. O painel mostra o desconto aplicado ("de R$X com 50% de desconto Mercado Líder").
+
 **Publicar**: cria como \`paused\` no ML. Você revisa lá e ativa manualmente. Idempotência via UUID — clique 2x = 1 publicação.
 
 **Histórico de publicações**: cada tentativa fica registrada com status. Botão "sync" force-update do status atual no ML.
