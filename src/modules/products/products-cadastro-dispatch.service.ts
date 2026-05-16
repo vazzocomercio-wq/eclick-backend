@@ -180,7 +180,7 @@ export class ProductsCadastroDispatchService {
           : 'Revisar cadastro completo'
 
         const dedupKey = `product_cadastro:${p.id}`
-        const baseUrl = process.env.FRONTEND_PUBLIC_URL ?? 'https://app.eclick.app.br'
+        const baseUrl = process.env.FRONTEND_PUBLIC_URL ?? 'https://eclick.app.br'
         // Deeplink aponta pra IA Criativo do produto: operador completa
         // dados, gera imagens, gera listing e publica direto no ML — tudo
         // numa tela só. Sem isso, ia pro editor básico e ele tinha que
