@@ -118,6 +118,20 @@ export class CreativeController {
     return this.svc.creativeToCatalog(this.orgOrThrow(u), id)
   }
 
+  /** POST /products/:id/import-catalog-images — importa as fotos do produto
+   *  do catálogo como imagens aprovadas do anúncio (operador publica sem
+   *  precisar gerar imagens com IA). Exige briefing_id no body. */
+  @Post('products/:id/import-catalog-images')
+  @HttpCode(HttpStatus.OK)
+  importCatalogImages(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { briefing_id?: string },
+  ) {
+    if (!body?.briefing_id) throw new BadRequestException('briefing_id obrigatório')
+    return this.svc.importCatalogImagesAsCreativeImages(this.orgOrThrow(u), id, body.briefing_id)
+  }
+
   // ── Briefings ────────────────────────────────────────────────────────────
 
   @Post('products/:id/briefings')

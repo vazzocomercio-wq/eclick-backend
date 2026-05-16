@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, ConflictException } from '@nestjs/common'
+import { randomUUID } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
@@ -380,6 +381,109 @@ export class CreativeService {
         photo_urls: c.photo_urls ?? [],
       },
     }
+  }
+
+  /**
+   * Importa as fotos do produto do catálogo como imagens do anúncio
+   * (`creative_images` aprovadas), pra o operador publicar sem precisar gerar
+   * imagens com IA. Cobre o pedido "se já houver imagens, passar sem criar".
+   *
+   * Como `creative_images.job_id` é NOT NULL, cria um job de import (custo
+   * zero, `prompts_metadata.source = 'catalog_import'`) só pra hospedar as
+   * imagens — o publish/ML continua lendo de `creative_images` sem mudança.
+   *
+   * Idempotente: se já existe job de import pra esse produto, não duplica.
+   * Best-effort por foto: uma que falhe o download não aborta as demais.
+   */
+  async importCatalogImagesAsCreativeImages(
+    orgId:             string,
+    creativeProductId: string,
+    briefingId:        string,
+  ): Promise<{ imported: number; skipped: 'no_link' | 'no_photos' | 'already_imported' | null }> {
+    const creative = await this.getProduct(orgId, creativeProductId)
+    if (!creative.product_id) return { imported: 0, skipped: 'no_link' }
+
+    // Idempotência: já importou antes pra esse produto?
+    const { data: priorJob } = await supabaseAdmin
+      .from('creative_image_jobs')
+      .select('id')
+      .eq('product_id', creativeProductId)
+      .eq('prompts_metadata->>source', 'catalog_import')
+      .limit(1)
+      .maybeSingle()
+    if (priorJob) return { imported: 0, skipped: 'already_imported' }
+
+    // Fotos do catálogo (ML aceita 10 — limita a 12 com folga)
+    const { data: cat } = await supabaseAdmin
+      .from('products')
+      .select('photo_urls')
+      .eq('id', creative.product_id)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    const photoUrls = (((cat as { photo_urls: string[] | null } | null)?.photo_urls) ?? []).slice(0, 12)
+    if (photoUrls.length === 0) return { imported: 0, skipped: 'no_photos' }
+
+    // Job de import — custo zero, status já completed (não passa pelo worker)
+    const nowIso = new Date().toISOString()
+    const { data: job, error: jobErr } = await supabaseAdmin
+      .from('creative_image_jobs')
+      .insert({
+        organization_id:  orgId,
+        product_id:       creativeProductId,
+        briefing_id:      briefingId,
+        status:           'completed',
+        requested_count:  photoUrls.length,
+        completed_count:  photoUrls.length,
+        approved_count:   photoUrls.length,
+        max_cost_usd:     0,
+        total_cost_usd:   0,
+        prompts_metadata: { source: 'catalog_import' },
+        started_at:       nowIso,
+        completed_at:     nowIso,
+      })
+      .select('id')
+      .single()
+    if (jobErr || !job) throw new BadRequestException(`importCatalogImages.job: ${jobErr?.message}`)
+
+    let imported = 0
+    for (let i = 0; i < photoUrls.length; i++) {
+      try {
+        const resp = await fetch(photoUrls[i])
+        if (!resp.ok) { this.logger.warn(`[catalog-import] foto ${i} HTTP ${resp.status}`); continue }
+        const buffer = Buffer.from(await resp.arrayBuffer())
+        const contentType = resp.headers.get('content-type') || 'image/jpeg'
+        const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg'
+        const imageId = randomUUID()
+        const storagePath = `${orgId}/${creativeProductId}/images/${imageId}.${ext}`
+
+        const { error: upErr } = await supabaseAdmin.storage
+          .from('creative')
+          .upload(storagePath, buffer, { contentType, upsert: true, cacheControl: '3600' })
+        if (upErr) { this.logger.warn(`[catalog-import] upload foto ${i}: ${upErr.message}`); continue }
+
+        const { error: insErr } = await supabaseAdmin
+          .from('creative_images')
+          .insert({
+            id:                  imageId,
+            job_id:              job.id,
+            product_id:          creativeProductId,
+            organization_id:     orgId,
+            position:            i + 1,
+            prompt_text:         'Imagem importada do catálogo',
+            status:              'approved',
+            storage_path:        storagePath,
+            approved_at:         nowIso,
+            generation_metadata: { source: 'catalog_import', original_url: photoUrls[i] },
+          })
+        if (insErr) { this.logger.warn(`[catalog-import] insert foto ${i}: ${insErr.message}`); continue }
+        imported++
+      } catch (e) {
+        this.logger.warn(`[catalog-import] foto ${i} falhou: ${(e as Error).message}`)
+      }
+    }
+
+    this.logger.log(`[catalog-import] produto ${creativeProductId}: ${imported}/${photoUrls.length} fotos importadas`)
+    return { imported, skipped: null }
   }
 
   /** Cria creative_product pré-preenchido com dados de um produto do catálogo.
