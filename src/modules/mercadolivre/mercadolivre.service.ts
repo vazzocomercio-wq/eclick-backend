@@ -1543,16 +1543,40 @@ export class MercadolivreService {
     limit: number,
     q?: string,
   ): Promise<{ items: any[]; total: number }> {
-    const searchParams: Record<string, unknown> = { status, offset, limit }
-    if (q?.trim()) searchParams.q = q.trim()
+    // Busca unificada — o termo casa contra qualquer dado relevante do anúncio:
+    //   - código MLB (com ou sem prefixo) → resolve o item direto
+    //   - senão → busca por título (q) E por SKU exato (seller_sku) na API ML
+    //     e mescla. O ML não tem busca cross-campo, daí as 2 chamadas.
+    const searchUrl = `${ML_BASE}/users/${sellerId}/items/search`
+    const authHeaders = { Authorization: `Bearer ${token}` }
+    const term = q?.trim()
 
-    const { data: search } = await axios.get(`${ML_BASE}/users/${sellerId}/items/search`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: searchParams,
-    })
+    let ids: string[]
+    let total: number
 
-    const ids: string[] = search.results ?? []
-    const total: number = search.paging?.total ?? 0
+    if (!term) {
+      const { data: search } = await axios.get(searchUrl, {
+        headers: authHeaders,
+        params: { status, offset, limit },
+      })
+      ids = search.results ?? []
+      total = search.paging?.total ?? 0
+    } else if (/^MLB\d+$/i.test(term) || /^\d{6,}$/.test(term)) {
+      // Código MLB digitado (ex: MLB5304689760 ou 5304689760)
+      ids = [/^MLB/i.test(term) ? term.toUpperCase() : `MLB${term}`]
+      total = 1
+    } else {
+      const [byTitle, bySku] = await Promise.allSettled([
+        axios.get(searchUrl, { headers: authHeaders, params: { status, q: term, limit: 50 } }),
+        axios.get(searchUrl, { headers: authHeaders, params: { status, seller_sku: term, limit: 50 } }),
+      ])
+      const merged: string[] = []
+      if (byTitle.status === 'fulfilled') merged.push(...(byTitle.value.data.results ?? []))
+      if (bySku.status === 'fulfilled')   merged.push(...(bySku.value.data.results ?? []))
+      const unique = [...new Set(merged)]
+      total = unique.length
+      ids = unique.slice(offset, offset + limit)
+    }
 
     if (ids.length === 0) return { items: [], total }
 
