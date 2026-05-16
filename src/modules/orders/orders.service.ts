@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { computeContributionMargin, estimateSaleFee, round2 } from '../../common/margin'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -26,10 +27,20 @@ export class OrdersService {
   constructor(private readonly ml: MercadolivreService) {}
 
   async createManualOrder(orgId: string, dto: CreateManualOrderDto) {
-    const platformFee = dto.platform === 'ml' ? dto.sale_price * 0.115 : 0
+    // Pedido manual não tem tarifa real do ML — estima 11,5% (sem categoria
+    // não dá pra precisar). Vendas reais ingeridas via webhook usam o
+    // `sale_fee` real. Frete e imposto não são resolvidos no manual.
+    const platformFee  = dto.platform === 'ml' ? estimateSaleFee(dto.sale_price, 11.5, 0) : 0
     const shippingCost = 0
-    const grossProfit = dto.sale_price - platformFee - shippingCost - (dto.cost_price ?? 0)
-    const marginPct = dto.sale_price > 0 ? (grossProfit / dto.sale_price) * 100 : 0
+    const grossProfit  = round2(dto.sale_price - platformFee - shippingCost)
+    const margin = computeContributionMargin({
+      price:         dto.sale_price,
+      saleFee:       platformFee,
+      shipping:      shippingCost,
+      cost:          dto.cost_price ?? 0,
+      taxPercentage: 0,
+      taxOnFreight:  false,
+    })
 
     const { data, error } = await supabaseAdmin
       .from('orders')
@@ -42,11 +53,11 @@ export class OrdersService {
         quantity:               dto.quantity,
         sale_price:             dto.sale_price,
         cost_price:             dto.cost_price ?? null,
-        platform_fee:           Math.round(platformFee * 100) / 100,
+        platform_fee:           platformFee,
         shipping_cost:          shippingCost,
-        gross_profit:           Math.round(grossProfit * 100) / 100,
-        contribution_margin:    Math.round(grossProfit * 100) / 100,
-        contribution_margin_pct: Math.round(marginPct * 100) / 100,
+        gross_profit:           grossProfit,
+        contribution_margin:    margin.contributionMargin,
+        contribution_margin_pct: margin.contributionMarginPct,
         status:                 'pending',
         notes:                  dto.notes ?? null,
       })
