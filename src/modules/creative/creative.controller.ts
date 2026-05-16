@@ -569,6 +569,7 @@ export class CreativeController {
       category_id?:    string
       attributes?:     Array<{ id: string; value_name?: string; value_id?: string }>
       condition?:      'new' | 'used' | 'not_specified'
+      seller_id?:      number
     },
   ) {
     if (!body?.idempotency_key) throw new BadRequestException('idempotency_key obrigatório')

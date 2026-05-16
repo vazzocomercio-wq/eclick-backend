@@ -268,13 +268,16 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 - ✅ Verde "Publicação ATIVA" → pode publicar (status final = paused, você ativa no ML)
 
 **Fluxo do wizard**:
-1. **Imagens**: drag-and-drop pra ordenar, capa = índice 0, max 10
-2. **Vídeo** (opcional): radio se múltiplos. Upload best-effort.
-3. **Categoria + atributos**: predict automático no título → form dinâmico
-4. **Markup / Precificação**: calcula o preço de venda pela margem alvo (ver abaixo)
-5. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
-6. **Listing type**: free / gold_special / gold_pro
-7. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+1. **Conta(s) do Mercado Livre**: escolhe em qual(is) conta(s) ML o anúncio sobe (ver abaixo)
+2. **Imagens**: drag-and-drop pra ordenar, capa = índice 0, max 10
+3. **Vídeo** (opcional): radio se múltiplos. Upload best-effort.
+4. **Categoria + atributos**: predict automático no título → form dinâmico
+5. **Markup / Precificação**: calcula o preço de venda pela margem alvo (ver abaixo)
+6. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
+7. **Listing type**: free / gold_special / gold_pro
+8. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+
+**Seleção de conta (multi-conta)**: quando a org tem mais de uma conta ML conectada, o painel "Conta(s) do Mercado Livre" lista todas. Marque uma, várias ou todas — o anúncio é publicado em cada conta selecionada (uma publicação por conta, cada uma com seu MLB). Por padrão vem pré-selecionada a conta mais antiga (principal). O histórico de publicações mostra a conta de cada anúncio. Antes disso o publish pegava a conta com \`updated_at\` mais recente — podia subir na conta errada silenciosamente.
 
 **Painel Markup / Precificação**: dimensiona o preço de venda a partir de — margem de contribuição alvo (%), custo do produto/CMV (R$), custo de venda do marketplace/tarifa (%), imposto (%), reserva para promoção (%) e custo de frete. O preço cheio é calculado para que MESMO numa promoção do tamanho da reserva a margem alvo se mantenha: \`precoPromo = (CMV + frete) ÷ (1 − tarifa − imposto − margemAlvo)\`, \`precoVenda = precoPromo ÷ (1 − reservaPromo)\`. A tarifa vem pré-preenchida do tipo de anúncio (16% Premium / 11,5% demais) e é editável. Botão "Aplicar como preço" joga o valor no campo Preço. O resultado é reverificado pelo motor canônico de margem — a margem exibida é a real, não a de entrada.
 

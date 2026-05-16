@@ -92,6 +92,8 @@ export interface PublishMlOpts extends PreviewBuildOpts {
   /** UUID gerado pela UI quando abre dialog de confirmação. Mesma key
    *  = mesma publicação (idempotente). */
   idempotency_key: string
+  /** Conta ML de destino. Omitido = conta resolvida por updated_at (legacy). */
+  seller_id?: number
 }
 
 export interface CreativePublication {
@@ -100,6 +102,7 @@ export interface CreativePublication {
   listing_id:                    string
   product_id:                    string
   user_id:                       string | null
+  seller_id:                     number | null
   marketplace:                   'mercado_livre' | 'shopee' | 'amazon' | 'magalu'
   status:                        'pending' | 'publishing' | 'published' | 'failed'
   idempotency_key:               string
@@ -440,9 +443,10 @@ export class CreativeMlPublisherService {
   async uploadVideoToMl(
     orgId:      string,
     videoStoragePath: string,
+    sellerId?:  number,
   ): Promise<{ videoId: string } | null> {
     try {
-      const { token } = await this.ml.getTokenForOrg(orgId)
+      const { token } = await this.ml.getTokenForOrg(orgId, sellerId)
 
       // Baixa do bucket creative
       const { data: blob, error: dlErr } = await supabaseAdmin
@@ -564,6 +568,7 @@ export class CreativeMlPublisherService {
         listing_id:       listingId,
         product_id:       listing.product_id,
         user_id:          userId,
+        seller_id:        opts.seller_id ?? null,
         marketplace:      'mercado_livre',
         status:           'pending',
         idempotency_key:  opts.idempotency_key,
@@ -592,7 +597,7 @@ export class CreativeMlPublisherService {
     await this.setPublicationStatus(pub.id, 'publishing')
 
     try {
-      const { token } = await this.ml.getTokenForOrg(orgId)
+      const { token } = await this.ml.getTokenForOrg(orgId, opts.seller_id)
 
       // Pictures: passa como source URL — ML baixa sozinho.
       // Não precisa pre-upload separado pra MVP.
@@ -613,7 +618,7 @@ export class CreativeMlPublisherService {
         } else if (vid.status !== 'approved') {
           videoSkipReason = `video status='${vid.status}' (deve ser 'approved')`
         } else {
-          const upload = await this.uploadVideoToMl(orgId, vid.storage_path)
+          const upload = await this.uploadVideoToMl(orgId, vid.storage_path, opts.seller_id)
           if (upload) {
             externalVideoId = upload.videoId
           } else {
@@ -755,7 +760,7 @@ export class CreativeMlPublisherService {
       throw new BadRequestException('publication sem external_id')
     }
 
-    const { token } = await this.ml.getTokenForOrg(orgId)
+    const { token } = await this.ml.getTokenForOrg(orgId, pub.seller_id ?? undefined)
 
     let mlStatus: string | null = null
     try {
