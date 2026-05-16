@@ -347,6 +347,41 @@ export class CreativeService {
     return (data ?? []) as CreativeProduct[]
   }
 
+  /**
+   * Prefill pro deeplink de cadastro: dado um produto do catálogo, retorna
+   * (a) os creative_products já vinculados e (b) os dados básicos do catálogo
+   * pra pré-preencher o Step 1 da tela de novo anúncio (nome/categoria/marca
+   * + fotos). O frontend usa pra decidir: redirecionar pro anúncio existente
+   * ou abrir o fluxo de criação já preenchido.
+   */
+  async getCatalogPrefill(orgId: string, catalogProductId: string): Promise<{
+    existing: Array<{ id: string; name: string; status: string }>
+    catalog:  { id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] }
+  }> {
+    await this.assertCatalogProductInOrg(orgId, catalogProductId)
+    const { data: cat, error } = await supabaseAdmin
+      .from('products')
+      .select('id, name, category, brand, photo_urls')
+      .eq('id', catalogProductId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`getCatalogPrefill: ${error.message}`)
+    if (!cat) throw new NotFoundException('produto do catálogo não encontrado')
+
+    const creatives = await this.listCreativesForCatalogProduct(orgId, catalogProductId)
+    const c = cat as { id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] | null }
+    return {
+      existing: creatives.map(cr => ({ id: cr.id, name: cr.name, status: cr.status })),
+      catalog: {
+        id:         c.id,
+        name:       c.name,
+        category:   c.category,
+        brand:      c.brand,
+        photo_urls: c.photo_urls ?? [],
+      },
+    }
+  }
+
   /** Cria creative_product pré-preenchido com dados de um produto do catálogo.
    *  Usuário ainda precisa subir imagem (main_image_url + main_image_storage_path
    *  vêm do upload no frontend, este service só cria a row). */

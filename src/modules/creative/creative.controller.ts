@@ -82,6 +82,15 @@ export class CreativeController {
     })
   }
 
+  /** GET /products/catalog-prefill/:catalogId — resolve o deeplink de cadastro:
+   *  retorna os anúncios já vinculados ao produto do catálogo + os dados básicos
+   *  pra pré-preencher o Step 1 (nome/categoria/marca/fotos).
+   *  IMPORTANTE: declarado ANTES de products/:id pra não cair no catch-all. */
+  @Get('products/catalog-prefill/:catalogId')
+  catalogPrefill(@ReqUser() u: ReqUserPayload, @Param('catalogId') catalogId: string) {
+    return this.svc.getCatalogPrefill(this.orgOrThrow(u), catalogId)
+  }
+
   @Get('products/:id')
   getProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getProductWithSignedUrl(this.orgOrThrow(u), id)
