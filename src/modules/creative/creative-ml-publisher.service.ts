@@ -490,6 +490,36 @@ export class CreativeMlPublisherService {
     }
   }
 
+  /**
+   * POST /items com fallback de título. Categorias de catálogo/família (ex:
+   * iluminação) GERAM o título a partir do `family_name` e rejeitam um
+   * `title` no corpo (`invalid_fields [title]`). Quando isso acontece,
+   * reenvia sem o campo `title` — o `family_name` (que carrega o título
+   * otimizado) vira a base do título gerado pelo ML.
+   */
+  private async postItemToMl(
+    token:  string,
+    mlBody: Record<string, unknown>,
+  ): Promise<{ id: string; permalink?: string; status?: string; pictures?: Array<{ id: string; url: string }> }> {
+    const cfg = {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 60_000,
+    }
+    try {
+      const res = await axios.post(`${ML_BASE}/items`, mlBody, cfg)
+      return res.data
+    } catch (e: unknown) {
+      if (isTitleFieldRejected(e) && 'title' in mlBody) {
+        this.logger.log('[creative.ml.publish] categoria gera o título — reenviando sem `title`')
+        const retry: Record<string, unknown> = { ...mlBody }
+        delete retry.title
+        const res = await axios.post(`${ML_BASE}/items`, retry, cfg)
+        return res.data
+      }
+      throw e
+    }
+  }
+
   /** Publica de fato no ML. Status final do anúncio = `paused` (default
    *  user revisa no ML antes de ativar). Idempotente via idempotency_key. */
   async publishToMl(
@@ -601,18 +631,8 @@ export class CreativeMlPublisherService {
         delete (mlBody as { video_id?: unknown }).video_id
       }
 
-      // POST /items — autenticado
-      const res = await axios.post<{
-        id:         string
-        permalink?: string
-        status?:    string
-        pictures?:  Array<{ id: string; url: string }>
-      }>(`${ML_BASE}/items`, mlBody, {
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        timeout: 60_000,
-      })
-
-      const item = res.data
+      // POST /items — autenticado (com fallback de título)
+      const item = await this.postItemToMl(token, mlBody)
       const externalPictureIds = (item.pictures ?? [])
         .map(p => p.id)
         .filter(Boolean)
@@ -889,6 +909,21 @@ export class CreativeMlPublisherService {
 }
 
 // ── Helpers de erro ──────────────────────────────────────────────────────
+
+/** True quando o ML rejeitou o campo `title` (categoria gera o título). */
+function isTitleFieldRejected(e: unknown): boolean {
+  if (!axios.isAxiosError(e)) return false
+  const data = e.response?.data as
+    | { error?: string; message?: string; cause?: Array<{ message?: string }> }
+    | undefined
+  if (!data) return false
+  const text = [
+    data.error ?? '',
+    data.message ?? '',
+    ...(data.cause ?? []).map(c => c.message ?? ''),
+  ].join(' ').toLowerCase()
+  return text.includes('[title]') && text.includes('invalid')
+}
 
 function extractMlError(e: unknown): { message: string; body: Record<string, unknown> | null } {
   if (axios.isAxiosError(e)) {
