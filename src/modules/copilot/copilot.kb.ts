@@ -2476,6 +2476,49 @@ em \`radar_conversion_calibration\`.
 \`GET /radar/products/:id/events\``,
     tags: ['radar', 'demanda', 'conversao', 'estimativa', 'ranking', 'concorrentes', 'visitas', 'margem', 'motor2'],
   },
+  {
+    routes:   ['/dashboard/radar/concorrentes', '/dashboard/radar/concorrentes/[productId]'],
+    category: 'radar',
+    title:    'Radar — Concorrentes Vinculados (anúncios não-catálogo)',
+    content: `**A segunda metade do Radar.** O Radar de catálogo só cobre produtos
+de catálogo ML. A maioria dos anúncios NÃO é catálogo — pra esses o ML não diz
+quem concorre. Aqui **você vincula manualmente**: "meu produto X concorre com
+estes anúncios de concorrente".
+
+**Como vincular** (\`/dashboard/radar/concorrentes\`):
+- Botão **"Vincular concorrente"** → escolha um produto seu + cole o **link do
+  anúncio do concorrente** (a página MLB-... do Mercado Livre) + um apelido +
+  o **preço dele**.
+- Vincula-se ao **produto**, não ao anúncio: vale pra todos os seus anúncios
+  daquele produto (conta principal, secundária, futuros).
+
+**Por que o preço é você que informa**: o Mercado Livre **bloqueia** o preço de
+anúncio de concorrente (a API responde 403, a busca está fechada, e a página
+pública não traz o preço). Não é limitação do e-Click — é política do ML. Por
+isso o preço é manual; atualize quando mudar (clique no preço no card pra
+editar). O campo \`price_source\` já está pronto pra uma futura extensão do
+Chrome automatizar isso.
+
+**O que é automático**: **visitas** do concorrente (série diária — o ML libera
+isso), **venda estimada** (visitas × sua conversão calibrada, Motor 2) e os
+**movimentos** (preço subiu/baixou, visitas em alta/queda, concorrente mais
+barato que você).
+
+**Tela de comparação** (clique num produto monitorado):
+- KPIs: seu preço, suas visitas 30d, suas **vendas reais** 30d, nº de concorrentes
+- **Leitura do Radar** — insight de IA: o que os concorrentes estão fazendo e
+  qual decisão considerar
+- Gráficos de **preço** e **visitas** ao longo do tempo (você vs cada concorrente)
+- Card por concorrente: preço (editável), preço vs você, visitas 30d, venda
+  estimada 30d e pílulas de movimento. Dá pra **pausar** ou **remover** o vínculo.
+
+**Importante**: venda estimada é estimativa (visitas × conversão), nunca a venda
+real do concorrente — o ML não expõe esse dado. Use pra dimensionar a disputa.
+
+**Coleta**: 1×/dia no eclick-workers. **Endpoints**: \`GET/POST/PATCH/DELETE
+/radar/competitors/...\``,
+    tags: ['radar', 'concorrentes', 'vinculados', 'preco', 'visitas', 'monitoramento', 'mercadolivre', 'comparacao'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════
