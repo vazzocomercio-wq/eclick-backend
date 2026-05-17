@@ -36,7 +36,15 @@ export class ConversationsService {
     return { conversations: data ?? [], total: count ?? 0 }
   }
 
-  async getConversation(id: string) {
+  // Helper: garante que a conversa existe e pertence à org. Lança 404 se não.
+  // Mitiga IDOR — antes services tomavam só convId do path/body e assumiam ownership.
+  private async assertConvInOrg(orgId: string, conversationId: string): Promise<void> {
+    const { data } = await supabaseAdmin
+      .from('ai_conversations').select('id').eq('id', conversationId).eq('organization_id', orgId).maybeSingle()
+    if (!data) throw new HttpException('Conversa não encontrada', 404)
+  }
+
+  async getConversation(orgId: string, id: string) {
     try {
       // Note: ai_agent_channels has FK to ai_agents (not to ai_conversations),
       // so the channel_config join must be nested inside the agent expansion.
@@ -52,6 +60,7 @@ export class ConversationsService {
           )
         `)
         .eq('id', id)
+        .eq('organization_id', orgId)
         .single()
 
       if (error) throw error
@@ -62,10 +71,12 @@ export class ConversationsService {
     }
   }
 
-  async getMessages(conversationId: string) {
+  async getMessages(orgId: string, conversationId: string) {
+    await this.assertConvInOrg(orgId, conversationId)
     const { data, error } = await supabaseAdmin
       .from('ai_messages')
       .select('*')
+      .eq('organization_id', orgId)
       .eq('conversation_id', conversationId)
       .order('sent_at', { ascending: true })
 
@@ -73,10 +84,12 @@ export class ConversationsService {
     return data ?? []
   }
 
-  async sendHumanMessage(conversationId: string, userId: string, content: string) {
+  async sendHumanMessage(orgId: string, conversationId: string, userId: string, content: string) {
+    await this.assertConvInOrg(orgId, conversationId)
     const { data: msg, error } = await supabaseAdmin
       .from('ai_messages')
       .insert({
+        organization_id: orgId,
         conversation_id: conversationId,
         role:            'human',
         content,
@@ -91,6 +104,7 @@ export class ConversationsService {
       .from('ai_conversations')
       .select('total_messages')
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
       .single()
 
     await supabaseAdmin
@@ -101,17 +115,22 @@ export class ConversationsService {
         status:         'waiting_customer',
       })
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
 
     return msg
   }
 
-  async approveSuggestion(conversationId: string, messageId: string, userId: string, editedContent?: string) {
-    // 1. Fetch original message content for sending
+  async approveSuggestion(orgId: string, conversationId: string, messageId: string, userId: string, editedContent?: string) {
+    await this.assertConvInOrg(orgId, conversationId)
+    // 1. Fetch original message content for sending — escopado por org+conv
     const { data: message } = await supabaseAdmin
       .from('ai_messages')
       .select('content')
       .eq('id', messageId)
+      .eq('organization_id', orgId)
+      .eq('conversation_id', conversationId)
       .maybeSingle()
+    if (!message) throw new HttpException('Mensagem não encontrada', 404)
 
     const contentToSend = editedContent || message?.content || ''
 
@@ -129,6 +148,8 @@ export class ConversationsService {
       .from('ai_messages')
       .update(update)
       .eq('id', messageId)
+      .eq('organization_id', orgId)
+      .eq('conversation_id', conversationId)
       .select()
       .single()
 
@@ -139,6 +160,7 @@ export class ConversationsService {
       .from('ai_conversations')
       .select('channel, external_conversation_id')
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
       .maybeSingle()
 
     // 4. Send to ML if applicable
@@ -164,26 +186,31 @@ export class ConversationsService {
         updated_at:  new Date().toISOString(),
       })
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
 
     return data
   }
 
-  async discardSuggestion(conversationId: string, messageId: string) {
+  async discardSuggestion(orgId: string, conversationId: string, messageId: string) {
+    await this.assertConvInOrg(orgId, conversationId)
     await supabaseAdmin
       .from('ai_messages')
       .delete()
       .eq('id', messageId)
+      .eq('organization_id', orgId)
       .eq('conversation_id', conversationId)
 
     await supabaseAdmin
       .from('ai_conversations')
       .update({ status: 'open', updated_at: new Date().toISOString() })
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
 
     return { ok: true }
   }
 
-  async resolve(conversationId: string) {
+  async resolve(orgId: string, conversationId: string) {
+    await this.assertConvInOrg(orgId, conversationId)
     const { data, error } = await supabaseAdmin
       .from('ai_conversations')
       .update({
@@ -192,6 +219,7 @@ export class ConversationsService {
         updated_at:  new Date().toISOString(),
       })
       .eq('id', conversationId)
+      .eq('organization_id', orgId)
       .select()
       .single()
 
@@ -199,8 +227,8 @@ export class ConversationsService {
     return data
   }
 
-  async escalate(conversationId: string, assignTo?: string) {
-    const { data, error } = await supabaseAdmin
+  async escalate(conversationId: string, assignTo?: string, orgId?: string) {
+    let q = supabaseAdmin
       .from('ai_conversations')
       .update({
         status:     'escalated',
@@ -209,14 +237,14 @@ export class ConversationsService {
         updated_at:  new Date().toISOString(),
       })
       .eq('id', conversationId)
-      .select()
-      .single()
-
+    if (orgId) q = q.eq('organization_id', orgId)
+    const { data, error } = await q.select().single()
     if (error) throw error
     return data
   }
 
   async upsertConversation(conv: {
+    organization_id: string
     agent_id?: string
     channel: string
     external_conversation_id: string
@@ -226,6 +254,7 @@ export class ConversationsService {
     listing_id?: string
     listing_title?: string
   }) {
+    if (!conv.organization_id) throw new Error('upsertConversation: organization_id obrigatório')
     const { data, error } = await supabaseAdmin
       .from('ai_conversations')
       .upsert(
@@ -240,6 +269,7 @@ export class ConversationsService {
   }
 
   async addMessage(msg: {
+    organization_id?: string  // opcional: se omitido, deriva de conversation_id
     conversation_id: string
     role: string
     content: string
@@ -250,9 +280,21 @@ export class ConversationsService {
     was_auto_sent?: boolean
     external_message_id?: string
   }) {
+    // Resolve org se não passada (compat com callers legados; novo código deve passar)
+    let orgId = msg.organization_id
+    if (!orgId) {
+      const { data: convOrg } = await supabaseAdmin
+        .from('ai_conversations')
+        .select('organization_id')
+        .eq('id', msg.conversation_id)
+        .maybeSingle()
+      orgId = convOrg?.organization_id as string | undefined
+      if (!orgId) throw new Error(`addMessage: conversation ${msg.conversation_id} sem organization_id`)
+    }
+
     const { data, error } = await supabaseAdmin
       .from('ai_messages')
-      .insert(msg)
+      .insert({ ...msg, organization_id: orgId })
       .select()
       .single()
 
@@ -262,6 +304,7 @@ export class ConversationsService {
       .from('ai_conversations')
       .select('total_messages, auto_replied_count')
       .eq('id', msg.conversation_id)
+      .eq('organization_id', orgId)
       .single()
 
     await supabaseAdmin
@@ -273,6 +316,7 @@ export class ConversationsService {
         status: msg.was_auto_sent ? 'waiting_customer' : 'waiting_human',
       })
       .eq('id', msg.conversation_id)
+      .eq('organization_id', orgId)
 
     return data
   }
@@ -362,10 +406,11 @@ export class ConversationsService {
     }).sort((a, b) => b.messages - a.messages)
   }
 
-  async listInsights(limit = 10) {
+  async listInsights(orgId: string, limit = 10) {
     const { data, error } = await supabaseAdmin
       .from('ai_insights')
       .select('id, type, data, generated_at, expires_at')
+      .eq('organization_id', orgId)
       .order('generated_at', { ascending: false })
       .limit(limit)
     if (error) return []

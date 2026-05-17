@@ -31,13 +31,15 @@ export class AiSettingsController {
   // ── Module settings ───────────────────────────────────────────────────────
 
   @Get('settings')
-  getSettings() {
-    return this.svc.getSettings()
+  async getSettings(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.getSettings(orgId)
   }
 
   @Patch('settings')
-  updateSettings(@Body() body: AiModuleSettings) {
-    return this.svc.updateSettings(body)
+  async updateSettings(@Headers('authorization') auth: string, @Body() body: AiModuleSettings) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.updateSettings(orgId, body)
   }
 
   // ── Templates ─────────────────────────────────────────────────────────────

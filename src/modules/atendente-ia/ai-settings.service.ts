@@ -39,38 +39,44 @@ export class AiSettingsService {
     return AI_PROVIDERS.filter(p => connected.has(p.id))
   }
 
-  // ── Module settings (singleton row id=1) ──────────────────────────────────
+  // ── Module settings (per-org row, UNIQUE organization_id) ─────────────────
+  // Antes era singleton id=1 — todas orgs compartilhavam thresholds. Migrado
+  // em 20260505_ai_module_settings_per_org.sql.
 
-  async getSettings(): Promise<AiModuleSettings> {
+  private static DEFAULTS: AiModuleSettings = {
+    show_cost_estimates: false,
+    classifier_provider: 'anthropic',
+    classifier_model:    'claude-haiku-4-5-20251001',
+    embedding_provider:  'openai',
+    embedding_model:     'text-embedding-3-small',
+    auto_send_threshold: 80,
+    queue_threshold:     50,
+    show_tokens:         true,
+    capture_edits:       true,
+    auto_retrain:        false,
+    notify_escalation:   true,
+    notify_daily:        false,
+  }
+
+  async getSettings(orgId: string): Promise<AiModuleSettings> {
+    if (!orgId) throw new HttpException('getSettings: orgId obrigatório', 400)
     const { data, error } = await supabaseAdmin
       .from('ai_module_settings')
       .select('*')
-      .eq('id', 1)
+      .eq('organization_id', orgId)
       .maybeSingle()
 
     if (error) throw new HttpException(error.message, 500)
     if (!data) {
-      // Migration not run yet — return defaults so UI doesn't crash
-      return {
-        id: 1,
-        show_cost_estimates: false,
-        classifier_provider: 'anthropic',
-        classifier_model:    'claude-haiku-4-5-20251001',
-        embedding_provider:  'openai',
-        embedding_model:     'text-embedding-3-small',
-        auto_send_threshold: 80,
-        queue_threshold:     50,
-        show_tokens:         true,
-        capture_edits:       true,
-        auto_retrain:        false,
-        notify_escalation:   true,
-        notify_daily:        false,
-      }
+      // Org sem linha (criada após a migration?) — retorna defaults sem persistir
+      // pra evitar race condition. updateSettings cria sob demanda.
+      return AiSettingsService.DEFAULTS
     }
     return data as AiModuleSettings
   }
 
-  async updateSettings(updates: AiModuleSettings): Promise<AiModuleSettings> {
+  async updateSettings(orgId: string, updates: AiModuleSettings): Promise<AiModuleSettings> {
+    if (!orgId) throw new HttpException('updateSettings: orgId obrigatório', 400)
     const payload: Record<string, unknown> = { updated_at: new Date().toISOString() }
     for (const k of [
       'show_cost_estimates', 'classifier_provider', 'classifier_model',
@@ -80,10 +86,13 @@ export class AiSettingsService {
       if (updates[k] !== undefined) payload[k] = updates[k]
     }
 
-    // upsert into singleton id=1
+    // upsert por organization_id (UNIQUE)
     const { data, error } = await supabaseAdmin
       .from('ai_module_settings')
-      .upsert({ id: 1, ...payload }, { onConflict: 'id' })
+      .upsert(
+        { organization_id: orgId, ...AiSettingsService.DEFAULTS, ...payload },
+        { onConflict: 'organization_id' },
+      )
       .select()
       .single()
 

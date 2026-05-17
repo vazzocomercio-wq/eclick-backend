@@ -72,6 +72,19 @@ export class WebhooksController {
           return
         }
 
+        // Multi-tenant: até resolução por phone_number_id estar pronta,
+        // pegamos o organization_id do config (Meta) ou via env
+        // WEBHOOK_DEFAULT_ORG_ID (Z-API synthetic). Sem org → não há onde
+        // gravar conversation org-aware, então abortamos com erro claro.
+        const webhookOrgId =
+          (config as { organization_id?: string | null }).organization_id ??
+          process.env.WEBHOOK_DEFAULT_ORG_ID ??
+          null
+        if (!webhookOrgId) {
+          this.logger.error(`[wa.webhook] sem organization_id resolvível (config sem org e WEBHOOK_DEFAULT_ORG_ID não setado) — skip`)
+          return
+        }
+
         for (const msg of messages) {
           // Mark as read immediately (best-effort)
           this.waSender.markAsRead(config, msg.external_id).catch(() => { /* logged inside */ })
@@ -82,6 +95,7 @@ export class WebhooksController {
 
           // Find or create conversation
           const conv = await this.conversations.upsertConversation({
+            organization_id:          webhookOrgId,
             channel:                  'whatsapp',
             external_conversation_id: msg.customer_whatsapp_id, // 1 conv por número
             external_customer_id:     msg.customer_whatsapp_id,
@@ -185,10 +199,25 @@ export class WebhooksController {
         }
       }
 
-      // Find or create conversation
+      // Find or create conversation — orgId via widget.agent_id → ai_agents
+      let widgetOrgId: string | null = null
+      if ((widget as { agent_id?: string | null }).agent_id) {
+        const { data: agentRow } = await supabaseAdmin
+          .from('ai_agents')
+          .select('organization_id')
+          .eq('id', (widget as { agent_id: string }).agent_id)
+          .maybeSingle()
+        widgetOrgId = (agentRow?.organization_id as string | undefined) ?? null
+      }
+      if (!widgetOrgId) {
+        this.logger.error(`[widget.webhook] widget ${widget.id} sem agent ou agent sem org — skip`)
+        return res.status(409).json({ error: 'Widget não está vinculado a um agente válido' })
+      }
+
       let conversationId = session.conversation_id
       if (!conversationId) {
         const conv = await this.conversations.upsertConversation({
+          organization_id:          widgetOrgId,
           channel:                  'widget',
           external_conversation_id: `widget:${session.session_token}`,
           external_customer_id:     session.unified_customer_id ?? session.session_token,

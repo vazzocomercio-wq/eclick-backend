@@ -35,13 +35,13 @@ export class ConversationsController {
   }
 
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.svc.getConversation(id)
+  get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.getConversation(u.orgId!, id)
   }
 
   @Get(':id/messages')
-  messages(@Param('id') id: string) {
-    return this.svc.getMessages(id)
+  messages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.getMessages(u.orgId!, id)
   }
 
   @Post(':id/messages')
@@ -50,7 +50,7 @@ export class ConversationsController {
     @Param('id') id: string,
     @Body() body: { content: string },
   ) {
-    return this.svc.sendHumanMessage(id, u.id, body.content)
+    return this.svc.sendHumanMessage(u.orgId!, id, u.id, body.content)
   }
 
   @Post(':id/approve')
@@ -60,30 +60,32 @@ export class ConversationsController {
     @Param('id') convId: string,
     @Body() body: { message_id: string; content?: string },
   ) {
-    return this.svc.approveSuggestion(convId, body.message_id, u.id, body.content)
+    return this.svc.approveSuggestion(u.orgId!, convId, body.message_id, u.id, body.content)
   }
 
   @Post(':id/discard-suggestion')
   @HttpCode(HttpStatus.OK)
   discard(
+    @ReqUser() u: ReqUserPayload,
     @Param('id') convId: string,
     @Body() body: { message_id: string },
   ) {
-    return this.svc.discardSuggestion(convId, body.message_id)
+    return this.svc.discardSuggestion(u.orgId!, convId, body.message_id)
   }
 
   @Post(':id/resolve')
   @HttpCode(HttpStatus.OK)
-  resolve(@Param('id') id: string) {
-    return this.svc.resolve(id)
+  resolve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.resolve(u.orgId!, id)
   }
 
   @Post(':id/escalate')
   @HttpCode(HttpStatus.OK)
   escalate(
+    @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
     @Body() body: { assign_to?: string },
   ) {
-    return this.svc.escalate(id, body.assign_to)
+    return this.svc.escalate(id, body.assign_to, u.orgId!)
   }
 }

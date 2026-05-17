@@ -8,6 +8,7 @@ import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { AiUsageService } from '../ai-usage/ai-usage.service'
 import { AiSettingsService } from './ai-settings.service'
 import { AiKnowledgeService } from './ai-knowledge.service'
+import { AiHubBridgeService } from './ai-hub-bridge.service'
 
 type AutoPilotDecision = 'auto_send' | 'queue_for_human' | 'escalate'
 
@@ -49,6 +50,7 @@ export class AiResponderService {
     private readonly aiUsage: AiUsageService,
     private readonly aiSettings: AiSettingsService,
     private readonly aiKnowledge: AiKnowledgeService,
+    private readonly hubBridge:  AiHubBridgeService,
   ) {}
 
   // ── ML Question polling ────────────────────────────────────────────────────
@@ -56,6 +58,11 @@ export class AiResponderService {
   @Cron(CronExpression.EVERY_MINUTE)
   async pollMlQuestions() {
     try {
+      // ml_connections é a fonte de verdade de "qual org tem ML conectado".
+      // Iteramos por org e, pra CADA org, buscamos o agente próprio dela —
+      // antes (PRC bug) o cron pegava o primeiro agentChannel de qualquer org
+      // e respondia perguntas de outras orgs com agente alheio (cross-org leak
+      // crítico).
       const { data: connections } = await supabaseAdmin
         .from('ml_connections')
         .select('organization_id, access_token, seller_id, expires_at')
@@ -63,29 +70,41 @@ export class AiResponderService {
       if (!connections?.length) return
 
       for (const conn of connections) {
+        if (!conn.organization_id) continue
         if (new Date(conn.expires_at) < new Date()) continue
 
         const { data: agentChannel } = await supabaseAdmin
           .from('ai_agent_channels')
           .select('*, agent:ai_agents(*)')
+          .eq('organization_id', conn.organization_id)
           .eq('channel', 'mercadolivre')
           .eq('is_active', true)
+          .order('updated_at', { ascending: false })
           .limit(1)
           .maybeSingle()
 
         if (!agentChannel?.agent) continue
+        // Garante que o agent também é da mesma org (defensivo — backfill cobriu)
+        if ((agentChannel.agent as { organization_id?: string }).organization_id !== conn.organization_id) {
+          this.logger.warn(`[pollMlQuestions] org mismatch agentChannel/agent skip org=${conn.organization_id}`)
+          continue
+        }
 
-        await this.processOrgMlQuestions(conn.seller_id, agentChannel)
+        await this.processOrgMlQuestions(conn.organization_id, conn.seller_id, agentChannel)
       }
     } catch (err) {
       this.logger.error('[pollMlQuestions]', (err as Error).message)
     }
   }
 
-  private async processOrgMlQuestions(sellerId: number, agentChannel: any) {
+  private async processOrgMlQuestions(orgId: string, sellerId: number, agentChannel: any) {
     try {
       const connections = await this.mlService.getAllConnections()
-      const conn = connections.find(c => c.seller_id === sellerId) ?? connections[0]
+      // Match estrito: seller + org. Antes pegava connections[0] como fallback,
+      // o que poderia escolher token de OUTRA org se sellerId não batesse.
+      const conn = connections.find(c =>
+        c.seller_id === sellerId && (c as { organization_id?: string }).organization_id === orgId,
+      )
       if (!conn) return
 
       const token = (conn as any).access_token
@@ -98,25 +117,29 @@ export class AiResponderService {
       let processed = 0
 
       for (const q of questions) {
-        // Skip if already processed
+        // Skip if already processed (org-scoped)
         const { data: existing } = await supabaseAdmin
           .from('ai_conversations')
           .select('id')
+          .eq('organization_id', orgId)
           .eq('channel', 'mercadolivre')
           .eq('external_conversation_id', String(q.id))
           .maybeSingle()
 
         if (existing) continue
 
-        // Fetch product info linked to this listing
+        // Fetch product info linked to this listing — scoped por org via inner
+        // join em products (product_listings não tem organization_id direto).
         const { data: vinculo } = await supabaseAdmin
           .from('product_listings')
-          .select('product:products(id, name, sku, cost_price, tax_percentage, supply_type, lead_time_days)')
+          .select('product:products!inner(id, name, sku, cost_price, tax_percentage, supply_type, lead_time_days, organization_id)')
           .eq('listing_id', q.item_id)
           .eq('is_active', true)
+          .eq('products.organization_id', orgId)
           .maybeSingle()
 
         await this.processIncomingMessage({
+          orgId,
           channel: 'mercadolivre',
           agentChannel,
           externalConvId:    String(q.id),
@@ -136,7 +159,7 @@ export class AiResponderService {
 
       // Summary log: only when there's something to report (avoids 1 line/min idle spam)
       if (processed > 0) {
-        this.logger.log(`[questions.poll] seller=${sellerId} ${questions.length} fetched, ${processed} new processed`)
+        this.logger.log(`[questions.poll] org=${orgId} seller=${sellerId} ${questions.length} fetched, ${processed} new processed`)
       }
     } catch (err) {
       this.logger.warn('[processOrgMlQuestions]', (err as Error).message)
@@ -146,6 +169,7 @@ export class AiResponderService {
   // ── Core processor ────────────────────────────────────────────────────────
 
   async processIncomingMessage(opts: {
+    orgId: string
     channel: string
     agentChannel: any
     externalConvId: string
@@ -160,11 +184,19 @@ export class AiResponderService {
       product?: any
     }
   }) {
-    const { agentChannel, channel, externalConvId, customerMessage, externalCustomerId, customerName, productInfo } = opts
+    const { orgId, agentChannel, channel, externalConvId, customerMessage, externalCustomerId, customerName, productInfo } = opts
     const { agent } = agentChannel
+
+    // Defensivo: agente precisa ser da mesma org passada (cron já valida, mas
+    // expor método sem checar abriria buraco caso outro caller chame errado)
+    if ((agent as { organization_id?: string }).organization_id !== orgId) {
+      this.logger.error(`[processIncomingMessage] org mismatch: agent.org=${(agent as { organization_id?: string }).organization_id} expected=${orgId}`)
+      return
+    }
 
     // 1. Upsert conversation
     const conv = await this.conversations.upsertConversation({
+      organization_id: orgId,
       agent_id: agent.id,
       channel,
       external_conversation_id: externalConvId,
@@ -176,10 +208,11 @@ export class AiResponderService {
     })
 
     // 2. Save customer message (idempotent)
-    const existingMsgs = await this.conversations.getMessages(conv.id)
+    const existingMsgs = await this.conversations.getMessages(orgId, conv.id)
     const alreadySaved = existingMsgs.some(m => m.content === customerMessage && m.role === 'customer')
     if (!alreadySaved) {
       await this.conversations.addMessage({
+        organization_id:     orgId,
         conversation_id:     conv.id,
         role:                'customer',
         content:             customerMessage,
@@ -193,7 +226,12 @@ export class AiResponderService {
       lowerMsg.includes(kw.toLowerCase()),
     )
     if (shouldEscalate) {
-      await this.conversations.escalate(conv.id)
+      await this.conversations.escalate(conv.id, undefined, orgId)
+      // IH bridge: notifica gestor via WhatsApp
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conv.id, customerName,
+        channel, reason: 'complaint', summary: customerMessage,
+      }).catch(() => { /* logged inside */ })
       return
     }
 
@@ -203,6 +241,11 @@ export class AiResponderService {
         .from('ai_conversations')
         .update({ status: 'waiting_human', updated_at: new Date().toISOString() })
         .eq('id', conv.id)
+        .eq('organization_id', orgId)
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conv.id, customerName,
+        channel, reason: 'human_only', summary: customerMessage,
+      }).catch(() => {})
       return
     }
 
@@ -212,12 +255,13 @@ export class AiResponderService {
     let knowledge: Array<{ type?: string; title: string; content: string; knowledge_id?: string }> = []
     const knowledgeCitedIds: string[] = []
     try {
-      const matches = await this.aiKnowledge.searchSimilar(customerMessage, agent.id, 5)
+      const matches = await this.aiKnowledge.searchSimilar(orgId, customerMessage, agent.id, 5)
       if (matches.length) {
         const ids = matches.map(m => m.knowledge_id)
         const { data: rows } = await supabaseAdmin
           .from('ai_knowledge_base')
           .select('id, type, title, content')
+          .eq('organization_id', orgId)
           .in('id', ids)
         const byId = new Map((rows ?? []).map(r => [r.id, r]))
         knowledge = matches
@@ -234,22 +278,33 @@ export class AiResponderService {
     }
 
     if (!knowledge.length) {
-      const { data: kbRows } = await supabaseAdmin
-        .from('ai_knowledge_base')
-        .select('id, type, title, content')
+      // Fallback usa M:M (única fonte; agent_id legacy removido em AI-6)
+      const { data: kbLink } = await supabaseAdmin
+        .from('ai_agent_knowledge')
+        .select('knowledge_id')
+        .eq('organization_id', orgId)
         .eq('agent_id', agent.id)
-        .eq('is_active', true)
-        .limit(20)
-      knowledge = (kbRows ?? []).map(r => {
-        knowledgeCitedIds.push(r.id)
-        return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
-      })
+      const kbIds = (kbLink ?? []).map(r => r.knowledge_id as string)
+      if (kbIds.length) {
+        const { data: kbRows } = await supabaseAdmin
+          .from('ai_knowledge_base')
+          .select('id, type, title, content')
+          .eq('organization_id', orgId)
+          .eq('is_active', true)
+          .in('id', kbIds)
+          .limit(20)
+        knowledge = (kbRows ?? []).map(r => {
+          knowledgeCitedIds.push(r.id)
+          return { type: r.type, title: r.title, content: r.content, knowledge_id: r.id }
+        })
+      }
     }
 
     // Recent messages
     const { data: messagesData } = await supabaseAdmin
       .from('ai_messages')
       .select('role, content')
+      .eq('organization_id', orgId)
       .eq('conversation_id', conv.id)
       .order('sent_at', { ascending: false })
       .limit(10)
@@ -287,7 +342,7 @@ export class AiResponderService {
     })
 
     // 8c. Decide auto-pilot action (uses settings thresholds + agent flags)
-    const settings = await this.aiSettings.getSettings()
+    const settings = await this.aiSettings.getSettings(orgId)
     const decision = this.decideAutoPilot({
       confidence,
       alwaysEscalate: !!(agent as { always_escalate?: boolean }).always_escalate,
@@ -302,6 +357,7 @@ export class AiResponderService {
     // 9. Save AI message — first via legacy addMessage (keeps stats counters),
     // then update with the new tracking columns.
     const savedMsg = await this.conversations.addMessage({
+      organization_id: orgId,
       conversation_id: conv.id,
       role:            'agent',
       content,
@@ -323,35 +379,46 @@ export class AiResponderService {
           sent_to_customer: autoSend,
         })
         .eq('id', savedMsg.id)
+        .eq('organization_id', orgId)
     }
 
-    // 9b. Bump knowledge usage stats (best-effort)
+    // 9b. Bump knowledge usage stats (best-effort, org-scoped)
     if (knowledgeCitedIds.length) {
-      this.aiKnowledge.recordUsage(knowledgeCitedIds).catch(() => { /* logged inside */ })
+      this.aiKnowledge.recordUsage(orgId, knowledgeCitedIds).catch(() => { /* logged inside */ })
     }
 
     // 10. Act on decision
     if (decision === 'auto_send' && channel === 'mercadolivre') {
-      if ((agentChannel.auto_reply_delay_seconds ?? 0) > 0) {
-        await new Promise(r => setTimeout(r, agentChannel.auto_reply_delay_seconds * 1000))
-      }
-      try {
-        await this.mlService.answerQuestion(null, Number(externalConvId), content)
-      } catch (e: any) {
-        this.logger.warn('[ai-responder] erro ML:', e.message)
-      }
+      // Antes (AI-7 fix): `await new Promise(setTimeout)` bloqueava todo o
+      // pipeline de polling. Com 20 perguntas × 30s delay, o cron de 1min
+      // não tickava por 10min — backlog acumulava. Agora agendamos a resposta
+      // de forma desacoplada (setTimeout não-await) e seguimos. O delay segue
+      // existindo (UX "humanizada") mas não congela o cron.
+      const delayMs = Math.max(0, (agentChannel.auto_reply_delay_seconds ?? 0) * 1000)
+      this.scheduleMlAnswer(externalConvId, content, delayMs)
     } else if (decision === 'escalate') {
-      await this.conversations.escalate(conv.id)
+      await this.conversations.escalate(conv.id, undefined, orgId)
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conv.id, customerName,
+        channel, reason: 'always_escalate', confidence, summary: customerMessage,
+        queueThreshold: settings.queue_threshold ?? 50,
+      }).catch(() => {})
     } else {
       // queue_for_human → status já é 'waiting_human' via addMessage
       await supabaseAdmin
         .from('ai_conversations')
         .update({ status: 'waiting_human', updated_at: new Date().toISOString() })
         .eq('id', conv.id)
+        .eq('organization_id', orgId)
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conv.id, customerName,
+        channel, reason: 'low_confidence', confidence, summary: customerMessage,
+        queueThreshold: settings.queue_threshold ?? 50,
+      }).catch(() => {})
     }
 
-    // 11. Analytics
-    await this.updateAnalytics(agent.id, channel, autoSend)
+    // 11. Analytics (org-scoped)
+    await this.updateAnalytics(orgId, agent.id, channel, autoSend)
 
     // 12. Token usage
     if (tokensIn || tokensOut) {
@@ -391,18 +458,35 @@ export class AiResponderService {
   }): Promise<{ decision: AutoPilotDecision; response: string; confidence: number; ai_message_id?: string }> {
     const { text, channel, conversation_id } = opts
 
+    // 0. Resolve orgId pela conversa — todas queries downstream dependem.
+    //    Antes (cross-org bug) o método pegava o primeiro agent_channel ativo
+    //    do canal globalmente, abrindo respostas de outras orgs.
+    const { data: convRow } = await supabaseAdmin
+      .from('ai_conversations')
+      .select('organization_id')
+      .eq('id', conversation_id)
+      .maybeSingle()
+    const orgId = convRow?.organization_id as string | undefined
+    if (!orgId) {
+      this.logger.error(`[ai.processMessage] conversation ${conversation_id} sem organization_id — escalando`)
+      // Não chamamos escalate sem org pra não vazar — só retorna.
+      return { decision: 'escalate', response: '', confidence: 0 }
+    }
+
     // 1. Save customer message (idempotent guard would require a unique key
     //    on external_message_id; webhook should de-dupe upstream)
     await this.conversations.addMessage({
+      organization_id: orgId,
       conversation_id,
       role: 'customer',
       content: text,
     })
 
-    // 2. Pick agent for this channel
+    // 2. Pick agent for this channel — escopado pela ORG da conversa
     const { data: agentChannel } = await supabaseAdmin
       .from('ai_agent_channels')
       .select('*, agent:ai_agents(*)')
+      .eq('organization_id', orgId)
       .eq('channel', channel)
       .eq('is_active', true)
       .order('updated_at', { ascending: false })
@@ -410,21 +494,22 @@ export class AiResponderService {
       .maybeSingle()
 
     if (!agentChannel?.agent) {
-      this.logger.warn(`[ai.processMessage] sem agente ativo no canal ${channel} — escalando`)
-      await this.conversations.escalate(conversation_id)
+      this.logger.warn(`[ai.processMessage] sem agente ativo no canal ${channel} org=${orgId} — escalando`)
+      await this.conversations.escalate(conversation_id, undefined, orgId)
       return { decision: 'escalate', response: '', confidence: 0 }
     }
     const agent = agentChannel.agent
 
-    // 3. Knowledge via semantic search (with fallback)
+    // 3. Knowledge via semantic search (with fallback) — org-scoped
     const knowledgeCitedIds: string[] = []
     let knowledge: Array<{ type?: string; title: string; content: string }> = []
     try {
-      const matches = await this.aiKnowledge.searchSimilar(text, agent.id, 5)
+      const matches = await this.aiKnowledge.searchSimilar(orgId, text, agent.id, 5)
       if (matches.length) {
         const ids = matches.map(m => m.knowledge_id)
         const { data: rows } = await supabaseAdmin
-          .from('ai_knowledge_base').select('id, type, title, content').in('id', ids)
+          .from('ai_knowledge_base').select('id, type, title, content')
+          .eq('organization_id', orgId).in('id', ids)
         const byId = new Map((rows ?? []).map(r => [r.id, r]))
         for (const m of matches) {
           const r = byId.get(m.knowledge_id)
@@ -435,28 +520,40 @@ export class AiResponderService {
       this.logger.warn(`[ai.processMessage] knowledge search failed: ${e?.message}`)
     }
     if (!knowledge.length) {
-      const { data: kbRows } = await supabaseAdmin
-        .from('ai_knowledge_base').select('id, type, title, content')
-        .eq('agent_id', agent.id).eq('is_active', true).limit(20)
-      knowledge = (kbRows ?? []).map(r => { knowledgeCitedIds.push(r.id); return { type: r.type, title: r.title, content: r.content } })
+      // M:M única fonte (legacy agent_id removido em AI-6)
+      const { data: kbLink } = await supabaseAdmin
+        .from('ai_agent_knowledge')
+        .select('knowledge_id')
+        .eq('organization_id', orgId)
+        .eq('agent_id', agent.id)
+      const kbIds = (kbLink ?? []).map(r => r.knowledge_id as string)
+      if (kbIds.length) {
+        const { data: kbRows } = await supabaseAdmin
+          .from('ai_knowledge_base').select('id, type, title, content')
+          .eq('organization_id', orgId).eq('is_active', true)
+          .in('id', kbIds).limit(20)
+        knowledge = (kbRows ?? []).map(r => { knowledgeCitedIds.push(r.id); return { type: r.type, title: r.title, content: r.content } })
+      }
     }
 
-    // 4. Recent messages
+    // 4. Recent messages — org-scoped
     const { data: messagesData } = await supabaseAdmin
       .from('ai_messages')
       .select('role, content')
+      .eq('organization_id', orgId)
       .eq('conversation_id', conversation_id)
       .order('sent_at', { ascending: false })
       .limit(10)
     const recentMessages = (messagesData ?? []).reverse()
 
-    // 5. Cross-channel customer history (only when we know who they are)
+    // 5. Cross-channel customer history (only when we know who they are) — org-scoped
     let crossChannelContext = ''
     if (opts.unified_customer_id) {
       try {
         const { data: history } = await supabaseAdmin
           .from('ai_conversations')
           .select('channel, status, total_messages, listing_title, updated_at')
+          .eq('organization_id', orgId)
           .eq('unified_customer_id', opts.unified_customer_id)
           .neq('id', conversation_id)
           .order('updated_at', { ascending: false })
@@ -485,7 +582,7 @@ export class AiResponderService {
     const apiKey  = await this.credentials.getDecryptedKey(null, agent.model_provider, keyName)
     if (!apiKey) {
       this.logger.error(`[ai.processMessage] sem API key pra ${agent.model_provider} — escalando`)
-      await this.conversations.escalate(conversation_id)
+      await this.conversations.escalate(conversation_id, undefined, orgId)
       return { decision: 'escalate', response: '', confidence: 0 }
     }
 
@@ -495,14 +592,14 @@ export class AiResponderService {
     const durationMs = Date.now() - t0
     if (!aiResult) {
       this.logger.error(`[ai.processMessage] LLM null after ${durationMs}ms`)
-      await this.conversations.escalate(conversation_id)
+      await this.conversations.escalate(conversation_id, undefined, orgId)
       return { decision: 'escalate', response: '', confidence: 0 }
     }
     const { content, confidence: llmConf, reasoning, tokensIn, tokensOut } = aiResult
 
     // 8. Confidence + decision
     const confidence = this.computeConfidence(llmConf, { knowledgeCount: knowledge.length, hasListing: false, content })
-    const settings = await this.aiSettings.getSettings()
+    const settings = await this.aiSettings.getSettings(orgId)
     const decision = this.decideAutoPilot({
       confidence,
       alwaysEscalate: !!(agent as { always_escalate?: boolean }).always_escalate,
@@ -514,6 +611,7 @@ export class AiResponderService {
 
     // 9. Save AI message + tracking columns
     const savedMsg = await this.conversations.addMessage({
+      organization_id: orgId,
       conversation_id,
       role:            'agent',
       content,
@@ -535,12 +633,26 @@ export class AiResponderService {
           sent_to_customer: decision === 'auto_send',
         })
         .eq('id', savedMsg.id)
+        .eq('organization_id', orgId)
     }
-    if (knowledgeCitedIds.length) this.aiKnowledge.recordUsage(knowledgeCitedIds).catch(() => {})
+    if (knowledgeCitedIds.length) this.aiKnowledge.recordUsage(orgId, knowledgeCitedIds).catch(() => {})
 
-    // 10. Update conversation status (auto_send → caller will send → status set elsewhere)
+    // 10. Update conversation status + IH bridge p/ casos não-auto
     if (decision === 'escalate') {
-      await this.conversations.escalate(conversation_id)
+      await this.conversations.escalate(conversation_id, undefined, orgId)
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conversation_id,
+        customerName: opts.customer_name ?? null,
+        channel, reason: 'always_escalate', confidence, summary: text,
+        queueThreshold: settings.queue_threshold ?? 50,
+      }).catch(() => {})
+    } else if (decision === 'queue_for_human') {
+      this.hubBridge.emitEscalation({
+        orgId, conversationId: conversation_id,
+        customerName: opts.customer_name ?? null,
+        channel, reason: 'low_confidence', confidence, summary: text,
+        queueThreshold: settings.queue_threshold ?? 50,
+      }).catch(() => {})
     }
 
     // 11. Token usage
@@ -717,12 +829,38 @@ Confiança: 90-100 = informação exata | 70-89 = informação relacionada | 50-
     return { content, confidence, reasoning, tokensIn, tokensOut }
   }
 
-  private async updateAnalytics(agentId: string, channel: string, autoReplied: boolean) {
+  /**
+   * Agenda o envio da resposta ao ML após `delayMs` (UX humanizada) sem
+   * bloquear o caller. setTimeout é ephemeral — se o processo cair antes
+   * do disparo, a pergunta aparecerá de novo no próximo polling como
+   * UNANSWERED e a IA reprocessa (idempotente porque a conversa já existe).
+   * Pra delays longos (>1min) seria preferível um job persistente, mas
+   * auto_reply_delay_seconds é tipicamente 5-30s — risco aceitável.
+   */
+  private scheduleMlAnswer(externalConvId: string, content: string, delayMs: number): void {
+    const fire = () => {
+      this.mlService.answerQuestion(null, Number(externalConvId), content)
+        .catch((e: any) => this.logger.warn(`[ai-responder] erro ML conv=${externalConvId}: ${e?.message}`))
+    }
+    if (delayMs <= 0) {
+      // setImmediate pra ainda assim quebrar a stack do caller (event loop)
+      setImmediate(fire)
+    } else {
+      const t = setTimeout(fire, delayMs)
+      // Permite o processo encerrar mesmo com timer pendente — em produção
+      // isso significa que respostas pendentes podem ser perdidas no shutdown,
+      // mas o próximo polling reprocessará.
+      if (typeof (t as { unref?: () => void }).unref === 'function') (t as { unref: () => void }).unref()
+    }
+  }
+
+  private async updateAnalytics(orgId: string, agentId: string, channel: string, autoReplied: boolean) {
     const today = new Date().toISOString().split('T')[0]
 
     const { data: existing } = await supabaseAdmin
       .from('ai_agent_analytics')
       .select('*')
+      .eq('organization_id', orgId)
       .eq('agent_id', agentId)
       .eq('channel', channel)
       .eq('date', today)
@@ -736,10 +874,12 @@ Confiança: 90-100 = informação exata | 70-89 = informação relacionada | 50-
           messages_auto_replied: existing.messages_auto_replied + (autoReplied ? 1 : 0),
         })
         .eq('id', existing.id)
+        .eq('organization_id', orgId)
     } else {
       await supabaseAdmin
         .from('ai_agent_analytics')
         .insert({
+          organization_id:       orgId,
           agent_id:              agentId,
           channel,
           date:                  today,

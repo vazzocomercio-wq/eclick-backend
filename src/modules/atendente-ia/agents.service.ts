@@ -4,6 +4,28 @@ import { supabaseAdmin } from '../../common/supabase'
 @Injectable()
 export class AgentsService {
 
+  // ── Helpers de validação cross-org ─────────────────────────────────────
+  // Antes: serviços assumiam que o caller passou o agentId/knowledgeId
+  // certo e nunca validavam org. IDOR clássico — qualquer user logado
+  // podia /atendente-ia/agents/<id-de-outra-org>/knowledge e acessar/editar.
+  private async assertAgentInOrg(orgId: string, agentId: string): Promise<void> {
+    const { data } = await supabaseAdmin
+      .from('ai_agents').select('id').eq('id', agentId).eq('organization_id', orgId).maybeSingle()
+    if (!data) throw new NotFoundException('Agente não encontrado')
+  }
+
+  private async assertKnowledgeInOrg(orgId: string, knowledgeId: string): Promise<void> {
+    const { data } = await supabaseAdmin
+      .from('ai_knowledge_base').select('id').eq('id', knowledgeId).eq('organization_id', orgId).maybeSingle()
+    if (!data) throw new NotFoundException('Conteúdo não encontrado')
+  }
+
+  private async assertTrainingInOrg(orgId: string, trainingId: string): Promise<void> {
+    const { data } = await supabaseAdmin
+      .from('ai_training_examples').select('id').eq('id', trainingId).eq('organization_id', orgId).maybeSingle()
+    if (!data) throw new NotFoundException('Exemplo não encontrado')
+  }
+
   // ── Agents ────────────────────────────────────────────────────────────────
 
   async listAgents(orgId: string) {
@@ -105,7 +127,7 @@ export class AgentsService {
 
   // ── Channels ──────────────────────────────────────────────────────────────
 
-  async upsertChannel(agentId: string, channel: string, body: {
+  async upsertChannel(orgId: string, agentId: string, channel: string, body: {
     mode?: string
     is_active?: boolean
     confidence_threshold?: number
@@ -117,9 +139,13 @@ export class AgentsService {
     working_days?: number[]
     outside_hours_message?: string
   }) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { data, error } = await supabaseAdmin
       .from('ai_agent_channels')
-      .upsert({ agent_id: agentId, channel, ...body }, { onConflict: 'agent_id,channel' })
+      .upsert(
+        { agent_id: agentId, organization_id: orgId, channel, ...body },
+        { onConflict: 'agent_id,channel' },
+      )
       .select()
       .single()
 
@@ -127,10 +153,12 @@ export class AgentsService {
     return data
   }
 
-  async deleteChannel(agentId: string, channel: string) {
+  async deleteChannel(orgId: string, agentId: string, channel: string) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { error } = await supabaseAdmin
       .from('ai_agent_channels')
       .delete()
+      .eq('organization_id', orgId)
       .eq('agent_id', agentId)
       .eq('channel', channel)
 
@@ -140,44 +168,67 @@ export class AgentsService {
 
   // ── Knowledge ─────────────────────────────────────────────────────────────
 
-  async listKnowledge(agentId: string) {
+  async listKnowledge(orgId: string, agentId: string) {
+    await this.assertAgentInOrg(orgId, agentId)
+    // M:M é a única fonte (legacy ai_knowledge_base.agent_id removido em AI-6).
+    const { data: links } = await supabaseAdmin
+      .from('ai_agent_knowledge')
+      .select('knowledge_id')
+      .eq('organization_id', orgId)
+      .eq('agent_id', agentId)
+    const linkedIds = (links ?? []).map(r => r.knowledge_id as string)
+    if (!linkedIds.length) return []
+
     const { data, error } = await supabaseAdmin
       .from('ai_knowledge_base')
       .select('*')
-      .eq('agent_id', agentId)
+      .eq('organization_id', orgId)
       .eq('is_active', true)
+      .in('id', linkedIds)
       .order('created_at', { ascending: false })
-
     if (error) throw error
     return data ?? []
   }
 
-  async createKnowledge(agentId: string, body: {
+  async createKnowledge(orgId: string, agentId: string, body: {
     type: string
     title: string
     content: string
     tags?: string[]
   }) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { data, error } = await supabaseAdmin
       .from('ai_knowledge_base')
-      .insert({ agent_id: agentId, ...body })
+      .insert({ organization_id: orgId, ...body })
       .select()
       .single()
 
     if (error) throw error
+
+    // Linka via M:M (única fonte agora — legacy agent_id removido em AI-6)
+    if (data?.id) {
+      await supabaseAdmin
+        .from('ai_agent_knowledge')
+        .upsert(
+          { agent_id: agentId, knowledge_id: data.id, organization_id: orgId },
+          { onConflict: 'agent_id,knowledge_id' },
+        )
+    }
     return data
   }
 
-  async updateKnowledge(knowledgeId: string, body: Partial<{
+  async updateKnowledge(orgId: string, knowledgeId: string, body: Partial<{
     title: string
     content: string
     tags: string[]
     is_active: boolean
   }>) {
+    await this.assertKnowledgeInOrg(orgId, knowledgeId)
     const { data, error } = await supabaseAdmin
       .from('ai_knowledge_base')
       .update(body)
       .eq('id', knowledgeId)
+      .eq('organization_id', orgId)
       .select()
       .single()
 
@@ -185,11 +236,13 @@ export class AgentsService {
     return data
   }
 
-  async deleteKnowledge(knowledgeId: string) {
+  async deleteKnowledge(orgId: string, knowledgeId: string) {
+    await this.assertKnowledgeInOrg(orgId, knowledgeId)
     const { error } = await supabaseAdmin
       .from('ai_knowledge_base')
       .delete()
       .eq('id', knowledgeId)
+      .eq('organization_id', orgId)
 
     if (error) throw error
     return { ok: true }
@@ -197,10 +250,12 @@ export class AgentsService {
 
   // ── Training examples ─────────────────────────────────────────────────────
 
-  async listTraining(agentId: string) {
+  async listTraining(orgId: string, agentId: string) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { data, error } = await supabaseAdmin
       .from('ai_training_examples')
       .select('*')
+      .eq('organization_id', orgId)
       .eq('agent_id', agentId)
       .eq('is_active', true)
       .order('created_at', { ascending: false })
@@ -209,15 +264,16 @@ export class AgentsService {
     return data ?? []
   }
 
-  async createTraining(agentId: string, body: {
+  async createTraining(orgId: string, agentId: string, body: {
     question: string
     ideal_answer: string
     category?: string
     source?: string
   }) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { data, error } = await supabaseAdmin
       .from('ai_training_examples')
-      .insert({ agent_id: agentId, ...body })
+      .insert({ agent_id: agentId, organization_id: orgId, ...body })
       .select()
       .single()
 
@@ -225,11 +281,13 @@ export class AgentsService {
     return data
   }
 
-  async deleteTraining(trainingId: string) {
+  async deleteTraining(orgId: string, trainingId: string) {
+    await this.assertTrainingInOrg(orgId, trainingId)
     const { error } = await supabaseAdmin
       .from('ai_training_examples')
       .delete()
       .eq('id', trainingId)
+      .eq('organization_id', orgId)
 
     if (error) throw error
     return { ok: true }
@@ -241,11 +299,13 @@ export class AgentsService {
    * Defaults to 'manual' creation, becomes 'human_edit' when auto-captured
    * from a /conversas edit, and 'validated' once a human confirms.
    */
-  async validateTraining(trainingId: string) {
+  async validateTraining(orgId: string, trainingId: string) {
+    await this.assertTrainingInOrg(orgId, trainingId)
     const { data, error } = await supabaseAdmin
       .from('ai_training_examples')
       .update({ source: 'validated' })
       .eq('id', trainingId)
+      .eq('organization_id', orgId)
       .select()
       .single()
     if (error) throw error
@@ -254,10 +314,12 @@ export class AgentsService {
 
   // ── Analytics ─────────────────────────────────────────────────────────────
 
-  async getAnalytics(agentId: string, from: string, to: string) {
+  async getAnalytics(orgId: string, agentId: string, from: string, to: string) {
+    await this.assertAgentInOrg(orgId, agentId)
     const { data, error } = await supabaseAdmin
       .from('ai_agent_analytics')
       .select('*')
+      .eq('organization_id', orgId)
       .eq('agent_id', agentId)
       .gte('date', from)
       .lte('date', to)

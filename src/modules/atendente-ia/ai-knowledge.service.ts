@@ -18,8 +18,8 @@ export class AiKnowledgeService {
    * configured in ai_module_settings (default: openai text-embedding-3-small).
    * Returns a vector of 1536 numbers (compatible with the column type).
    */
-  async generateEmbedding(text: string): Promise<number[]> {
-    const cfg = await this.settings.getSettings()
+  async generateEmbedding(orgId: string, text: string): Promise<number[]> {
+    const cfg = await this.settings.getSettings(orgId)
     const provider = cfg.embedding_provider ?? 'openai'
     const model    = cfg.embedding_model    ?? 'text-embedding-3-small'
 
@@ -50,11 +50,12 @@ export class AiKnowledgeService {
    * the given agent has access to (via ai_agent_knowledge join).
    */
   async searchSimilar(
+    orgId: string,
     query: string,
     agentId: string,
     limit = 5,
   ): Promise<Array<{ knowledge_id: string; content: string; score: number }>> {
-    const queryEmbedding = await this.generateEmbedding(query)
+    const queryEmbedding = await this.generateEmbedding(orgId, query)
 
     // pgvector cosine distance: 1 - (a <=> b) → similarity. Lower distance = closer.
     // Using a Postgres function via supabase RPC keeps the query indexed (ivfflat).
@@ -73,8 +74,10 @@ export class AiKnowledgeService {
 
     const { data: rows } = await supabaseAdmin
       .from('ai_knowledge_embeddings')
-      .select('knowledge_id, content, embedding, ai_agent_knowledge!inner(agent_id)')
+      .select('knowledge_id, content, embedding, ai_agent_knowledge!inner(agent_id, organization_id)')
+      .eq('organization_id', orgId)
       .eq('ai_agent_knowledge.agent_id', agentId)
+      .eq('ai_agent_knowledge.organization_id', orgId)
       .limit(50)
 
     if (!rows?.length) return []
@@ -89,13 +92,17 @@ export class AiKnowledgeService {
   }
 
   /** Persist embedding for a knowledge_base row. Replaces any existing row. */
-  async upsertEmbedding(knowledgeId: string, content: string): Promise<void> {
-    const embedding = await this.generateEmbedding(content)
+  async upsertEmbedding(orgId: string, knowledgeId: string, content: string): Promise<void> {
+    const embedding = await this.generateEmbedding(orgId, content)
 
-    // Replace any existing embedding for this knowledge_id
-    await supabaseAdmin.from('ai_knowledge_embeddings').delete().eq('knowledge_id', knowledgeId)
+    // Replace any existing embedding for this knowledge_id (org-scoped delete)
+    await supabaseAdmin.from('ai_knowledge_embeddings')
+      .delete()
+      .eq('organization_id', orgId)
+      .eq('knowledge_id', knowledgeId)
     const { error } = await supabaseAdmin.from('ai_knowledge_embeddings').insert({
-      knowledge_id: knowledgeId,
+      organization_id: orgId,
+      knowledge_id:    knowledgeId,
       content,
       embedding,
     })
@@ -103,20 +110,24 @@ export class AiKnowledgeService {
   }
 
   /** Bump times_used + last_used_at when a knowledge entry is cited in a response. */
-  async recordUsage(knowledgeIds: string[]): Promise<void> {
+  async recordUsage(orgId: string, knowledgeIds: string[]): Promise<void> {
     if (!knowledgeIds.length) return
-    // Postgres: increment times_used and update last_used_at for each id
+    if (!orgId) throw new Error('recordUsage: orgId obrigatório')
+    // Postgres: increment times_used and update last_used_at for each id (org-scoped)
     for (const id of knowledgeIds) {
       const { data: row } = await supabaseAdmin
         .from('ai_knowledge_base')
         .select('times_used')
         .eq('id', id)
+        .eq('organization_id', orgId)
         .maybeSingle()
+      if (!row) continue
       const times = (row?.times_used ?? 0) + 1
       await supabaseAdmin
         .from('ai_knowledge_base')
         .update({ times_used: times, last_used_at: new Date().toISOString() })
         .eq('id', id)
+        .eq('organization_id', orgId)
     }
   }
 

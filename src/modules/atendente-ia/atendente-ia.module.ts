@@ -8,14 +8,16 @@ import { AiSettingsService } from './ai-settings.service'
 import { AiSettingsController } from './ai-settings.controller'
 import { AiKnowledgeService } from './ai-knowledge.service'
 import { AiKnowledgeController } from './ai-knowledge.controller'
+import { AiHubBridgeService } from './ai-hub-bridge.service'
 import { CredentialsModule } from '../credentials/credentials.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { AiUsageModule } from '../ai-usage/ai-usage.module'
+import { IntelligenceHubModule } from '../intelligence-hub/intelligence-hub.module'
 
 @Module({
-  imports: [CredentialsModule, MercadolivreModule, AiUsageModule],
+  imports: [CredentialsModule, MercadolivreModule, AiUsageModule, IntelligenceHubModule],
   controllers: [AgentsController, ConversationsController, AiSettingsController, AiKnowledgeController],
-  providers: [AgentsService, ConversationsService, AiResponderService, AiSettingsService, AiKnowledgeService],
-  exports: [AgentsService, ConversationsService, AiResponderService, AiSettingsService, AiKnowledgeService],
+  providers: [AgentsService, ConversationsService, AiResponderService, AiSettingsService, AiKnowledgeService, AiHubBridgeService],
+  exports: [AgentsService, ConversationsService, AiResponderService, AiSettingsService, AiKnowledgeService, AiHubBridgeService],
 })
 export class AtendenteIaModule {}
