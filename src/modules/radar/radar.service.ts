@@ -45,14 +45,20 @@ export class RadarService {
     const calibration = await this.loadCalibration(orgId)
     const visits30d = await this.visits30dByItem(orgId)
 
-    // SKU vem da tabela products (radar_catalog_products.product_id).
+    // SKU + foto vêm da tabela products (radar_catalog_products.product_id).
     const productIds = [...new Set(
       (products ?? []).map((p) => p.product_id).filter((x): x is string => typeof x === 'string'),
     )]
-    const skuByProduct = new Map<string, string | null>()
+    const metaByProduct = new Map<string, { sku: string | null; photo: string | null }>()
     if (productIds.length > 0) {
-      const { data: prods } = await sb.from('products').select('id,sku').in('id', productIds)
-      for (const pr of prods ?? []) skuByProduct.set(pr.id as string, (pr.sku as string | null) ?? null)
+      const { data: prods } = await sb.from('products').select('id,sku,photo_urls').in('id', productIds)
+      for (const pr of prods ?? []) {
+        const photos = pr.photo_urls as string[] | null
+        metaByProduct.set(pr.id as string, {
+          sku: (pr.sku as string | null) ?? null,
+          photo: Array.isArray(photos) && photos.length > 0 ? photos[0] : null,
+        })
+      }
     }
 
     const offersByCp = groupBy(offers ?? [], (o) => o.catalog_product_ref as string)
@@ -74,10 +80,11 @@ export class RadarService {
       const marketDemand = rate == null
         ? null
         : Math.round(offs.reduce((acc, o) => acc + (visits30d.get(o.item_id as string) ?? 0) * rate, 0))
+      const meta = typeof p.product_id === 'string' ? metaByProduct.get(p.product_id) : undefined
       return {
         ...p,
-        sku: typeof p.product_id === 'string' ? (skuByProduct.get(p.product_id) ?? null) : null,
-        thumbnail: (ownOffer?.thumbnail as string | null) ?? null,
+        sku: meta?.sku ?? null,
+        thumbnail: meta?.photo ?? (ownOffer?.thumbnail as string | null) ?? null,
         price_to_win: (ownOffer?.price_to_win as number | null) ?? null,
         catalog_status: (ownOffer?.catalog_status as string | null) ?? null,
         vazzo_item_id: (ownOffer?.item_id as string | null) ?? null,

@@ -42,7 +42,7 @@ export class RadarCompetitorsService {
 
     const { data: products, error: pe } = await sb
       .from('products')
-      .select('id,name,sku,category_ml_id,cost_price,my_price')
+      .select('id,name,sku,category_ml_id,cost_price,my_price,photo_urls')
       .eq('organization_id', orgId)
       .in('id', productIds)
     if (pe) throw new Error(`products: ${pe.message}`)
@@ -53,6 +53,7 @@ export class RadarCompetitorsService {
         product_id: p.id,
         name: p.name,
         sku: p.sku,
+        image: firstPhoto(p.photo_urls),
         category_id: p.category_ml_id ?? null,
         competitor_count: agg.total,
         active_count: agg.active,
@@ -163,7 +164,7 @@ export class RadarCompetitorsService {
 
     const { data: product } = await sb
       .from('products')
-      .select('id,name,sku,category_ml_id,cost_price,my_price')
+      .select('id,name,sku,category_ml_id,cost_price,my_price,photo_urls')
       .eq('id', productId)
       .eq('organization_id', orgId)
       .maybeSingle()
@@ -252,6 +253,7 @@ export class RadarCompetitorsService {
         id: product.id,
         name: product.name,
         sku: product.sku,
+        image: firstPhoto(product.photo_urls),
         category_id: product.category_ml_id ?? null,
         cost_price: product.cost_price ?? null,
         my_price: product.my_price ?? null,
@@ -341,6 +343,13 @@ export class RadarCompetitorsService {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/** Primeira foto do produto (products.photo_urls é text[]). */
+function firstPhoto(photoUrls: unknown): string | null {
+  return Array.isArray(photoUrls) && photoUrls.length > 0 && typeof photoUrls[0] === 'string'
+    ? photoUrls[0]
+    : null
+}
 
 interface SnapRow { item_id: unknown; snapshot_date: unknown; price: unknown; visits: unknown; link_id?: unknown }
 export interface SeriesPoint { date: string; price: number | null; visits: number }
