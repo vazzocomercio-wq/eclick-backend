@@ -192,6 +192,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Radar IA C3 — insight de Concorrentes Vinculados. Lê preço/visitas/venda
+  // estimada dos concorrentes e gera uma leitura curta e acionável. Haiku pra
+  // latência baixa + custo mínimo (roda ao abrir a tela de comparação).
+  radar_competitor_insight: {
+    label:       'Insight de concorrente (Radar)',
+    description: 'Lê movimentos de preço/visitas/venda estimada dos concorrentes vinculados e gera uma leitura acionável',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+  },
   // Onda 4 A4: Copiloto da Loja (admin assistant)
   store_copilot: {
     label:       'Copiloto da Loja (A4)',

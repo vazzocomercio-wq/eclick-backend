@@ -3,6 +3,7 @@ import { loadOrgToken } from './token-client.js'
 import { collectOffers } from './collectors/offers.js'
 import { collectVisits } from './collectors/visits.js'
 import { collectSellers } from './collectors/sellers.js'
+import { collectCompetitorLinks } from './collectors/competitor-links.js'
 import { collectDiscovery } from './collectors/discovery.js'
 import { detectEvents } from './events-detector.js'
 import { calibrateConversion } from './conversion-calibrator.js'
@@ -16,6 +17,17 @@ async function orgsWithWatchlist(activeOnly: boolean): Promise<string[]> {
   if (activeOnly) q = q.eq('status', 'ativo')
   const { data, error } = await q
   if (error) throw new Error(`orgsWithWatchlist: ${error.message}`)
+  return [...new Set((data ?? []).map((row) => row.organization_id as string))]
+}
+
+/** Orgs com vínculos de concorrente ativos (Concorrentes Vinculados — C2). */
+async function orgsWithCompetitorLinks(): Promise<string[]> {
+  const sb = getSupabase()
+  const { data, error } = await sb
+    .from('radar_competitor_links')
+    .select('organization_id')
+    .eq('status', 'ativo')
+  if (error) throw new Error(`orgsWithCompetitorLinks: ${error.message}`)
   return [...new Set((data ?? []).map((row) => row.organization_id as string))]
 }
 
@@ -72,8 +84,10 @@ export async function runDaily(force = false): Promise<void> {
   startOfDay.setUTCHours(0, 0, 0, 0)
   const sinceIso = startOfDay.toISOString()
 
-  const orgs = await orgsWithWatchlist(true)
-  radarLog('orchestrator', `runDaily — ${orgs.length} org(s) com watchlist ativa${force ? ' (forçado)' : ''}`)
+  const watchlistOrgs = await orgsWithWatchlist(true)
+  const linkOrgs = await orgsWithCompetitorLinks()
+  const orgs = [...new Set([...watchlistOrgs, ...linkOrgs])]
+  radarLog('orchestrator', `runDaily — ${orgs.length} org(s) (watchlist + vínculos)${force ? ' (forçado)' : ''}`)
 
   for (const orgId of orgs) {
     if (!force && (await hasRecentRun(orgId, 'daily', sinceIso))) {
@@ -87,9 +101,10 @@ export async function runDaily(force = false): Promise<void> {
       const offers = await collectOffers(orgId, tok)
       const visits = await collectVisits(orgId, tok)
       const sellers = await collectSellers(orgId, tok)
+      const competitors = await collectCompetitorLinks(orgId, tok) // C2 — concorrentes vinculados
       const events = await detectEvents(orgId) // R3 — motor de eventos
       const calibration = await calibrateConversion(orgId) // M2 — calibração da conversão
-      const stats = { offers, visits, sellers, events, calibration, duration_ms: Date.now() - t0 }
+      const stats = { offers, visits, sellers, competitors, events, calibration, duration_ms: Date.now() - t0 }
       await finishRun(runId, 'completed', stats)
       radarLog('orchestrator', `org=${orgId} daily OK`, JSON.stringify(stats))
     } catch (e) {
