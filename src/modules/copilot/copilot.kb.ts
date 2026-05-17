@@ -2386,6 +2386,99 @@ const CADASTRO_OPS_ENTRIES: KbEntry[] = [
 ]
 
 // ════════════════════════════════════════════════════════════════════════
+// e-Click Radar IA — inteligência de mercado (MVP 1 + Motor 2)
+// ════════════════════════════════════════════════════════════════════════
+
+const RADAR_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/radar'],
+    category: 'radar',
+    title:    'e-Click Radar IA — watchlist de concorrentes e o que mudou',
+    content: `**Radar de mercado centrado no seu produto de catálogo.** Acompanha
+todas as ofertas de um mesmo produto no Mercado Livre — a sua e as dos
+concorrentes — e detecta mudanças automaticamente.
+
+**Por que catálogo, não anúncio avulso**: o Radar gira em torno do **produto de
+catálogo** (a ficha única do ML, ex: \`MLB-PROD-123\`). Várias ofertas disputam o
+mesmo produto; o Radar agrupa todas elas e compara preço, frete, logística e
+reputação do vendedor lado a lado.
+
+**A tela (Tela 1 — lista)**:
+- **KPI strip** no topo: produtos monitorados, ofertas no total, quantos você
+  está na ponta de preço, demanda de mercado estimada
+- **Tabela ordenável** (clique no cabeçalho pra ordenar) — são 164+ produtos,
+  por isso é tabela e não grade de cards. Colunas: produto, nº de ofertas, seu
+  preço vs. menor preço, **Demanda** (estimada — ver Tela 2), eventos recentes
+- **"O que mudou"** — painel consolidado dos eventos da org inteira: quedas de
+  preço, novo concorrente, você perdeu/voltou à ponta de preço, mudança de frete
+- Clique numa linha → abre a **Tela 2** (detalhe do produto)
+
+**De onde vem o dado**: um coletor roda no \`eclick-workers\` 1×/dia. Ele lê
+dados **públicos** do ML (ofertas do produto, visitas, perfil do vendedor) — não
+existe API que entregue a venda real do concorrente, então a parte de demanda é
+**estimada** (explicado na Tela 2). Há também uma rodada de **descoberta**
+semanal que amplia a watchlist lendo o seu próprio catálogo.
+
+**Eventos — severidade**:
+- \`queda_preco\` / \`alta_preco\` — concorrente mexeu no preço
+- \`mudanca_menor_preco\` — mudou quem está na ponta de preço. É **atenção** por
+  padrão; vira **crítico** só quando o concorrente te corta o preço de forma
+  agressiva (≥10% abaixo)
+- \`novo_concorrente\` / \`saiu_concorrente\` — entrou/saiu oferta do conjunto
+- \`mudanca_frete\` — frete ou tipo de logística mudou
+
+A 1ª vez que um produto é coletado vira **baseline silencioso** — não dispara
+enxurrada de \`novo_concorrente\`.
+
+**Endpoints**: \`GET /radar/products\`, \`GET /radar/summary\`, \`GET /radar/events\``,
+    tags: ['radar', 'concorrentes', 'watchlist', 'mercado', 'eventos', 'preco', 'inteligencia'],
+  },
+  {
+    routes:   ['/dashboard/radar/[id]'],
+    category: 'radar',
+    title:    'Radar — detalhe do produto: ranking competitivo e demanda estimada',
+    content: `**Tela 2 — raio-x de um produto de catálogo.**
+
+**Ranking competitivo**: todas as ofertas ativas do produto, ordenadas por
+preço. Cada linha traz vendedor (com cor da reputação), preço (verde + ▾ = menor
+preço), **Demanda 30d estimada**, frete, logística e tipo de anúncio. A sua
+oferta aparece destacada em ciano.
+
+**Cruzamento de margem** (se o produto tiver custo cadastrado): custo interno vs.
+menor preço do mercado vs. seu preço — mostra a margem bruta em cada cenário.
+Margem bruta = (preço − custo) ÷ preço; **não** inclui tarifa ML, frete nem
+imposto.
+
+**Motor 2 — Demanda Estimada (o que o card "Como a demanda é estimada" explica)**:
+- O ML **não expõe** a venda real do concorrente. O Radar **estima**:
+  \`demanda ≈ visitas coletadas do anúncio × taxa de conversão\`
+- A **conversão é calibrada no SEU dado real**: unidades vendidas ÷ visitas dos
+  seus próprios anúncios monitorados, numa janela de 30 dias
+- É calibrada **por categoria**; quando a categoria tem pouco dado, cai pra uma
+  **taxa org-wide** (fallback). O card diz qual base foi usada ("calibrada por
+  categoria" ou "por organização")
+- **Confiança**: "Boa" quando há volume suficiente (≥200 visitas e ≥5 unidades
+  na categoria), senão "Baixa" — e aí os números são ordem de grandeza, não
+  exatos
+- Por oferta a Tela 2 mostra \`visitas 30d\`, \`unidades estimadas\` e
+  \`receita estimada\`
+
+**Importante**: demanda estimada é **estimativa**, nunca a venda real do
+concorrente. Use pra dimensionar o tamanho da disputa, não como número contábil.
+
+**Gráficos**: histórico de preço (você + top 4 concorrentes) e visitas ao longo
+do tempo.
+
+**Calibração** roda 1×/dia no \`eclick-workers\` (passo do \`runDaily\`) e grava
+em \`radar_conversion_calibration\`.
+
+**Endpoints**: \`GET /radar/products/:id\`, \`GET /radar/products/:id/series\`,
+\`GET /radar/products/:id/events\``,
+    tags: ['radar', 'demanda', 'conversao', 'estimativa', 'ranking', 'concorrentes', 'visitas', 'margem', 'motor2'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
@@ -2406,6 +2499,7 @@ export const KB: KbEntry[] = [
   ...ML_POSTSALE_INTELLIGENCE_ENTRIES,
   ...ML_LISTING_ENTRIES,
   ...EXECUTIVE_DASHBOARD_ENTRIES,
+  ...RADAR_ENTRIES,
   ...OPS_ENTRIES,
   ...COPILOT_PAGE_ENTRIES,
   ...MULTI_ACCOUNT_ENTRIES,

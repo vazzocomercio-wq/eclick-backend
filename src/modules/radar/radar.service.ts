@@ -22,7 +22,7 @@ export class RadarService {
 
     const { data: offers, error: oe } = await sb
       .from('radar_offers')
-      .select('catalog_product_ref,price,is_own')
+      .select('catalog_product_ref,price,is_own,item_id')
       .eq('organization_id', orgId)
       .eq('status', 'ativo')
     if (oe) throw new Error(`radar_offers: ${oe.message}`)
@@ -42,6 +42,9 @@ export class RadarService {
       .gte('collected_at', since)
     if (se) throw new Error(`radar_offer_snapshots: ${se.message}`)
 
+    const calibration = await this.loadCalibration(orgId)
+    const visits30d = await this.visits30dByItem(orgId)
+
     const offersByCp = groupBy(offers ?? [], (o) => o.catalog_product_ref as string)
     const eventsByCp = new Map<string, number>()
     for (const e of events ?? []) {
@@ -56,6 +59,10 @@ export class RadarService {
       const minPrice = prices.length ? Math.min(...prices) : null
       const vazzoPrices = numbers(offs.filter((o) => o.is_own === true).map((o) => o.price))
       const vazzoPrice = vazzoPrices.length ? Math.min(...vazzoPrices) : null
+      const rate = effectiveRate(calibration, (p.category_id as string | null) ?? null).rate
+      const marketDemand = rate == null
+        ? null
+        : Math.round(offs.reduce((acc, o) => acc + (visits30d.get(o.item_id as string) ?? 0) * rate, 0))
       return {
         ...p,
         competitors: offs.filter((o) => o.is_own !== true).length,
@@ -65,6 +72,7 @@ export class RadarService {
         vazzo_has_lead: vazzoPrice != null && minPrice != null && vazzoPrice === minPrice,
         price_delta_pct: deltaByCp.get(p.id as string) ?? null,
         new_events: eventsByCp.get(p.id as string) ?? 0,
+        market_demand: marketDemand,
       }
     })
   }
@@ -80,12 +88,21 @@ export class RadarService {
       .eq('organization_id', orgId)
     for (const s of sellers ?? []) sellerSet.add(s.id as string)
 
+    const calibration = await this.loadCalibration(orgId)
     return {
       products_monitored: products.filter((p) => p.status === 'ativo').length,
       products_total: products.length,
       competitors: sellerSet.size,
       new_events: products.reduce((acc, p) => acc + p.new_events, 0),
       products_losing_lead: products.filter((p) => !p.vazzo_has_lead && p.min_price != null).length,
+      market_demand_total: products.reduce((acc, p) => acc + (p.market_demand ?? 0), 0),
+      conversion: {
+        rate: calibration.org_rate,
+        confidence: calibration.org_confidence,
+        own_visits: calibration.org_visits,
+        own_units: calibration.org_units,
+        calc_date: calibration.calc_date,
+      },
     }
   }
 
@@ -133,10 +150,36 @@ export class RadarService {
       internal = ip ?? null
     }
 
+    // Motor 2 — demanda estimada por oferta: visitas 30d × conversão calibrada.
+    const calibration = await this.loadCalibration(orgId)
+    const visits30d = await this.visits30dByItem(orgId, id)
+    const { rate, basis } = effectiveRate(calibration, (product.category_id as string | null) ?? null)
+
+    const enrichedOffers = (offers ?? []).map((o) => {
+      const v = visits30d.get(o.item_id as string) ?? 0
+      const estUnits = rate == null ? null : Math.round(v * rate)
+      const price = typeof o.price === 'number' ? o.price : null
+      return {
+        ...o,
+        seller: oneOf(o.seller),
+        visits_30d: v,
+        est_units_30d: estUnits,
+        est_revenue_30d: estUnits != null && price != null ? Math.round(estUnits * price) : null,
+      }
+    })
+
     return {
       product,
-      offers: (offers ?? []).map((o) => ({ ...o, seller: oneOf(o.seller) })),
+      offers: enrichedOffers,
       internal,
+      calibration: {
+        rate,
+        basis,
+        confidence: calibration.org_confidence,
+        own_visits: calibration.org_visits,
+        own_units: calibration.org_units,
+        calc_date: calibration.calc_date,
+      },
     }
   }
 
@@ -214,9 +257,84 @@ export class RadarService {
     if (error) throw new Error(`radar_events: ${error.message}`)
     return data ?? []
   }
+
+  /** Motor 2 — calibração de conversão mais recente (por categoria + org-wide). */
+  private async loadCalibration(orgId: string): Promise<Calibration> {
+    const { data } = await supabaseAdmin
+      .from('radar_conversion_calibration')
+      .select('calc_date,category_id,conversion_rate,confidence,own_visits,own_units')
+      .eq('organization_id', orgId)
+      .order('calc_date', { ascending: false })
+    const rows = data ?? []
+    const latestDate = rows.length ? (rows[0].calc_date as string) : null
+    const cal: Calibration = {
+      calc_date: latestDate,
+      org_rate: null,
+      org_confidence: 'low',
+      org_visits: 0,
+      org_units: 0,
+      by_category: new Map(),
+    }
+    for (const row of rows) {
+      if (row.calc_date !== latestDate) continue
+      const conf: 'ok' | 'low' = (row.confidence as string) === 'ok' ? 'ok' : 'low'
+      if (row.category_id == null) {
+        cal.org_rate = (row.conversion_rate as number | null) ?? null
+        cal.org_confidence = conf
+        cal.org_visits = Number(row.own_visits) || 0
+        cal.org_units = Number(row.own_units) || 0
+      } else {
+        cal.by_category.set(row.category_id as string, {
+          rate: (row.conversion_rate as number | null) ?? null,
+          confidence: conf,
+        })
+      }
+    }
+    return cal
+  }
+
+  /** Motor 2 — visitas dos últimos 30d somadas por item (org-wide ou de 1 catálogo). */
+  private async visits30dByItem(orgId: string, catalogRef?: string): Promise<Map<string, number>> {
+    const since = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10)
+    let q = supabaseAdmin
+      .from('radar_visit_snapshots')
+      .select('item_id,visits')
+      .eq('organization_id', orgId)
+      .gte('visit_date', since)
+    if (catalogRef) q = q.eq('catalog_product_ref', catalogRef)
+    const { data } = await q
+    const m = new Map<string, number>()
+    for (const v of data ?? []) {
+      const k = v.item_id as string
+      m.set(k, (m.get(k) ?? 0) + (Number(v.visits) || 0))
+    }
+    return m
+  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+interface Calibration {
+  calc_date: string | null
+  org_rate: number | null
+  org_confidence: 'ok' | 'low'
+  org_visits: number
+  org_units: number
+  by_category: Map<string, { rate: number | null; confidence: 'ok' | 'low' }>
+}
+
+/** Resolve a conversão de um produto: a taxa da categoria se confiável, senão a org-wide. */
+function effectiveRate(
+  cal: Calibration,
+  categoryId: string | null,
+): { rate: number | null; basis: 'categoria' | 'organização' | 'indisponível' } {
+  if (categoryId) {
+    const c = cal.by_category.get(categoryId)
+    if (c && c.confidence === 'ok' && c.rate != null) return { rate: c.rate, basis: 'categoria' }
+  }
+  if (cal.org_rate != null) return { rate: cal.org_rate, basis: 'organização' }
+  return { rate: null, basis: 'indisponível' }
+}
 
 function groupBy<T>(rows: T[], key: (r: T) => string): Map<string, T[]> {
   const m = new Map<string, T[]>()

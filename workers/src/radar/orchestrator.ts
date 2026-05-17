@@ -5,6 +5,7 @@ import { collectVisits } from './collectors/visits.js'
 import { collectSellers } from './collectors/sellers.js'
 import { collectDiscovery } from './collectors/discovery.js'
 import { detectEvents } from './events-detector.js'
+import { calibrateConversion } from './conversion-calibrator.js'
 import type { RunType } from './types.js'
 import { radarLog, errMsg } from './util.js'
 
@@ -86,8 +87,9 @@ export async function runDaily(force = false): Promise<void> {
       const offers = await collectOffers(orgId, tok)
       const visits = await collectVisits(orgId, tok)
       const sellers = await collectSellers(orgId, tok)
-      const events = await detectEvents(orgId) // R3 — motor de eventos, passo final
-      const stats = { offers, visits, sellers, events, duration_ms: Date.now() - t0 }
+      const events = await detectEvents(orgId) // R3 — motor de eventos
+      const calibration = await calibrateConversion(orgId) // M2 — calibração da conversão
+      const stats = { offers, visits, sellers, events, calibration, duration_ms: Date.now() - t0 }
       await finishRun(runId, 'completed', stats)
       radarLog('orchestrator', `org=${orgId} daily OK`, JSON.stringify(stats))
     } catch (e) {
