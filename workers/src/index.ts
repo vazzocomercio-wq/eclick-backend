@@ -12,6 +12,7 @@
 import 'dotenv/config'
 import { BaileysManager } from './whatsapp/baileys.manager.js'
 import { InternalServer } from './internal-server.js'
+import { startRadarScheduler, stopRadarScheduler } from './radar/scheduler.js'
 
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const
 
@@ -41,6 +42,9 @@ async function main(): Promise<void> {
     await internalServer.start()
   }
 
+  // e-Click Radar IA — scheduler diário/semanal de coleta de mercado
+  startRadarScheduler()
+
   const heartbeat = setInterval(() => {
     log(`heartbeat sessions=${manager.sessionCount}`)
   }, 60_000)
@@ -49,6 +53,7 @@ async function main(): Promise<void> {
     process.on(signal, () => {
       log(`received ${signal}, shutting down`)
       clearInterval(heartbeat)
+      stopRadarScheduler()
       void Promise.allSettled([
         manager.stop(),
         internalServer?.stop() ?? Promise.resolve(),

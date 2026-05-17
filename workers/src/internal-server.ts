@@ -1,6 +1,7 @@
 import http from 'node:http'
 import type { BaileysManager } from './whatsapp/baileys.manager.js'
 import type { OutboundContent } from './whatsapp/baileys.session.js'
+import { triggerManual } from './radar/scheduler.js'
 
 /**
  * HTTP server interno do worker. Existe pra a API NestJS conseguir
@@ -84,6 +85,11 @@ export class InternalServer {
       return
     }
 
+    if (req.method === 'POST' && url === '/internal/radar/run') {
+      await this.handleRadarRun(req, res)
+      return
+    }
+
     this.json(res, 404, { error: 'not_found' })
   }
 
@@ -114,6 +120,30 @@ export class InternalServer {
         this.json(res, 500, { error: 'check_failed', detail: message })
       }
     }
+  }
+
+  /**
+   * Gatilho manual da coleta do e-Click Radar IA — usado pelos smokes do
+   * R2/R3. Fire-and-forget: a coleta dura minutos; o smoke confere o
+   * resultado depois em radar_collection_runs.
+   * Body: { kind?: 'daily' | 'discovery' | 'both' } (default 'daily').
+   */
+  private async handleRadarRun(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: { kind?: string }
+    try {
+      body = await this.parseJsonBody<{ kind?: string }>(req)
+    } catch (err) {
+      this.json(res, 400, { error: 'invalid_json', detail: String(err) })
+      return
+    }
+    const kind: 'daily' | 'discovery' | 'both' =
+      body?.kind === 'discovery' || body?.kind === 'both' ? body.kind : 'daily'
+
+    void triggerManual(kind).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[internal-server] radar run falhou:', err)
+    })
+    this.json(res, 202, { started: true, kind })
   }
 
   private async handleSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
