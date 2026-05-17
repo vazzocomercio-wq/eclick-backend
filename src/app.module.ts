@@ -10,7 +10,6 @@ import { SalesAggregatorModule } from './modules/sales-aggregator/sales-aggregat
 import { SuppliersModule } from './modules/suppliers/suppliers.module'
 import { ComprasModule } from './modules/compras/compras.module'
 import { PurchaseOrdersModule } from './modules/purchase-orders/purchase-orders.module'
-import { CompetitorsModule } from './modules/competitors/competitors.module'
 import { AtendenteIaModule } from './modules/atendente-ia/atendente-ia.module'
 import { CredentialsModule } from './modules/credentials/credentials.module'
 import { AiUsageModule } from './modules/ai-usage/ai-usage.module'
@@ -80,7 +79,6 @@ import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-int
     SuppliersModule,
     ComprasModule,
     PurchaseOrdersModule,
-    CompetitorsModule,
     AtendenteIaModule,
     CredentialsModule,
     AiUsageModule,
