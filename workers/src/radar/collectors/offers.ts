@@ -81,7 +81,9 @@ async function upsertOffer(
     }
   }
 
-  const isWinner = offer.price != null && minPrice != null && offer.price === minPrice
+  // "menor preço" do conjunto competitivo — NÃO é o buy-box winner (que o ML
+  // não expõe: buy_box_winner vem null e /products/{id}/items não tem ganhador).
+  const isLowestPrice = offer.price != null && minPrice != null && offer.price === minPrice
   const now = new Date().toISOString()
   const freeShipping = offer.shipping?.free_shipping ?? null
   const logisticType = offer.shipping?.logistic_type ?? null
@@ -98,7 +100,7 @@ async function upsertOffer(
       logistic_type: logisticType,
       listing_type: offer.listing_type_id,
       condition: offer.condition,
-      is_winner: isWinner,
+      is_lowest_price: isLowestPrice,
       is_own: isOwn,
       sold_quantity: soldQuantity,
       available_quantity: availableQuantity,
@@ -120,7 +122,7 @@ async function upsertOffer(
     price: offer.price,
     free_shipping: freeShipping,
     logistic_type: logisticType,
-    is_winner: isWinner,
+    is_lowest_price: isLowestPrice,
     collected_at: now,
   })
   if (snapErr) throw new Error(`snapshot: ${snapErr.message}`)
