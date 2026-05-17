@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { MlListingPricesService } from '../mercadolivre/ml-listing-prices.service'
+import { MlShippingCostService } from '../mercadolivre/ml-shipping-cost.service'
 
 /**
  * e-Click Radar IA — serviço read-only que alimenta as 2 telas do módulo.
@@ -8,6 +11,11 @@ import { supabaseAdmin } from '../../common/supabase'
  */
 @Injectable()
 export class RadarService {
+  constructor(
+    private readonly mercadolivre: MercadolivreService,
+    private readonly listingPrices: MlListingPricesService,
+    private readonly shippingCost: MlShippingCostService,
+  ) {}
   /** Tela 1 — produtos da watchlist + agregados por produto. */
   async listProducts(orgId: string, status?: string) {
     const sb = supabaseAdmin
@@ -142,6 +150,111 @@ export class RadarService {
       .not('catalog_status', 'is', null)
     if (error) throw new Error(`radar_offers: ${error.message}`)
     return data ?? []
+  }
+
+  /**
+   * Contexto de preço de um produto pra o modal "Ajustar preço": preço atual,
+   * preço pra ganhar o catálogo (ao vivo), custo, imposto, tarifa ML e frete —
+   * pra o modal calcular a margem em qualquer preço.
+   */
+  async getPriceContext(orgId: string, productId: string) {
+    const sb = supabaseAdmin
+    const { data: cp } = await sb
+      .from('radar_catalog_products')
+      .select('id,category_id,product_id')
+      .eq('organization_id', orgId)
+      .eq('id', productId)
+      .maybeSingle()
+    if (!cp) throw new NotFoundException('Produto de catálogo não encontrado')
+
+    const { data: offer } = await sb
+      .from('radar_offers')
+      .select('item_id,price,listing_type,catalog_status,price_to_win,seller:seller_ref(seller_id)')
+      .eq('organization_id', orgId)
+      .eq('catalog_product_ref', productId)
+      .eq('is_own', true)
+      .order('price', { ascending: true, nullsFirst: false })
+      .limit(1)
+      .maybeSingle()
+
+    let cost: number | null = null
+    let taxPct: number | null = null
+    let dims: { weight_kg: number | null; length_cm: number | null; width_cm: number | null; height_cm: number | null } | null = null
+    if (cp.product_id) {
+      const { data: p } = await sb
+        .from('products')
+        .select('cost_price,tax_percentage,weight_kg,length_cm,width_cm,height_cm')
+        .eq('id', cp.product_id)
+        .maybeSingle()
+      if (p) {
+        cost = (p.cost_price as number | null) ?? null
+        taxPct = (p.tax_percentage as number | null) ?? null
+        dims = {
+          weight_kg: p.weight_kg as number | null,
+          length_cm: p.length_cm as number | null,
+          width_cm: p.width_cm as number | null,
+          height_cm: p.height_cm as number | null,
+        }
+      }
+    }
+
+    const base = {
+      cost, tax_pct: taxPct, fee_pct: null as number | null,
+      fixed_fee: null as number | null, shipping_cost: null as number | null,
+    }
+    if (!offer) {
+      return { has_listing: false, item_id: null, current_price: null, price_to_win: null, catalog_status: null, ...base }
+    }
+
+    const sellerId = (oneOf(offer.seller) as { seller_id?: number } | null)?.seller_id
+    const itemId = offer.item_id as string
+    const price = typeof offer.price === 'number' ? offer.price : 0
+
+    let token: string | null = null
+    try {
+      token = (await this.mercadolivre.getTokenForOrg(orgId, sellerId)).token
+    } catch { /* sem token — segue sem tarifa/frete */ }
+
+    let priceToWin = (offer.price_to_win as number | null) ?? null
+    let catalogStatus = (offer.catalog_status as string | null) ?? null
+    try {
+      const ptw = await this.mercadolivre.fetchPriceToWin(orgId, [{ item_id: itemId, seller_id: sellerId }])
+      if (ptw[0]) {
+        priceToWin = ptw[0].price_to_win ?? priceToWin
+        catalogStatus = ptw[0].catalog_status ?? catalogStatus
+      }
+    } catch { /* mantém o do banco */ }
+
+    const listingType = (offer.listing_type as string | null) ?? 'gold_special'
+    if (token && cp.category_id && price > 0) {
+      try {
+        const fee = await this.listingPrices.getFee(token, {
+          categoryId: cp.category_id as string,
+          listingTypeId: listingType,
+          price,
+        })
+        if (fee) { base.fee_pct = fee.percentageFee; base.fixed_fee = fee.fixedFee }
+      } catch { /* sem tarifa */ }
+    }
+
+    if (token && sellerId && dims?.weight_kg && dims.length_cm && dims.width_cm && dims.height_cm && price > 0) {
+      try {
+        const r = await this.shippingCost.getFreeShippingCost(token, sellerId, {
+          lengthCm: dims.length_cm, widthCm: dims.width_cm, heightCm: dims.height_cm,
+          weightGrams: dims.weight_kg * 1000, itemPrice: price, listingTypeId: listingType,
+        })
+        base.shipping_cost = r?.sellerCost ?? null
+      } catch { /* sem frete */ }
+    }
+
+    return {
+      has_listing: true,
+      item_id: itemId,
+      current_price: price,
+      price_to_win: priceToWin,
+      catalog_status: catalogStatus,
+      ...base,
+    }
   }
 
   /** Tela 1 — feed "o que mudou" (eventos da org inteira). */

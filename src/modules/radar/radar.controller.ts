@@ -47,6 +47,12 @@ export class RadarController {
     return this.radar.getProduct(this.org(user), id)
   }
 
+  /** Modal "Ajustar preço" — preço pra ganhar + custo + tarifa + frete. */
+  @Get('products/:id/price-context')
+  getPriceContext(@ReqUser() user: AuthUser, @Param('id') id: string) {
+    return this.radar.getPriceContext(this.org(user), id)
+  }
+
   /** Tela 2 — séries de preço (Vazzo + top 4 concorrentes) e visitas. */
   @Get('products/:id/series')
   getSeries(@ReqUser() user: AuthUser, @Param('id') id: string) {

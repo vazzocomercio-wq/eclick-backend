@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { AiModule } from '../ai/ai.module'
+import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { RadarController } from './radar.controller'
 import { RadarService } from './radar.service'
 import { RadarCompetitorsController } from './radar-competitors.controller'
@@ -11,7 +12,7 @@ import { RadarCompetitorsService } from './radar-competitors.service'
  * (CRUD de vínculos + comparação + insight IA). A coleta vive no eclick-workers.
  */
 @Module({
-  imports: [AiModule],
+  imports: [AiModule, MercadolivreModule],
   controllers: [RadarController, RadarCompetitorsController],
   providers: [RadarService, RadarCompetitorsService],
 })
