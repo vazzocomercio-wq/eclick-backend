@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException, HttpException, BadRequestException, 
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MlListingPricesService } from './ml-listing-prices.service'
+import { MlShippingCostService } from './ml-shipping-cost.service'
 import { estimateSaleFee } from '../../common/margin'
 
 // redeploy - organization_id now nullable
@@ -141,7 +142,10 @@ function computePerfStats(
 
 @Injectable()
 export class MercadolivreService {
-  constructor(private readonly listingPrices: MlListingPricesService) {}
+  constructor(
+    private readonly listingPrices: MlListingPricesService,
+    private readonly shippingCost: MlShippingCostService,
+  ) {}
 
   // ── OAuth ────────────────────────────────────────────────────────────────
 
@@ -1082,6 +1086,89 @@ export class MercadolivreService {
         }
       }))
       for (const r of results) if (r) out.push(r)
+    }
+    return out
+  }
+
+  /**
+   * Custo REAL do frete grátis pago pelo vendedor, para vários anúncios.
+   * A API listing_prices NÃO devolve esse custo — aqui usa o
+   * MlShippingCostService (/users/{id}/shipping_options/free) com as
+   * dimensões do produto vinculado. Anúncio sem vínculo/dimensões/seller
+   * degrada (null) — a margem cai no fallback.
+   */
+  async fetchFreeShippingCost(
+    orgId: string,
+    items: Array<{ item_id: string; seller_id?: number; price: number; listing_type_id?: string }>,
+  ): Promise<Array<{ item_id: string; free_shipping_cost: number | null }>> {
+    if (items.length === 0) return []
+
+    const { data: links } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id, product_id')
+      .in('listing_id', items.map((i) => i.item_id))
+      .eq('platform', 'mercadolivre')
+    const productByListing = new Map<string, string>()
+    for (const l of links ?? []) {
+      if (l.listing_id && l.product_id) productByListing.set(l.listing_id as string, l.product_id as string)
+    }
+
+    const productIds = [...new Set(productByListing.values())]
+    const dimByProduct = new Map<string, {
+      weight_kg: number | null; length_cm: number | null; width_cm: number | null; height_cm: number | null
+    }>()
+    if (productIds.length > 0) {
+      const { data: products } = await supabaseAdmin
+        .from('products')
+        .select('id, weight_kg, length_cm, width_cm, height_cm')
+        .eq('organization_id', orgId)
+        .in('id', productIds)
+      for (const p of products ?? []) {
+        dimByProduct.set(p.id as string, {
+          weight_kg: p.weight_kg as number | null,
+          length_cm: p.length_cm as number | null,
+          width_cm: p.width_cm as number | null,
+          height_cm: p.height_cm as number | null,
+        })
+      }
+    }
+
+    const tokenCache = new Map<number | 'default', string>()
+    const tokenFor = async (sellerId?: number): Promise<string> => {
+      const key: number | 'default' = sellerId ?? 'default'
+      const cached = tokenCache.get(key)
+      if (cached) return cached
+      const { token } = await this.getTokenForOrg(orgId, sellerId)
+      tokenCache.set(key, token)
+      return token
+    }
+
+    const out: Array<{ item_id: string; free_shipping_cost: number | null }> = []
+    const CONCURRENCY = 5
+    for (let i = 0; i < items.length; i += CONCURRENCY) {
+      const slice = items.slice(i, i + CONCURRENCY)
+      const results = await Promise.all(slice.map(async (it) => {
+        const pid = productByListing.get(it.item_id)
+        const dim = pid ? dimByProduct.get(pid) : undefined
+        if (!dim || !dim.weight_kg || !dim.length_cm || !dim.width_cm || !dim.height_cm || it.seller_id == null) {
+          return { item_id: it.item_id, free_shipping_cost: null }
+        }
+        try {
+          const token = await tokenFor(it.seller_id)
+          const r = await this.shippingCost.getFreeShippingCost(token, it.seller_id, {
+            lengthCm: dim.length_cm,
+            widthCm: dim.width_cm,
+            heightCm: dim.height_cm,
+            weightGrams: dim.weight_kg * 1000,
+            itemPrice: it.price,
+            listingTypeId: it.listing_type_id ?? 'gold_special',
+          })
+          return { item_id: it.item_id, free_shipping_cost: r?.sellerCost ?? null }
+        } catch {
+          return { item_id: it.item_id, free_shipping_cost: null }
+        }
+      }))
+      out.push(...results)
     }
     return out
   }
