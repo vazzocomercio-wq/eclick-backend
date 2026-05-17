@@ -108,4 +108,70 @@ export class MlShippingCostService {
       return null
     }
   }
+
+  /**
+   * Custo do frete grátis de um anúncio JÁ PUBLICADO — usa as dimensões
+   * REAIS registradas no próprio anúncio (atributos SELLER_PACKAGE_*), não
+   * estimativas do catálogo interno. Para Criativo (anúncio novo) continua-se
+   * usando getFreeShippingCost direto com as dimensões digitadas.
+   */
+  async getItemFreeShippingCost(token: string, itemId: string): Promise<ShippingCostResult | null> {
+    try {
+      const { data: item } = await axios.get<{
+        seller_id?: number
+        price?: number
+        listing_type_id?: string
+        shipping?: { free_shipping?: boolean }
+        attributes?: Array<{
+          id?: string
+          value_name?: string
+          value_struct?: { number?: number; unit?: string } | null
+          values?: Array<{ struct?: { number?: number; unit?: string } | null }>
+        }>
+      }>(`${ML_BASE}/items/${itemId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { attributes: 'id,seller_id,price,listing_type_id,shipping,attributes' },
+        timeout: 10_000,
+      })
+
+      if (!item?.shipping?.free_shipping || !item.seller_id) return null
+      const attrs = Array.isArray(item.attributes) ? item.attributes : []
+
+      /** Lê um atributo de dimensão → { n, unit }. */
+      const readDim = (attrId: string): { n: number; unit: string } | null => {
+        const a = attrs.find((x) => x?.id === attrId)
+        if (!a) return null
+        const struct = a.value_struct ?? a.values?.[0]?.struct ?? null
+        let n = typeof struct?.number === 'number' ? struct.number : null
+        const unit = struct?.unit ?? ''
+        if (n == null && typeof a.value_name === 'string') {
+          const m = a.value_name.match(/[\d.,]+/)
+          if (m) n = parseFloat(m[0].replace(',', '.'))
+        }
+        return n != null && n > 0 ? { n, unit } : null
+      }
+      const L = readDim('SELLER_PACKAGE_LENGTH')
+      const W = readDim('SELLER_PACKAGE_WIDTH')
+      const H = readDim('SELLER_PACKAGE_HEIGHT')
+      const WT = readDim('SELLER_PACKAGE_WEIGHT')
+      if (!L || !W || !H || !WT) return null
+
+      const toCm = (d: { n: number; unit: string }): number =>
+        d.unit === 'mm' ? d.n / 10 : d.unit === 'm' ? d.n * 100 : d.n
+      const toGrams = (d: { n: number; unit: string }): number =>
+        d.unit === 'kg' ? d.n * 1000 : d.n
+
+      return this.getFreeShippingCost(token, item.seller_id, {
+        lengthCm: toCm(L),
+        widthCm: toCm(W),
+        heightCm: toCm(H),
+        weightGrams: toGrams(WT),
+        itemPrice: Number(item.price) || 0,
+        listingTypeId: item.listing_type_id ?? 'gold_special',
+      })
+    } catch (e) {
+      this.logger.warn(`[shipping-cost.item] ${itemId} falhou: ${(e as Error).message}`)
+      return null
+    }
+  }
 }

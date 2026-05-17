@@ -648,21 +648,19 @@ export class MercadolivreController {
     return this.ml.fetchPriceToWin(user.orgId!, items)
   }
 
-  // POST /ml/listings/shipping-cost  { items: [{ item_id, seller_id?, price, listing_type_id? }] }
-  // Custo real do frete grátis (a API listing_prices não devolve isso).
+  // POST /ml/listings/shipping-cost  { items: [{ item_id, seller_id? }] }
+  // Custo real do frete grátis — dimensões reais do próprio anúncio no ML.
   @Post('listings/shipping-cost')
   @HttpCode(HttpStatus.OK)
   listingsShippingCost(
     @ReqUser() user: ReqUserPayload,
-    @Body() body: { items?: Array<{ item_id?: string; seller_id?: number; price?: number; listing_type_id?: string }> },
+    @Body() body: { items?: Array<{ item_id?: string; seller_id?: number }> },
   ) {
     const items = (body.items ?? [])
-      .filter((it) => typeof it.item_id === 'string' && typeof it.price === 'number')
+      .filter((it) => typeof it.item_id === 'string')
       .map((it) => ({
         item_id: it.item_id as string,
         seller_id: it.seller_id != null ? Number(it.seller_id) : undefined,
-        price: it.price as number,
-        listing_type_id: it.listing_type_id,
       }))
       .slice(0, 50)
     return this.ml.fetchFreeShippingCost(user.orgId!, items)

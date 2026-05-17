@@ -179,22 +179,15 @@ export class RadarService {
 
     let cost: number | null = null
     let taxPct: number | null = null
-    let dims: { weight_kg: number | null; length_cm: number | null; width_cm: number | null; height_cm: number | null } | null = null
     if (cp.product_id) {
       const { data: p } = await sb
         .from('products')
-        .select('cost_price,tax_percentage,weight_kg,length_cm,width_cm,height_cm')
+        .select('cost_price,tax_percentage')
         .eq('id', cp.product_id)
         .maybeSingle()
       if (p) {
         cost = (p.cost_price as number | null) ?? null
         taxPct = (p.tax_percentage as number | null) ?? null
-        dims = {
-          weight_kg: p.weight_kg as number | null,
-          length_cm: p.length_cm as number | null,
-          width_cm: p.width_cm as number | null,
-          height_cm: p.height_cm as number | null,
-        }
       }
     }
 
@@ -237,12 +230,10 @@ export class RadarService {
       } catch { /* sem tarifa */ }
     }
 
-    if (token && sellerId && dims?.weight_kg && dims.length_cm && dims.width_cm && dims.height_cm && price > 0) {
+    if (token) {
       try {
-        const r = await this.shippingCost.getFreeShippingCost(token, sellerId, {
-          lengthCm: dims.length_cm, widthCm: dims.width_cm, heightCm: dims.height_cm,
-          weightGrams: dims.weight_kg * 1000, itemPrice: price, listingTypeId: listingType,
-        })
+        // Frete via dimensões REAIS do anúncio (atributos SELLER_PACKAGE_*).
+        const r = await this.shippingCost.getItemFreeShippingCost(token, itemId)
         base.shipping_cost = r?.sellerCost ?? null
       } catch { /* sem frete */ }
     }
