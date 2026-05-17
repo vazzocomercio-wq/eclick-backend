@@ -554,6 +554,16 @@ export class CreativeController {
     return this.mlPub.buildPreview(this.orgOrThrow(u), id, body)
   }
 
+  @Post('listings/:id/ml-attributes/suggest')
+  @HttpCode(HttpStatus.OK)
+  suggestMlAttributes(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { category_id?: string },
+  ) {
+    return this.mlPub.suggestMlAttributes(this.orgOrThrow(u), id, body?.category_id)
+  }
+
   @Post('listings/:id/ml-publish')
   @HttpCode(HttpStatus.OK)
   publishMl(

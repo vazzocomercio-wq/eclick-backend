@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { MlShippingCostService, type ShippingCostResult } from '../mercadolivre/ml-shipping-cost.service'
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
+import { LlmService } from '../ai/llm.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -75,17 +76,21 @@ export interface PreviewResponse {
     domain_name:   string | null
     suggested_attributes: Array<{ id: string; name: string; value_id?: string; value_name?: string }>
   }
-  required_attributes: Array<{
-    id:               string
-    name:             string
-    value_type:       string
-    required:         boolean
-    value_max_length?: number
-    values?:          Array<{ id: string; name: string }>
-    hint?:            string
-  }>
+  required_attributes: MlAttributeSpec[]
+  /** Atributos recomendados (não-obrigatórios) — aceitam "não se aplica". */
+  recommended_attributes: MlAttributeSpec[]
   /** Objeto que iria pro POST /items. Frontend mostra como JSON formatado. */
   ml_payload: Record<string, unknown>
+}
+
+export interface MlAttributeSpec {
+  id:                string
+  name:              string
+  value_type:        string
+  required:          boolean
+  value_max_length?: number
+  values?:           Array<{ id: string; name: string }>
+  hint?:             string
 }
 
 export interface PublishMlOpts extends PreviewBuildOpts {
@@ -143,6 +148,7 @@ export class CreativeMlPublisherService {
     private readonly creative: CreativeService,
     private readonly ml:       MercadolivreService,
     private readonly shipping: MlShippingCostService,
+    private readonly llm:      LlmService,
   ) {}
 
   /**
@@ -256,7 +262,7 @@ export class CreativeMlPublisherService {
     }
   }
 
-  async getRequiredAttributes(categoryId: string): Promise<PreviewResponse['required_attributes']> {
+  async getRequiredAttributes(categoryId: string): Promise<MlAttributeSpec[]> {
     const all = await this.ml.getCategoryAttributes(categoryId)
     return all
       .filter(a => a.tags?.required === true || a.tags?.catalog_required === true)
@@ -265,6 +271,30 @@ export class CreativeMlPublisherService {
         name:             a.name,
         value_type:       a.value_type,
         required:         true,
+        value_max_length: a.value_max_length,
+        values:           a.values,
+        hint:             a.hint,
+      }))
+  }
+
+  /** Atributos RECOMENDADOS (não-obrigatórios) visíveis da categoria — os que
+   *  aceitam "não se aplica". Exclui ocultos/read-only e os de imagem
+   *  (picture_id), que não dá pra preencher por IA. */
+  async getRecommendedAttributes(categoryId: string): Promise<MlAttributeSpec[]> {
+    const all = await this.ml.getCategoryAttributes(categoryId)
+    return all
+      .filter(a => {
+        const t = a.tags ?? {}
+        if (t.hidden || t.read_only) return false
+        if (t.required || t.catalog_required) return false
+        if (a.value_type === 'picture_id') return false
+        return true
+      })
+      .map(a => ({
+        id:               a.id,
+        name:             a.name,
+        value_type:       a.value_type,
+        required:         false,
         value_max_length: a.value_max_length,
         values:           a.values,
         hint:             a.hint,
@@ -336,10 +366,14 @@ export class CreativeMlPublisherService {
       warnings.push('Não foi possível predizer a categoria do anúncio. Defina manualmente.')
     }
 
-    // Required attributes
-    let requiredAttrs: PreviewResponse['required_attributes'] = []
+    // Required + recommended attributes
+    let requiredAttrs:    MlAttributeSpec[] = []
+    let recommendedAttrs: MlAttributeSpec[] = []
     if (categoryId) {
-      requiredAttrs = await this.getRequiredAttributes(categoryId)
+      ;[requiredAttrs, recommendedAttrs] = await Promise.all([
+        this.getRequiredAttributes(categoryId),
+        this.getRecommendedAttributes(categoryId),
+      ])
     }
 
     // Valida attributes preenchidos
@@ -432,9 +466,116 @@ export class CreativeMlPublisherService {
         domain_name:          domainName,
         suggested_attributes: suggestedAttrs,
       },
-      required_attributes: requiredAttrs,
-      ml_payload:          mlPayload,
+      required_attributes:    requiredAttrs,
+      recommended_attributes: recommendedAttrs,
+      ml_payload:             mlPayload,
     }
+  }
+
+  /**
+   * Sugere valores para os atributos da categoria via IA, a partir dos dados
+   * do produto e do anúncio. Atributos recomendados que a IA não consegue
+   * determinar voltam como "não se aplica" (value_id "-1"). Atributos
+   * obrigatórios nunca recebem "não se aplica" — ficam pro usuário preencher.
+   */
+  async suggestMlAttributes(
+    orgId:      string,
+    listingId:  string,
+    categoryId?: string,
+  ): Promise<Array<{ id: string; value_id?: string; value_name?: string; not_applicable: boolean }>> {
+    const ctx = await this.getPublishContext(orgId, listingId)
+    const { listing, product } = ctx
+
+    let catId = categoryId?.trim() || null
+    if (!catId) {
+      const predicted = await this.predictCategoryFromTitle(listing.title)
+      catId = predicted.category_id
+    }
+    if (!catId) return []
+
+    const [required, recommended] = await Promise.all([
+      this.getRequiredAttributes(catId),
+      this.getRecommendedAttributes(catId),
+    ])
+    const allAttrs = [...required, ...recommended]
+    if (allAttrs.length === 0) return []
+    const requiredIds = new Set(required.map(a => a.id))
+    const byId = new Map(allAttrs.map(a => [a.id, a]))
+
+    const attrLines = allAttrs.map(a => {
+      const opts = (a.values ?? []).map(v => v.name).filter(Boolean)
+      let spec: string
+      if (opts.length)                         spec = `escolha UMA opção exata: ${opts.slice(0, 60).join(' | ')}`
+      else if (a.value_type === 'boolean')     spec = 'responda "Sim" ou "Não"'
+      else if (a.value_type === 'number_unit') spec = 'número com unidade (ex: "40 W", "30 cm")'
+      else if (a.value_type === 'number')      spec = 'número'
+      else                                     spec = 'texto curto'
+      return `- ${a.id} ("${a.name}") — ${spec}`
+    }).join('\n')
+
+    const userPrompt = [
+      'Você preenche a ficha técnica de um anúncio do Mercado Livre.',
+      '',
+      'PRODUTO:',
+      `- Nome: ${product.name}`,
+      `- Marca: ${product.brand ?? '—'}`,
+      `- Categoria (texto livre): ${product.category ?? '—'}`,
+      `- Cor: ${product.color ?? '—'}`,
+      `- Material: ${product.material ?? '—'}`,
+      `- Diferenciais: ${(product.differentials ?? []).join('; ') || '—'}`,
+      `- Dimensões: ${JSON.stringify(product.dimensions ?? {})}`,
+      `- Título do anúncio: ${listing.title}`,
+      `- Descrição: ${(listing.description ?? '').slice(0, 2000)}`,
+      '',
+      'ATRIBUTOS A PREENCHER:',
+      attrLines,
+      '',
+      'REGRAS:',
+      '- Preencha apenas o que der pra deduzir COM CONFIANÇA dos dados do produto.',
+      '- Para atributos com opções, use EXATAMENTE uma das opções listadas.',
+      '- Se não der pra determinar, devolva {"id":"X","not_applicable":true}.',
+      '- NUNCA invente valores.',
+      '',
+      'Responda só JSON: {"attributes":[{"id":"X","value":"Y"}|{"id":"X","not_applicable":true}]}',
+    ].join('\n')
+
+    const out = await this.llm.generateText({
+      orgId,
+      feature:    'creative_listing',
+      userPrompt,
+      jsonMode:   true,
+      maxTokens:  2000,
+      creative:   { productId: product.id, operation: 'ml_attributes_suggest' },
+    })
+
+    let parsed: { attributes?: Array<{ id?: string; value?: string; not_applicable?: boolean }> }
+    try { parsed = JSON.parse(out.text) } catch { return [] }
+    const items = Array.isArray(parsed?.attributes) ? parsed.attributes : []
+
+    const norm = (s: string) => s.toLowerCase().trim()
+    const result: Array<{ id: string; value_id?: string; value_name?: string; not_applicable: boolean }> = []
+    for (const it of items) {
+      const id = String(it?.id ?? '').trim()
+      const attr = byId.get(id)
+      if (!attr) continue
+      const isRequired = requiredIds.has(id)
+      const raw = it?.value == null ? '' : String(it.value).trim()
+
+      if (it?.not_applicable || !raw) {
+        // obrigatório nunca vai como "não se aplica"
+        if (!isRequired) result.push({ id, value_id: '-1', not_applicable: true })
+        continue
+      }
+      if (attr.values && attr.values.length > 0) {
+        const opt = attr.values.find(o => norm(o.name) === norm(raw))
+        if (opt)            result.push({ id, value_id: opt.id, value_name: opt.name, not_applicable: false })
+        else if (!isRequired) result.push({ id, value_id: '-1', not_applicable: true })
+        // obrigatório sem match → deixa pro usuário
+      } else {
+        result.push({ id, value_name: raw, not_applicable: false })
+      }
+    }
+    return result
   }
 
   // ════════════════════════════════════════════════════════════════════════

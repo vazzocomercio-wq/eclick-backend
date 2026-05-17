@@ -271,11 +271,14 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 1. **Conta(s) do Mercado Livre**: escolhe em qual(is) conta(s) ML o anúncio sobe (ver abaixo)
 2. **Imagens**: drag-and-drop pra ordenar, capa = índice 0, max 10
 3. **Vídeo** (opcional): radio se múltiplos. Upload best-effort.
-4. **Categoria + atributos**: predict automático no título → form dinâmico
-5. **Markup / Precificação**: calcula o preço de venda pela margem alvo (ver abaixo)
-6. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
-7. **Listing type**: free / gold_special / gold_pro
-8. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+4. **Categoria + atributos**: predict automático no título → form dinâmico dos obrigatórios
+5. **Atributos recomendados**: preenchidos por IA, com "Não se aplica" (ver abaixo)
+6. **Markup / Precificação**: calcula o preço de venda pela margem alvo (ver abaixo)
+7. **Preço/Estoque**: com sugestão de SKU match (se produto exists no catálogo legacy)
+8. **Listing type**: free / gold_special / gold_pro
+9. **Preview JSON**: mostra payload final + warnings em tempo real (debounce 600ms)
+
+**Atributos recomendados + "Não se aplica"**: além dos obrigatórios, a categoria tem atributos recomendados (Potência, Formato, fontes de luz, ANATEL, etc.). A IA preenche esses a partir do produto/anúncio (\`POST /creative/listings/:id/ml-attributes/suggest\`, feature \`creative_listing\`) — roda automático ao abrir a tela. O que a IA não determina vira "Não se aplica" (\`value_id: "-1"\` no payload ML — convenção do ML pra contar o campo como preenchido). Cada campo tem o toggle "Não se aplica" editável. Os 4 obrigatórios NUNCA recebem "não se aplica" (o ML exige valor real). Botão "Preencher com IA" refaz a sugestão.
 
 **Seleção de conta (multi-conta)**: quando a org tem mais de uma conta ML conectada, o painel "Conta(s) do Mercado Livre" lista todas. Marque uma, várias ou todas — o anúncio é publicado em cada conta selecionada (uma publicação por conta, cada uma com seu MLB). Por padrão vem pré-selecionada a conta mais antiga (principal). O histórico de publicações mostra a conta de cada anúncio. Antes disso o publish pegava a conta com \`updated_at\` mais recente — podia subir na conta errada silenciosamente.
 
