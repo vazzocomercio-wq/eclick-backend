@@ -393,6 +393,16 @@ export class CreativeMlPublisherService {
       }
     }
 
+    // Recomendados: lista o que não está preenchido NEM marcado "não se
+    // aplica" (value_id "-1" conta como resolvido).
+    for (const rec of recommendedAttrs) {
+      const v = filled.get(rec.id)
+      const resolved = !!((v?.value_id && v.value_id.length > 0) || (v?.value_name && v.value_name.length > 0))
+      if (!resolved) {
+        warnings.push(`Atributo recomendado '${rec.name}' (${rec.id}) — preencha ou marque "Não se aplica".`)
+      }
+    }
+
     // Title length pra ML
     if (listing.title.length > 60) {
       warnings.push(`Título tem ${listing.title.length} caracteres — ML aceita máx 60. Será truncado.`)
