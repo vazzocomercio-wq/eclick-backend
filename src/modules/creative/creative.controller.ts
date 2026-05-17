@@ -589,9 +589,11 @@ export class CreativeController {
       stock:           number
       listing_type?:   'free' | 'gold_special' | 'gold_pro'
       category_id?:    string
-      attributes?:     Array<{ id: string; value_name?: string; value_id?: string }>
-      condition?:      'new' | 'used' | 'not_specified'
-      seller_id?:      number
+      attributes?:        Array<{ id: string; value_name?: string; value_id?: string }>
+      condition?:         'new' | 'used' | 'not_specified'
+      seller_id?:         number
+      wholesale_price?:   number
+      wholesale_min_qty?: number
     },
   ) {
     if (!body?.idempotency_key) throw new BadRequestException('idempotency_key obrigatório')

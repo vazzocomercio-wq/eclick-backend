@@ -770,6 +770,7 @@ export class MercadolivreService {
     hint?:                 string
     hierarchy?:            string
     relevance?:            number
+    default_unit?:         string
   }>> {
     try {
       const { data } = await axios.get(

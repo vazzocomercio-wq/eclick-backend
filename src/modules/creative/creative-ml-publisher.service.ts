@@ -91,6 +91,8 @@ export interface MlAttributeSpec {
   value_max_length?: number
   values?:           Array<{ id: string; name: string }>
   hint?:             string
+  /** Unidade default (number_unit) — ex: W, cm, g. Usado pra normalizar valores. */
+  default_unit?:     string
 }
 
 export interface PublishMlOpts extends PreviewBuildOpts {
@@ -99,6 +101,10 @@ export interface PublishMlOpts extends PreviewBuildOpts {
   idempotency_key: string
   /** Conta ML de destino. Omitido = conta resolvida por updated_at (legacy). */
   seller_id?: number
+  /** Preço de atacado (B2B) — aplicado pós-publicação. Requer wholesale_min_qty ≥ 2. */
+  wholesale_price?: number
+  /** Quantidade mínima de compra para o preço de atacado. */
+  wholesale_min_qty?: number
 }
 
 export interface CreativePublication {
@@ -265,7 +271,11 @@ export class CreativeMlPublisherService {
   async getRequiredAttributes(categoryId: string): Promise<MlAttributeSpec[]> {
     const all = await this.ml.getCategoryAttributes(categoryId)
     return all
-      .filter(a => a.tags?.required === true || a.tags?.catalog_required === true)
+      // `conditional_required` entra como obrigatório: o ML exige valor real
+      // quando a condição é atingida — não aceita "não se aplica".
+      .filter(a => a.tags?.required === true
+        || a.tags?.catalog_required === true
+        || a.tags?.conditional_required === true)
       .map(a => ({
         id:               a.id,
         name:             a.name,
@@ -274,6 +284,7 @@ export class CreativeMlPublisherService {
         value_max_length: a.value_max_length,
         values:           a.values,
         hint:             a.hint,
+        default_unit:     a.default_unit,
       }))
   }
 
@@ -286,7 +297,8 @@ export class CreativeMlPublisherService {
       .filter(a => {
         const t = a.tags ?? {}
         if (t.hidden || t.read_only) return false
-        if (t.required || t.catalog_required) return false
+        // obrigatórios e condicionalmente-obrigatórios vão em getRequiredAttributes
+        if (t.required || t.catalog_required || t.conditional_required) return false
         if (a.value_type === 'picture_id') return false
         return true
       })
@@ -298,6 +310,7 @@ export class CreativeMlPublisherService {
         value_max_length: a.value_max_length,
         values:           a.values,
         hint:             a.hint,
+        default_unit:     a.default_unit,
       }))
   }
 
@@ -384,9 +397,12 @@ export class CreativeMlPublisherService {
         warnings.push(`Atributo obrigatório '${req.name}' (${req.id}) não preenchido.`)
         continue
       }
-      const hasValue = (v.value_id && v.value_id.length > 0) || (v.value_name && v.value_name.length > 0)
+      // value_id "-1" = "não se aplica" — NÃO conta como preenchido para um
+      // atributo obrigatório (o ML exige valor real).
+      const hasValue = (v.value_id && v.value_id.length > 0 && v.value_id !== '-1')
+        || (v.value_name && v.value_name.length > 0)
       if (!hasValue) {
-        warnings.push(`Atributo '${req.name}' está vazio.`)
+        warnings.push(`Atributo obrigatório '${req.name}' (${req.id}) precisa de um valor — "não se aplica" não é aceito.`)
       }
       if (req.value_max_length && v.value_name && v.value_name.length > req.value_max_length) {
         warnings.push(`Atributo '${req.name}' excede ${req.value_max_length} caracteres.`)
@@ -429,6 +445,19 @@ export class CreativeMlPublisherService {
     for (const [id, val, unit] of pkgAttrs) {
       if (val != null && !attributesPayload.find(a => a.id === id)) {
         attributesPayload.push({ id, value_name: `${val} ${unit}` })
+      }
+    }
+
+    // Normaliza atributos number_unit: valor nu ("15") sem unidade →
+    // "15 W" (default_unit da categoria). Sem isso o ML rejeita ("unit is
+    // not valid").
+    const specById = new Map<string, MlAttributeSpec>()
+    for (const s of [...requiredAttrs, ...recommendedAttrs]) specById.set(s.id, s)
+    for (const a of attributesPayload) {
+      const spec = specById.get(a.id)
+      if (spec?.value_type === 'number_unit' && spec.default_unit
+          && a.value_name && /^[\d.,]+$/.test(a.value_name.trim())) {
+        a.value_name = `${a.value_name.trim()} ${spec.default_unit}`
       }
     }
 
@@ -691,6 +720,44 @@ export class CreativeMlPublisherService {
     }
   }
 
+  /**
+   * Define o preço de atacado (preço por quantidade B2B) de um item já
+   * publicado: `POST /items/{id}/prices/standard/quantity`. Mantém o preço
+   * `standard` atual e adiciona uma faixa de atacado a partir de `minQty`
+   * unidades. Só funciona para sellers habilitados a B2B (tag `business`).
+   */
+  private async setItemWholesalePrice(
+    token:  string,
+    itemId: string,
+    opts:   { price: number; minQty: number },
+  ): Promise<void> {
+    const cfg = {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 20_000,
+    }
+    // Preço standard atual (sem min_purchase_unit) — mantido na tabela.
+    const { data: cur } = await axios.get<{
+      prices?: Array<{ id: string; type: string; conditions?: { min_purchase_unit?: number } }>
+    }>(`${ML_BASE}/items/${itemId}/prices`, cfg)
+    const standard = (cur?.prices ?? []).find(
+      p => p.type === 'standard' && !p.conditions?.min_purchase_unit,
+    )
+    const body = {
+      prices: [
+        ...(standard ? [{ id: standard.id }] : []),
+        {
+          amount:      opts.price,
+          currency_id: 'BRL',
+          conditions: {
+            context_restrictions: ['channel_marketplace', 'user_type_business'],
+            min_purchase_unit:    opts.minQty,
+          },
+        },
+      ],
+    }
+    await axios.post(`${ML_BASE}/items/${itemId}/prices/standard/quantity`, body, cfg)
+  }
+
   /** Publica de fato no ML. Status final do anúncio = `paused` (default
    *  user revisa no ML antes de ativar). Idempotente via idempotency_key. */
   async publishToMl(
@@ -828,6 +895,26 @@ export class CreativeMlPublisherService {
         .single()
 
       this.logger.log(`[creative.ml.publish] ✓ ${item.id} publicado (status: ${item.status ?? '?'})`)
+
+      // Pós-publicação: preço de atacado (preço por quantidade B2B).
+      // Fail-isolated — o anúncio já está publicado; se falhar, registra o
+      // motivo e o vendedor pode configurar manualmente no ML.
+      if (opts.wholesale_price && opts.wholesale_min_qty && opts.wholesale_min_qty >= 2) {
+        try {
+          await this.setItemWholesalePrice(token, item.id, {
+            price:  opts.wholesale_price,
+            minQty: Math.floor(opts.wholesale_min_qty),
+          })
+          this.logger.log(`[creative.ml.publish] ✓ preço de atacado ${item.id}: R$${opts.wholesale_price} (mín ${opts.wholesale_min_qty}un)`)
+        } catch (e) {
+          const err = extractMlError(e)
+          this.logger.warn(`[creative.ml.publish] preço de atacado falhou ${item.id}: ${err.message}`)
+          await supabaseAdmin
+            .from('creative_publications')
+            .update({ error_message: `Preço de atacado não aplicado: ${err.message}`, updated_at: new Date().toISOString() })
+            .eq('id', pub.id)
+        }
+      }
 
       // Pós-publicação: propaga os dados do anúncio de volta pro produto do
       // catálogo vinculado (título ML, descrição, fotos). Fail-isolated — um
