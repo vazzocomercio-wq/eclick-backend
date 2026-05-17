@@ -535,6 +535,18 @@ export class CreativeController {
     return this.mlPub.getRequiredAttributes(id)
   }
 
+  /** Atributos da categoria separados em obrigatórios + recomendados —
+   *  usado pelo painel de atributos (editor de anúncio e publicação). */
+  @Get('ml/categories/:id/attributes-split')
+  async getMlCategoryAttributesSplit(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const [required, recommended] = await Promise.all([
+      this.mlPub.getRequiredAttributes(id),
+      this.mlPub.getRecommendedAttributes(id),
+    ])
+    return { required, recommended }
+  }
+
   @Post('listings/:id/ml-preview')
   @HttpCode(HttpStatus.OK)
   buildMlPreview(
