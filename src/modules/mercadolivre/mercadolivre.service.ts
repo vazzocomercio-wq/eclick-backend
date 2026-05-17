@@ -1025,6 +1025,67 @@ export class MercadolivreService {
     return { item_id: itemId, price: newPrice }
   }
 
+  /**
+   * Busca AO VIVO o price_to_win (status do catálogo + preço pra ganhar) de
+   * vários itens próprios. Usado pelas telas de anúncio pra mostrar o status
+   * na hora, sem depender da coleta diária do Radar. Multi-conta: agrupa o
+   * token por seller_id; item de outra conta ou sem catálogo degrada (null).
+   */
+  async fetchPriceToWin(
+    orgId: string,
+    items: Array<{ item_id: string; seller_id?: number }>,
+  ): Promise<Array<{
+    item_id: string
+    catalog_status: string | null
+    price_to_win: number | null
+    catalog_winner_price: number | null
+    current_price: number | null
+  }>> {
+    if (items.length === 0) return []
+
+    const tokenCache = new Map<number | 'default', string>()
+    const tokenFor = async (sellerId?: number): Promise<string> => {
+      const key: number | 'default' = sellerId ?? 'default'
+      const cached = tokenCache.get(key)
+      if (cached) return cached
+      const { token } = await this.getTokenForOrg(orgId, sellerId)
+      tokenCache.set(key, token)
+      return token
+    }
+
+    const out: Array<{
+      item_id: string
+      catalog_status: string | null
+      price_to_win: number | null
+      catalog_winner_price: number | null
+      current_price: number | null
+    }> = []
+    const CONCURRENCY = 6
+    for (let i = 0; i < items.length; i += CONCURRENCY) {
+      const slice = items.slice(i, i + CONCURRENCY)
+      const results = await Promise.all(slice.map(async (it) => {
+        try {
+          const token = await tokenFor(it.seller_id)
+          const { data } = await axios.get(
+            `${ML_BASE}/items/${it.item_id}/price_to_win`,
+            { params: { version: 'v2' }, headers: { Authorization: `Bearer ${token}` }, timeout: 8000 },
+          )
+          return {
+            item_id: it.item_id,
+            catalog_status: typeof data.status === 'string' ? data.status : null,
+            price_to_win: typeof data.price_to_win === 'number' ? data.price_to_win : null,
+            catalog_winner_price: typeof data.winner?.price === 'number' ? data.winner.price : null,
+            current_price: typeof data.current_price === 'number' ? data.current_price : null,
+          }
+        } catch {
+          return null
+        }
+      }))
+      for (const r of results) if (r) out.push(r)
+    }
+    return out
+  }
+
   /** @deprecated prefer StockService.syncStockToAllChannels (logs to stock_sync_logs).
    * Retained because decrementStock (sale webhook) cannot inject StockService
    * without a circular dep. This path now writes to stock_sync_logs too. */

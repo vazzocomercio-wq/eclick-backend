@@ -630,6 +630,24 @@ export class MercadolivreController {
     return this.ml.setListingPrice(user.orgId!, itemId, body.price, sellerId)
   }
 
+  // POST /ml/listings/price-to-win  { items: [{ item_id, seller_id? }] }
+  // Status do catálogo + preço pra ganhar, AO VIVO no ML (telas de anúncio).
+  @Post('listings/price-to-win')
+  @HttpCode(HttpStatus.OK)
+  listingsPriceToWin(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { items?: Array<{ item_id?: string; seller_id?: number }> },
+  ) {
+    const items = (body.items ?? [])
+      .filter((it) => typeof it.item_id === 'string')
+      .map((it) => ({
+        item_id: it.item_id as string,
+        seller_id: it.seller_id != null ? Number(it.seller_id) : undefined,
+      }))
+      .slice(0, 50)
+    return this.ml.fetchPriceToWin(user.orgId!, items)
+  }
+
   // POST /ml/products/from-listing  { listing_ids: string[]; seller_id?: number }
   @Post('products/from-listing')
   @HttpCode(HttpStatus.OK)
