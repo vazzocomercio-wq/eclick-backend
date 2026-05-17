@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getSupabase } from '../../supabase.js'
 import type { OrgToken } from '../token-client.js'
-import { getCatalogOffers, getItem, sleep } from '../ml-api.js'
+import { getCatalogOffers, getItem, getPriceToWin, sleep } from '../ml-api.js'
 import type { MlCatalogItem } from '../types.js'
 import { radarLog, errMsg } from '../util.js'
 
@@ -68,16 +68,29 @@ async function upsertOffer(
   const isOwn = tok.isOwnSeller(offer.seller_id)
   const sellerRef = await ensureSeller(sb, orgId, offer.seller_id)
 
-  // sold/available_quantity só do item PRÓPRIO — concorrente é 403 (inacessível).
+  // sold/available_quantity + foto + price_to_win só do item PRÓPRIO —
+  // concorrente é 403 (inacessível). price_to_win exige o token da conta DONA
+  // do item: item de outra conta (multi-conta) degrada pra null.
   let soldQuantity: number | null = null
   let availableQuantity: number | null = null
+  let ownThumbnail: string | null = null
+  let priceToWin: number | null = null
+  let catalogStatus: string | null = null
+  let catalogWinnerPrice: number | null = null
   if (isOwn) {
     try {
       const item = await getItem(offer.item_id, tok)
       soldQuantity = typeof item.sold_quantity === 'number' ? item.sold_quantity : null
       availableQuantity = typeof item.available_quantity === 'number' ? item.available_quantity : null
+      ownThumbnail = typeof item.thumbnail === 'string' ? item.thumbnail : null
     } catch (e) {
       radarLog('offers', 'getItem próprio falhou', offer.item_id, errMsg(e))
+    }
+    const ptw = await getPriceToWin(offer.item_id, tok)
+    if (ptw) {
+      priceToWin = ptw.price_to_win
+      catalogStatus = ptw.status
+      catalogWinnerPrice = ptw.winner_price
     }
   }
 
@@ -104,8 +117,12 @@ async function upsertOffer(
       is_own: isOwn,
       sold_quantity: soldQuantity,
       available_quantity: availableQuantity,
+      price_to_win: priceToWin,
+      catalog_status: catalogStatus,
+      catalog_winner_price: catalogWinnerPrice,
+      price_to_win_checked_at: isOwn ? now : null,
       permalink: offer.permalink ?? null,
-      thumbnail: offer.thumbnail ?? null,
+      thumbnail: ownThumbnail ?? offer.thumbnail ?? null,
       status: 'ativo',
       last_seen_at: now,
       updated_at: now,

@@ -56,6 +56,34 @@ export async function getUser(sellerId: number, tok: OrgToken): Promise<Record<s
   return mlGet<Record<string, unknown>>(`/users/${sellerId}`, tok)
 }
 
+export interface PriceToWin {
+  price_to_win: number | null
+  status: string | null          // winning | competing | sharing_first_place | listed
+  winner_price: number | null
+}
+
+/**
+ * /items/{id}/price_to_win — status real do catálogo + preço pra ganhar.
+ * Só responde p/ item PRÓPRIO da conta do token; item de outra conta (multi-
+ * conta) ou de terceiro dá 403 → retorna null (degradação silenciosa).
+ */
+export async function getPriceToWin(itemId: string, tok: OrgToken): Promise<PriceToWin | null> {
+  try {
+    const body = await mlGet<{
+      price_to_win?: number
+      status?: string
+      winner?: { price?: number }
+    }>(`/items/${itemId}/price_to_win?version=v2`, tok)
+    return {
+      price_to_win: typeof body.price_to_win === 'number' ? body.price_to_win : null,
+      status: body.status ?? null,
+      winner_price: typeof body.winner?.price === 'number' ? body.winner.price : null,
+    }
+  } catch {
+    return null
+  }
+}
+
 /** /items/{id} — detalhe de um item PRÓPRIO (sold/available_quantity). */
 export async function getItem(itemId: string, tok: OrgToken): Promise<Record<string, unknown>> {
   return mlGet<Record<string, unknown>>(`/items/${itemId}`, tok)

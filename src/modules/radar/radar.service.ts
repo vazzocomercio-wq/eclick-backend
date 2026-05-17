@@ -22,7 +22,7 @@ export class RadarService {
 
     const { data: offers, error: oe } = await sb
       .from('radar_offers')
-      .select('catalog_product_ref,price,is_own,item_id')
+      .select('catalog_product_ref,price,is_own,item_id,price_to_win,catalog_status,thumbnail')
       .eq('organization_id', orgId)
       .eq('status', 'ativo')
     if (oe) throw new Error(`radar_offers: ${oe.message}`)
@@ -45,6 +45,16 @@ export class RadarService {
     const calibration = await this.loadCalibration(orgId)
     const visits30d = await this.visits30dByItem(orgId)
 
+    // SKU vem da tabela products (radar_catalog_products.product_id).
+    const productIds = [...new Set(
+      (products ?? []).map((p) => p.product_id).filter((x): x is string => typeof x === 'string'),
+    )]
+    const skuByProduct = new Map<string, string | null>()
+    if (productIds.length > 0) {
+      const { data: prods } = await sb.from('products').select('id,sku').in('id', productIds)
+      for (const pr of prods ?? []) skuByProduct.set(pr.id as string, (pr.sku as string | null) ?? null)
+    }
+
     const offersByCp = groupBy(offers ?? [], (o) => o.catalog_product_ref as string)
     const eventsByCp = new Map<string, number>()
     for (const e of events ?? []) {
@@ -59,12 +69,17 @@ export class RadarService {
       const minPrice = prices.length ? Math.min(...prices) : null
       const vazzoPrices = numbers(offs.filter((o) => o.is_own === true).map((o) => o.price))
       const vazzoPrice = vazzoPrices.length ? Math.min(...vazzoPrices) : null
+      const ownOffer = offs.find((o) => o.is_own === true) ?? null
       const rate = effectiveRate(calibration, (p.category_id as string | null) ?? null).rate
       const marketDemand = rate == null
         ? null
         : Math.round(offs.reduce((acc, o) => acc + (visits30d.get(o.item_id as string) ?? 0) * rate, 0))
       return {
         ...p,
+        sku: typeof p.product_id === 'string' ? (skuByProduct.get(p.product_id) ?? null) : null,
+        thumbnail: (ownOffer?.thumbnail as string | null) ?? null,
+        price_to_win: (ownOffer?.price_to_win as number | null) ?? null,
+        catalog_status: (ownOffer?.catalog_status as string | null) ?? null,
         competitors: offs.filter((o) => o.is_own !== true).length,
         total_offers: offs.length,
         min_price: minPrice,
