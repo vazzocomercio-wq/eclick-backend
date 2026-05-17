@@ -35,6 +35,12 @@ export class RadarController {
     return this.radar.listEvents(this.org(user), limit ? Number(limit) : undefined)
   }
 
+  /** Status real do catálogo (price_to_win) dos itens próprios — telas de anúncios. */
+  @Get('catalog-status')
+  catalogStatus(@ReqUser() user: AuthUser) {
+    return this.radar.getCatalogStatus(this.org(user))
+  }
+
   /** Tela 2 — produto + ranking competitivo + dados de margem. */
   @Get('products/:id')
   getProduct(@ReqUser() user: AuthUser, @Param('id') id: string) {

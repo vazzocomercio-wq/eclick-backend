@@ -121,6 +121,21 @@ export class RadarService {
     }
   }
 
+  /**
+   * Status real do catálogo dos itens próprios (price_to_win). Usado pelas
+   * telas de anúncios pra refletir ganhando/perdendo + preço pra ganhar.
+   */
+  async getCatalogStatus(orgId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('radar_offers')
+      .select('item_id,price,price_to_win,catalog_status,catalog_winner_price,price_to_win_checked_at')
+      .eq('organization_id', orgId)
+      .eq('is_own', true)
+      .not('catalog_status', 'is', null)
+    if (error) throw new Error(`radar_offers: ${error.message}`)
+    return data ?? []
+  }
+
   /** Tela 1 — feed "o que mudou" (eventos da org inteira). */
   async listEvents(orgId: string, limit = 50) {
     const sb = supabaseAdmin
