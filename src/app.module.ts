@@ -67,6 +67,7 @@ import { ExecutiveDashboardModule } from './modules/executive-dashboard/executiv
 import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/visits-scanner.module'
 import { EOtimizerModule } from './modules/e-otimizer/e-otimizer.module'
 import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-integration.module'
+import { RadarModule } from './modules/radar/radar.module'
 
 @Module({
   imports: [
@@ -136,6 +137,7 @@ import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-int
     VisitsScannerModule,
     EOtimizerModule,
     IcarusIntegrationModule,
+    RadarModule,
   ],
   controllers: [AppController],
   providers: [AppService],
