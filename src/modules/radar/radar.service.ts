@@ -80,6 +80,7 @@ export class RadarService {
         thumbnail: (ownOffer?.thumbnail as string | null) ?? null,
         price_to_win: (ownOffer?.price_to_win as number | null) ?? null,
         catalog_status: (ownOffer?.catalog_status as string | null) ?? null,
+        vazzo_item_id: (ownOffer?.item_id as string | null) ?? null,
         competitors: offs.filter((o) => o.is_own !== true).length,
         total_offers: offs.length,
         min_price: minPrice,

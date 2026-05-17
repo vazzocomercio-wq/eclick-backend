@@ -966,6 +966,65 @@ export class MercadolivreService {
     }
   }
 
+  /**
+   * Ajusta o PREÇO de um anúncio ML — escreve no Mercado Livre de verdade.
+   * Multi-conta: o PUT exige o token da conta DONA do item. `sellerIdHint`
+   * vem do frontend quando ele já sabe (telas de anúncio); senão resolve via
+   * radar_offers (item próprio monitorado). Atualiza os registros locais.
+   */
+  async setListingPrice(
+    orgId: string,
+    itemId: string,
+    newPrice: number,
+    sellerIdHint?: number,
+  ): Promise<{ item_id: string; price: number }> {
+    if (!Number.isFinite(newPrice) || newPrice <= 0) {
+      throw new BadRequestException('Preço inválido')
+    }
+
+    let sellerId = sellerIdHint
+    if (!sellerId) {
+      const { data } = await supabaseAdmin
+        .from('radar_offers')
+        .select('seller:seller_ref(seller_id)')
+        .eq('organization_id', orgId)
+        .eq('item_id', itemId)
+        .eq('is_own', true)
+        .maybeSingle()
+      const rel = (data as { seller?: unknown } | null)?.seller
+      const seller = Array.isArray(rel) ? rel[0] : rel
+      const sid = (seller as { seller_id?: number } | undefined)?.seller_id
+      if (typeof sid === 'number') sellerId = sid
+    }
+
+    const { token } = await this.getTokenForOrg(orgId, sellerId)
+    try {
+      await axios.put(
+        `${ML_BASE}/items/${itemId}`,
+        { price: newPrice },
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+    } catch (e: any) {
+      const msg = e.response?.data?.message ?? e.message ?? 'erro'
+      console.error(`[price-update] erro em ${itemId}:`, msg)
+      throw new BadRequestException(`Mercado Livre recusou a mudança de preço: ${msg}`)
+    }
+
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from('radar_offers')
+      .update({ price: newPrice, updated_at: now })
+      .eq('organization_id', orgId)
+      .eq('item_id', itemId)
+    await supabaseAdmin
+      .from('product_listings')
+      .update({ listing_price: newPrice, updated_at: now })
+      .eq('listing_id', itemId)
+      .eq('platform', 'mercadolivre')
+
+    return { item_id: itemId, price: newPrice }
+  }
+
   /** @deprecated prefer StockService.syncStockToAllChannels (logs to stock_sync_logs).
    * Retained because decrementStock (sale webhook) cannot inject StockService
    * without a circular dep. This path now writes to stock_sync_logs too. */

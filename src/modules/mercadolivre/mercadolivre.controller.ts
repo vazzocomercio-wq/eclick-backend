@@ -614,6 +614,22 @@ export class MercadolivreController {
     return this.ml.getListingsCounts(user.orgId!, Number.isFinite(sid) ? sid : undefined)
   }
 
+  // PATCH /ml/listings/:itemId/price  { price: number; seller_id?: number }
+  // Escreve o novo preço no Mercado Livre (anúncio real) + registros locais.
+  @Patch('listings/:itemId/price')
+  @HttpCode(HttpStatus.OK)
+  updateListingPrice(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    @Body() body: { price?: number; seller_id?: number },
+  ) {
+    if (typeof body.price !== 'number' || !Number.isFinite(body.price) || body.price <= 0) {
+      throw new BadRequestException('price é obrigatório e deve ser maior que zero')
+    }
+    const sellerId = body.seller_id != null ? Number(body.seller_id) : undefined
+    return this.ml.setListingPrice(user.orgId!, itemId, body.price, sellerId)
+  }
+
   // POST /ml/products/from-listing  { listing_ids: string[]; seller_id?: number }
   @Post('products/from-listing')
   @HttpCode(HttpStatus.OK)
