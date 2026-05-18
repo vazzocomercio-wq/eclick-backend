@@ -401,19 +401,31 @@ export class IcarusCatalogService {
       if (error) throw new Error(error.message)
     }
 
-    // O custo líquido também alimenta o CMV (cost_price) do produto.
-    await this.syncProductCost(orgId, productId, netCost)
+    // Custo líquido e estoque do fornecedor também alimentam o produto.
+    await this.syncProductFromSupplier(orgId, productId, {
+      cost:  netCost,
+      stock: Number(item.stock) || 0,
+    })
   }
 
-  /** Espelha o custo líquido (preço do fornecedor menos o ajuste) no CMV —
-   *  products.cost_price — do produto. */
-  private async syncProductCost(orgId: string, productId: string, cost: number): Promise<void> {
+  /** Espelha dados do fornecedor no produto: CMV (cost_price) e/ou estoque
+   *  (stock). Atualiza só os campos informados. */
+  private async syncProductFromSupplier(
+    orgId: string,
+    productId: string,
+    fields: { cost?: number; stock?: number },
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {}
+    if (fields.cost != null)  patch.cost_price = fields.cost
+    if (fields.stock != null) patch.stock = Math.max(0, Math.round(fields.stock))
+    if (Object.keys(patch).length === 0) return
+    patch.updated_at = new Date().toISOString()
     const { error } = await supabaseAdmin
       .from('products')
-      .update({ cost_price: cost, updated_at: new Date().toISOString() })
+      .update(patch)
       .eq('id', productId)
       .eq('organization_id', orgId)
-    if (error) throw new Error(`falha ao atualizar CMV do produto: ${error.message}`)
+    if (error) throw new Error(`falha ao atualizar produto: ${error.message}`)
   }
 
   // ── Desconto / ajuste de custo ──────────────────────────────────────────
@@ -491,7 +503,7 @@ export class IcarusCatalogService {
       .eq('id', supplierProductId)
     if (error) throw new BadRequestException(error.message)
 
-    await this.syncProductCost(orgId, sp.product_id as string, netCost)
+    await this.syncProductFromSupplier(orgId, sp.product_id as string, { cost: netCost })
     return { ok: true, unit_cost: netCost }
   }
 
@@ -520,7 +532,7 @@ export class IcarusCatalogService {
           .from('supplier_products')
           .update({ unit_cost: newCost, last_cost_change_at: now, updated_at: now })
           .eq('id', sp.id)
-        await this.syncProductCost(orgId, sp.product_id as string, newCost)
+        await this.syncProductFromSupplier(orgId, sp.product_id as string, { cost: newCost })
         changed++
       }
     }
@@ -547,7 +559,7 @@ export class IcarusCatalogService {
       .eq('supplier_id', supplierId)
 
     const search = (opts.search ?? '').replace(/[%,()*]/g, ' ').trim()
-    if (search) q = q.ilike('products.name', `%${search}%`)
+    if (search) q = q.or(`supplier_sku.ilike.%${search}%,products.name.ilike.%${search}%`)
 
     const { data, error, count } = await q
       .order('updated_at', { ascending: false })

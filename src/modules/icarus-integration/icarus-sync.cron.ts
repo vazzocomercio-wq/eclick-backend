@@ -105,8 +105,20 @@ export class IcarusSyncCron {
 
     if (latest.size === 0) return
 
+    // Mapa supplier_sku -> product_id, pra refletir o estoque também no produto.
+    const { data: spRows } = await supabaseAdmin
+      .from('supplier_products')
+      .select('supplier_sku, product_id')
+      .eq('supplier_id', integ.supplier_id)
+    const skuToProduct = new Map<string, string>(
+      (spRows ?? [])
+        .filter(r => r.supplier_sku && r.product_id)
+        .map((r): [string, string] => [r.supplier_sku as string, r.product_id as string]),
+    )
+
     const now = new Date().toISOString()
     for (const [code, qty] of latest) {
+      const stock = Math.max(0, Math.round(qty))
       await supabaseAdmin
         .from('supplier_catalog_items')
         .update({ stock: qty, updated_at: now })
@@ -117,6 +129,14 @@ export class IcarusSyncCron {
         .update({ partner_stock: qty, last_stock_change_at: now, updated_at: now })
         .eq('supplier_id', integ.supplier_id)
         .eq('supplier_sku', code)
+      const productId = skuToProduct.get(code)
+      if (productId) {
+        await supabaseAdmin
+          .from('products')
+          .update({ stock, updated_at: now })
+          .eq('id', productId)
+          .eq('organization_id', integ.organization_id)
+      }
     }
 
     await supabaseAdmin
