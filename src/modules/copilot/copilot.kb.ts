@@ -213,8 +213,14 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 **Health score** (gauge no card): 80+ = verde, 60-79 = amber, <60 = vermelho. Reflete preço competitivo + estoque + fotos + campanha + variações + reputação. Click no card abre detalhe.
 
-**Multi-conta**: badge colorido por conta (palette baseada em seller_id). Vincular anúncio de uma conta NÃO afeta anúncios da outra — \`account_id\` é a chave que separa.`,
-    tags: ['anúncios', 'listings', 'ml', 'vinculo', 'bulk-link', 'multi-conta', 'product_listings'],
+**Multi-conta**: badge colorido por conta (palette baseada em seller_id). Vincular anúncio de uma conta NÃO afeta anúncios da outra — \`account_id\` é a chave que separa.
+
+**Disputa de catálogo + ajuste de preço** (anúncios de catálogo): cada card mostra o status ao vivo — 🏆 Ganhando / 🤝 Empatado / 📉 Perdendo (API price_to_win do ML).
+- **Perdendo** → botão "Ganha o catálogo a R$ X →": o preço que o ML pede pra retomar a ponta. O painel de margem mostra a margem nesse preço.
+- **Ganhando** → botão "Teto do catálogo: R$ X →": o preço do concorrente mais barato − R$ 0,01, ou seja, até onde dá pra SUBIR o preço e seguir ganhando. O painel mostra a "Margem no teto do catálogo".
+- Click no preço (ou nesses botões) abre a edição inline — altera o preço no ML de verdade.
+- Use o teto pra proteger margem: ganhando folgado (preço bem abaixo do concorrente)? suba o preço em direção ao teto.`,
+    tags: ['anúncios', 'listings', 'ml', 'vinculo', 'bulk-link', 'multi-conta', 'product_listings', 'catalogo', 'teto', 'preco', 'price-to-win'],
   },
   {
     routes:   ['/dashboard/creative'],
