@@ -141,10 +141,11 @@ export class IcarusApiClient {
       )
       const requestToken = res.data?.request_token
       if (!requestToken || typeof requestToken !== 'string') {
-        throw new HttpException(
-          `Icarus retornou shape inesperado em /generate: ${JSON.stringify(res.data).slice(0, 200)}`,
-          HttpStatus.BAD_GATEWAY,
-        )
+        const d: unknown = res.data
+        const hint = typeof d === 'string' && d.trim()
+          ? `a Pennacorp recusou o token: "${d.trim().slice(0, 150)}"`
+          : `resposta inesperada em /generate: ${JSON.stringify(d).slice(0, 200)}`
+        throw new HttpException(`Icarus — ${hint}`, HttpStatus.BAD_GATEWAY)
       }
       this.tokenCache.set(accessToken, {
         token:      requestToken,
@@ -293,11 +294,15 @@ export class IcarusApiClient {
   private handleAxiosError(e: unknown, endpoint: string): never {
     const err = e as AxiosError
     if (err.response) {
-      const body = typeof err.response.data === 'string'
+      const raw = typeof err.response.data === 'string'
         ? err.response.data
         : JSON.stringify(err.response.data ?? {})
+      const isHtml = /^\s*<(?:!doctype|html)/i.test(raw)
+      const detail = isHtml
+        ? 'a Pennacorp respondeu uma página de erro (HTML), não a resposta da API — token inválido, endereço errado, ou o servidor sem acesso à API.'
+        : raw.slice(0, 300)
       throw new HttpException(
-        `Icarus ${endpoint} respondeu ${err.response.status}: ${body.slice(0, 300)}`,
+        `Icarus ${endpoint} respondeu ${err.response.status}: ${detail}`,
         err.response.status >= 400 && err.response.status < 600 ? err.response.status : HttpStatus.BAD_GATEWAY,
       )
     }
