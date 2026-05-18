@@ -1,6 +1,6 @@
 import type {
   StorefrontDesign, DesignTheme, DesignColors, DesignEffects,
-  ProductPageDesign, Section, SectionType,
+  ProductPageDesign, Section,
 } from './storefront-design.types'
 import { THEME_MODES, FONT_PAIRS, RADII, DENSITIES } from './storefront-design.types'
 import { DEFAULT_DESIGN } from './storefront-design.templates'
@@ -12,8 +12,6 @@ import { DEFAULT_DESIGN } from './storefront-design.templates'
  * lanca: corrige/clampa cada campo e preenche o que faltou a partir de um
  * design de fallback (o modelo de inspiracao ou o padrao). Garante que o
  * resultado e sempre renderavel pelo frontend.
- *
- * Trata os dois esquemas: v1 (secoes simples) e v2 (Tema Premium).
  */
 
 const HEX = /^#[0-9a-fA-F]{6}$/
@@ -197,48 +195,6 @@ function validateColumnsOpt(
 function validateSection(raw: unknown): Section | null {
   if (!isObj(raw)) return null
   switch (raw.type) {
-    // ── v1 ──────────────────────────────────────────────────────────
-    case 'header':
-      return { type: 'header', variant: oneOf(raw.variant, ['minimal', 'centered', 'overlay'] as const, 'minimal') }
-    case 'hero':
-      return {
-        type: 'hero',
-        variant:     oneOf(raw.variant, ['gradient', 'image', 'split'] as const, 'gradient'),
-        headline:    str(raw.headline, 'Bem-vindo à loja', 120),
-        subheadline: str(raw.subheadline, 'Conheça nossos produtos.', 240),
-        ctaLabel:    str(raw.ctaLabel, 'Ver produtos', 40),
-        imageUrl:    typeof raw.imageUrl === 'string' ? raw.imageUrl : null,
-      }
-    case 'collections':
-      return {
-        type: 'collections',
-        variant: oneOf(raw.variant, ['strip', 'grid'] as const, 'strip'),
-        title:   str(raw.title, 'Coleções', 80),
-      }
-    case 'productGrid': {
-      const cols = isObj(raw.columns) ? raw.columns : {}
-      return {
-        type: 'productGrid',
-        variant: oneOf(raw.variant, ['compact', 'elevated', 'editorial'] as const, 'elevated'),
-        title:   str(raw.title, 'Produtos', 80),
-        columns: {
-          mobile:  int(cols.mobile, 2, 1, 2),
-          tablet:  int(cols.tablet, 3, 1, 4),
-          desktop: int(cols.desktop, 4, 2, 4),
-        },
-      }
-    }
-    case 'about':
-      return {
-        type: 'about',
-        variant: oneOf(raw.variant, ['simple', 'banner'] as const, 'simple'),
-        title:   str(raw.title, 'Sobre a loja', 80),
-        body:    str(raw.body, 'Conheça mais sobre a nossa loja.', 600),
-      }
-    case 'footer':
-      return { type: 'footer', variant: oneOf(raw.variant, ['minimal', 'full'] as const, 'minimal') }
-
-    // ── v2 premium ──────────────────────────────────────────────────
     case 'announcementBar':
       return {
         type: 'announcementBar',
@@ -338,61 +294,35 @@ function validateSection(raw: unknown): Section | null {
   }
 }
 
-const HEADER_TYPES:  readonly SectionType[] = ['header', 'siteHeader']
-const FOOTER_TYPES:  readonly SectionType[] = ['footer', 'siteFooter']
-const PRODUCT_TYPES: readonly SectionType[] = ['productGrid', 'productShowcase']
-
-function hasType(s: Section, types: readonly SectionType[]): boolean {
-  return (types as readonly string[]).includes(s.type)
-}
-
-function validateSections(raw: unknown, fb: Section[], version: 1 | 2): Section[] {
+function validateSections(raw: unknown, fb: Section[]): Section[] {
   const arr = Array.isArray(raw) ? raw : []
   const sections = arr
     .map(validateSection)
     .filter((s): s is Section => s !== null)
 
-  // Garante os blocos essenciais — uma loja sem cabecalho, grade de
-  // produtos ou rodape nao faz sentido. v2 usa as variantes premium.
-  if (!sections.some(s => hasType(s, HEADER_TYPES))) {
-    sections.unshift(
-      version === 2
-        ? { type: 'siteHeader', variant: 'split', sticky: true, showSearch: true, showCart: true, nav: [] }
-        : { type: 'header', variant: 'minimal' },
-    )
+  // Garante os blocos essenciais — cabecalho, vitrine de produtos e rodape.
+  if (!sections.some(s => s.type === 'siteHeader')) {
+    sections.unshift({ type: 'siteHeader', variant: 'split', sticky: true, showSearch: true, showCart: true, nav: [] })
   }
-  if (!sections.some(s => hasType(s, PRODUCT_TYPES))) {
-    if (version === 2) {
-      sections.push({
-        type: 'productShowcase', layout: 'carousel', title: 'Produtos',
-        source: 'storefront', collectionId: null,
-      })
-    } else {
-      const fbGrid = fb.find(s => s.type === 'productGrid')
-      sections.push(fbGrid ?? {
-        type: 'productGrid', variant: 'elevated', title: 'Produtos',
-        columns: { mobile: 2, tablet: 3, desktop: 4 },
-      })
-    }
+  if (!sections.some(s => s.type === 'productShowcase')) {
+    const fbShowcase = fb.find(s => s.type === 'productShowcase')
+    sections.push(fbShowcase ?? {
+      type: 'productShowcase', layout: 'carousel', title: 'Produtos',
+      source: 'storefront', collectionId: null,
+    })
   }
-  if (!sections.some(s => hasType(s, FOOTER_TYPES))) {
-    sections.push(
-      version === 2
-        ? { type: 'siteFooter', variant: 'columns', newsletter: true }
-        : { type: 'footer', variant: 'minimal' },
-    )
+  if (!sections.some(s => s.type === 'siteFooter')) {
+    sections.push({ type: 'siteFooter', variant: 'columns', newsletter: true })
   }
 
   // Ordem final: announcementBar -> cabecalho -> meio -> rodape.
   const announce = sections.find(s => s.type === 'announcementBar')
-  const header   = sections.find(s => hasType(s, HEADER_TYPES))
-  const footers  = sections.filter(s => hasType(s, FOOTER_TYPES))
+  const header   = sections.find(s => s.type === 'siteHeader')
+  const footers  = sections.filter(s => s.type === 'siteFooter')
   const footer   = footers[footers.length - 1]
   const middle   = sections.filter(s =>
     s !== announce && s !== header && s !== footer &&
-    s.type !== 'announcementBar' &&
-    !hasType(s, HEADER_TYPES) &&
-    !hasType(s, FOOTER_TYPES),
+    s.type !== 'announcementBar' && s.type !== 'siteHeader' && s.type !== 'siteFooter',
   )
   return [announce, header, ...middle, footer].filter((s): s is Section => s != null)
 }
@@ -412,11 +342,10 @@ export function validateDesign(
   fallback: StorefrontDesign = DEFAULT_DESIGN,
 ): StorefrontDesign {
   const o = isObj(raw) ? raw : {}
-  const version: 1 | 2 = o.version === 2 ? 2 : 1
   return {
-    version,
+    version:  2,
     theme:    validateTheme(o.theme, fallback.theme),
-    sections: validateSections(o.sections, fallback.sections, version),
+    sections: validateSections(o.sections, fallback.sections),
     product:  validateProduct(o.product, fallback.product),
   }
 }

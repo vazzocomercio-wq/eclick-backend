@@ -1,12 +1,9 @@
 /**
- * Esquema da receita de design da Loja Propria.
+ * Esquema da receita de design da Loja Propria — Tema Premium.
  *
  * ESPELHO de eclick-frontend/src/lib/storefront/types.ts — manter os dois
  * em sync (mesmo padrao do margin.ts). O backend gera/valida o design; o
  * frontend renderiza. Qualquer mudanca de campo aqui replica la.
- *
- * v1 = esquema simples (Fases 1-9). v2 = Tema Premium (estilo editorial/
- * Renovate) — secoes ricas com efeitos. O renderizador trata os dois.
  */
 
 export type ThemeMode = 'dark' | 'light'
@@ -21,15 +18,15 @@ export interface DesignColors {
   text:       string
   textMuted:  string
   border:     string
-  /** Premium: fundo escuro de banners (announcement, marquee). */
+  /** Fundo escuro de banners (announcement, marquee). */
   dark?:      string
-  /** Premium: cor do texto-watermark gigante ao fundo das secoes. */
+  /** Cor do texto-watermark gigante ao fundo das secoes. */
   watermark?: string
-  /** Premium: cor do texto sobre a cor primaria (ex.: dentro de botoes). */
+  /** Cor do texto sobre a cor primaria (ex.: dentro de botoes). */
   onAccent?:  string
 }
 
-/** Premium — efeitos globais ligaveis. v1 ignora (campo opcional). */
+/** Efeitos globais ligaveis da vitrine. */
 export interface DesignEffects {
   scrollReveal:  boolean
   watermarks:    boolean
@@ -43,55 +40,12 @@ export interface DesignTheme {
   fontPair: FontPair
   radius:   Radius
   density:  Density
-  /** Premium — efeitos globais (opcional; v1 nao preenche). */
+  /** Efeitos globais (opcional — cai no padrao quando ausente). */
   effects?: DesignEffects
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// v1 — secoes simples (Fases 1-9). Mantidas por compatibilidade.
-// ─────────────────────────────────────────────────────────────────────
-
-export interface HeaderSection {
-  type:    'header'
-  variant: 'minimal' | 'centered' | 'overlay'
-}
-
-export interface HeroSection {
-  type:        'hero'
-  variant:     'gradient' | 'image' | 'split'
-  headline:    string
-  subheadline: string
-  ctaLabel:    string
-  imageUrl?:   string | null
-}
-
-export interface CollectionsSection {
-  type:    'collections'
-  variant: 'strip' | 'grid'
-  title:   string
-}
-
-export interface ProductGridSection {
-  type:    'productGrid'
-  variant: 'compact' | 'elevated' | 'editorial'
-  title:   string
-  columns: { mobile: number; tablet: number; desktop: number }
-}
-
-export interface AboutSection {
-  type:    'about'
-  variant: 'simple' | 'banner'
-  title:   string
-  body:    string
-}
-
-export interface FooterSection {
-  type:    'footer'
-  variant: 'minimal' | 'full'
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// v2 — Tema Premium (estilo editorial/Renovate). Secoes ricas.
+// Secoes do Tema Premium (estilo editorial/Renovate).
 // ─────────────────────────────────────────────────────────────────────
 
 /** Faixa superior com mensagem + countdown opcional. */
@@ -196,14 +150,6 @@ export interface SiteFooterSection {
 }
 
 export type Section =
-  // v1
-  | HeaderSection
-  | HeroSection
-  | CollectionsSection
-  | ProductGridSection
-  | AboutSection
-  | FooterSection
-  // v2 premium
   | AnnouncementBarSection
   | SiteHeaderSection
   | HeroPortraitSection
@@ -225,8 +171,8 @@ export interface ProductPageDesign {
 }
 
 export interface StorefrontDesign {
-  /** 1 = esquema simples; 2 = Tema Premium. */
-  version:  1 | 2
+  /** Sempre 2 — versao do esquema da receita de design. */
+  version:  2
   theme:    DesignTheme
   sections: Section[]
   product:  ProductPageDesign

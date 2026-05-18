@@ -6,7 +6,7 @@ import { LlmService } from '../ai/llm.service'
 import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
 import { CredentialsService } from '../credentials/credentials.service'
 import type { GenerateTextOutput, GenerateImageOutput } from '../ai/types'
-import type { StorefrontDesign, HeroSection, FontPair, Section } from './storefront-design.types'
+import type { StorefrontDesign, FontPair, Section } from './storefront-design.types'
 import { STOREFRONT_TEMPLATE_MAP, DEFAULT_DESIGN } from './storefront-design.templates'
 import { validateDesign } from './storefront-design.validator'
 
@@ -300,43 +300,29 @@ export class StorefrontDesignService {
   }
 
   /**
-   * Injeta a imagem de banner no design. No v2 procura um banner
-   * (tiltBanner/fullBanner) ou o primeiro slide do heroPortrait; no v1
-   * preenche o bloco hero. Cria um bloco quando nao existe alvo.
+   * Injeta a imagem de banner no design. Procura um banner
+   * (tiltBanner/fullBanner) ou o primeiro slide do heroPortrait; cria um
+   * fullBanner quando nao existe alvo.
    */
   private injectHeroImage(design: StorefrontDesign, imageUrl: string): StorefrontDesign {
     const sections = [...design.sections]
 
-    if (design.version === 2) {
-      const bannerIdx = sections.findIndex(s => s.type === 'tiltBanner' || s.type === 'fullBanner')
-      if (bannerIdx >= 0) {
-        sections[bannerIdx] = { ...sections[bannerIdx], imageUrl } as Section
+    const bannerIdx = sections.findIndex(s => s.type === 'tiltBanner' || s.type === 'fullBanner')
+    if (bannerIdx >= 0) {
+      sections[bannerIdx] = { ...sections[bannerIdx], imageUrl } as Section
+    } else {
+      const heroIdx = sections.findIndex(s => s.type === 'heroPortrait')
+      if (heroIdx >= 0) {
+        const hp = sections[heroIdx] as Extract<Section, { type: 'heroPortrait' }>
+        const slides = hp.slides.length > 0
+          ? hp.slides.map((sl, i) => (i === 0 ? { ...sl, imageUrl } : sl))
+          : [{ imageUrl }]
+        sections[heroIdx] = { ...hp, slides }
       } else {
-        const heroIdx = sections.findIndex(s => s.type === 'heroPortrait')
-        if (heroIdx >= 0) {
-          const hp = sections[heroIdx] as Extract<Section, { type: 'heroPortrait' }>
-          const slides = hp.slides.length > 0
-            ? hp.slides.map((sl, i) => (i === 0 ? { ...sl, imageUrl } : sl))
-            : [{ imageUrl }]
-          sections[heroIdx] = { ...hp, slides }
-        } else {
-          sections.push({ type: 'fullBanner', imageUrl, headline: 'Destaque da loja' })
-        }
+        sections.push({ type: 'fullBanner', imageUrl, headline: 'Destaque da loja' })
       }
-      return { ...design, sections }
     }
-
-    // v1 — bloco hero com imagem.
-    let v1 = sections.map(s =>
-      s.type === 'hero' ? ({ ...s, variant: 'image', imageUrl } as HeroSection) : s,
-    )
-    if (!v1.some(s => s.type === 'hero')) {
-      v1 = [...v1, {
-        type: 'hero', variant: 'image', imageUrl,
-        headline: 'Bem-vindo à loja', subheadline: 'Conheça os nossos produtos.', ctaLabel: 'Ver produtos',
-      }]
-    }
-    return { ...design, sections: v1 }
+    return { ...design, sections }
   }
 
   private buildHeroImagePrompt(args: {
