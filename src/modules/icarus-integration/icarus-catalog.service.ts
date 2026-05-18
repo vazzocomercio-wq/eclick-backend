@@ -297,6 +297,11 @@ export class IcarusCatalogService {
       const n = Number(v)
       return Number.isFinite(n) && n > 0 ? n : null
     }
+    // A Pennacorp envia dimensões em MILÍMETROS; nosso padrão é centímetro.
+    const mmToCm = (v: unknown): number | null => {
+      const mm = posNum(v)
+      return mm == null ? null : Math.round((mm / 10) * 100) / 100
+    }
     const text = (v: unknown): string | null => {
       const s = v == null ? '' : String(v).trim()
       return s || null
@@ -305,10 +310,11 @@ export class IcarusCatalogService {
       description:       text(raw.pt_obs),
       category:          text(item.family) ?? text(raw.fa_nome),
       gtin:              text(item.external_barcode) ?? text(raw.pb_codbar),
+      // Peso já vem em quilos na Pennacorp — sem conversão.
       weight_kg:         posNum(raw.pb_peso) ?? posNum(raw.pt_pesoliq),
-      height_cm:         posNum(raw.pb_altura),
-      width_cm:          posNum(raw.pb_largura),
-      length_cm:         posNum(raw.pb_comprim),
+      height_cm:         mmToCm(raw.pb_altura),
+      width_cm:          mmToCm(raw.pb_largura),
+      length_cm:         mmToCm(raw.pb_comprim),
       image_url:         text(item.image_url) ?? text(raw.pt_imagem),
       supplier_raw_data: raw,
     }
