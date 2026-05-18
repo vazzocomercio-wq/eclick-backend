@@ -292,6 +292,9 @@ export class IcarusApiClient {
   }
 
   private handleAxiosError(e: unknown, endpoint: string): never {
+    // Erros já tratados (HttpException — ex: token recusado pela Pennacorp)
+    // propagam como estão; não são erro de rede do axios.
+    if (e instanceof HttpException) throw e
     const err = e as AxiosError
     if (err.response) {
       const raw = typeof err.response.data === 'string'
