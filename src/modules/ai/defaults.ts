@@ -216,6 +216,13 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Loja Propria Fase 6 — imagem de banner/hero da loja gerada por IA.
+  storefront_hero_image: {
+    label:       'Banner da loja (IA)',
+    description: 'Gera a imagem de banner/hero da Loja Propria',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

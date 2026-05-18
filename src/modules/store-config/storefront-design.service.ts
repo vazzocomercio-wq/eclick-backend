@@ -1,10 +1,15 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
+import axios from 'axios'
+import { randomUUID } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
-import type { GenerateTextOutput } from '../ai/types'
-import type { StorefrontDesign } from './storefront-design.types'
+import type { GenerateTextOutput, GenerateImageOutput } from '../ai/types'
+import type { StorefrontDesign, HeroSection, FontPair } from './storefront-design.types'
 import { STOREFRONT_TEMPLATE_MAP, DEFAULT_DESIGN } from './storefront-design.templates'
 import { validateDesign } from './storefront-design.validator'
+
+/** Bucket publico do Supabase Storage pras imagens de banner da loja. */
+const STOREFRONT_BUCKET = 'storefront-assets'
 
 /**
  * Loja Propria — Fase 2: geracao da receita de design por IA.
@@ -146,6 +151,117 @@ export class StorefrontDesignService {
       `[storefront-design] org=${orgId} gerado por imagem (model=${out.model}, custo=$${out.costUsd.toFixed(4)})`,
     )
     return { design }
+  }
+
+  /** Gera a imagem de banner (hero) da loja por IA, faz upload e injeta no design. */
+  async generateHeroImage(orgId: string, input: { prompt?: string }): Promise<{ design: StorefrontDesign }> {
+    const store = await this.loadStoreForHero(orgId)
+    const design = store.design ?? DEFAULT_DESIGN
+
+    const imagePrompt = this.buildHeroImagePrompt({
+      storeName:        store.store_name,
+      storeDescription: store.store_description,
+      design,
+      hint:             (input.prompt ?? '').trim() || undefined,
+    })
+
+    let img: GenerateImageOutput
+    try {
+      img = await this.llm.generateImage({
+        orgId,
+        feature: 'storefront_hero_image',
+        prompt:  imagePrompt,
+        format:  'wide',
+        n:       1,
+      })
+    } catch (e) {
+      this.logger.error(`[storefront-design] geração de banner falhou: ${(e as Error).message}`)
+      throw new BadRequestException('A IA não conseguiu gerar o banner agora. Tente de novo em instantes.')
+    }
+
+    const first = img.images?.[0]
+    if (!first?.b64 && !first?.url) {
+      throw new BadRequestException('A IA não retornou nenhuma imagem.')
+    }
+
+    const buffer = first.b64
+      ? Buffer.from(first.b64, 'base64')
+      : Buffer.from(
+          (await axios.get<ArrayBuffer>(first.url!, { responseType: 'arraybuffer', timeout: 30_000 })).data,
+        )
+
+    const path = `${orgId}/hero/${randomUUID()}.png`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(STOREFRONT_BUCKET)
+      .upload(path, buffer, { contentType: 'image/png', upsert: false })
+    if (upErr) {
+      throw new BadRequestException(`Erro ao salvar a imagem do banner: ${upErr.message}`)
+    }
+    const imageUrl = supabaseAdmin.storage.from(STOREFRONT_BUCKET).getPublicUrl(path).data.publicUrl
+
+    // Injeta a imagem no bloco hero (cria um se nao existir).
+    let sections = design.sections.map(s =>
+      s.type === 'hero' ? ({ ...s, variant: 'image', imageUrl } as HeroSection) : s,
+    )
+    if (!sections.some(s => s.type === 'hero')) {
+      const newHero: HeroSection = {
+        type: 'hero', variant: 'image', imageUrl,
+        headline: 'Bem-vindo à loja', subheadline: 'Conheça os nossos produtos.', ctaLabel: 'Ver produtos',
+      }
+      sections = [...sections, newHero]
+    }
+
+    const validated = validateDesign({ ...design, sections }, DEFAULT_DESIGN)
+    await this.save(orgId, validated)
+    this.logger.log(
+      `[storefront-design] org=${orgId} banner gerado (model=${img.model}, custo=$${img.costUsd.toFixed(4)})`,
+    )
+    return { design: validated }
+  }
+
+  private buildHeroImagePrompt(args: {
+    storeName: string
+    storeDescription: string | null
+    design: StorefrontDesign
+    hint?: string
+  }): string {
+    const moodByFont: Record<FontPair, string> = {
+      elegant:   'elegant and refined',
+      modern:    'modern, clean and minimal',
+      bold:      'bold, vibrant and energetic',
+      classic:   'classic and timeless',
+      editorial: 'editorial and sophisticated',
+      playful:   'playful, warm and friendly',
+    }
+    const mood = moodByFont[args.design.theme.fontPair] ?? 'modern and clean'
+    const tone = args.design.theme.mode === 'dark'
+      ? 'dark, moody, low-key dramatic lighting'
+      : 'bright, airy, soft natural light'
+    return [
+      `Wide cinematic hero banner background image for the online store "${args.storeName}".`,
+      args.storeDescription ? `Store context: ${args.storeDescription}.` : '',
+      args.hint ? `Scene: ${args.hint}.` : 'A tasteful ambient lifestyle scene that fits the store.',
+      `Visual style: ${mood}; ${tone} color palette.`,
+      'Composition with generous empty negative space for a text overlay, soft depth of field.',
+      'Absolutely NO text, NO words, NO letters, NO logos anywhere in the image.',
+      'High-end professional e-commerce photography, photorealistic.',
+    ].filter(Boolean).join(' ')
+  }
+
+  private async loadStoreForHero(orgId: string): Promise<{
+    store_name: string
+    store_description: string | null
+    design: StorefrontDesign | null
+  }> {
+    const { data } = await supabaseAdmin
+      .from('store_config')
+      .select('store_name, store_description, design')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!data) {
+      throw new BadRequestException('Configure sua loja primeiro em Config da Loja.')
+    }
+    return data as { store_name: string; store_description: string | null; design: StorefrontDesign | null }
   }
 
   private async callLlm(orgId: string, userPrompt: string): Promise<GenerateTextOutput> {

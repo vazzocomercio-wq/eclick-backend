@@ -12,6 +12,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *
  *   POST /store/config/design/generate             { prompt, inspirationId? }
  *   POST /store/config/design/generate-from-image  { imageBase64, imageMimeType?, prompt? }
+ *   POST /store/config/design/hero-image           { prompt? }
  *   PUT  /store/config/design                      { design }
  */
 @Controller('store/config/design')
@@ -43,6 +44,12 @@ export class StorefrontDesignController {
       imageMimeType: body.imageMimeType,
       prompt:        body.prompt,
     })
+  }
+
+  @Post('hero-image')
+  generateHeroImage(@ReqUser() u: ReqUserPayload, @Body() body: { prompt?: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.generateHeroImage(u.orgId, { prompt: body?.prompt })
   }
 
   @Put()
