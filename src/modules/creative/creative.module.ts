@@ -22,9 +22,10 @@ import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { CredentialsModule } from '../credentials/credentials.module'
 import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
+import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule],
+  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule, ActiveBridgeModule],
   controllers: [CreativeController],
   providers:   [
     CreativeService,

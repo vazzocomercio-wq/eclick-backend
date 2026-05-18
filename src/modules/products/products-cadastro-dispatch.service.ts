@@ -63,6 +63,12 @@ export class ProductsCadastroDispatchService {
       throw new BadRequestException('Máximo 100 produtos por dispatch.')
     }
 
+    // Prazo da tarefa de criação do card: 1 dia (regra do funil "Anúncios ML"
+    // — cada etapa gera tarefa pro operador; a de criação tem 24h, as demais
+    // 3h via automação de stage). Respeita o prazo que o gestor escolheu.
+    const dueDate = input.due_date
+      ?? new Date(Date.now() + 24 * 3600_000).toISOString()
+
     // SaaS e Active são produtos distintos com orgs separadas. Pipeline +
     // Stage IDs vêm do Active e pertencem à org Active do dispatcher.
     // Bridge precisa receber o org_id Active (não o SaaS) pra que a validação
@@ -194,7 +200,7 @@ export class ProductsCadastroDispatchService {
           assigned_to:     input.operator_user_id,
           title:           `Completar cadastro: ${(p as any).name} ${(p as any).sku ? `(${(p as any).sku})` : ''}`.trim(),
           task_title:      taskBody.slice(0, 200),
-          due_date:        input.due_date,
+          due_date:        dueDate,
           tags:            ['cadastro_pendente', ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
           metadata: {
             source:          'saas_cadastro',
@@ -226,7 +232,7 @@ export class ProductsCadastroDispatchService {
             active_stage_id:         input.stage_id,
             active_deal_id:          bridgeRes.deal_id ?? null,
             active_task_id:          bridgeRes.task_id ?? null,
-            due_date:                input.due_date ?? null,
+            due_date:                dueDate,
             missing_fields_snapshot: missingFields,
             status:                  'open',
             dedup_key:               dedupKey,

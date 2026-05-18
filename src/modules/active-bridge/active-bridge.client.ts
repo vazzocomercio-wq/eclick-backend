@@ -63,6 +63,33 @@ interface SendBroadcastInput {
   rate_limit_ms?:    number    // delay entre mensagens (default 3000)
 }
 
+interface CardActionLink {
+  label: string
+  url:   string
+}
+
+interface MoveCardInput {
+  /** Org dona do card — obrigatório se for achar por dedup_key. */
+  organization_id?: string
+  /** Chave lógica do card (custom_fields.dedup_key). */
+  dedup_key?:       string
+  /** Id direto do deal — se vier, Active deriva a org do próprio deal. */
+  deal_id?:         string
+  to_stage_id?:     string
+  to_stage_name?:   string
+  /** Botão contextual do card. `null` limpa; omitir mantém. */
+  action_link?:     CardActionLink | null
+}
+
+export interface MoveCardResult {
+  ok?:                true
+  found?:             boolean
+  deal_id?:           string | null
+  moved?:             boolean
+  reason?:            string
+  skipped_no_bridge?: boolean
+}
+
 @Injectable()
 export class ActiveBridgeClient {
   private readonly logger = new Logger(ActiveBridgeClient.name)
@@ -230,6 +257,44 @@ export class ActiveBridgeClient {
       return await res.json() as CreateCampaignCardResult
     } catch (e) {
       this.logger.error(`[active-bridge] createCampaignCard falhou: ${(e as Error).message}`)
+      throw e
+    }
+  }
+
+  /** Avança um card existente no funil "Anúncios ML" do Active e atualiza
+   *  o botão contextual (`action_link`). Usado pelo fluxo de publicação ML
+   *  do SaaS: anúncio publicado+sincronizado → "Incluir Campanha", etc.
+   *
+   *  Acha o card por `deal_id` direto OU por `organization_id` + `dedup_key`.
+   *  Avança só pra frente — Active ignora se o card já passou da etapa.
+   *  No-op se bridge não configurado. */
+  async moveCard(input: MoveCardInput): Promise<MoveCardResult> {
+    if (!this.isConfigured()) {
+      this.logger.warn('[active-bridge] moveCard no-op (bridge não configurado)')
+      return { skipped_no_bridge: true }
+    }
+    if (!input.deal_id && (!input.organization_id || !input.dedup_key)) {
+      this.logger.warn('[active-bridge] moveCard skipped — informe deal_id ou organization_id+dedup_key')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/move-card`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw new BadRequestException(`Active responded ${res.status}: ${body.slice(0, 200)}`)
+      }
+      return await res.json() as MoveCardResult
+    } catch (e) {
+      this.logger.error(`[active-bridge] moveCard falhou: ${(e as Error).message}`)
       throw e
     }
   }

@@ -5,6 +5,7 @@ import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { MlShippingCostService, type ShippingCostResult } from '../mercadolivre/ml-shipping-cost.service'
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
 import { LlmService } from '../ai/llm.service'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -151,10 +152,11 @@ export class CreativeMlPublisherService {
   private readonly logger = new Logger(CreativeMlPublisherService.name)
 
   constructor(
-    private readonly creative: CreativeService,
-    private readonly ml:       MercadolivreService,
-    private readonly shipping: MlShippingCostService,
-    private readonly llm:      LlmService,
+    private readonly creative:     CreativeService,
+    private readonly ml:           MercadolivreService,
+    private readonly shipping:     MlShippingCostService,
+    private readonly llm:          LlmService,
+    private readonly activeBridge: ActiveBridgeClient,
   ) {}
 
   /**
@@ -926,6 +928,15 @@ export class CreativeMlPublisherService {
         this.logger.warn(`[creative.ml.publish] sync catálogo pós-publish falhou: ${(e as Error).message}`)
       }
 
+      // Pós-publicação: avança o card do funil "Anúncios ML" no Active CRM
+      // pra a etapa "Incluir Campanha" e seta o botão de atalho. Fail-isolated.
+      try {
+        const creativeProduct = await this.creative.getProduct(orgId, listing.product_id)
+        await this.advanceActiveCardAfterPublish(orgId, creativeProduct.product_id)
+      } catch (e) {
+        this.logger.warn(`[creative.ml.publish] move-card Active pós-publish falhou: ${(e as Error).message}`)
+      }
+
       return (updated as CreativePublication) ?? pub
     } catch (e: unknown) {
       const errPayload = extractMlError(e)
@@ -985,6 +996,56 @@ export class CreativeMlPublisherService {
     } else {
       this.logger.log(`[creative.ml.publish] catálogo ${catalogId} sincronizado — título + ${photoUrls.length} foto(s)`)
     }
+  }
+
+  /**
+   * Avança o card do anúncio no funil "Anúncios ML" do Active CRM pra a
+   * etapa "Incluir Campanha" após a publicação + sync, e coloca o botão
+   * de atalho pras campanhas ML.
+   *
+   * O card é o mesmo criado pelo dispatch de cadastro (Operação de
+   * Cadastro → card no Active): achamos o deal vinculado via
+   * `product_operator_assignments`. Se o anúncio não veio de um card de
+   * cadastro (publicado direto no IA Criativo), não há card pra mover —
+   * no-op silencioso.
+   */
+  private async advanceActiveCardAfterPublish(
+    orgId:            string,
+    catalogProductId: string | null,
+  ): Promise<void> {
+    if (!catalogProductId) return
+    if (!this.activeBridge.isConfigured()) return
+
+    const { data: assignment } = await supabaseAdmin
+      .from('product_operator_assignments')
+      .select('active_deal_id')
+      .eq('organization_id', orgId)
+      .eq('product_id', catalogProductId)
+      .in('status', ['open', 'in_progress'])
+      .not('active_deal_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const dealId = (assignment as { active_deal_id: string | null } | null)?.active_deal_id
+    if (!dealId) {
+      this.logger.log(`[creative.ml.publish] anúncio sem card de cadastro no Active — move-card pulado`)
+      return
+    }
+
+    const baseUrl = (process.env.FRONTEND_PUBLIC_URL ?? 'https://eclick.app.br').replace(/\/+$/, '')
+    const res = await this.activeBridge.moveCard({
+      deal_id:       dealId,
+      to_stage_name: 'Incluir Campanha',
+      action_link: {
+        label: 'Incluir em campanha',
+        url:   `${baseUrl}/dashboard/ml-campaigns`,
+      },
+    })
+    this.logger.log(
+      `[creative.ml.publish] move-card Active deal=${dealId} → Incluir Campanha ` +
+      `(found=${res.found} moved=${res.moved}${res.reason ? ` reason=${res.reason}` : ''})`,
+    )
   }
 
   async getPublication(orgId: string, id: string): Promise<CreativePublication> {
