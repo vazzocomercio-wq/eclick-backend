@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Body, Param, Query, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RadarService } from './radar.service'
@@ -39,6 +39,13 @@ export class RadarController {
   @Get('catalog-status')
   catalogStatus(@ReqUser() user: AuthUser) {
     return this.radar.getCatalogStatus(this.org(user))
+  }
+
+  /** Teto do catálogo (concorrente mais barato) pros anúncios informados. */
+  @Post('catalog-ceiling')
+  catalogCeiling(@ReqUser() user: AuthUser, @Body() body: { item_ids?: string[] }) {
+    const ids = Array.isArray(body?.item_ids) ? body.item_ids : []
+    return this.radar.getCatalogCeiling(this.org(user), ids)
   }
 
   /** Tela 2 — produto + ranking competitivo + dados de margem. */

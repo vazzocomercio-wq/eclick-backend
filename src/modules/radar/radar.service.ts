@@ -156,6 +156,61 @@ export class RadarService {
   }
 
   /**
+   * Teto do catálogo por anúncio próprio: o preço do concorrente mais barato
+   * no mesmo produto de catálogo. Usado pela tela de Anúncios ML pra mostrar
+   * até onde dá pra subir o preço sem perder a ponta. `itemIds` = MLBs.
+   */
+  async getCatalogCeiling(
+    orgId: string,
+    itemIds: string[],
+  ): Promise<Array<{ item_id: string; runner_up_price: number | null; runner_up_seller: string | null }>> {
+    const ids = [...new Set(itemIds.filter((x) => typeof x === 'string' && x))].slice(0, 100)
+    if (ids.length === 0) return []
+    const sb = supabaseAdmin
+
+    // Anúncios próprios → resolve o produto de catálogo de cada um.
+    const { data: own } = await sb
+      .from('radar_offers')
+      .select('item_id,catalog_product_ref')
+      .eq('organization_id', orgId)
+      .eq('is_own', true)
+      .in('item_id', ids)
+    const ownRows = (own ?? []) as Array<{ item_id: string; catalog_product_ref: string }>
+    if (ownRows.length === 0) return []
+
+    const refs = [...new Set(ownRows.map((o) => o.catalog_product_ref))]
+
+    // Concorrente mais barato por catálogo (ordenado asc → 1ª linha = menor).
+    const { data: comps } = await sb
+      .from('radar_offers')
+      .select('catalog_product_ref,price,seller:seller_ref(nickname)')
+      .eq('organization_id', orgId)
+      .eq('status', 'ativo')
+      .not('is_own', 'is', true)
+      .not('price', 'is', null)
+      .in('catalog_product_ref', refs)
+      .order('price', { ascending: true })
+
+    const cheapestByRef = new Map<string, { price: number; seller: string | null }>()
+    for (const c of (comps ?? []) as Array<{ catalog_product_ref: string; price: number; seller: unknown }>) {
+      if (cheapestByRef.has(c.catalog_product_ref)) continue
+      cheapestByRef.set(c.catalog_product_ref, {
+        price: c.price,
+        seller: (oneOf(c.seller) as { nickname?: string } | null)?.nickname ?? null,
+      })
+    }
+
+    return ownRows.map((o) => {
+      const cheapest = cheapestByRef.get(o.catalog_product_ref)
+      return {
+        item_id: o.item_id,
+        runner_up_price: cheapest?.price ?? null,
+        runner_up_seller: cheapest?.seller ?? null,
+      }
+    })
+  }
+
+  /**
    * Contexto de preço de um produto pra o modal "Ajustar preço": preço atual,
    * preço pra ganhar o catálogo (ao vivo), custo, imposto, tarifa ML e frete —
    * pra o modal calcular a margem em qualquer preço.
