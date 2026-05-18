@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, HttpException } from '@nestjs/common'
+import { Injectable, NotFoundException, HttpException, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { StockService } from '../stock/stock.service'
 
@@ -45,6 +45,45 @@ export interface UpdateStockDto {
 @Injectable()
 export class ProductsService {
   constructor(private readonly stock: StockService) {}
+
+  /**
+   * Loja Propria — Fase 9: marca/desmarca produtos pra aparecer na vitrine.
+   * Ao publicar (visible=true), pula produtos sem nome ou sem preco — senao
+   * a loja renderiza produto quebrado. Retorna quantos foram e quantos pularam.
+   */
+  async setStorefrontVisibility(
+    orgId: string,
+    productIds: string[],
+    visible: boolean,
+  ): Promise<{ updated: number; skipped: number }> {
+    const ids = Array.isArray(productIds) ? productIds.filter(Boolean) : []
+    if (ids.length === 0) throw new BadRequestException('Selecione ao menos um produto.')
+
+    let targetIds = ids
+    let skipped = 0
+    if (visible) {
+      const { data: valid, error: selErr } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('organization_id', orgId)
+        .in('id', ids)
+        .not('name', 'is', null)
+        .neq('name', '')
+        .gt('price', 0)
+      if (selErr) throw new BadRequestException(`Erro: ${selErr.message}`)
+      targetIds = (valid ?? []).map(r => r.id as string)
+      skipped = ids.length - targetIds.length
+    }
+    if (targetIds.length === 0) return { updated: 0, skipped }
+
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update({ storefront_visible: visible, updated_at: new Date().toISOString() })
+      .eq('organization_id', orgId)
+      .in('id', targetIds)
+    if (error) throw new BadRequestException(`Erro ao atualizar: ${error.message}`)
+    return { updated: targetIds.length, skipped }
+  }
 
   async getAll(orgId: string | null) {
     // Supabase/PostgREST corta em 1000 rows por request. Catálogos grandes

@@ -31,6 +31,21 @@ export class ProductsController {
     private readonly activeResolver:   ActiveResolverService,
   ) {}
 
+  /** POST /products/storefront-visibility — Loja Propria Fase 9: envia ou
+   *  remove produtos da vitrine /loja/[slug] em lote. */
+  @Post('storefront-visibility')
+  setStorefrontVisibility(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { productIds?: string[]; visible?: boolean },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.products.setStorefrontVisibility(
+      u.orgId,
+      body?.productIds ?? [],
+      body?.visible === true,
+    )
+  }
+
   // ── Active config dropdowns (sessão 2026-05-14) ────────────────────────
   // Endpoints que populam os dropdowns do modal "Despachar pra operador"
   // sem o user precisar copiar UUIDs do schema active.* na mão.

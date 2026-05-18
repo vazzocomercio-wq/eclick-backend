@@ -259,7 +259,7 @@ export class StoreConfigService {
     return (data as StoreConfig) ?? null
   }
 
-  /** Lista produtos públicos (catalog_status='live'). */
+  /** Lista produtos públicos da vitrine (storefront_visible=true, com estoque). */
   async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string } = {}): Promise<Array<Record<string, unknown>>> {
     const limit  = Math.min(opts.limit  ?? 24, 60)
     const offset = Math.max(opts.offset ?? 0, 0)
@@ -267,7 +267,7 @@ export class StoreConfigService {
       .from('products')
       .select('id, name, price, photo_urls, category, ai_score, ai_short_description')
       .eq('organization_id', orgId)
-      .in('catalog_status', ['ready', 'live'])
+      .eq('storefront_visible', true)
       .gt('stock', 0)
       .order('ai_score', { ascending: false })
       .range(offset, offset + limit - 1)
@@ -284,7 +284,7 @@ export class StoreConfigService {
       .select('*')
       .eq('organization_id', orgId)
       .eq('id', productId)
-      .in('catalog_status', ['ready', 'live'])
+      .eq('storefront_visible', true)
       .maybeSingle()
     return data ?? null
   }
