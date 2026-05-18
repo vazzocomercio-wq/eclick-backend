@@ -2555,20 +2555,20 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
     routes:   ['/dashboard/store/designer'],
     category: 'loja',
     title:    'Designer da Loja — visual da vitrine por IA',
-    content: `**Cria o visual da sua loja própria (a vitrine pública em /loja/seu-slug) com ajuda de IA.**
+    content: `**Cria o visual da sua loja própria (a vitrine pública em /loja/seu-slug) com ajuda de IA — Tema Premium.**
 
 **Como usar:**
-- **Modelos de inspiração** — 4 estilos prontos (Tech Minimalista, Boutique Elegante, Vibrante, Clean Claro). Clique num para selecioná-lo.
+- **Modelos de inspiração** — 5 estilos prontos. "Editorial Premium" é o tema completo (visual de revista, com efeitos, banners e seções ricas); os outros 4 são estilos simples. Clique num para selecioná-lo.
 - **Aplicar modelo selecionado** — usa o modelo escolhido direto, sem IA.
-- **Gerar com IA** — descreva no campo de texto o estilo, as cores e a sensação que quer; a IA monta o design completo (tema, blocos e textos). Se um modelo estiver selecionado, ele vira o ponto de partida.
-- **Inspiração visual** — na aba "Gerar com IA" também dá pra subir um print de uma loja de referência; a IA analisa a imagem (cores, fontes, estilo) e cria a sua loja no mesmo espírito.
-- **Inspiração do Canva** — conecte sua conta Canva na aba "Gerar com IA" e escolha um dos seus designs; a IA exporta e analisa ele como referência visual.
-- **Inspiração por link** — cole a URL de um site ou loja de referência; o sistema captura um print da página e a IA copia o estilo (cores, fontes, efeitos) pra sua loja.
-- **Ajustar à mão** — a aba "Ajustar à mão" abre um editor manual: cores, fonte, cantos, densidade e quais blocos aparecem. Refina o que a IA gerou sem precisar de outro prompt.
-- **Imagem do banner** — ainda na aba "Ajustar à mão", o botão "Gerar imagem do banner" cria com IA uma foto pro topo da loja, combinando com o estilo do design.
-- O **preview ao lado** mostra a vitrine na hora. Não gostou? Ajuste o texto e gere de novo.
+- **Gerar com IA** — descreva o estilo, as cores e a sensação que quer; a IA monta uma loja premium completa (tema, efeitos, todas as seções e os textos). Se um modelo estiver selecionado, ele vira o ponto de partida.
+- **Inspiração visual** — suba um print de uma loja de referência; a IA analisa cores, fontes e estilo e cria a sua no mesmo espírito.
+- **Inspiração do Canva** — conecte sua conta Canva e escolha um design seu como referência visual.
+- **Inspiração por link** — cole a URL de um site de referência; o sistema captura um print e a IA copia o estilo.
+- **Ajustar à mão** — editor manual: tema (modo, cores, fonte, cantos, densidade), cores premium, os efeitos globais (revelar seções ao rolar, marca d'água, parallax nos banners, troca de foto no hover) e o gerenciador de seções — reordenar, adicionar, remover e editar os textos de cada seção.
+- **Imagem do banner** — o botão "Gerar imagem do banner" cria com IA uma foto pro destaque da loja.
+- O **preview ao lado** mostra a vitrine na hora.
 
-**O que a IA decide:** paleta de cores, tipografia, arredondamento, densidade, ordem dos blocos da home (cabeçalho, banner, grade de produtos, bloco "sobre", rodapé) e os textos.
+**A vitrine premium** tem faixa de anúncio, cabeçalho fixo, hero em carrossel, vitrines de produtos, banners, grade de categorias, bloco editorial e rodapé rico — além de uma página de catálogo em /loja/seu-slug/produtos com filtro por categoria e ordenação.
 
 **Boas práticas no prompt:**
 - Diga o ramo da loja (joias, eletrônicos, moda fitness) — a IA ajusta o tom.
@@ -2577,9 +2577,9 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 
 **Importante:**
 - A loja precisa estar com status Ativa (em Config da Loja) para ficar pública.
-- Os produtos da vitrine vêm do catálogo: só aparecem os que estão prontos/publicados e com estoque maior que zero.
+- Os produtos da vitrine vêm do catálogo: só aparecem os que foram enviados para a loja (Catálogo > Produtos > "Enviar para a loja") e com estoque maior que zero.
 - Gerar um design substitui o anterior — é seguro, dá pra gerar quantas vezes quiser.`,
-    tags: ['loja', 'storefront', 'design', 'vitrine', 'ia'],
+    tags: ['loja', 'storefront', 'design', 'vitrine', 'ia', 'premium', 'catalogo'],
   },
 ]
 
