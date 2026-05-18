@@ -143,9 +143,19 @@ export class IcarusIntegrationController {
 
   /** GET .../products — produtos já vinculados (pra ajuste por produto). */
   @Get('products')
-  listSyncedProducts(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+  listSyncedProducts(
+    @ReqUser() u: ReqUserPayload,
+    @Param('supplierId') supplierId: string,
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.catalog.listSyncedProducts(u.orgId, supplierId)
+    return this.catalog.listSyncedProducts(u.orgId, supplierId, {
+      search,
+      limit:  limit  ? Number(limit)  : undefined,
+      offset: offset ? Number(offset) : undefined,
+    })
   }
 
   /** PUT .../products/:spId/adjustment — ajuste de custo de um produto. */

@@ -504,17 +504,34 @@ export class IcarusCatalogService {
     return changed
   }
 
-  /** Produtos já vinculados ao fornecedor — pra tela de ajuste por produto. */
-  async listSyncedProducts(orgId: string, supplierId: string) {
-    const { data, error } = await supabaseAdmin
+  /** Produtos já vinculados ao fornecedor — pra tela de ajuste por produto.
+   *  Paginado (limit/offset) e com busca opcional por nome do produto. */
+  async listSyncedProducts(
+    orgId: string,
+    supplierId: string,
+    opts: { limit?: number; offset?: number; search?: string } = {},
+  ) {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200)
+    const offset = Math.max(opts.offset ?? 0, 0)
+
+    let q = supabaseAdmin
       .from('supplier_products')
-      .select('id, product_id, supplier_sku, supplier_gross_price, cost_adjustment_type, cost_adjustment_value, unit_cost, partner_stock, products(name, sku)')
+      .select(
+        'id, product_id, supplier_sku, supplier_gross_price, cost_adjustment_type, cost_adjustment_value, unit_cost, partner_stock, products!inner(name, sku)',
+        { count: 'exact' },
+      )
       .eq('organization_id', orgId)
       .eq('supplier_id', supplierId)
+
+    const search = (opts.search ?? '').replace(/[%,()*]/g, ' ').trim()
+    if (search) q = q.ilike('products.name', `%${search}%`)
+
+    const { data, error, count } = await q
       .order('updated_at', { ascending: false })
+      .range(offset, offset + limit - 1)
     if (error) throw new BadRequestException(error.message)
 
-    return (data ?? []).map(sp => {
+    const items = (data ?? []).map(sp => {
       const prod = Array.isArray(sp.products) ? sp.products[0] : sp.products
       return {
         id:                    sp.id,
@@ -528,5 +545,6 @@ export class IcarusCatalogService {
         partner_stock:         sp.partner_stock,
       }
     })
+    return { items, total: count ?? 0, limit, offset }
   }
 }
