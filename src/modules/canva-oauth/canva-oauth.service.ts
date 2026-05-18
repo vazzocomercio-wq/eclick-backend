@@ -457,6 +457,106 @@ export class CanvaOauthService {
     return new BadRequestException(`Canva ${endpoint}: ${(e as Error).message}`)
   }
 
+  // ── Designs list + export (Loja Propria Fase 7) ─────────────────────────
+
+  /** Lista os designs da conta Canva do usuario, pra usar como inspiracao. */
+  async listDesigns(
+    orgId: string,
+    query?: string,
+  ): Promise<Array<{ id: string; title: string; thumbnailUrl: string | null }>> {
+    this.getEnv()
+    const token = await this.getValidAccessToken(orgId)
+    if (!token) {
+      throw new BadRequestException('Conecte sua conta Canva nas Integrações primeiro.')
+    }
+    const params = new URLSearchParams({ limit: '30', ownership: 'owned' })
+    if (query && query.trim()) params.set('query', query.trim().slice(0, 255))
+    try {
+      const res = await axios.get<{
+        items?: Array<{ id: string; title?: string; thumbnail?: { url?: string } }>
+      }>(`${CANVA_API_BASE}/designs?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 20_000,
+      })
+      return (res.data.items ?? []).map(d => ({
+        id:           d.id,
+        title:        d.title ?? 'Sem título',
+        thumbnailUrl: d.thumbnail?.url ?? null,
+      }))
+    } catch (e) {
+      this.logCanvaError('designs.list', e)
+      throw this.canvaErrorToHttp('designs.list', e)
+    }
+  }
+
+  /** Exporta um design do Canva como PNG e devolve em base64. */
+  async exportDesignAsBase64(orgId: string, designId: string): Promise<string> {
+    this.getEnv()
+    const token = await this.getValidAccessToken(orgId)
+    if (!token) {
+      throw new BadRequestException('Conecte sua conta Canva nas Integrações primeiro.')
+    }
+
+    // 1. Cria o job de export
+    let jobId: string | undefined
+    try {
+      const res = await axios.post<{ job: { id: string; status: string } }>(
+        `${CANVA_API_BASE}/exports`,
+        { design_id: designId, format: { type: 'png' } },
+        {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          timeout: 30_000,
+        },
+      )
+      jobId = res.data?.job?.id
+    } catch (e) {
+      this.logCanvaError('exports', e)
+      throw this.canvaErrorToHttp('exports', e)
+    }
+    if (!jobId) throw new BadRequestException('Canva não retornou o job de exportação')
+
+    // 2. Poll ate success (backoff 2..7s, ~27s max)
+    let downloadUrl: string | undefined
+    for (let i = 0; i < 6; i++) {
+      await new Promise(r => setTimeout(r, 2000 + i * 1000))
+      try {
+        const jobRes = await axios.get<{
+          job: { status: string; urls?: string[]; error?: { message?: string } }
+        }>(`${CANVA_API_BASE}/exports/${jobId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10_000,
+        })
+        const st = jobRes.data?.job?.status
+        if (st === 'success') {
+          downloadUrl = jobRes.data?.job?.urls?.[0]
+          break
+        }
+        if (st === 'failed') {
+          throw new BadRequestException(
+            `Exportação do Canva falhou: ${jobRes.data?.job?.error?.message ?? 'desconhecido'}`,
+          )
+        }
+      } catch (e) {
+        if (e instanceof BadRequestException) throw e
+        this.logCanvaError(`exports/${jobId} (poll #${i})`, e)
+      }
+    }
+    if (!downloadUrl) {
+      throw new BadRequestException('A exportação do Canva demorou demais. Tente de novo.')
+    }
+
+    // 3. Download + base64
+    try {
+      const img = await axios.get<ArrayBuffer>(downloadUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30_000,
+      })
+      return Buffer.from(img.data).toString('base64')
+    } catch (e) {
+      throw new BadRequestException(`Não foi possível baixar a imagem do Canva: ${(e as Error).message}`)
+    }
+  }
+
   // ── Cron cleanup de oauth_state ─────────────────────────────────────────
 
   /** A cada 15min, deleta rows expirados ou consumidos há mais de 1h. */

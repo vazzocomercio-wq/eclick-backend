@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Put, Body, UseGuards, BadRequestException,
+  Controller, Get, Post, Put, Body, Query, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -8,11 +8,13 @@ import { StorefrontDesignService } from './storefront-design.service'
 interface ReqUserPayload { id: string; orgId: string | null }
 
 /**
- * Loja Propria — Fase 2: Designer de loja com IA.
+ * Loja Propria — Designer de loja com IA (Fases 2/5/6/7).
  *
  *   POST /store/config/design/generate             { prompt, inspirationId? }
  *   POST /store/config/design/generate-from-image  { imageBase64, imageMimeType?, prompt? }
  *   POST /store/config/design/hero-image           { prompt? }
+ *   GET  /store/config/design/canva/designs        ?query=
+ *   POST /store/config/design/canva/generate       { designId, prompt? }
  *   PUT  /store/config/design                      { design }
  */
 @Controller('store/config/design')
@@ -50,6 +52,25 @@ export class StorefrontDesignController {
   generateHeroImage(@ReqUser() u: ReqUserPayload, @Body() body: { prompt?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.generateHeroImage(u.orgId, { prompt: body?.prompt })
+  }
+
+  @Get('canva/designs')
+  listCanvaDesigns(@ReqUser() u: ReqUserPayload, @Query('query') query?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listCanvaDesigns(u.orgId, query)
+  }
+
+  @Post('canva/generate')
+  generateFromCanva(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { designId?: string; prompt?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.designId) throw new BadRequestException('designId obrigatório')
+    return this.svc.generateFromCanvaDesign(u.orgId, {
+      designId: body.designId,
+      prompt:   body.prompt,
+    })
   }
 
   @Put()

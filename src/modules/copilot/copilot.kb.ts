@@ -2562,6 +2562,7 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - **Aplicar modelo selecionado** — usa o modelo escolhido direto, sem IA.
 - **Gerar com IA** — descreva no campo de texto o estilo, as cores e a sensação que quer; a IA monta o design completo (tema, blocos e textos). Se um modelo estiver selecionado, ele vira o ponto de partida.
 - **Inspiração visual** — na aba "Gerar com IA" também dá pra subir um print de uma loja de referência; a IA analisa a imagem (cores, fontes, estilo) e cria a sua loja no mesmo espírito.
+- **Inspiração do Canva** — conecte sua conta Canva na aba "Gerar com IA" e escolha um dos seus designs; a IA exporta e analisa ele como referência visual.
 - **Ajustar à mão** — a aba "Ajustar à mão" abre um editor manual: cores, fonte, cantos, densidade e quais blocos aparecem. Refina o que a IA gerou sem precisar de outro prompt.
 - **Imagem do banner** — ainda na aba "Ajustar à mão", o botão "Gerar imagem do banner" cria com IA uma foto pro topo da loja, combinando com o estilo do design.
 - O **preview ao lado** mostra a vitrine na hora. Não gostou? Ajuste o texto e gere de novo.

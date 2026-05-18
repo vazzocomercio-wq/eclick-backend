@@ -3,6 +3,7 @@ import axios from 'axios'
 import { randomUUID } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
+import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
 import type { GenerateTextOutput, GenerateImageOutput } from '../ai/types'
 import type { StorefrontDesign, HeroSection, FontPair } from './storefront-design.types'
 import { STOREFRONT_TEMPLATE_MAP, DEFAULT_DESIGN } from './storefront-design.templates'
@@ -76,7 +77,33 @@ interface GenerateInput {
 export class StorefrontDesignService {
   private readonly logger = new Logger(StorefrontDesignService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly canva: CanvaOauthService,
+  ) {}
+
+  /** Lista os designs do Canva do usuario (pra usar como inspiracao visual). */
+  async listCanvaDesigns(
+    orgId: string,
+    query?: string,
+  ): Promise<Array<{ id: string; title: string; thumbnailUrl: string | null }>> {
+    return this.canva.listDesigns(orgId, query)
+  }
+
+  /** Gera o design da loja a partir de um design do Canva (export PNG -> visao). */
+  async generateFromCanvaDesign(
+    orgId: string,
+    input: { designId: string; prompt?: string },
+  ): Promise<{ design: StorefrontDesign }> {
+    const designId = (input.designId ?? '').trim()
+    if (!designId) throw new BadRequestException('Escolha um design do Canva.')
+    const imageBase64 = await this.canva.exportDesignAsBase64(orgId, designId)
+    return this.generateFromImage(orgId, {
+      imageBase64,
+      imageMimeType: 'image/png',
+      prompt:        input.prompt,
+    })
+  }
 
   /** Gera a receita de design via IA e salva em store_config.design. */
   async generateDesign(orgId: string, input: GenerateInput): Promise<{ design: StorefrontDesign }> {
