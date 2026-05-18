@@ -637,6 +637,31 @@ const COMPRAS_PRICING_ENTRIES: KbEntry[] = [
     tags: ['compras', 'suppliers'],
   },
   {
+    routes:   ['/dashboard/compras/fornecedores/[id]'],
+    category: 'compras',
+    title:    'Integração Icarus (Pennacorp) — catálogo do fornecedor',
+    content: `**Aba Icarus** na página do fornecedor — conecta o ERP Icarus (Pennacorp) e sincroniza catálogo + estoque do fornecedor de dropship.
+
+**Conectar**: cole o access token recebido da Pennacorp. É validado na hora e guardado criptografado.
+
+**Sincronizar catálogo**:
+- "Puxar catálogo" traz os produtos do ERP pra uma área de staging.
+- A lista mostra o status: ✅ Sincronizado · 🔵 Disponível (você já tem o produto) · ⚪ Sem cadastro.
+- Selecione e clique "Sincronizar" — casa por SKU com um produto existente; se não achar, cria produto novo já vinculado.
+- Não importa o catálogo inteiro — você escolhe item a item o que entra.
+
+**Custo (preço do fornecedor = seu custo)**:
+- O preço de venda do fornecedor é o preço BRUTO.
+- Desconto geral (% ou R$ fixo) na ficha do fornecedor — vale pra todos os produtos.
+- Ajuste por produto (% / R$ / preço manual) — quando preenchido, ignora o geral.
+- Custo líquido = bruto − ajuste. É o que alimenta o motor de margem.
+
+**Estoque**: cron a cada 15 min mantém o estoque do fornecedor atualizado. Preço: cron a cada 1 h.
+
+**Importante**: nada é enviado de volta pro ERP — a integração só lê. O ajuste de custo é só do nosso lado.`,
+    tags: ['compras', 'suppliers', 'icarus', 'dropship', 'pennacorp'],
+  },
+  {
     routes:   ['/dashboard/pricing/configuracao', '/dashboard/pricing/analise'],
     category: 'pricing',
     title:    'Pricing — análise vs concorrência',

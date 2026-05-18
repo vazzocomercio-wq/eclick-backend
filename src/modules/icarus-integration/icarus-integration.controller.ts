@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Delete, Param, Body, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Put, Delete, Param, Query, Body, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
 import { IcarusIntegrationService, type ConnectInput } from './icarus-integration.service'
+import { IcarusCatalogService } from './icarus-catalog.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
@@ -15,7 +16,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('suppliers/:supplierId/integrations/icarus')
 @UseGuards(SupabaseAuthGuard)
 export class IcarusIntegrationController {
-  constructor(private readonly service: IcarusIntegrationService) {}
+  constructor(
+    private readonly service: IcarusIntegrationService,
+    private readonly catalog: IcarusCatalogService,
+  ) {}
 
   /** POST /suppliers/:supplierId/integrations/icarus
    *  Conecta (ou reconecta) Icarus pro fornecedor. Faz ping antes de persistir. */
@@ -61,6 +65,91 @@ export class IcarusIntegrationController {
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.service.disconnect(u.orgId, supplierId)
+  }
+
+  // ── Catálogo / sincronização ───────────────────────────────────────────
+
+  /** POST .../catalog/pull — puxa o catálogo do ERP pro staging. */
+  @Post('catalog/pull')
+  @HttpCode(HttpStatus.OK)
+  pullCatalog(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.pullCatalog(u.orgId, supplierId)
+  }
+
+  /** GET .../catalog — lista do staging com status synced/available/new. */
+  @Get('catalog')
+  listCatalog(
+    @ReqUser() u: ReqUserPayload,
+    @Param('supplierId') supplierId: string,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.listCatalog(u.orgId, supplierId, {
+      status,
+      search,
+      limit:  limit  ? Number(limit)  : undefined,
+      offset: offset ? Number(offset) : undefined,
+    })
+  }
+
+  /** GET .../catalog/summary — contagem por status pro cabeçalho. */
+  @Get('catalog/summary')
+  catalogSummary(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.getCatalogSummary(u.orgId, supplierId)
+  }
+
+  /** POST .../catalog/sync — sincroniza os itens selecionados. */
+  @Post('catalog/sync')
+  @HttpCode(HttpStatus.OK)
+  syncCatalog(
+    @ReqUser() u: ReqUserPayload,
+    @Param('supplierId') supplierId: string,
+    @Body() body: { catalog_item_ids?: string[] },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.syncSelected(u.orgId, supplierId, body?.catalog_item_ids ?? [])
+  }
+
+  /** GET .../discount — desconto geral do fornecedor. */
+  @Get('discount')
+  getDiscount(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.getSupplierDiscount(u.orgId, supplierId)
+  }
+
+  /** PUT .../discount — define o desconto geral e recalcula custos. */
+  @Put('discount')
+  setDiscount(
+    @ReqUser() u: ReqUserPayload,
+    @Param('supplierId') supplierId: string,
+    @Body() body: { type?: 'percent' | 'fixed' | null; value?: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.setSupplierDiscount(u.orgId, supplierId, body?.type ?? null, Number(body?.value) || 0)
+  }
+
+  /** GET .../products — produtos já vinculados (pra ajuste por produto). */
+  @Get('products')
+  listSyncedProducts(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.catalog.listSyncedProducts(u.orgId, supplierId)
+  }
+
+  /** PUT .../products/:spId/adjustment — ajuste de custo de um produto. */
+  @Put('products/:spId/adjustment')
+  setProductAdjustment(
+    @ReqUser() u: ReqUserPayload,
+    @Param('spId') spId: string,
+    @Body() body: { type?: 'percent' | 'fixed' | 'override' | null; value?: number | null },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const value = body?.value == null ? null : Number(body.value)
+    return this.catalog.setProductAdjustment(u.orgId, spId, body?.type ?? null, value)
   }
 }
 

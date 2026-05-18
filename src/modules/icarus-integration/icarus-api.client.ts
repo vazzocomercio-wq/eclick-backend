@@ -4,55 +4,73 @@ import axios, { AxiosError, AxiosInstance } from 'axios'
 /**
  * Cliente HTTP da API Icarus (Pennacorp). Doc: https://www.pennacorp.com.br/mobile/api/public/apidoc/
  *
- * Sessão 2026-05-14 (Fase 1) — sem token real ainda; cliente já valida shape
- * de resposta e cacheia request_token em memória até a Pennacorp confirmar
- * TTL real (esperado: ~24h via JWT).
+ * Sessão 2026-05-18 — validado ao vivo com token real (empresa em_id 336).
+ * Achados do smoke test:
+ *   - Base real é /mobile/api (NÃO /mobile/api/public — lá só mora a doc).
+ *   - access_token / request_token vão como CAMPO POST form-urlencoded,
+ *     nunca na URL. Filtros de /produtos vão na query string.
+ *   - request_token traz a validade embutida (claim expTime, ~1h).
  *
  * Auth em 2 etapas:
- *   1. POST /generate/:access_token  → { request_token: "<jwt>" }
- *   2. Toda chamada subsequente usa :request_token na URL
+ *   1. POST /generate/  (campo access_token) → { request_token: "<jwt>" }
+ *   2. Toda chamada subsequente manda request_token como campo POST.
  *
- * Sem webhook — só polling. Endpoints suportam dtAlteracao (YYYYMMDD) pra
- * incremental, o que torna polling barato.
+ * Sem webhook — só polling.
  */
 
-const DEFAULT_BASE_URL = 'https://www.pennacorp.com.br/mobile/api/public'
+const DEFAULT_BASE_URL = 'https://www.pennacorp.com.br/mobile/api'
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /** Tempo que confiamos no request_token cacheado em memória antes de regenerar.
  *  Conservador (1h) até Pennacorp confirmar TTL real. */
 const REQUEST_TOKEN_TTL_MS = 60 * 60 * 1000
 
+/**
+ * Produto do /produtos. Validado ao vivo em 2026-05-18: a API mistura string
+ * e number nos campos numéricos — o consumidor deve coagir com Number().
+ */
 export interface IcarusProduct {
-  pt_code:        string
-  pt_descr:       string
-  pt_obs?:        string
-  pt_unid?:       string
-  dt_alteracao?:  string         // dd/mm/aa
-  pack?:          string         // string com decimal "3.000"
-  pb_codbar?:     string         // GTIN
-  pt_codegroup?:  string         // produto similar
-  fa_nome?:       string         // família
-  pt_multiplo?:   string         // venda mínima
-  pb_altura?:     string
-  pb_largura?:    string
-  pb_comprim?:    string
-  pb_peso?:       string         // peso bruto
-  pt_pesoliq?:    string         // peso líquido
-  pt_preco?:      string         // preço fixo (sem margem)
-  pt_qtd?:        string         // físico − reservas (disponível)
-  pt_reserva?:    string
-  pt_custo?:      string         // ⚠️ custo deles — ignorar pra dropship
-  pt_imagem?:     string
-  pt_marg_flag?:  boolean        // promo ativa?
-  margemp?:       string         // margem quando promo ativa
-  preco_final?:   string         // valor final (inclui promo) — PREFERIR este
+  pt_code:         string
+  pt_descr?:       string
+  pt_obs?:         string
+  pt_unid?:        string
+  dt_alteracao?:   string                   // dd/mm/aa
+  pt_cadastro?:    string                   // YYYY-MM-DD
+  pack?:           string | number
+  pb_codbar?:      string                   // GTIN
+  pt_codegroup?:   string                   // produto similar
+  fa_nome?:        string                   // família (nome)
+  fa_number?:      string | number          // família (número)
+  pt_multiplo?:    string | number          // venda mínima
+  pb_altura?:      string | number
+  pb_largura?:     string | number
+  pb_comprim?:     string | number
+  pb_peso?:        string | number          // peso bruto
+  pt_pesoliq?:     string | number          // peso líquido
+  pt_preco?:       string | number          // preço fixo (0 quando trabalha com margem)
+  pt_qtd?:         string | number          // físico − reservas (disponível)
+  pt_reserva?:     string | number
+  pt_custo?:       string | number          // ⚠️ custo deles — pode vir oculto
+  pt_imagem?:      string
+  pt_marg_flag?:   string | boolean         // 'T' = promoção ativa
+  margemp?:        string | number | null
+  preco_final?:    string | number          // preço de venda do fornecedor — PREFERIR este
+  preco_original?: string | number          // preço antes da promoção dele
+  mercado?:        string
 }
 
 export interface IcarusStockItem {
   pt_code:  string
   pt_descr: string
   estoque:  string             // string com decimal "12.000"
+}
+
+/** Item de movimento do /estoque_v2 — mo_number é o cursor de paginação. */
+export interface IcarusStockMovement {
+  pt_code:   string
+  pt_descr:  string
+  pt_qtd:    number | string   // saldo disponível atual
+  mo_number: number            // número da movimentação (cursor)
 }
 
 export interface IcarusProductsFilters {
@@ -117,7 +135,9 @@ export class IcarusApiClient {
     const ax = this.buildAxios(config)
     try {
       const res = await ax.post<{ request_token?: string }>(
-        `/generate/${encodeURIComponent(accessToken)}`,
+        '/generate/',
+        new URLSearchParams({ access_token: accessToken }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
       )
       const requestToken = res.data?.request_token
       if (!requestToken || typeof requestToken !== 'string') {
@@ -181,9 +201,9 @@ export class IcarusApiClient {
 
     try {
       const res = await ax.post<IcarusListResponse<IcarusProduct>>(
-        `/produtos/${encodeURIComponent(requestToken)}`,
-        null,
-        { params },
+        '/produtos',
+        new URLSearchParams({ request_token: requestToken }),
+        { params, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
       )
       return this.normalizeListResponse(res.data)
     } catch (e) {
@@ -192,8 +212,13 @@ export class IcarusApiClient {
   }
 
   /**
-   * POST /estoque/:request_token?dtAlteracao=YYYYMMDD — busca só os SKUs
-   * com saldo alterado desde a data. Ideal pra cron incremental.
+   * ⚠️ DEPRECATED — endpoint /estoque antigo. A Pennacorp migrou pra estoque_v2.
+   * Fase 3 deve reescrever pra (mecânica validada ao vivo em 2026-05-18):
+   *   POST /estoque_v2  — campos POST: request_token, num_movimento
+   *   resposta: { data: [{ pt_code, pt_descr, pt_qtd, mo_number }], total, status }
+   *   - devolve no MÁXIMO 100 movimentos por chamada → paginar
+   *   - mo_number é o cursor: próxima página usa num_movimento = max(mo_number) + 1
+   *   - 1ª chamada: num_movimento=100 (valores 0 e 1 são rejeitados como inválidos)
    */
   async listStockChanges(
     accessToken: string,
@@ -211,13 +236,38 @@ export class IcarusApiClient {
 
     try {
       const res = await ax.post<IcarusListResponse<IcarusStockItem>>(
-        `/estoque/${encodeURIComponent(requestToken)}`,
-        null,
-        { params },
+        '/estoque',
+        new URLSearchParams({ request_token: requestToken }),
+        { params, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
       )
       return this.normalizeListResponse(res.data)
     } catch (e) {
       this.handleAxiosError(e, '/estoque')
+    }
+  }
+
+  /**
+   * POST /estoque_v2 — 1 página (no máximo 100 movimentos) a partir de
+   * `num_movimento`. Cada item traz `mo_number`; a próxima página usa
+   * num_movimento = max(mo_number) + 1. Sem mais movimentos → status 'empty'
+   * e data = []. Valores 0 e 1 são rejeitados — na 1ª chamada use 100.
+   */
+  async listStockV2(
+    accessToken: string,
+    numMovimento: number,
+    config: IcarusClientConfig = {},
+  ): Promise<IcarusListResponse<IcarusStockMovement>> {
+    const requestToken = await this.getRequestToken(accessToken, config)
+    const ax = this.buildAxios(config)
+    try {
+      const res = await ax.post<IcarusListResponse<IcarusStockMovement>>(
+        '/estoque_v2',
+        new URLSearchParams({ request_token: requestToken, num_movimento: String(numMovimento) }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+      )
+      return this.normalizeListResponse(res.data)
+    } catch (e) {
+      this.handleAxiosError(e, '/estoque_v2')
     }
   }
 
