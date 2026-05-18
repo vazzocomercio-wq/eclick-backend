@@ -400,6 +400,20 @@ export class IcarusCatalogService {
       const { error } = await supabaseAdmin.from('supplier_products').insert(row)
       if (error) throw new Error(error.message)
     }
+
+    // O custo líquido também alimenta o CMV (cost_price) do produto.
+    await this.syncProductCost(orgId, productId, netCost)
+  }
+
+  /** Espelha o custo líquido (preço do fornecedor menos o ajuste) no CMV —
+   *  products.cost_price — do produto. */
+  private async syncProductCost(orgId: string, productId: string, cost: number): Promise<void> {
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update({ cost_price: cost, updated_at: new Date().toISOString() })
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+    if (error) throw new Error(`falha ao atualizar CMV do produto: ${error.message}`)
   }
 
   // ── Desconto / ajuste de custo ──────────────────────────────────────────
@@ -451,7 +465,7 @@ export class IcarusCatalogService {
     }
     const { data: sp } = await supabaseAdmin
       .from('supplier_products')
-      .select('id, supplier_id, supplier_gross_price')
+      .select('id, supplier_id, product_id, supplier_gross_price')
       .eq('id', supplierProductId)
       .eq('organization_id', orgId)
       .maybeSingle()
@@ -476,6 +490,8 @@ export class IcarusCatalogService {
       })
       .eq('id', supplierProductId)
     if (error) throw new BadRequestException(error.message)
+
+    await this.syncProductCost(orgId, sp.product_id as string, netCost)
     return { ok: true, unit_cost: netCost }
   }
 
@@ -486,7 +502,7 @@ export class IcarusCatalogService {
 
     const { data: sps } = await supabaseAdmin
       .from('supplier_products')
-      .select('id, supplier_gross_price, cost_adjustment_type, cost_adjustment_value, unit_cost')
+      .select('id, product_id, supplier_gross_price, cost_adjustment_type, cost_adjustment_value, unit_cost')
       .eq('organization_id', orgId)
       .eq('supplier_id', supplierId)
 
@@ -504,6 +520,7 @@ export class IcarusCatalogService {
           .from('supplier_products')
           .update({ unit_cost: newCost, last_cost_change_at: now, updated_at: now })
           .eq('id', sp.id)
+        await this.syncProductCost(orgId, sp.product_id as string, newCost)
         changed++
       }
     }
