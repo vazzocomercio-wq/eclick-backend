@@ -25,6 +25,19 @@ export interface DiscountInfo {
   value: number
 }
 
+/** Campos extraídos do payload Pennacorp pra enriquecer um produto. */
+interface ProductEnrichment {
+  description:       string | null
+  category:          string | null
+  gtin:              string | null
+  weight_kg:         number | null
+  height_cm:         number | null
+  width_cm:          number | null
+  length_cm:         number | null
+  image_url:         string | null
+  supplier_raw_data: Record<string, unknown>
+}
+
 @Injectable()
 export class IcarusCatalogService {
   private readonly log = new Logger(IcarusCatalogService.name)
@@ -231,19 +244,25 @@ export class IcarusCatalogService {
     return { synced: items.length - failed, created_products: created, linked_existing: linked, failed }
   }
 
-  /** Acha o produto da org pelo SKU; se não houver, cria um rascunho vinculado. */
+  /** Acha o produto da org pelo SKU; se não houver, cria um rascunho vinculado.
+   *  Em ambos os casos enriquece o produto com os dados da Pennacorp. */
   private async resolveOrCreateProduct(
     orgId: string,
     supplierId: string,
     item: Record<string, any>,
   ): Promise<{ id: string; created: boolean }> {
+    const enr = this.buildEnrichment(item)
+
     const { data: existing } = await supabaseAdmin
       .from('products')
       .select('id')
       .eq('organization_id', orgId)
       .eq('sku', item.external_code)
       .maybeSingle()
-    if (existing) return { id: existing.id, created: false }
+    if (existing) {
+      await this.enrichExistingProduct(orgId, existing.id as string, enr)
+      return { id: existing.id as string, created: false }
+    }
 
     const { data: novo, error } = await supabaseAdmin
       .from('products')
@@ -251,9 +270,16 @@ export class IcarusCatalogService {
         organization_id:       orgId,
         name:                  item.name ?? item.external_code,
         sku:                   item.external_code,
-        gtin:                  item.external_barcode ?? null,
+        gtin:                  enr.gtin,
         brand:                 'Cinderella Decor',
-        photo_urls:            item.image_url ? [item.image_url] : [],
+        photo_urls:            enr.image_url ? [enr.image_url] : [],
+        description:           enr.description,
+        category:              enr.category,
+        weight_kg:             enr.weight_kg,
+        height_cm:             enr.height_cm,
+        width_cm:              enr.width_cm,
+        length_cm:             enr.length_cm,
+        supplier_raw_data:     enr.supplier_raw_data,
         status:                'draft',
         condition:             'new',
         preferred_supplier_id: supplierId,
@@ -262,6 +288,70 @@ export class IcarusCatalogService {
       .single()
     if (error || !novo) throw new Error(error?.message ?? 'falha ao criar produto')
     return { id: novo.id, created: true }
+  }
+
+  /** Extrai os campos de enriquecimento do item do catálogo (payload Pennacorp). */
+  private buildEnrichment(item: Record<string, any>): ProductEnrichment {
+    const raw = (item.raw ?? {}) as Record<string, any>
+    const posNum = (v: unknown): number | null => {
+      const n = Number(v)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const text = (v: unknown): string | null => {
+      const s = v == null ? '' : String(v).trim()
+      return s || null
+    }
+    return {
+      description:       text(raw.pt_obs),
+      category:          text(item.family) ?? text(raw.fa_nome),
+      gtin:              text(item.external_barcode) ?? text(raw.pb_codbar),
+      weight_kg:         posNum(raw.pb_peso) ?? posNum(raw.pt_pesoliq),
+      height_cm:         posNum(raw.pb_altura),
+      width_cm:          posNum(raw.pb_largura),
+      length_cm:         posNum(raw.pb_comprim),
+      image_url:         text(item.image_url) ?? text(raw.pt_imagem),
+      supplier_raw_data: raw,
+    }
+  }
+
+  /** Enriquece um produto JÁ existente — preenche só os campos vazios (não
+   *  sobrescreve o que o usuário editou). supplier_raw_data é sempre atualizado. */
+  private async enrichExistingProduct(
+    orgId: string,
+    productId: string,
+    enr: ProductEnrichment,
+  ): Promise<void> {
+    const { data: cur } = await supabaseAdmin
+      .from('products')
+      .select('description, category, gtin, weight_kg, height_cm, width_cm, length_cm, photo_urls')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!cur) return
+
+    const emptyText = (v: unknown) => v == null || String(v).trim() === ''
+    const emptyNum  = (v: unknown) => v == null || Number(v) === 0
+    const patch: Record<string, unknown> = {
+      supplier_raw_data: enr.supplier_raw_data,
+      updated_at:        new Date().toISOString(),
+    }
+    if (emptyText(cur.description) && enr.description) patch.description = enr.description
+    if (emptyText(cur.category)    && enr.category)    patch.category    = enr.category
+    if (emptyText(cur.gtin)        && enr.gtin)        patch.gtin        = enr.gtin
+    if (emptyNum(cur.weight_kg)    && enr.weight_kg)   patch.weight_kg   = enr.weight_kg
+    if (emptyNum(cur.height_cm)    && enr.height_cm)   patch.height_cm   = enr.height_cm
+    if (emptyNum(cur.width_cm)     && enr.width_cm)    patch.width_cm    = enr.width_cm
+    if (emptyNum(cur.length_cm)    && enr.length_cm)   patch.length_cm   = enr.length_cm
+    if ((!Array.isArray(cur.photo_urls) || cur.photo_urls.length === 0) && enr.image_url) {
+      patch.photo_urls = [enr.image_url]
+    }
+
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update(patch)
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+    if (error) throw new Error(`falha ao enriquecer produto: ${error.message}`)
   }
 
   /** Cria ou atualiza o vínculo supplier_products (custo líquido + estoque do parceiro). */
