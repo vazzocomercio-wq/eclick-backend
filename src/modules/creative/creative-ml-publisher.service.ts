@@ -6,6 +6,7 @@ import { MlShippingCostService, type ShippingCostResult } from '../mercadolivre/
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
 import { LlmService } from '../ai/llm.service'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -152,11 +153,12 @@ export class CreativeMlPublisherService {
   private readonly logger = new Logger(CreativeMlPublisherService.name)
 
   constructor(
-    private readonly creative:     CreativeService,
-    private readonly ml:           MercadolivreService,
-    private readonly shipping:     MlShippingCostService,
-    private readonly llm:          LlmService,
-    private readonly activeBridge: ActiveBridgeClient,
+    private readonly creative:       CreativeService,
+    private readonly ml:             MercadolivreService,
+    private readonly shipping:       MlShippingCostService,
+    private readonly llm:            LlmService,
+    private readonly activeBridge:   ActiveBridgeClient,
+    private readonly activeResolver: ActiveResolverService,
   ) {}
 
   /**
@@ -1016,18 +1018,7 @@ export class CreativeMlPublisherService {
     if (!catalogProductId) return
     if (!this.activeBridge.isConfigured()) return
 
-    const { data: assignment } = await supabaseAdmin
-      .from('product_operator_assignments')
-      .select('active_deal_id')
-      .eq('organization_id', orgId)
-      .eq('product_id', catalogProductId)
-      .in('status', ['open', 'in_progress'])
-      .not('active_deal_id', 'is', null)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    const dealId = (assignment as { active_deal_id: string | null } | null)?.active_deal_id
+    const dealId = await this.activeResolver.findCardDealForProduct(orgId, catalogProductId)
     if (!dealId) {
       this.logger.log(`[creative.ml.publish] anúncio sem card de cadastro no Active — move-card pulado`)
       return

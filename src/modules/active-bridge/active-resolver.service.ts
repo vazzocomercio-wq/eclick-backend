@@ -110,6 +110,34 @@ export class ActiveResolverService {
     }))
   }
 
+  /**
+   * Acha o deal Active vinculado a um produto do catálogo SaaS.
+   *
+   * O vínculo vem de `product_operator_assignments` — a row criada quando
+   * o gestor despacha o produto pra Operação de Cadastro (cria 1 card no
+   * funil "Anúncios ML" do Active). Retorna o `active_deal_id` da
+   * assignment mais recente (o card vivo), ou null se o produto nunca foi
+   * despachado.
+   *
+   * Não filtra por status da assignment de propósito: o que importa é o
+   * deal, e o move-card do bridge já é forward-only + idempotente.
+   */
+  async findCardDealForProduct(
+    orgId:            string,
+    catalogProductId: string,
+  ): Promise<string | null> {
+    const { data } = await supabaseAdmin
+      .from('product_operator_assignments')
+      .select('active_deal_id')
+      .eq('organization_id', orgId)
+      .eq('product_id', catalogProductId)
+      .not('active_deal_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return (data as { active_deal_id: string | null } | null)?.active_deal_id ?? null
+  }
+
   /** Lista stages de um pipeline ordenados por position. */
   async listStages(saasUserId: string, pipelineId: string): Promise<ActiveStage[]> {
     // Resolve org pra defender contra IDs de outra org

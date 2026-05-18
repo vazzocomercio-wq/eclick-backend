@@ -22,6 +22,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { MlCampaignsApiClient, CampaignsRateLimitedException } from './ml-campaigns-api.client'
 import type {
   MlPromotionListItem,
@@ -43,8 +45,10 @@ export class MlCampaignsSyncService {
   private readonly logger = new Logger(MlCampaignsSyncService.name)
 
   constructor(
-    private readonly ml:     MercadolivreService,
-    private readonly client: MlCampaignsApiClient,
+    private readonly ml:             MercadolivreService,
+    private readonly client:         MlCampaignsApiClient,
+    private readonly activeBridge:   ActiveBridgeClient,
+    private readonly activeResolver: ActiveResolverService,
   ) {}
 
   /** Sync principal — fan-out se sellerId omitido.
@@ -668,6 +672,19 @@ export class MlCampaignsSyncService {
       .maybeSingle()
     const productId = (listingRow as { product_id: string } | null)?.product_id ?? null
 
+    // F3: detecta a transição pra 'started' — anúncio entrou numa campanha
+    // ativa. Lê o status anterior ANTES do upsert (que sobrescreve a row).
+    let justStarted = false
+    if (status === 'started' && productId) {
+      const { data: prior } = await supabaseAdmin
+        .from('ml_campaign_items')
+        .select('status')
+        .eq('campaign_id', campaignRowId)
+        .eq('ml_item_id',  it.id)
+        .maybeSingle()
+      justStarted = (prior as { status: string } | null)?.status !== 'started'
+    }
+
     // Health check
     const health = await this.assessHealth(productId)
 
@@ -702,6 +719,46 @@ export class MlCampaignsSyncService {
       .from('ml_campaign_items')
       .upsert(payload, { onConflict: 'campaign_id,ml_item_id' })
     if (error) this.logger.warn(`[campaigns] upsert item ${it.id} falhou: ${error.message}`)
+
+    // F3: anúncio entrou numa campanha ativa → avança o card do funil
+    // "Anúncios ML" pra "Incluir ADS". Só dispara na transição (não a cada
+    // sync de um item que já estava started). Fail-isolated.
+    if (justStarted && productId) {
+      try {
+        await this.advanceCardToAds(orgId, productId)
+      } catch (e) {
+        this.logger.warn(`[campaigns] move-card ADS falhou item=${it.id}: ${(e as Error).message}`)
+      }
+    }
+  }
+
+  /**
+   * Avança o card do anúncio no funil "Anúncios ML" do Active CRM pra a
+   * etapa "Incluir ADS" — chamado quando o anúncio entra numa campanha
+   * ativa. Acha o card pelo deal vinculado em product_operator_assignments
+   * (origem: dispatch de cadastro). Anúncio sem card de cadastro = no-op.
+   * O move-card do bridge é forward-only: se o card já passou de "Incluir
+   * ADS", nada acontece.
+   */
+  private async advanceCardToAds(orgId: string, catalogProductId: string): Promise<void> {
+    if (!this.activeBridge.isConfigured()) return
+
+    const dealId = await this.activeResolver.findCardDealForProduct(orgId, catalogProductId)
+    if (!dealId) return
+
+    const baseUrl = (process.env.FRONTEND_PUBLIC_URL ?? 'https://eclick.app.br').replace(/\/+$/, '')
+    const res = await this.activeBridge.moveCard({
+      deal_id:       dealId,
+      to_stage_name: 'Incluir ADS',
+      action_link: {
+        label: 'Gerenciar ADS',
+        url:   `${baseUrl}/dashboard/ads/mercadolivre`,
+      },
+    })
+    this.logger.log(
+      `[campaigns] move-card ADS deal=${dealId} → Incluir ADS ` +
+      `(found=${res.found} moved=${res.moved}${res.reason ? ` reason=${res.reason}` : ''})`,
+    )
   }
 
   private async assessHealth(productId: string | null): Promise<HealthAssessment> {
