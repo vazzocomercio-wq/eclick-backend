@@ -144,6 +144,25 @@ Cada bucket lista top 5 produtos. Click no produto → \`/dashboard/produtos/[id
 - Top performers: copie o que funciona neles (estrutura de descrição, fotos) pros outros`,
     tags: ['catalog', 'recommendations', 'health'],
   },
+  {
+    routes:   ['/dashboard/radar', '/dashboard/radar/[id]'],
+    category: 'catalogo',
+    title:    'Radar IA — disputa de catálogo e teto de preço',
+    content: `**e-Click Radar IA.** Monitora a concorrência por produto de catálogo no Mercado Livre — quem está ganhando a ponta, preços dos concorrentes e demanda estimada.
+
+**Status do catálogo** (coluna "Catálogo"): Ganhando / Empatado / Perdendo. Vem ao vivo da API do ML (price_to_win); enquanto a coleta diária não roda, cai num heurístico de menor preço.
+
+**Ajustar preço** (modal): puxa custo, imposto, tarifa ML e frete reais pra calcular a margem em qualquer preço. Altera o preço do anúncio no ML de verdade.
+- **Perdendo** → mostra o **"Preço pra ganhar"**: o valor que o ML diz que você precisa pra retomar a ponta.
+- **Ganhando** → mostra o **"Teto do catálogo"**: o preço do concorrente mais barato − R$ 0,01. É até onde dá pra **subir** o preço e seguir ganhando — protege margem sem perder a disputa. A margem nesse teto já aparece no card.
+
+**Folga** (na lista, itens que você ganha): \`↑ R$ X\` em verde = quanto dá pra subir até alcançar o concorrente mais barato.
+
+**Como usar pra proteger margem**: se você está ganhando folgado (preço bem abaixo do concorrente), suba o preço em direção ao teto — você ganha margem sem perder a ponta.
+
+**Ressalvas**: o teto usa os preços da última coleta do Radar (não é ao vivo). E o vencedor do catálogo no ML não é só preço — reputação, frete grátis e Full também pesam; ser o mais barato é o fator mais forte, então o teto é um piso seguro, não garantia absoluta.`,
+    tags: ['radar', 'catalogo', 'concorrencia', 'preco', 'teto', 'price-to-win', 'margem'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════
