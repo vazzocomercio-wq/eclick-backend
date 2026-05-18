@@ -3,6 +3,8 @@ import { Cron } from '@nestjs/schedule'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -33,7 +35,11 @@ interface DailyMetricRow {
 export class MlAdsService {
   private readonly logger = new Logger(MlAdsService.name)
 
-  constructor(private readonly ml: MercadolivreService) {}
+  constructor(
+    private readonly ml:             MercadolivreService,
+    private readonly activeBridge:   ActiveBridgeClient,
+    private readonly activeResolver: ActiveResolverService,
+  ) {}
 
   // ── ML Ads API ────────────────────────────────────────────────────────────
 
@@ -492,6 +498,10 @@ export class MlAdsService {
       return { ok: false, advertiser_id: null, campaigns: 0, reports: 0, message: 'Conta sem ML Ads ativo' }
     }
 
+    // F4: snapshot dos anúncios já anunciados ANTES do sync — usado depois
+    // pra detectar quais entraram em ADS agora (funil "Anúncios ML").
+    const prevAdvertised = await this.collectAdvertisedItemIds(orgId)
+
     // Sweep any pre-existing rows with bad ids before this mapper was hardened.
     await supabaseAdmin
       .from('ml_ads_campaigns')
@@ -628,7 +638,87 @@ export class MlAdsService {
     }
 
     this.logger.log(`[ml-ads.sync] org=${orgId} ${advertisers.length} advertisers, ${totalCampaigns} campanhas, ${totalReports} reports`)
+
+    // F4: anúncios que entraram numa campanha ADS desde o último sync →
+    // avança o card do funil "Anúncios ML" pra "Concluído". Fail-isolated.
+    try {
+      const nowAdvertised   = await this.collectAdvertisedItemIds(orgId)
+      const newlyAdvertised = [...nowAdvertised].filter(id => !prevAdvertised.has(id))
+      if (newlyAdvertised.length > 0) {
+        await this.advanceCardsToCompleted(orgId, newlyAdvertised)
+      }
+    } catch (e: any) {
+      this.logger.warn(`[ml-ads.sync] move-card Concluído falhou: ${e?.message}`)
+    }
+
     return { ok: true, advertiser_id: advertisers[0].advertiser_id, campaigns: totalCampaigns, reports: totalReports }
+  }
+
+  /** Reúne todos os ml_item_id (MLB) presentes nos arrays `items` das
+   *  campanhas ADS da org. O array vem como string[] ou {item_id}[]. */
+  private async collectAdvertisedItemIds(orgId: string): Promise<Set<string>> {
+    const { data, error } = await supabaseAdmin
+      .from('ml_ads_campaigns')
+      .select('items')
+      .eq('organization_id', orgId)
+    if (error) {
+      if (!this.isMissingTableError(error)) {
+        this.logger.warn(`[ml-ads] collectAdvertisedItemIds: ${error.message}`)
+      }
+      return new Set()
+    }
+    const set = new Set<string>()
+    for (const row of (data ?? []) as Array<{ items: unknown }>) {
+      const itemsRaw = Array.isArray(row.items) ? row.items : []
+      for (const i of itemsRaw) {
+        const id = typeof i === 'string' ? i : (i as { item_id?: string })?.item_id
+        if (id) set.add(id)
+      }
+    }
+    return set
+  }
+
+  /**
+   * Avança pra etapa "Concluído" os cards do funil "Anúncios ML" cujos
+   * anúncios entraram numa campanha ADS agora. Resolve MLB → produto do
+   * catálogo (products.ml_listing_id) → deal vinculado em
+   * product_operator_assignments. Anúncio sem card de cadastro = no-op.
+   * O move-card do bridge é forward-only: re-disparos são inofensivos.
+   */
+  private async advanceCardsToCompleted(orgId: string, newlyAdvertisedMlbs: string[]): Promise<void> {
+    if (!this.activeBridge.isConfigured()) return
+
+    // Lookup MLB → produto, em lotes pra não estourar limite de URL do PostgREST.
+    const products: Array<{ id: string; ml_listing_id: string }> = []
+    for (let i = 0; i < newlyAdvertisedMlbs.length; i += 150) {
+      const batch = newlyAdvertisedMlbs.slice(i, i + 150)
+      const { data } = await supabaseAdmin
+        .from('products')
+        .select('id, ml_listing_id')
+        .eq('organization_id', orgId)
+        .in('ml_listing_id', batch)
+      products.push(...((data ?? []) as Array<{ id: string; ml_listing_id: string }>))
+    }
+    if (products.length === 0) return
+
+    for (const p of products) {
+      try {
+        const dealId = await this.activeResolver.findCardDealForProduct(orgId, p.id)
+        if (!dealId) continue
+        const res = await this.activeBridge.moveCard({
+          deal_id:       dealId,
+          to_stage_name: 'Concluído',
+          // ADS resolvido — limpa o botão "Gerenciar ADS" do card.
+          action_link:   null,
+        })
+        this.logger.log(
+          `[ml-ads.sync] move-card Concluído deal=${dealId} mlb=${p.ml_listing_id} ` +
+          `(found=${res.found} moved=${res.moved}${res.reason ? ` reason=${res.reason}` : ''})`,
+        )
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.sync] move-card Concluído produto=${p.id} falhou: ${e?.message}`)
+      }
+    }
   }
 
   /** Backwards-compat shim — algumas chamadas legadas ainda chamam syncAll().
