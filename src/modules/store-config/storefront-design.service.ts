@@ -34,7 +34,7 @@ FORMATO EXATO:
       "textMuted": "#rrggbb",   // texto secundário
       "border": "#rrggbb"       // bordas e divisórias
     },
-    "fontPair": "elegant" | "modern" | "bold" | "classic",
+    "fontPair": "elegant" | "modern" | "bold" | "classic" | "editorial" | "playful",
     "radius": "none" | "sm" | "md" | "lg",
     "density": "compact" | "cozy" | "spacious"
   },

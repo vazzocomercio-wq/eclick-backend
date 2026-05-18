@@ -7,7 +7,7 @@
  */
 
 export type ThemeMode = 'dark' | 'light'
-export type FontPair  = 'elegant' | 'modern' | 'bold' | 'classic'
+export type FontPair  = 'elegant' | 'modern' | 'bold' | 'classic' | 'editorial' | 'playful'
 export type Radius    = 'none' | 'sm' | 'md' | 'lg'
 export type Density   = 'compact' | 'cozy' | 'spacious'
 
@@ -90,6 +90,6 @@ export interface StorefrontDesign {
 
 // Conjuntos de valores validos — usados pelo validador runtime.
 export const THEME_MODES:  readonly ThemeMode[] = ['dark', 'light']
-export const FONT_PAIRS:   readonly FontPair[]  = ['elegant', 'modern', 'bold', 'classic']
+export const FONT_PAIRS:   readonly FontPair[]  = ['elegant', 'modern', 'bold', 'classic', 'editorial', 'playful']
 export const RADII:        readonly Radius[]    = ['none', 'sm', 'md', 'lg']
 export const DENSITIES:    readonly Density[]   = ['compact', 'cozy', 'spacious']
