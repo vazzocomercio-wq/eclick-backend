@@ -208,6 +208,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
   },
+  // Loja Propria Fase 2: Designer de loja com IA. Sonnet pra coerencia de
+  // design (paleta + layout) + saida JSON estruturada. Fallback OpenAI mini.
+  storefront_design: {
+    label:       'Designer de loja (IA)',
+    description: 'Gera a receita de design da loja (tema + blocos + layout) a partir de um prompt',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
