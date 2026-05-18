@@ -17,7 +17,7 @@ import { validateDesign } from './storefront-design.validator'
 
 const SYSTEM_PROMPT = `Você é um designer de e-commerce especializado em criar lojas virtuais bonitas e coerentes.
 
-Sua tarefa: a partir da descrição do lojista, criar a "receita de design" da loja — um objeto JSON.
+Sua tarefa: criar a "receita de design" de uma loja — um objeto JSON — conforme o pedido do lojista.
 
 Responda SOMENTE com o objeto JSON. Sem markdown, sem comentários, sem texto antes ou depois.
 
@@ -109,6 +109,45 @@ export class StorefrontDesignService {
     return { design }
   }
 
+  /** Gera a receita de design analisando uma imagem de referencia (visao). */
+  async generateFromImage(
+    orgId: string,
+    input: { imageBase64: string; imageMimeType?: string; prompt?: string },
+  ): Promise<{ design: StorefrontDesign }> {
+    const b64 = (input.imageBase64 ?? '').trim()
+    if (b64.length < 100) {
+      throw new BadRequestException('Envie uma imagem de referência válida.')
+    }
+    const storeName = await this.loadStoreName(orgId)
+    const extra = (input.prompt ?? '').trim()
+
+    const userPrompt = [
+      `A imagem anexada é uma loja ou site cujo estilo visual o lojista quer reproduzir na loja "${storeName}".`,
+      'Analise a paleta de cores, a tipografia, a sensação geral e o tipo de layout da imagem.',
+      extra ? `Considere também este pedido do lojista: ${extra}` : '',
+      'Gere a receita de design completa em JSON, no mesmo espírito visual da imagem — sem copiar produtos ou textos específicos que apareçam nela.',
+    ].filter(Boolean).join('\n')
+
+    const out = await this.callVision(orgId, {
+      imageBase64:   b64,
+      imageMimeType: input.imageMimeType ?? 'image/jpeg',
+      userPrompt,
+    })
+
+    const parsed = parseJsonLoose(out.text)
+    if (parsed === null) {
+      this.logger.warn(`[storefront-design] visão resposta nao-JSON: ${out.text.slice(0, 200)}`)
+      throw new BadRequestException('A IA retornou um formato inesperado. Tente de novo.')
+    }
+
+    const design = validateDesign(parsed, DEFAULT_DESIGN)
+    await this.save(orgId, design)
+    this.logger.log(
+      `[storefront-design] org=${orgId} gerado por imagem (model=${out.model}, custo=$${out.costUsd.toFixed(4)})`,
+    )
+    return { design }
+  }
+
   private async callLlm(orgId: string, userPrompt: string): Promise<GenerateTextOutput> {
     try {
       return await this.llm.generateText({
@@ -123,6 +162,27 @@ export class StorefrontDesignService {
     } catch (e) {
       this.logger.error(`[storefront-design] LLM falhou: ${(e as Error).message}`)
       throw new BadRequestException('A IA não conseguiu gerar o design agora. Tente de novo em instantes.')
+    }
+  }
+
+  private async callVision(
+    orgId: string,
+    args: { imageBase64: string; imageMimeType: string; userPrompt: string },
+  ): Promise<GenerateTextOutput> {
+    try {
+      return await this.llm.analyzeImage({
+        orgId,
+        feature:       'storefront_design',
+        imageBase64:   args.imageBase64,
+        imageMimeType: args.imageMimeType,
+        systemPrompt:  SYSTEM_PROMPT,
+        userPrompt:    args.userPrompt,
+        jsonMode:      true,
+        maxTokens:     2500,
+      })
+    } catch (e) {
+      this.logger.error(`[storefront-design] visão falhou: ${(e as Error).message}`)
+      throw new BadRequestException('A IA não conseguiu analisar a imagem agora. Tente outra imagem ou tente de novo.')
     }
   }
 

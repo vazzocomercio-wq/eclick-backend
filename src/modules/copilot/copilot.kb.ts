@@ -2561,6 +2561,7 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - **Modelos de inspiração** — 4 estilos prontos (Tech Minimalista, Boutique Elegante, Vibrante, Clean Claro). Clique num para selecioná-lo.
 - **Aplicar modelo selecionado** — usa o modelo escolhido direto, sem IA.
 - **Gerar com IA** — descreva no campo de texto o estilo, as cores e a sensação que quer; a IA monta o design completo (tema, blocos e textos). Se um modelo estiver selecionado, ele vira o ponto de partida.
+- **Inspiração visual** — na aba "Gerar com IA" também dá pra subir um print de uma loja de referência; a IA analisa a imagem (cores, fontes, estilo) e cria a sua loja no mesmo espírito.
 - **Ajustar à mão** — a aba "Ajustar à mão" abre um editor manual: cores, fonte, cantos, densidade e quais blocos aparecem. Refina o que a IA gerou sem precisar de outro prompt.
 - O **preview ao lado** mostra a vitrine na hora. Não gostou? Ajuste o texto e gere de novo.
 

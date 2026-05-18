@@ -6,6 +6,7 @@ if (!globalThis.crypto) {
 import 'dotenv/config'
 import { NestFactory } from '@nestjs/core';
 import { IoAdapter } from '@nestjs/platform-socket.io';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { initSentry, captureException, flushSentry } from './common/sentry';
 
@@ -35,7 +36,11 @@ async function bootstrap() {
   console.log(`[Bootstrap] SUPABASE_SECRET_KEY=${process.env.SUPABASE_SECRET_KEY ? 'SET' : 'MISSING'}`);
   console.log(`[Bootstrap] ML_CLIENT_ID=${process.env.ML_CLIENT_ID ? 'SET' : 'MISSING'}`);
 
-  const app = await NestFactory.create(AppModule);
+  // bodyParser: false + parsers manuais com limite maior — necessario pra
+  // receber imagens em base64 (ex.: inspiracao visual do Designer da Loja).
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(json({ limit: '8mb' }));
+  app.use(urlencoded({ extended: true, limit: '8mb' }));
   app.useWebSocketAdapter(new IoAdapter(app));
   app.enableCors({
     origin: true,   // allow all origins — restrict after confirmed working
