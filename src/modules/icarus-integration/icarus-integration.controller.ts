@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Param, Query, Body, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Put, Delete, Param, Query, Body, UseGuards, HttpCode, HttpStatus, BadRequestException, Logger } from '@nestjs/common'
 import { IcarusIntegrationService, type ConnectInput } from './icarus-integration.service'
 import { IcarusCatalogService } from './icarus-catalog.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
@@ -16,6 +16,8 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('suppliers/:supplierId/integrations/icarus')
 @UseGuards(SupabaseAuthGuard)
 export class IcarusIntegrationController {
+  private readonly log = new Logger(IcarusIntegrationController.name)
+
   constructor(
     private readonly service: IcarusIntegrationService,
     private readonly catalog: IcarusCatalogService,
@@ -69,12 +71,18 @@ export class IcarusIntegrationController {
 
   // ── Catálogo / sincronização ───────────────────────────────────────────
 
-  /** POST .../catalog/pull — puxa o catálogo do ERP pro staging. */
+  /** POST .../catalog/pull — dispara o pull do catálogo em segundo plano.
+   *  Responde na hora; a UI acompanha pelo status da integração (polling). */
   @Post('catalog/pull')
   @HttpCode(HttpStatus.OK)
   pullCatalog(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.catalog.pullCatalog(u.orgId, supplierId)
+    // Catálogo grande pode demorar — roda em segundo plano pra não estourar o
+    // tempo da requisição HTTP. Sucesso/erro ficam gravados em supplier_integrations.
+    void this.catalog.pullCatalog(u.orgId, supplierId).catch((err: Error) => {
+      this.log.error(`[icarus] pull em segundo plano falhou: ${err?.message}`)
+    })
+    return { started: true }
   }
 
   /** GET .../catalog — lista do staging com status synced/available/new. */

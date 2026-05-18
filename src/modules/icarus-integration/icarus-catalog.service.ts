@@ -47,31 +47,44 @@ export class IcarusCatalogService {
     const tok = await this.integration.getDecryptedToken(orgId, supplierId)
     if (!tok) throw new BadRequestException('Integração Icarus não conectada para este fornecedor')
 
-    const clientConfig = this.integration.buildClientConfig(tok.config)
-    const filters: { bSaldo: boolean; dtAlteracao?: string } = { bSaldo: true }
-    if (dtAlteracao) filters.dtAlteracao = dtAlteracao
-    const res = await this.client.listProducts(tok.access_token, filters, clientConfig)
-    const products = res.data ?? []
-    const now = new Date().toISOString()
+    try {
+      const clientConfig = this.integration.buildClientConfig(tok.config)
+      const filters: { bSaldo: boolean; dtAlteracao?: string } = { bSaldo: true }
+      if (dtAlteracao) filters.dtAlteracao = dtAlteracao
+      const res = await this.client.listProducts(tok.access_token, filters, clientConfig)
+      const products = res.data ?? []
+      const now = new Date().toISOString()
 
-    const rows = products
-      .filter(p => p.pt_code != null && String(p.pt_code).trim() !== '')
-      .map(p => this.toCatalogRow(orgId, supplierId, tok.integration_id, p, now))
+      const rows = products
+        .filter(p => p.pt_code != null && String(p.pt_code).trim() !== '')
+        .map(p => this.toCatalogRow(orgId, supplierId, tok.integration_id, p, now))
 
-    for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
-      const { error } = await supabaseAdmin
-        .from('supplier_catalog_items')
-        .upsert(rows.slice(i, i + UPSERT_CHUNK), { onConflict: 'supplier_id,external_code' })
-      if (error) throw new BadRequestException(`Falha ao gravar catálogo: ${error.message}`)
+      for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+        const { error } = await supabaseAdmin
+          .from('supplier_catalog_items')
+          .upsert(rows.slice(i, i + UPSERT_CHUNK), { onConflict: 'supplier_id,external_code' })
+        if (error) throw new BadRequestException(`Falha ao gravar catálogo: ${error.message}`)
+      }
+
+      await supabaseAdmin
+        .from('supplier_integrations')
+        .update({ last_synced_at: now, last_sync_status: 'success', last_sync_error: null, total_synced: rows.length, updated_at: now })
+        .eq('id', tok.integration_id)
+
+      this.log.log(`[icarus-catalog] pull supplier=${supplierId} → ${rows.length} itens`)
+      return { pulled: rows.length, total: res.total }
+    } catch (e) {
+      // Registra a falha pra UI (que acompanha por polling) conseguir mostrar.
+      await supabaseAdmin
+        .from('supplier_integrations')
+        .update({
+          last_sync_status: 'failed',
+          last_sync_error:  ((e as Error).message ?? 'erro desconhecido').slice(0, 500),
+          updated_at:       new Date().toISOString(),
+        })
+        .eq('id', tok.integration_id)
+      throw e
     }
-
-    await supabaseAdmin
-      .from('supplier_integrations')
-      .update({ last_synced_at: now, last_sync_status: 'success', last_sync_error: null, total_synced: rows.length })
-      .eq('id', tok.integration_id)
-
-    this.log.log(`[icarus-catalog] pull supplier=${supplierId} → ${rows.length} itens`)
-    return { pulled: rows.length, total: res.total }
   }
 
   private toCatalogRow(orgId: string, supplierId: string, integrationId: string, p: IcarusProduct, now: string) {
