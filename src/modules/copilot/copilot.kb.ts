@@ -2550,6 +2550,34 @@ real do concorrente — o ML não expõe esse dado. Use pra dimensionar a disput
 // Export consolidado
 // ════════════════════════════════════════════════════════════════════════
 
+const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/store/designer'],
+    category: 'loja',
+    title:    'Designer da Loja — visual da vitrine por IA',
+    content: `**Cria o visual da sua loja própria (a vitrine pública em /loja/seu-slug) com ajuda de IA.**
+
+**Como usar:**
+- **Modelos de inspiração** — 4 estilos prontos (Tech Minimalista, Boutique Elegante, Vibrante, Clean Claro). Clique num para selecioná-lo.
+- **Aplicar modelo selecionado** — usa o modelo escolhido direto, sem IA.
+- **Gerar com IA** — descreva no campo de texto o estilo, as cores e a sensação que quer; a IA monta o design completo (tema, blocos e textos). Se um modelo estiver selecionado, ele vira o ponto de partida.
+- O **preview ao lado** mostra a vitrine na hora. Não gostou? Ajuste o texto e gere de novo.
+
+**O que a IA decide:** paleta de cores, tipografia, arredondamento, densidade, ordem dos blocos da home (cabeçalho, banner, grade de produtos, bloco "sobre", rodapé) e os textos.
+
+**Boas práticas no prompt:**
+- Diga o ramo da loja (joias, eletrônicos, moda fitness) — a IA ajusta o tom.
+- Cite a cor de destaque e se quer tema claro ou escuro, se tiver preferência.
+- Quanto mais específico o prompt, melhor o resultado.
+
+**Importante:**
+- A loja precisa estar com status Ativa (em Config da Loja) para ficar pública.
+- Os produtos da vitrine vêm do catálogo: só aparecem os que estão prontos/publicados e com estoque maior que zero.
+- Gerar um design substitui o anterior — é seguro, dá pra gerar quantas vezes quiser.`,
+    tags: ['loja', 'storefront', 'design', 'vitrine', 'ia'],
+  },
+]
+
 export const KB: KbEntry[] = [
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,
@@ -2572,6 +2600,7 @@ export const KB: KbEntry[] = [
   ...COPILOT_PAGE_ENTRIES,
   ...MULTI_ACCOUNT_ENTRIES,
   ...CONFIG_ENTRIES,
+  ...STOREFRONT_DESIGNER_ENTRIES,
   // Catch-all sempre por último — só preenche o que sobrou do budget
   // após entries route-específicas
   ...CATCHALL_ENTRIES,
