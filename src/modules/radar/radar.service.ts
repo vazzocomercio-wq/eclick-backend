@@ -83,6 +83,8 @@ export class RadarService {
       const minPrice = prices.length ? Math.min(...prices) : null
       const vazzoPrices = numbers(offs.filter((o) => o.is_own === true).map((o) => o.price))
       const vazzoPrice = vazzoPrices.length ? Math.min(...vazzoPrices) : null
+      const competitorPrices = numbers(offs.filter((o) => o.is_own !== true).map((o) => o.price))
+      const runnerUpPrice = competitorPrices.length ? Math.min(...competitorPrices) : null
       const ownOffer = offs.find((o) => o.is_own === true) ?? null
       const rate = effectiveRate(calibration, (p.category_id as string | null) ?? null).rate
       const marketDemand = rate == null
@@ -100,6 +102,7 @@ export class RadarService {
         total_offers: offs.length,
         min_price: minPrice,
         vazzo_price: vazzoPrice,
+        runner_up_price: runnerUpPrice,
         vazzo_has_lead: vazzoPrice != null && minPrice != null && vazzoPrice === minPrice,
         price_delta_pct: deltaByCp.get(p.id as string) ?? null,
         new_events: eventsByCp.get(p.id as string) ?? 0,
@@ -177,6 +180,22 @@ export class RadarService {
       .limit(1)
       .maybeSingle()
 
+    // Concorrente mais barato — vira o "teto" do catálogo quando o item
+    // próprio está ganhando: até quanto dá pra subir sem perder a ponta.
+    const { data: rival } = await sb
+      .from('radar_offers')
+      .select('price,seller:seller_ref(nickname)')
+      .eq('organization_id', orgId)
+      .eq('catalog_product_ref', productId)
+      .eq('status', 'ativo')
+      .not('is_own', 'is', true)
+      .not('price', 'is', null)
+      .order('price', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    const runnerUpPrice = typeof rival?.price === 'number' ? rival.price : null
+    const runnerUpSeller = (oneOf(rival?.seller) as { nickname?: string } | null)?.nickname ?? null
+
     let cost: number | null = null
     let taxPct: number | null = null
     if (cp.product_id) {
@@ -194,6 +213,7 @@ export class RadarService {
     const base = {
       cost, tax_pct: taxPct, fee_pct: null as number | null,
       fixed_fee: null as number | null, shipping_cost: null as number | null,
+      runner_up_price: runnerUpPrice, runner_up_seller: runnerUpSeller,
     }
     if (!offer) {
       return { has_listing: false, item_id: null, current_price: null, price_to_win: null, catalog_status: null, ...base }
