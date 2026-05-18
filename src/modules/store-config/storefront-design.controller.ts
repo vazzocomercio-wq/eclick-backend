@@ -12,6 +12,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *
  *   POST /store/config/design/generate             { prompt, inspirationId? }
  *   POST /store/config/design/generate-from-image  { imageBase64, imageMimeType?, prompt? }
+ *   POST /store/config/design/generate-from-url    { url, prompt? }
  *   POST /store/config/design/hero-image           { prompt? }
  *   GET  /store/config/design/canva/designs        ?query=
  *   POST /store/config/design/canva/generate       { designId, prompt? }
@@ -46,6 +47,16 @@ export class StorefrontDesignController {
       imageMimeType: body.imageMimeType,
       prompt:        body.prompt,
     })
+  }
+
+  @Post('generate-from-url')
+  generateFromUrl(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { url?: string; prompt?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.url) throw new BadRequestException('url obrigatória')
+    return this.svc.generateFromUrl(u.orgId, { url: body.url, prompt: body.prompt })
   }
 
   @Post('hero-image')

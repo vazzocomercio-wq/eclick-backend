@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
+import { CredentialsService } from '../credentials/credentials.service'
 import type { GenerateTextOutput, GenerateImageOutput } from '../ai/types'
 import type { StorefrontDesign, HeroSection, FontPair } from './storefront-design.types'
 import { STOREFRONT_TEMPLATE_MAP, DEFAULT_DESIGN } from './storefront-design.templates'
@@ -80,7 +81,59 @@ export class StorefrontDesignService {
   constructor(
     private readonly llm: LlmService,
     private readonly canva: CanvaOauthService,
+    private readonly credentials: CredentialsService,
   ) {}
+
+  /** Gera o design da loja a partir de um screenshot de uma URL de referencia. */
+  async generateFromUrl(
+    orgId: string,
+    input: { url: string; prompt?: string },
+  ): Promise<{ design: StorefrontDesign }> {
+    const url = (input.url ?? '').trim()
+    if (!/^https?:\/\/.+\..+/i.test(url)) {
+      throw new BadRequestException('Informe uma URL válida (começando com http:// ou https://).')
+    }
+    const imageBase64 = await this.screenshotUrl(orgId, url)
+    return this.generateFromImage(orgId, {
+      imageBase64,
+      imageMimeType: 'image/jpeg',
+      prompt:        input.prompt,
+    })
+  }
+
+  /** Captura um screenshot da URL via ScreenshotOne e devolve em base64. */
+  private async screenshotUrl(orgId: string, url: string): Promise<string> {
+    const key =
+      (await this.credentials.getDecryptedKey(orgId, 'screenshotone', 'SCREENSHOTONE_API_KEY').catch(() => null)) ??
+      (await this.credentials.getDecryptedKey(null, 'screenshotone', 'SCREENSHOTONE_API_KEY').catch(() => null))
+    if (!key) {
+      throw new BadRequestException(
+        'Inspiração por URL não configurada — adicione a chave do ScreenshotOne nas Configurações.',
+      )
+    }
+    const params = new URLSearchParams({
+      access_key:           key,
+      url,
+      format:               'jpg',
+      viewport_width:       '1280',
+      viewport_height:      '900',
+      full_page:            'false',
+      block_ads:            'true',
+      block_cookie_banners: 'true',
+      image_quality:        '82',
+    })
+    try {
+      const res = await axios.get<ArrayBuffer>(
+        `https://api.screenshotone.com/take?${params.toString()}`,
+        { responseType: 'arraybuffer', timeout: 45_000 },
+      )
+      return Buffer.from(res.data).toString('base64')
+    } catch (e) {
+      const msg = axios.isAxiosError(e) ? `HTTP ${e.response?.status}` : (e as Error).message
+      this.logger.error(`[storefront-design] screenshot da URL falhou: ${msg}`)
+      throw new BadRequestException('Não foi possível capturar o site. Verifique a URL e tente de novo.')
+    }
+  }
 
   /** Lista os designs do Canva do usuario (pra usar como inspiracao visual). */
   async listCanvaDesigns(

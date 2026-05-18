@@ -5,10 +5,11 @@ import { StorefrontDesignController } from './storefront-design.controller'
 import { StorefrontDesignService } from './storefront-design.service'
 import { AiModule } from '../ai/ai.module'
 import { CanvaOauthModule } from '../canva-oauth/canva-oauth.module'
+import { CredentialsModule } from '../credentials/credentials.module'
 
 /** Onda 4 / A6 — Store Config (white-label) + Loja Propria Designer com IA. */
 @Module({
-  imports:     [AiModule, CanvaOauthModule],
+  imports:     [AiModule, CanvaOauthModule, CredentialsModule],
   controllers: [StoreConfigController, StorePublicController, StorefrontDesignController],
   providers:   [StoreConfigService, StorefrontDesignService],
   exports:     [StoreConfigService],
