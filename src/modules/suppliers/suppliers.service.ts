@@ -44,7 +44,7 @@ export interface UpdateProductLinkDto extends Partial<Omit<LinkProductDto, 'prod
 
 export interface AddDocumentDto {
   document_type?: string | null
-  file_name: string
+  title: string
   file_url: string
   notes?: string | null
 }
@@ -97,7 +97,7 @@ export class SuppliersService {
           moq, is_preferred, supplier_sku, notes, price_tiers, created_at,
           products(id, name, sku, photo_urls, price)
         ),
-        supplier_documents(id, document_type, file_name, file_url, notes, created_at)
+        supplier_documents(id, document_type, title, file_url, notes, created_at)
       `)
       .eq('organization_id', orgId)
       .eq('id', id)
@@ -202,7 +202,12 @@ export class SuppliersService {
     await this.assertOwnership(orgId, supplierId)
     const { data, error } = await supabaseAdmin
       .from('supplier_documents')
-      .insert({ supplier_id: supplierId, ...dto })
+      .insert({
+        supplier_id: supplierId,
+        organization_id: orgId,
+        ...dto,
+        document_type: dto.document_type || 'Outro',
+      })
       .select()
       .single()
     if (error) throw new HttpException(error.message, 500)
