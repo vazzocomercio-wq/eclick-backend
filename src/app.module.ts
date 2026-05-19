@@ -55,6 +55,7 @@ import { KitsModule } from './modules/kits/kits.module'
 import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 import { StoreConfigModule } from './modules/store-config/store-config.module'
+import { PaymentsModule } from './modules/payments/payments.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
 import { MlCampaignsModule } from './modules/ml-campaigns/ml-campaigns.module'
 import { MlPostsaleModule } from './modules/ml-postsale/ml-postsale.module'
@@ -125,6 +126,7 @@ import { RadarModule } from './modules/radar/radar.module'
     StorefrontModule,
     StoreCopilotModule,
     StoreConfigModule,
+    PaymentsModule,
     MlAiCoreModule,
     MlCampaignsModule,
     MlVerticalModule,

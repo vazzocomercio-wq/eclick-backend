@@ -1,0 +1,98 @@
+import {
+  Controller, Post, Get, Body, Query, Param, Req, Headers, BadRequestException,
+  HttpCode, HttpStatus,
+} from '@nestjs/common'
+import { Public } from '../../common/decorators/public.decorator'
+import { PaymentsService } from './payments.service'
+import type { CheckoutCustomer, CheckoutItem, Gateway } from './types'
+import type { Request } from 'express'
+
+/**
+ * Loja Propria — Frente C: endpoints public-facing do checkout.
+ *
+ *   POST /storefront/checkout
+ *       { slug, items[], customer, gateway: 'mercadopago' | 'stripe' }
+ *       Cria pedido + cria preference no gateway + retorna initPoint.
+ *
+ *   GET  /storefront/order/:id
+ *       Detalhe publico (status + items + total). Usado pelas paginas
+ *       /pedido/[id]/sucesso /falha /pendente.
+ *
+ *   POST /storefront/webhooks/mp     ?topic=payment&id=N
+ *   POST /storefront/webhooks/stripe (raw body + Stripe-Signature header)
+ */
+@Controller('storefront')
+export class PaymentsController {
+  constructor(private readonly svc: PaymentsService) {}
+
+  @Post('checkout')
+  @Public()
+  async checkout(@Body() body: {
+    slug?:     string
+    items?:    CheckoutItem[]
+    customer?: CheckoutCustomer
+    gateway?:  Gateway
+  }) {
+    if (!body?.slug)     throw new BadRequestException('slug obrigatório')
+    if (!body?.items)    throw new BadRequestException('items obrigatório')
+    if (!body?.customer) throw new BadRequestException('customer obrigatório')
+    if (!body?.gateway)  throw new BadRequestException('gateway obrigatório')
+    return this.svc.checkout({
+      slug:     body.slug,
+      items:    body.items,
+      customer: body.customer,
+      gateway:  body.gateway,
+    })
+  }
+
+  @Get('order/:id')
+  @Public()
+  async getOrder(@Param('id') id: string) {
+    const order = await this.svc.getPublicOrder(id)
+    if (!order) throw new BadRequestException('Pedido não encontrado.')
+    return order
+  }
+
+  @Post('webhooks/mp')
+  @Public()
+  @HttpCode(HttpStatus.OK) // MP exige 200 pra parar de retry
+  async mpWebhook(
+    @Query() query: Record<string, string>,
+    @Body()  body:  Record<string, unknown>,
+  ) {
+    // Mercado Pago envia o `id` via query OU via body.data.id (novo formato)
+    const merged: Record<string, string> = {
+      ...query,
+      ...(body?.data && typeof body.data === 'object'
+        ? Object.fromEntries(Object.entries(body.data as Record<string, unknown>).map(([k, v]) => [`data.${k}`, String(v)]))
+        : {}),
+      ...(body?.type ? { type: String(body.type) } : {}),
+      ...(body?.action ? { action: String(body.action) } : {}),
+    }
+    await this.svc.handleMercadoPagoWebhook(merged)
+    return { ok: true }
+  }
+
+  @Post('webhooks/stripe')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  async stripeWebhook(
+    @Req() req: Request,
+    @Headers('stripe-signature') signature: string,
+  ) {
+    if (!signature) throw new BadRequestException('Stripe-Signature ausente')
+    // Pra HMAC funcionar precisamos do body raw. main.ts ja faz parsing JSON
+    // global; pra esta rota recuperamos o rawBody se foi anexado (NestJS +
+    // express raw middleware) ou fazemos um JSON.stringify defensivo do body
+    // ja parseado (funciona em testes; em prod prefira raw body middleware).
+    type ReqWithRaw = Request & { rawBody?: Buffer | string }
+    const r = req as ReqWithRaw
+    const raw: string = typeof r.rawBody === 'string'
+      ? r.rawBody
+      : Buffer.isBuffer(r.rawBody)
+        ? r.rawBody.toString('utf8')
+        : JSON.stringify(req.body ?? {})
+    await this.svc.handleStripeWebhook(raw, signature)
+    return { ok: true }
+  }
+}
