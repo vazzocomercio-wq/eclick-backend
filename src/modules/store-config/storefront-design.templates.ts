@@ -105,8 +105,58 @@ const editorialPremium: StorefrontDesign = {
   product: { gallery: 'side', showAttributes: true, ctaMode: 'whatsapp' },
 }
 
+/** Espelha as variantes do frontend (`STOREFRONT_TEMPLATES` em
+ *  lib/storefront/templates.ts) — reusa a estrutura editorialPremium
+ *  trocando apenas o tema. Permite que `inspirationId` cubra as 4
+ *  opcoes que aparecem na galeria do designer. */
+function variant(
+  overrides: Partial<StorefrontDesign['theme']> & { colors?: Partial<StorefrontDesign['theme']['colors']> },
+): StorefrontDesign {
+  return {
+    ...editorialPremium,
+    theme: {
+      ...editorialPremium.theme,
+      ...overrides,
+      colors: { ...editorialPremium.theme.colors, ...(overrides.colors ?? {}) },
+    },
+  }
+}
+
+const editorialDark: StorefrontDesign = variant({
+  mode: 'dark',
+  colors: {
+    background: '#0c0c0e', surface: '#16161a', primary: '#e9c46a',
+    text: '#fafafa', textMuted: '#a8a29e', border: '#27272a',
+    dark: '#000000', watermark: '#1a1a1e', onAccent: '#0c0c0e',
+  },
+  fontPair: 'editorial', radius: 'sm', density: 'spacious',
+})
+
+const boutiqueWarm: StorefrontDesign = variant({
+  mode: 'light',
+  colors: {
+    background: '#fbf6ee', surface: '#ffffff', primary: '#a0522d',
+    text: '#3d2e22', textMuted: '#9a8675', border: '#ecdcc2',
+    dark: '#3d2e22', watermark: '#f3e9d6', onAccent: '#fbf6ee',
+  },
+  fontPair: 'classic', radius: 'md', density: 'spacious',
+})
+
+const vibrantPop: StorefrontDesign = variant({
+  mode: 'light',
+  colors: {
+    background: '#fff7f1', surface: '#ffffff', primary: '#ff3366',
+    text: '#1a1a2e', textMuted: '#6c6c80', border: '#ffd9c7',
+    dark: '#1a1a2e', watermark: '#ffe2d0', onAccent: '#ffffff',
+  },
+  fontPair: 'bold', radius: 'lg', density: 'cozy',
+})
+
 export const STOREFRONT_TEMPLATE_MAP: Record<string, StorefrontDesign> = {
   editorial_premium: editorialPremium,
+  editorial_dark:    editorialDark,
+  boutique_warm:     boutiqueWarm,
+  vibrant_pop:       vibrantPop,
 }
 
 /** Receita usada como base de fallback do validador e da geracao por IA. */
