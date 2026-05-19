@@ -337,12 +337,23 @@ export class StockService {
       .order('priority', { ascending: true })
 
     if (!distributions?.length) {
-      // Fallback: no distribution config, use total_platform for ML (existing behavior)
-      const { total_platform } = await this.calculateAvailable(productId)
-      return [{ channel: 'mercadolivre', account_id: null, qty: total_platform, should_pause: total_platform <= 0, distribution_id: null, min_quantity: 0 }]
+      // Sem config de distribuição (o padrão): cada canal vinculado recebe o
+      // mesmo número — o DISPONÍVEL calculado (físico + virtual − reservado −
+      // segurança). Hoje só o ML tem push; a loja lê products.stock direto.
+      return [{
+        channel: 'mercadolivre', account_id: null,
+        qty: available, should_pause: available <= 0,
+        distribution_id: null, min_quantity: 0,
+      }]
     }
 
     return distributions.map(d => {
+      // Majoração virtual por canal (Shopee flash-offer): infla a vitrine
+      // daquele canal. Dormente — default 0. A pausa decide pelo estoque
+      // REAL, não pelo inflado: quando o real zera, o canal pausa mesmo
+      // com markup (sem estoque fantasma).
+      const markup = Math.max(0, Number(d.virtual_markup ?? 0))
+
       let qty = d.distribution_mode === 'fixed'
         ? (d.fixed_quantity ?? 0)
         : Math.floor(available * ((d.percentage ?? 100) / 100))
@@ -355,7 +366,7 @@ export class StockService {
       return {
         channel:         d.channel,
         account_id:      null, // column doesn't exist on this table; kept in shape for future per-account distribution
-        qty:             should_pause ? 0 : qty,
+        qty:             should_pause ? 0 : qty + markup,
         should_pause,
         distribution_id: d.id,
         min_quantity:    min,

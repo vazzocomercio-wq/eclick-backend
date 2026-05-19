@@ -51,6 +51,19 @@ export class StockCron {
     }
   }
 
+  // Diário 04:00 — reconciliação: re-empurra o estoque correto pra todo
+  // anúncio ML vinculado, pegando divergência (edição manual no ML ou push
+  // que falhou). Idempotente; loga em stock_sync_logs.
+  @Cron('0 4 * * *', { name: 'stock-reconcile-ml' })
+  async reconcileMlStock() {
+    try {
+      const result = await this.stockService.syncAllProductsWithMlListing()
+      this.logger.log(`[cron.reconcile] ${result.success}/${result.total} ok, ${result.errors} erro`)
+    } catch (err) {
+      this.logger.error('[cron.reconcile] falhou', err)
+    }
+  }
+
   // Every 5 minutes: sync ML order reservations
   @Cron('*/5 * * * *')
   async syncMlOrderReservations() {
