@@ -44,6 +44,17 @@ export interface CoverageResult {
     parcial:                        number
     completo:                       number
     cadastro_completo_sem_anuncio:  number
+    /** Cobertura por destino (canal × conta) — quantos produtos anunciados em cada. */
+    per_destino: Array<{
+      key:       string
+      channel:   string
+      accountId: string | null
+      label:     string
+      coberto:   number
+      faltam:    number
+    }>
+    /** Loja própria (canal informativo, não entra na classificação). */
+    loja: { coberto: number; faltam: number }
   }
   sample: CoverageProduct[]
 }
@@ -181,6 +192,11 @@ export class ProductsListingCoverageService {
     })
 
     // 4. Resumo (sobre TODOS os produtos)
+    const perDestino = destinos.map(d => {
+      const coberto = all.filter(p => p.covered.includes(d.key)).length
+      return { ...d, coberto, faltam: all.length - coberto }
+    })
+    const lojaCoberto = all.filter(p => p.na_loja).length
     const summary = {
       total:       all.length,
       sem_anuncio: all.filter(p => p.status === 'sem_anuncio').length,
@@ -188,6 +204,8 @@ export class ProductsListingCoverageService {
       completo:    all.filter(p => p.status === 'completo').length,
       cadastro_completo_sem_anuncio:
         all.filter(p => p.status === 'sem_anuncio' && p.cadastro_completo).length,
+      per_destino: perDestino,
+      loja:        { coberto: lojaCoberto, faltam: all.length - lojaCoberto },
     }
 
     // 5. Sample — só o que FALTA anunciar (sem_anuncio/parcial), filtrado e ordenado
