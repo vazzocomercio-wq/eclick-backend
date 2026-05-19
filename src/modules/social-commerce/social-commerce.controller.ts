@@ -14,7 +14,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
 /**
  * Onda 3 / S2 — Social Commerce endpoints (Instagram/Facebook Shop sync).
  *
- *  ── OAuth (Instagram/Facebook via Meta) ────────────────────────
+ *  ── OAuth (Instagram/Facebook/WhatsApp via Meta) ───────────────
  *  GET   /social-commerce/instagram/connect       (auth)
  *  GET   /social-commerce/instagram/callback      (public — Meta chama)
  *  POST  /social-commerce/instagram/disconnect    (auth)
@@ -33,6 +33,13 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *  GET   /social-commerce/instagram/products      (auth)
  *  POST  /social-commerce/instagram/products/add  (auth)
  *  POST  /social-commerce/instagram/products/remove (auth)
+ *
+ *  ── WhatsApp Business Catalog ──────────────────────────────────
+ *  GET   /social-commerce/whatsapp/status         (auth)
+ *  GET   /social-commerce/whatsapp/wabas          (auth) → wizard
+ *  POST  /social-commerce/whatsapp/setup          (auth) → vincula catalog↔WABA
+ *  POST  /social-commerce/whatsapp/sync           (auth)
+ *  POST  /social-commerce/whatsapp/disconnect     (auth)
  */
 @Controller('social-commerce')
 export class SocialCommerceController {
@@ -201,6 +208,77 @@ export class SocialCommerceController {
     if (!u.orgId)                    throw new BadRequestException('orgId ausente')
     if (!body?.product_ids?.length)  throw new BadRequestException('product_ids obrigatório')
     return this.svc.removeProductsFromSync(u.orgId, 'instagram_shop', body.product_ids)
+  }
+
+  // ── WhatsApp Business Catalog ─────────────────────────────────────
+
+  /** GET /social-commerce/whatsapp/status — mesmo formato do instagram. */
+  @Get('whatsapp/status')
+  @UseGuards(SupabaseAuthGuard)
+  async whatsappStatus(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const ch = await this.svc.getStatus(u.orgId, 'whatsapp_business')
+    return ch ? { connected: ch.status === 'connected', channel: ch } : { connected: false, channel: null }
+  }
+
+  /** GET /social-commerce/whatsapp/wabas — lista WABAs do user, reusando
+   *  o token do channel instagram_shop (OAuth Meta cobre todos os scopes). */
+  @Get('whatsapp/wabas')
+  @UseGuards(SupabaseAuthGuard)
+  whatsappWabas(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listAvailableWabas(u.orgId)
+  }
+
+  /** POST /social-commerce/whatsapp/setup
+   *  { waba_id, catalog_id, phone_number_id?, display_phone? }
+   *
+   *  Vincula catalog ao WABA no Meta + persiste channel local. */
+  @Post('whatsapp/setup')
+  @UseGuards(SupabaseAuthGuard)
+  whatsappSetup(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      waba_id?:          string
+      catalog_id?:       string
+      phone_number_id?:  string
+      display_phone?:    string
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.waba_id)    throw new BadRequestException('waba_id obrigatório')
+    if (!body?.catalog_id) throw new BadRequestException('catalog_id obrigatório')
+    return this.svc.setupWhatsAppCatalog(u.orgId, {
+      waba_id:          body.waba_id,
+      catalog_id:       body.catalog_id,
+      phone_number_id:  body.phone_number_id,
+      display_phone:    body.display_phone,
+    })
+  }
+
+  /** POST /social-commerce/whatsapp/disconnect — desvincula no Meta +
+   *  zera channel local. */
+  @Post('whatsapp/disconnect')
+  @UseGuards(SupabaseAuthGuard)
+  whatsappDisconnect(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.disconnectWhatsAppCatalog(u.orgId)
+  }
+
+  /** POST /social-commerce/whatsapp/sync — bulk sync dos produtos
+   *  storefront_visible/catalog_status:ready pro catalog. Reusa o
+   *  syncAll que ja existe (mas para o canal whatsapp_business o
+   *  catalog Meta e o mesmo do instagram_shop, entao a operacao
+   *  no Meta nao duplica — so o tracking local).
+   *
+   *  Como o catalog Meta e compartilhado, esta rota e principalmente
+   *  pra forcar tracking. A sincronizacao real ja roda via syncAll
+   *  do instagram quando o usuario clica "sincronizar" la. */
+  @Post('whatsapp/sync')
+  @UseGuards(SupabaseAuthGuard)
+  whatsappSync(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.syncAll(u.orgId)
   }
 
   // ── S3 — TikTok Shop readiness (sem API real ainda) ──────────────

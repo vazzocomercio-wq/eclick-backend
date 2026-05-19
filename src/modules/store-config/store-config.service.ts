@@ -249,14 +249,40 @@ export class StoreConfigService {
   // PUBLIC SSR (storefront)
   // ─────────────────────────────────────────────────────────────────
 
-  /** Por slug ou domínio. */
-  async getPublicBySlugOrDomain(input: { slug?: string; domain?: string }): Promise<StoreConfig | null> {
+  /** Por slug ou domínio. Inclui `whatsapp_catalog` (enabled + phone +
+   *  link wa.me/c/) quando a org tem channel whatsapp_business conectado
+   *  em social_commerce_channels — usado pelo widget da Loja Propria. */
+  async getPublicBySlugOrDomain(input: { slug?: string; domain?: string }): Promise<
+    (StoreConfig & { whatsapp_catalog?: { enabled: boolean; phone: string | null; link: string | null } }) | null
+  > {
     let q = supabaseAdmin.from('store_config').select('*').eq('status', 'active')
     if (input.slug)   q = q.eq('store_slug',   input.slug)
     if (input.domain) q = q.eq('custom_domain', input.domain)
     const { data, error } = await q.maybeSingle()
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
-    return (data as StoreConfig) ?? null
+    if (!data) return null
+    const cfg = data as StoreConfig
+
+    // Lookup WhatsApp Catalog (1 query — ignora erro pra nao quebrar a vitrine)
+    const { data: wa } = await supabaseAdmin
+      .from('social_commerce_channels')
+      .select('status, config')
+      .eq('organization_id', cfg.organization_id)
+      .eq('channel', 'whatsapp_business')
+      .maybeSingle()
+
+    let whatsapp_catalog: { enabled: boolean; phone: string | null; link: string | null } | undefined
+    if (wa && wa.status === 'connected') {
+      const phone = ((wa.config as Record<string, unknown>)?.display_phone as string | null) ?? cfg.whatsapp_number ?? null
+      const digits = phone ? phone.replace(/\D/g, '') : ''
+      whatsapp_catalog = {
+        enabled: true,
+        phone,
+        link: digits ? `https://wa.me/c/${digits}` : null,
+      }
+    }
+
+    return whatsapp_catalog ? { ...cfg, whatsapp_catalog } : cfg
   }
 
   /** Lista produtos públicos da vitrine (storefront_visible=true, com estoque). */

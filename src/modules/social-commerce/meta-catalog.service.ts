@@ -25,12 +25,16 @@ const GRAPH_API_BASE   = 'https://graph.facebook.com/v19.0'
 const META_AUTH_URL    = 'https://www.facebook.com/v19.0/dialog/oauth'
 const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 
-// Scopes mínimos pra Catalog Management
+// Scopes mínimos pra Catalog Management + WhatsApp Business
+// whatsapp_business_management: vincular catalog ao WABA + ler config
+// whatsapp_business_messaging: enviar produtos em conversas (futuro W4)
 const META_SCOPES = [
   'catalog_management',
   'business_management',
   'pages_read_engagement',
   'instagram_basic',
+  'whatsapp_business_management',
+  'whatsapp_business_messaging',
 ].join(',')
 
 @Injectable()
@@ -256,5 +260,97 @@ export class MetaCatalogService {
   logGraphError(context: string, channel: SocialCommerceChannelRow, err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     this.logger.error(`[meta.${context}] org=${channel.organization_id} channel=${channel.id}: ${msg}`)
+  }
+
+  // ── WhatsApp Business — vincular catalog ao WABA ─────────────────────
+
+  /** Lista WhatsApp Business Accounts do user.
+   *
+   *  Cada Business Manager pode ter N WABAs, cada WABA tem N numeros de
+   *  telefone. O catalog Meta (FB+IG+WhatsApp compartilham) precisa ser
+   *  vinculado ao WABA pra aparecer dentro do WhatsApp Business.
+   *
+   *  Requer scope `whatsapp_business_management`. Quando o token nao tem,
+   *  retorna [] (sem lancar — o caller exibe "conecte com permissoes
+   *  expandidas"). */
+  async listWabas(accessToken: string): Promise<Array<{
+    id:               string
+    name:             string
+    business_id:      string | null
+    phone_numbers?:   Array<{ id: string; display_phone_number: string; verified_name: string }>
+  }>> {
+    const url = `${GRAPH_API_BASE}/me/businesses?fields=id,name,owned_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name}}&access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as {
+      data?: Array<{
+        id: string
+        name: string
+        owned_whatsapp_business_accounts?: {
+          data?: Array<{
+            id: string
+            name: string
+            phone_numbers?: { data?: Array<{ id: string; display_phone_number: string; verified_name: string }> }
+          }>
+        }
+      }>
+      error?: { message?: string }
+    }
+    if (!res.ok) {
+      // Permissoes ausentes vem com codigos 10/200/etc. Logamos e devolvemos [].
+      this.logger.warn(`[meta.listWabas] ${body.error?.message ?? 'erro'}`)
+      return []
+    }
+    const out: Array<{
+      id: string; name: string; business_id: string | null
+      phone_numbers?: Array<{ id: string; display_phone_number: string; verified_name: string }>
+    }> = []
+    for (const biz of body.data ?? []) {
+      for (const waba of biz.owned_whatsapp_business_accounts?.data ?? []) {
+        out.push({
+          id:            waba.id,
+          name:          waba.name,
+          business_id:   biz.id ?? null,
+          phone_numbers: waba.phone_numbers?.data ?? [],
+        })
+      }
+    }
+    return out
+  }
+
+  /** Vincula um catalog (do Meta Commerce Manager) ao WhatsApp Business
+   *  Account. Apos isso, os produtos do catalog aparecem no WhatsApp
+   *  Business do lojista + podem ser enviados em conversa via Cloud API
+   *  ou Z-API (interactive `product` / `product_list`).
+   *
+   *  POST /{waba_id}/product_catalogs?catalog_id=...
+   *
+   *  Idempotente do lado do Meta — chamar 2x devolve OK; pra trocar
+   *  catalog, primeiro desvincular (DELETE) e religar. */
+  async linkCatalogToWaba(accessToken: string, wabaId: string, catalogId: string): Promise<{ success: boolean }> {
+    const url = `${GRAPH_API_BASE}/${wabaId}/product_catalogs`
+    const params = new URLSearchParams({ catalog_id: catalogId, access_token: accessToken })
+    const res = await fetch(`${url}?${params.toString()}`, { method: 'POST' })
+    const body = await res.json() as { success?: boolean; error?: { message?: string } }
+    if (!res.ok) throw new BadRequestException(`Meta linkCatalogToWaba: ${body.error?.message ?? 'erro'}`)
+    return { success: Boolean(body.success ?? true) }
+  }
+
+  /** Desvincula o catalog atual do WABA. */
+  async unlinkCatalogFromWaba(accessToken: string, wabaId: string, catalogId: string): Promise<{ success: boolean }> {
+    const url = `${GRAPH_API_BASE}/${wabaId}/product_catalogs`
+    const params = new URLSearchParams({ catalog_id: catalogId, access_token: accessToken })
+    const res = await fetch(`${url}?${params.toString()}`, { method: 'DELETE' })
+    const body = await res.json() as { success?: boolean; error?: { message?: string } }
+    if (!res.ok) throw new BadRequestException(`Meta unlinkCatalog: ${body.error?.message ?? 'erro'}`)
+    return { success: Boolean(body.success ?? true) }
+  }
+
+  /** Le o catalog vinculado ao WABA atualmente. */
+  async getLinkedCatalog(accessToken: string, wabaId: string): Promise<{ id: string; name: string } | null> {
+    const url = `${GRAPH_API_BASE}/${wabaId}/product_catalogs?fields=id,name&access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as { data?: Array<{ id: string; name: string }>; error?: { message?: string } }
+    if (!res.ok) return null
+    return (body.data && body.data[0]) ?? null
   }
 }

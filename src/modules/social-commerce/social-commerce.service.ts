@@ -101,6 +101,95 @@ export class SocialCommerceService {
     return data as SocialCommerceChannelRow
   }
 
+  // ── WhatsApp Business — vincular catalog ao WABA ────────────────────
+
+  /** Lista WhatsApp Business Accounts (WABAs) do user.
+   *  Reusa o access_token do channel 'instagram_shop' — o OAuth Meta
+   *  cobre todos os scopes (catalog + whatsapp + business). */
+  async listAvailableWabas(orgId: string): Promise<Array<{
+    id: string; name: string; business_id: string | null
+    phone_numbers?: Array<{ id: string; display_phone_number: string; verified_name: string }>
+  }>> {
+    const ch = await this.getStatus(orgId, 'instagram_shop')
+    if (!ch?.access_token) throw new BadRequestException('Conecte o Meta primeiro')
+    return this.meta.listWabas(ch.access_token)
+  }
+
+  /** Configura o canal whatsapp_business: vincula o catalog ao WABA no
+   *  Meta + persiste linha em social_commerce_channels. Reusa o token
+   *  Meta da row instagram_shop. */
+  async setupWhatsAppCatalog(orgId: string, body: {
+    waba_id:           string
+    catalog_id:        string
+    phone_number_id?:  string  // pra envio futuro via Cloud API
+    display_phone?:    string  // pra widget "Ver catalogo" da loja
+  }): Promise<SocialCommerceChannelRow> {
+    if (!body.waba_id || !body.catalog_id) {
+      throw new BadRequestException('waba_id e catalog_id obrigatórios')
+    }
+    const ig = await this.getStatus(orgId, 'instagram_shop')
+    if (!ig?.access_token) {
+      throw new BadRequestException('Conecte o Meta primeiro (POST /social-commerce/instagram/connect)')
+    }
+
+    // 1) Vincula no Meta (POST /{waba_id}/product_catalogs?catalog_id=)
+    await this.meta.linkCatalogToWaba(ig.access_token, body.waba_id, body.catalog_id)
+
+    // 2) Upsert row whatsapp_business
+    const existing = await this.getStatus(orgId, 'whatsapp_business')
+    const configPatch = {
+      waba_id:          body.waba_id,
+      catalog_id:       body.catalog_id,
+      phone_number_id:  body.phone_number_id ?? null,
+      display_phone:    body.display_phone ?? null,
+    }
+
+    if (existing) {
+      const { data, error } = await supabaseAdmin
+        .from('social_commerce_channels')
+        .update({
+          access_token:        ig.access_token,
+          token_expires_at:    ig.token_expires_at,
+          external_account_id: body.waba_id,
+          external_catalog_id: body.catalog_id,
+          config: { ...existing.config, ...configPatch },
+          status: 'connected',
+          last_error: null,
+        })
+        .eq('id', existing.id)
+        .select('*').maybeSingle()
+      if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'sem dados'}`)
+      return data as SocialCommerceChannelRow
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('social_commerce_channels')
+      .insert({
+        organization_id:     orgId,
+        channel:             'whatsapp_business',
+        access_token:        ig.access_token,
+        token_expires_at:    ig.token_expires_at,
+        external_account_id: body.waba_id,
+        external_catalog_id: body.catalog_id,
+        config:              configPatch,
+        status:              'connected',
+      })
+      .select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'sem dados'}`)
+    return data as SocialCommerceChannelRow
+  }
+
+  /** Desvincula no Meta + zera status local. */
+  async disconnectWhatsAppCatalog(orgId: string): Promise<{ ok: true }> {
+    const ch = await this.getStatus(orgId, 'whatsapp_business')
+    if (ch?.access_token && ch.external_account_id && ch.external_catalog_id) {
+      try {
+        await this.meta.unlinkCatalogFromWaba(ch.access_token, ch.external_account_id, ch.external_catalog_id)
+      } catch { /* best-effort — segue desconectando local */ }
+    }
+    return this.disconnect(orgId, 'whatsapp_business')
+  }
+
   async disconnect(orgId: string, channel: SocialCommerceChannel): Promise<{ ok: true }> {
     const { error } = await supabaseAdmin
       .from('social_commerce_channels')

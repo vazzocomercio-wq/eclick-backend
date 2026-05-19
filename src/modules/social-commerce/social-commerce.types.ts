@@ -5,6 +5,7 @@ export type SocialCommerceChannel =
   | 'facebook_shop'
   | 'tiktok_shop'
   | 'google_shopping'
+  | 'whatsapp_business'
 
 export type ChannelStatus =
   | 'disconnected'
