@@ -241,16 +241,27 @@ export class OrdersIngestionService {
           // o row no upsert; aqui restabelecemos a paridade.
           const shipIds = [...new Set(orders.map(o => o.shipping?.id).filter(Boolean))] as number[]
           const costMap = new Map<number, number>()
+          const breakdownMap = new Map<number, { sender_cost: number; receiver_cost: number; gross_amount: number; ml_refund: number }>()
           const fullMap = new Map<number, Awaited<ReturnType<typeof this.mlClient.fetchShipmentFull>>>()
           if (shipIds.length > 0) {
-            const [costResults, fullResults] = await Promise.all([
-              Promise.allSettled(shipIds.map(id => this.mlClient.fetchShipmentCost(token, id))),
+            // fetchShipmentBreakdown chama o mesmo GET /shipments/{id}/costs
+            // que fetchShipmentCost, mas devolve sender+receiver+gross+ml_refund
+            // de uma vez. Derivamos costMap de sender_cost (= o que
+            // fetchShipmentCost retornava) e ainda alimentamos breakdownMap pros
+            // 3 campos de frete que o webhook já populava e o backfill não.
+            const [breakdownResults, fullResults] = await Promise.all([
+              Promise.allSettled(shipIds.map(id => this.mlClient.fetchShipmentBreakdown(token, id))),
               Promise.allSettled(shipIds.map(id => this.mlClient.fetchShipmentFull(token, id))),
             ])
             stats.apiCalls += shipIds.length * 2
             shipIds.forEach((id, idx) => {
-              const c = costResults[idx]
-              costMap.set(id, c.status === 'fulfilled' ? c.value : 0)
+              const b = breakdownResults[idx]
+              if (b.status === 'fulfilled') {
+                breakdownMap.set(id, b.value)
+                costMap.set(id, b.value.sender_cost)
+              } else {
+                costMap.set(id, 0)
+              }
               const f = fullResults[idx]
               fullMap.set(id, f.status === 'fulfilled' ? f.value : null)
             })
@@ -280,7 +291,7 @@ export class OrdersIngestionService {
           const buyerMap = await this.fetchBuyersForOrders(orders, token, stats)
 
           // Build rows for every order item
-          const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId, buyerMap)
+          const rows = this.buildOrderRows(orgId, orders, costMap, listingMap, sellerId, buyerMap, breakdownMap)
 
           if (rows.length > 0) {
             const BATCH = 100
