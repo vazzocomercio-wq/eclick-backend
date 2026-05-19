@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { supabaseAdmin } from '../../common/supabase'
 import { IcarusApiClient, type IcarusProduct } from './icarus-api.client'
 import { IcarusIntegrationService } from './icarus-integration.service'
+import { StockService } from '../stock/stock.service'
 import { computeNetCost, resolveAdjustment, type CostAdjustment, type CostAdjustmentType } from './supplier-cost.util'
 
 /**
@@ -45,6 +46,7 @@ export class IcarusCatalogService {
   constructor(
     private readonly client: IcarusApiClient,
     private readonly integration: IcarusIntegrationService,
+    private readonly stock: StockService,
   ) {}
 
   // ── Puxar catálogo pro staging ──────────────────────────────────────────
@@ -408,24 +410,38 @@ export class IcarusCatalogService {
     })
   }
 
-  /** Espelha dados do fornecedor no produto: CMV (cost_price) e/ou estoque
-   *  (stock). Atualiza só os campos informados. */
+  /** Espelha dados do fornecedor no produto.
+   *  - CMV (cost_price): é atributo do produto → vai direto na coluna.
+   *  - Estoque: é estoque FÍSICO → entra no ledger product_stock (linha-mestre,
+   *    platform=NULL) e dispara recalcAndPropagate, que espelha products.stock
+   *    e distribui pros canais vinculados (ML/loja). */
   private async syncProductFromSupplier(
     orgId: string,
     productId: string,
     fields: { cost?: number; stock?: number },
   ): Promise<void> {
-    const patch: Record<string, unknown> = {}
-    if (fields.cost != null)  patch.cost_price = fields.cost
-    if (fields.stock != null) patch.stock = Math.max(0, Math.round(fields.stock))
-    if (Object.keys(patch).length === 0) return
-    patch.updated_at = new Date().toISOString()
-    const { error } = await supabaseAdmin
-      .from('products')
-      .update(patch)
-      .eq('id', productId)
-      .eq('organization_id', orgId)
-    if (error) throw new Error(`falha ao atualizar produto: ${error.message}`)
+    if (fields.cost != null) {
+      const { error } = await supabaseAdmin
+        .from('products')
+        .update({ cost_price: fields.cost, updated_at: new Date().toISOString() })
+        .eq('id', productId)
+        .eq('organization_id', orgId)
+      if (error) throw new Error(`falha ao atualizar custo do produto: ${error.message}`)
+    }
+
+    if (fields.stock != null) {
+      const qty = Math.max(0, Math.round(fields.stock))
+      const now = new Date().toISOString()
+      const { error } = await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: qty, last_movement_at: now, updated_at: now })
+        .eq('product_id', productId)
+        .is('platform', null)
+      if (error) throw new Error(`falha ao atualizar estoque do produto: ${error.message}`)
+      await this.stock
+        .recalcAndPropagate(productId, 'icarus_sync')
+        .catch(e => this.log.warn(`[icarus-catalog] recalc estoque produto=${productId} falhou: ${(e as Error).message}`))
+    }
   }
 
   // ── Desconto / ajuste de custo ──────────────────────────────────────────

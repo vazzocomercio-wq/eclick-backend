@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { IcarusApiClient } from './icarus-api.client'
 import { IcarusIntegrationService } from './icarus-integration.service'
 import { IcarusCatalogService } from './icarus-catalog.service'
+import { StockService } from '../stock/stock.service'
 
 /**
  * Sessão 2026-05-18 — Crons de sincronização do fornecedor (Cinderella/Icarus).
@@ -30,6 +31,7 @@ export class IcarusSyncCron {
     private readonly client: IcarusApiClient,
     private readonly integration: IcarusIntegrationService,
     private readonly catalog: IcarusCatalogService,
+    private readonly stockService: StockService,
   ) {}
 
   /** Estoque — incremental via estoque_v2. Mantém partner_stock fresco. */
@@ -131,11 +133,15 @@ export class IcarusSyncCron {
         .eq('supplier_sku', code)
       const productId = skuToProduct.get(code)
       if (productId) {
+        // Estoque físico no ledger (linha-mestre) + propagação pros canais.
         await supabaseAdmin
-          .from('products')
-          .update({ stock, updated_at: now })
-          .eq('id', productId)
-          .eq('organization_id', integ.organization_id)
+          .from('product_stock')
+          .update({ quantity: stock, last_movement_at: now, updated_at: now })
+          .eq('product_id', productId)
+          .is('platform', null)
+        await this.stockService
+          .recalcAndPropagate(productId, 'icarus_stock_cron')
+          .catch(e => this.log.warn(`[icarus-stock] recalc produto=${productId} falhou: ${(e as Error).message}`))
       }
     }
 

@@ -4,6 +4,7 @@ import { IcarusIntegrationService } from './icarus-integration.service'
 import { IcarusCatalogService } from './icarus-catalog.service'
 import { IcarusSyncCron } from './icarus-sync.cron'
 import { IcarusIntegrationController, IcarusIntegrationListController } from './icarus-integration.controller'
+import { StockModule } from '../stock/stock.module'
 
 /**
  * Conector Icarus (Pennacorp) pra ERPs de fornecedores de dropship.
@@ -14,6 +15,7 @@ import { IcarusIntegrationController, IcarusIntegrationListController } from './
  *   - Futuro: envio reverso de pedidos pro Icarus (/order/).
  */
 @Module({
+  imports:     [StockModule],
   providers:   [IcarusApiClient, IcarusIntegrationService, IcarusCatalogService, IcarusSyncCron],
   controllers: [IcarusIntegrationController, IcarusIntegrationListController],
   exports:     [IcarusApiClient, IcarusIntegrationService, IcarusCatalogService],
