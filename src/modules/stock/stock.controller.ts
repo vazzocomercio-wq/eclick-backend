@@ -19,6 +19,11 @@ export class StockController {
     return this.svc.getFullStock(productId)
   }
 
+  @Get(':product_id/movements')
+  movements(@Param('product_id') productId: string) {
+    return this.svc.getMovements(productId)
+  }
+
   @Patch(':stock_id/safety')
   async updateSafety(
     @Param('stock_id') stockId: string,

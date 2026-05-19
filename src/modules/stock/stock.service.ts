@@ -60,6 +60,17 @@ export class StockService {
     return { ...calc, reservations, distributions }
   }
 
+  /** Histórico de movimentos do produto (venda, estorno, ajuste, sync). */
+  async getMovements(productId: string, limit = 50) {
+    const { data } = await supabaseAdmin
+      .from('stock_movements')
+      .select('id, movement_type, quantity, balance_after, reference_type, reference_id, notes, created_at')
+      .eq('product_id', productId)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(Math.max(limit, 1), 200))
+    return data ?? []
+  }
+
   // ── Safety settings ───────────────────────────────────────────────────────
 
   async updateSafety(stockId: string, updates: {
