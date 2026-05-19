@@ -653,7 +653,7 @@ export class ProductsService {
           .eq('id', stockId)
 
         // Use new path so stock_sync_logs gets populated
-        this.stock.syncStockToAllChannels(dto.product_id, 'movement')
+        this.stock.recalcAndPropagate(dto.product_id, 'movement')
           .catch((e: Error) => console.error('[stock-sync] movement sync falhou:', e.message))
       }
 
@@ -683,7 +683,7 @@ export class ProductsService {
     if (error) throw new Error(error.message)
 
     if (current && (dto.quantity !== undefined || dto.virtual_quantity !== undefined)) {
-      this.stock.syncStockToAllChannels(current.product_id, 'manual_update')
+      this.stock.recalcAndPropagate(current.product_id, 'manual_update')
         .catch((e: Error) => console.error('[stock-sync] updateStock sync falhou:', e.message))
     }
 

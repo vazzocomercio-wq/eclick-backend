@@ -85,7 +85,7 @@ export class StockController {
   @HttpCode(HttpStatus.OK)
   async sync(@Param('product_id') productId: string) {
     try {
-      await this.svc.syncStockToAllChannels(productId, 'manual_force_sync')
+      await this.svc.recalcAndPropagate(productId, 'manual_force_sync')
       return { ok: true, productId }
     } catch (e: any) {
       this.logger.error(`[sync] product=${productId}: ${e?.message}`)

@@ -88,7 +88,7 @@ export class StockService {
 
     // Re-sync with channels since available qty changed
     if (data.product_id) {
-      this.syncStockToAllChannels(data.product_id).catch(e =>
+      this.recalcAndPropagate(data.product_id).catch(e =>
         this.logger.warn(`[updateSafety] sync error: ${e?.message}`),
       )
     }
@@ -154,7 +154,7 @@ export class StockService {
       .update({ reserved_quantity: newReserved, updated_at: new Date().toISOString() })
       .eq('id', stock.id)
 
-    this.syncStockToAllChannels(params.productId).catch(e =>
+    this.recalcAndPropagate(params.productId).catch(e =>
       this.logger.warn('[stock.reserve] sync error:', e.message),
     )
 
@@ -207,7 +207,7 @@ export class StockService {
       balance_after:  newQty,
     })
 
-    this.syncStockToAllChannels(reservation.product_id).catch(e =>
+    this.recalcAndPropagate(reservation.product_id).catch(e =>
       this.logger.warn('[stock.consume] sync error:', e.message),
     )
   }
@@ -241,7 +241,7 @@ export class StockService {
       .update({ status: 'released', released_at: new Date().toISOString() })
       .eq('id', reservation.id)
 
-    this.syncStockToAllChannels(reservation.product_id).catch(e =>
+    this.recalcAndPropagate(reservation.product_id).catch(e =>
       this.logger.warn('[stock.release] sync error:', e.message),
     )
   }
@@ -273,7 +273,7 @@ export class StockService {
         .update({ status: 'expired', released_at: new Date().toISOString() })
         .eq('id', r.id)
 
-      this.syncStockToAllChannels(r.product_id).catch(e =>
+      this.recalcAndPropagate(r.product_id).catch(e =>
         this.logger.warn('[stock.expire] sync error:', e.message),
       )
     }
@@ -449,7 +449,7 @@ export class StockService {
     let success = 0, errors = 0
     for (const productId of productIds) {
       try {
-        await this.syncStockToAllChannels(productId, 'manual_sync_all')
+        await this.recalcAndPropagate(productId, 'manual_sync_all')
         success++
       } catch (e: any) {
         errors++
@@ -460,8 +460,17 @@ export class StockService {
     return { total: productIds.length, success, errors }
   }
 
-  async syncStockToAllChannels(productId: string, triggeredBy = 'system_distribution') {
+  async recalcAndPropagate(productId: string, triggeredBy = 'system_distribution') {
     try {
+      // products.stock = espelho do disponível calculado — catálogo, loja e
+      // margem leem essa coluna; mantemos ela sempre sincronizada.
+      const calc = await this.calculateAvailable(productId)
+      if (!calc.no_stock_record) {
+        await supabaseAdmin
+          .from('products')
+          .update({ stock: Math.max(0, Math.round(calc.available)) })
+          .eq('id', productId)
+      }
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return
 
@@ -785,7 +794,7 @@ export class StockService {
       applied:              true,
     })
 
-    this.syncStockToAllChannels(productId, `auto_recalc_${triggeredBy}`)
+    this.recalcAndPropagate(productId, `auto_recalc_${triggeredBy}`)
       .catch(e => console.error('[stock.auto] sync erro:', e?.message))
 
     return result
