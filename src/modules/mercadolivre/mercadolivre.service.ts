@@ -954,20 +954,68 @@ export class MercadolivreService {
 
   // ── ML stock sync ────────────────────────────────────────────────────────
 
-  async updateListingStock(listingId: string, newQuantity: number, orgId?: string): Promise<void> {
-    const { token } = orgId
-      ? await this.getTokenForOrg(orgId)
-      : await this.getValidToken()
-    try {
+  /**
+   * Atualiza o estoque (available_quantity) de um anúncio ML.
+   *
+   * Multi-conta: o PUT exige o token da conta DONA do item — usar o token
+   * de outra conta da org devolve 403. Quando `knownSellerId` é informado,
+   * usa direto; senão tenta cada conta ML conectada da org até uma aceitar
+   * e devolve o sellerId que funcionou (o caller persiste em
+   * product_listings.account_id pra acelerar as próximas).
+   */
+  async updateListingStock(
+    listingId: string,
+    newQuantity: number,
+    orgId: string,
+    knownSellerId?: number,
+  ): Promise<{ sellerId: number }> {
+    const put = async (token: string): Promise<void> => {
       await axios.put(
         `${ML_BASE}/items/${listingId}`,
         { available_quantity: newQuantity },
         { headers: { Authorization: `Bearer ${token}` } },
       )
-    } catch (e: any) {
-      console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data?.message ?? e.message)
-      throw e
     }
+    // erro de "conta errada" (token não é dono do item) → tenta outra conta;
+    // qualquer outro status é erro real e deve propagar.
+    const isWrongAccount = (e: any): boolean => {
+      const st = e?.response?.status
+      return st === 401 || st === 403 || st === 404 || st == null
+    }
+
+    // 1. Conta conhecida — caminho rápido.
+    if (knownSellerId != null) {
+      try {
+        const { token } = await this.getTokenForOrg(orgId, knownSellerId)
+        await put(token)
+        return { sellerId: knownSellerId }
+      } catch (e: any) {
+        if (!isWrongAccount(e)) {
+          console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data?.message ?? e.message)
+          throw e
+        }
+        // conta conhecida não funcionou → cai pro fan-out abaixo
+      }
+    }
+
+    // 2. Dono desconhecido (ou conta conhecida errada): tenta cada conta da org.
+    const tokens = await this.getAllTokensForOrg(orgId)
+    let lastErr: unknown = null
+    for (const { token, sellerId } of tokens) {
+      if (sellerId === knownSellerId) continue // já tentei essa
+      try {
+        await put(token)
+        return { sellerId }
+      } catch (e: any) {
+        lastErr = e
+        if (!isWrongAccount(e)) {
+          console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data?.message ?? e.message)
+          throw e
+        }
+      }
+    }
+    console.error(`[stock-sync] nenhuma conta ML aceitou ${listingId}`)
+    throw lastErr ?? new Error('Nenhuma conta ML conseguiu atualizar o anúncio')
   }
 
   /**

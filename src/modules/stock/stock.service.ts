@@ -617,9 +617,17 @@ export class StockService {
     }
 
     try {
+      // org do produto — necessário pra resolver o token da conta ML dona
+      const { data: prod } = await supabaseAdmin
+        .from('products')
+        .select('organization_id')
+        .eq('id', productId)
+        .maybeSingle()
+      const orgId = prod?.organization_id as string | undefined
+
       const { data: vinculos } = await supabaseAdmin
         .from('product_listings')
-        .select('listing_id')
+        .select('id, listing_id, account_id')
         .eq('product_id', productId)
         .eq('platform', 'mercadolivre')
         .eq('is_active', true)
@@ -636,6 +644,18 @@ export class StockService {
         return
       }
 
+      if (!orgId) {
+        await supabaseAdmin.from('stock_sync_logs').insert({
+          product_id:    productId,
+          channel:       'mercadolivre',
+          sent_quantity: qty,
+          status:        'ignored',
+          error_message: 'Produto sem organização',
+          triggered_by:  triggeredBy,
+        })
+        return
+      }
+
       for (const v of vinculos) {
         const startTime = Date.now()
         let status: string = 'pending'
@@ -644,10 +664,26 @@ export class StockService {
         let confirmedQty: number | null = null
 
         try {
-          await this.mlService.updateListingStock(v.listing_id, shouldPause ? 0 : qty)
+          // Empurra com o token da conta ML DONA do anúncio. Se o vínculo
+          // ainda não registra a conta, updateListingStock descobre tentando
+          // as contas da org — devolvemos o sellerId pra persistir.
+          const result = await this.mlService.updateListingStock(
+            v.listing_id,
+            shouldPause ? 0 : qty,
+            orgId,
+            v.account_id ? Number(v.account_id) : undefined,
+          )
           confirmedQty = shouldPause ? 0 : qty
           status       = 'success'
           httpStatus   = 200
+
+          // Backfill do dono do anúncio quando ainda não estava registrado.
+          if (!v.account_id && result?.sellerId) {
+            await supabaseAdmin
+              .from('product_listings')
+              .update({ account_id: String(result.sellerId) })
+              .eq('id', v.id)
+          }
         } catch (e: any) {
           status     = 'error'
           errorMsg   = e?.message ?? 'erro desconhecido'
