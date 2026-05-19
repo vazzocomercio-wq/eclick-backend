@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Injectable,
   UnauthorizedException,
+  ForbiddenException,
 } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { supabaseAdmin } from '../supabase'
@@ -35,7 +36,13 @@ export class SupabaseAuthGuard implements CanActivate {
       .eq('user_id', user.id)
       .maybeSingle()
 
-    req.reqUser = { id: user.id, orgId: member?.organization_id ?? null }
+    // Sem organização, nenhum endpoint do backend faz sentido — e deixar
+    // orgId nulo abriria os dados de todas as orgs. Bloqueia.
+    if (!member?.organization_id) {
+      throw new ForbiddenException('Usuário sem organização ativa.')
+    }
+
+    req.reqUser = { id: user.id, orgId: member.organization_id }
     return true
   }
 }
