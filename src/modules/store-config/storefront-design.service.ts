@@ -245,6 +245,123 @@ export class StorefrontDesignService {
     return { design }
   }
 
+  /** Upload manual de uma imagem do lojista pro bucket publico — usado pelo
+   *  editor manual quando o lojista quer subir foto propria em vez de gerar
+   *  com IA. Recebe base64 (mesmo padrao de generate-from-image) e retorna a
+   *  URL publica. Limites do bucket / mimetype confirmados pelo Supabase. */
+  async uploadAsset(
+    orgId: string,
+    input: { imageBase64: string; imageMimeType?: string },
+  ): Promise<{ url: string }> {
+    const b64 = (input.imageBase64 ?? '').trim()
+    if (b64.length < 100) {
+      throw new BadRequestException('Envie uma imagem válida.')
+    }
+    const mime = input.imageMimeType ?? 'image/jpeg'
+    const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'
+    const buffer = Buffer.from(b64, 'base64')
+    const path = `${orgId}/upload/${randomUUID()}.${ext}`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(STOREFRONT_BUCKET)
+      .upload(path, buffer, { contentType: mime, upsert: false })
+    if (upErr) {
+      throw new BadRequestException(`Erro ao salvar a imagem: ${upErr.message}`)
+    }
+    const url = supabaseAdmin.storage.from(STOREFRONT_BUCKET).getPublicUrl(path).data.publicUrl
+    return { url }
+  }
+
+  /** Gera (e/ou injeta) uma imagem em UMA secao especifica do design.
+   *
+   *  `slot` decide onde a URL vai parar:
+   *   - "slide:N"    -> design.sections[i].slides[N].imageUrl   (heroPortrait)
+   *   - "category:N" -> design.sections[i].categories[N].imageUrl (categoryGrid)
+   *   - vazio        -> design.sections[i].imageUrl              (tilt/full/editorial/hotspot)
+   *
+   *  Quando `imageBase64` vem preenchido, usamos a foto do lojista
+   *  (decodifica + upload). Quando nao, geramos com IA via LlmService.
+   *  Em ambos os casos a URL e injetada na secao certa e o design e salvo. */
+  async generateSectionImage(
+    orgId: string,
+    input: {
+      sectionIndex: number
+      slot?:        string
+      prompt?:      string
+      imageBase64?: string
+      imageMimeType?: string
+    },
+  ): Promise<{ design: StorefrontDesign; url: string }> {
+    const store = await this.loadStoreForHero(orgId)
+    const design = store.design ?? DEFAULT_DESIGN
+    const idx = input.sectionIndex
+    if (!Number.isInteger(idx) || idx < 0 || idx >= design.sections.length) {
+      throw new BadRequestException('Seção inválida.')
+    }
+
+    // Caminho 1 — upload manual (lojista enviou base64)
+    if (input.imageBase64 && input.imageBase64.length > 100) {
+      const { url } = await this.uploadAsset(orgId, {
+        imageBase64:   input.imageBase64,
+        imageMimeType: input.imageMimeType,
+      })
+      const next = injectImageAt(design, idx, input.slot, url)
+      const validated = validateDesign(next, PREMIUM_BASE)
+      await this.save(orgId, validated)
+      return { design: validated, url }
+    }
+
+    // Caminho 2 — gera com IA. Reusa o prompt builder do hero, mas com hint
+    // adicional pra dar contexto da secao (ex: "categoria 'Lustres'").
+    const sectionHint = describeSection(design.sections[idx], input.slot)
+    const imagePrompt = this.buildHeroImagePrompt({
+      storeName:        store.store_name,
+      storeDescription: store.store_description,
+      design,
+      hint: [sectionHint, (input.prompt ?? '').trim()].filter(Boolean).join(' — ') || undefined,
+    })
+
+    let img: GenerateImageOutput
+    try {
+      img = await this.llm.generateImage({
+        orgId,
+        feature: 'storefront_hero_image',
+        prompt:  imagePrompt,
+        format:  'wide',
+        n:       1,
+      })
+    } catch (e) {
+      this.logger.error(`[storefront-design] geração de seção falhou: ${(e as Error).message}`)
+      throw new BadRequestException('A IA não conseguiu gerar a imagem agora. Tente de novo em instantes.')
+    }
+
+    const first = img.images?.[0]
+    if (!first?.b64 && !first?.url) {
+      throw new BadRequestException('A IA não retornou nenhuma imagem.')
+    }
+    const buffer = first.b64
+      ? Buffer.from(first.b64, 'base64')
+      : Buffer.from(
+          (await axios.get<ArrayBuffer>(first.url!, { responseType: 'arraybuffer', timeout: 30_000 })).data,
+        )
+
+    const path = `${orgId}/section/${randomUUID()}.png`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(STOREFRONT_BUCKET)
+      .upload(path, buffer, { contentType: 'image/png', upsert: false })
+    if (upErr) {
+      throw new BadRequestException(`Erro ao salvar a imagem: ${upErr.message}`)
+    }
+    const url = supabaseAdmin.storage.from(STOREFRONT_BUCKET).getPublicUrl(path).data.publicUrl
+
+    const next = injectImageAt(design, idx, input.slot, url)
+    const validated = validateDesign(next, PREMIUM_BASE)
+    await this.save(orgId, validated)
+    this.logger.log(
+      `[storefront-design] org=${orgId} secao=${idx} slot=${input.slot ?? '-'} gerada (model=${img.model}, custo=$${img.costUsd.toFixed(4)})`,
+    )
+    return { design: validated, url }
+  }
+
   /** Gera a imagem de banner (hero) da loja por IA, faz upload e injeta no design. */
   async generateHeroImage(orgId: string, input: { prompt?: string }): Promise<{ design: StorefrontDesign }> {
     const store = await this.loadStoreForHero(orgId)
@@ -446,6 +563,70 @@ export class StorefrontDesignService {
       .update({ design })
       .eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Erro ao salvar o design: ${error.message}`)
+  }
+}
+
+/** Injeta uma URL de imagem na secao certa do design conforme o `slot`.
+ *  - "slide:N"     -> design.sections[idx].slides[N].imageUrl  (heroPortrait)
+ *  - "category:N"  -> design.sections[idx].categories[N].imageUrl
+ *  - vazio/null    -> design.sections[idx].imageUrl (tilt/full/editorial/hotspot)
+ *  Nunca lanca: se o slot nao bater com a forma da secao, retorna design intacto.
+ */
+function injectImageAt(
+  design: StorefrontDesign,
+  idx: number,
+  slot: string | undefined,
+  url: string,
+): StorefrontDesign {
+  const sections = [...design.sections]
+  const sec = sections[idx]
+  if (!sec) return design
+
+  if (slot && slot.startsWith('slide:')) {
+    const n = Number(slot.slice('slide:'.length))
+    if (sec.type === 'heroPortrait' && Number.isInteger(n) && n >= 0 && n < sec.slides.length) {
+      const slides = sec.slides.map((sl, k) => k === n ? { ...sl, imageUrl: url } : sl)
+      sections[idx] = { ...sec, slides }
+    }
+    return { ...design, sections }
+  }
+
+  if (slot && slot.startsWith('category:')) {
+    const n = Number(slot.slice('category:'.length))
+    if (sec.type === 'categoryGrid' && Number.isInteger(n) && n >= 0 && n < sec.categories.length) {
+      const categories = sec.categories.map((c, k) => k === n ? { ...c, imageUrl: url } : c)
+      sections[idx] = { ...sec, categories }
+    }
+    return { ...design, sections }
+  }
+
+  // Slot vazio -> imageUrl direto da secao (tilt/full/editorial/hotspot)
+  if (sec.type === 'tiltBanner' || sec.type === 'fullBanner'
+      || sec.type === 'editorialSplit' || sec.type === 'imageHotspot') {
+    sections[idx] = { ...sec, imageUrl: url } as Section
+  }
+  return { ...design, sections }
+}
+
+/** Hint legivel da secao alvo, pra alimentar o prompt da IA. */
+function describeSection(section: Section | undefined, slot: string | undefined): string {
+  if (!section) return ''
+  if (section.type === 'heroPortrait' && slot?.startsWith('slide:')) {
+    const n = Number(slot.slice('slide:'.length))
+    const slide = Number.isInteger(n) ? section.slides[n] : undefined
+    return slide?.label ? `Hero slide: ${slide.label}` : 'Hero slide'
+  }
+  if (section.type === 'categoryGrid' && slot?.startsWith('category:')) {
+    const n = Number(slot.slice('category:'.length))
+    const cat = Number.isInteger(n) ? section.categories[n] : undefined
+    return cat?.label ? `Category card: ${cat.label}` : 'Category card'
+  }
+  switch (section.type) {
+    case 'tiltBanner':     return section.headline ? `Banner: ${section.headline}` : 'Banner'
+    case 'fullBanner':     return section.headline ? `Featured banner: ${section.headline}` : 'Featured banner'
+    case 'editorialSplit': return section.title ? `Editorial: ${section.title}` : 'Editorial'
+    case 'imageHotspot':   return section.title ? `Hotspot scene: ${section.title}` : 'Hotspot scene'
+    default:               return ''
   }
 }
 
