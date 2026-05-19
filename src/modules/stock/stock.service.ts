@@ -317,6 +317,92 @@ export class StockService {
     return { ok: true }
   }
 
+  // ── Venda → Estoque (baixa na venda) ──────────────────────────────────────
+
+  /**
+   * Aplica o efeito de uma venda no estoque, de forma idempotente.
+   *  - Pedido pago/enviado/entregue → baixa o físico (movimento 'sale').
+   *  - Pedido cancelado/reembolsado → estorna a baixa ('sale_reversal').
+   * Idempotência via stock_movements: chave reference_type='ml_order' +
+   * reference_id='{pedido}:{produto}'. Re-ingestão (webhook + cron de
+   * reconciliação) é segura — quem já baixou vira noop.
+   * Após uma mudança real, recalcAndPropagate re-espelha products.stock e
+   * re-distribui pros canais vinculados.
+   */
+  async applySaleMovement(params: {
+    productId: string
+    quantity: number
+    externalOrderId: string
+    status: string
+    channel?: string
+  }): Promise<'decremented' | 'reversed' | 'noop'> {
+    const productId = params.productId
+    const qty = Math.max(0, Math.round(Number(params.quantity) || 0))
+    if (!productId || qty <= 0) return 'noop'
+
+    const status   = (params.status ?? '').toLowerCase()
+    const isSale    = status === 'paid' || status === 'shipped' || status === 'delivered'
+    const isCancel  = status === 'cancelled' || status === 'canceled' || status === 'refunded'
+    if (!isSale && !isCancel) return 'noop'
+
+    const refId   = `${params.externalOrderId}:${productId}`
+    const channel = params.channel ?? 'mercadolivre'
+
+    const { data: stock } = await supabaseAdmin
+      .from('product_stock')
+      .select('id, quantity')
+      .eq('product_id', productId)
+      .is('platform', null)
+      .maybeSingle()
+    if (!stock) {
+      this.logger.warn(`[stock.sale] produto ${productId} sem registro de estoque — venda ${params.externalOrderId} ignorada`)
+      return 'noop'
+    }
+
+    const { data: movs } = await supabaseAdmin
+      .from('stock_movements')
+      .select('movement_type')
+      .eq('reference_type', 'ml_order')
+      .eq('reference_id', refId)
+    const hasSale     = (movs ?? []).some(m => m.movement_type === 'sale')
+    const hasReversal = (movs ?? []).some(m => m.movement_type === 'sale_reversal')
+
+    if (isSale) {
+      if (hasSale) return 'noop' // já baixado
+      const novaQtd = Math.max(0, Number(stock.quantity || 0) - qty)
+      await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', stock.id)
+      await supabaseAdmin.from('stock_movements').insert({
+        product_id: productId, stock_id: stock.id,
+        movement_type: 'sale', quantity: qty, balance_after: novaQtd,
+        reference_type: 'ml_order', reference_id: refId,
+        notes: `Venda ${channel} — pedido ${params.externalOrderId}`,
+      })
+      await this.recalcAndPropagate(productId, 'sale_decrement')
+        .catch(e => this.logger.warn(`[stock.sale] recalc ${productId}: ${e?.message}`))
+      return 'decremented'
+    }
+
+    // Cancelamento — só estorna se houve baixa e ainda não estornou
+    if (!hasSale || hasReversal) return 'noop'
+    const novaQtd = Math.max(0, Number(stock.quantity || 0) + qty)
+    await supabaseAdmin
+      .from('product_stock')
+      .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', stock.id)
+    await supabaseAdmin.from('stock_movements').insert({
+      product_id: productId, stock_id: stock.id,
+      movement_type: 'sale_reversal', quantity: qty, balance_after: novaQtd,
+      reference_type: 'ml_order', reference_id: refId,
+      notes: `Cancelamento — pedido ${params.externalOrderId}`,
+    })
+    await this.recalcAndPropagate(productId, 'sale_reversal')
+      .catch(e => this.logger.warn(`[stock.sale] recalc ${productId}: ${e?.message}`))
+    return 'reversed'
+  }
+
   // ── Channel distribution ──────────────────────────────────────────────────
 
   async calculateChannelQuantities(productId: string): Promise<Array<{

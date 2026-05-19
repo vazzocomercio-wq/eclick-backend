@@ -64,43 +64,57 @@ export class StockCron {
     }
   }
 
-  // Every 5 minutes: sync ML order reservations
-  @Cron('*/5 * * * *')
-  async syncMlOrderReservations() {
+  // A cada 15 min: rede de segurança da baixa de estoque na venda.
+  // O caminho primário é o webhook (ingestSingleOrder → applySaleMovement);
+  // este cron pega pedido ML pago das últimas 48h cujo webhook se perdeu.
+  // Idempotente — quem já baixou pelo webhook vira noop.
+  @Cron('*/15 * * * *', { name: 'stock-reconcile-orders' })
+  async reconcileStockFromOrders() {
     try {
-      // Fetch recent ML orders that need reservation updates
-      const { data: orders } = await supabaseAdmin
+      const since = new Date(Date.now() - 48 * 3600_000).toISOString()
+      const { data: rows } = await supabaseAdmin
         .from('orders')
-        .select('id, external_id, status, items')
-        .eq('channel', 'mercadolivre')
-        .in('status', ['paid', 'processing'])
-        .is('reservation_synced', null)
-        .limit(50)
+        .select('external_order_id, product_id, quantity, status')
+        .eq('platform', 'mercadolivre')
+        .in('status', ['paid', 'shipped', 'delivered'])
+        .not('product_id', 'is', null)
+        .gte('sold_at', since)
+        .limit(500)
 
-      if (!orders?.length) return
+      if (!rows?.length) return
 
-      for (const order of orders) {
-        try {
-          for (const item of (order.items as any[]) ?? []) {
-            if (!item.product_id || !item.quantity) continue
-            await this.stockService.reserveStock({
-              productId: item.product_id,
-              quantity: Number(item.quantity),
-              referenceType: 'ml_order',
-              referenceId: String(order.external_id || order.id),
-              channel: 'mercadolivre',
-            })
-          }
-          await supabaseAdmin
-            .from('orders')
-            .update({ reservation_synced: new Date().toISOString() })
-            .eq('id', order.id)
-        } catch (err) {
-          this.logger.error(`Failed to reserve stock for order ${order.id}`, err)
+      // Agrega por pedido+produto (um pedido pode ter 2 linhas do mesmo produto)
+      const agg = new Map<string, { productId: string; externalOrderId: string; status: string; quantity: number }>()
+      for (const r of rows) {
+        const key = `${r.external_order_id}:${r.product_id}`
+        const cur = agg.get(key)
+        if (cur) {
+          cur.quantity += Number(r.quantity) || 0
+        } else {
+          agg.set(key, {
+            productId:       r.product_id as string,
+            externalOrderId: String(r.external_order_id),
+            status:          String(r.status),
+            quantity:        Number(r.quantity) || 0,
+          })
         }
       }
+
+      let applied = 0
+      for (const m of agg.values()) {
+        const result = await this.stockService
+          .applySaleMovement({ ...m, channel: 'mercadolivre' })
+          .catch(e => {
+            this.logger.warn(`[cron.reconcile-orders] pedido ${m.externalOrderId}: ${(e as Error)?.message}`)
+            return 'noop' as const
+          })
+        if (result === 'decremented') applied++
+      }
+      if (applied > 0) {
+        this.logger.log(`[cron.reconcile-orders] ${applied} venda(s) baixadas (webhook perdido)`)
+      }
     } catch (err) {
-      this.logger.error('syncMlOrderReservations failed', err)
+      this.logger.error('[cron.reconcile-orders] falhou', err)
     }
   }
 }

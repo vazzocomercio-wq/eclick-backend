@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../../common/supabase'
 import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
 import { MessagingService } from '../../messaging/messaging.service'
 import { NewSaleNotifierService } from './new-sale-notifier.service'
+import { StockService } from '../../stock/stock.service'
 
 interface ProductInfo {
   product_id: string
@@ -54,6 +55,7 @@ export class OrdersIngestionService {
     private readonly mlClient:    MercadoLivreClient,
     private readonly messaging:   MessagingService,
     private readonly newSaleNotifier: NewSaleNotifierService,
+    private readonly stock:       StockService,
   ) {}
 
   /** Public — surfaces the last sync result for /sync-stats. */
@@ -164,6 +166,26 @@ export class OrdersIngestionService {
     // Só pra pedidos pagos. Falha silenciosa se algum dado faltar.
     if (order.status === 'paid') {
       this.newSaleNotifier.fireAndForget(orgId, sellerId, externalOrderId)
+    }
+
+    // Baixa de estoque (Estoque Unificado F3): venda paga decrementa o
+    // ledger, cancelamento estorna. Idempotente via stock_movements, então
+    // re-ingestão é segura. Agrega por produto (um pedido pode ter 2 linhas
+    // do mesmo produto). Fire-and-forget — não atrasa o webhook.
+    const saleByProduct = new Map<string, number>()
+    for (const row of rows) {
+      const pid = row.product_id as string | null
+      if (!pid) continue
+      saleByProduct.set(pid, (saleByProduct.get(pid) ?? 0) + (Number(row.quantity) || 0))
+    }
+    for (const [productId, quantity] of saleByProduct) {
+      this.stock.applySaleMovement({
+        productId,
+        quantity,
+        externalOrderId: String(externalOrderId),
+        status:          String(order.status ?? ''),
+        channel:         'mercadolivre',
+      }).catch(e => this.logger.warn(`[single-ingest] baixa estoque produto=${productId}: ${(e as Error)?.message}`))
     }
 
     return { upserted: rows.length, skipped: false }
