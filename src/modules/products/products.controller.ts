@@ -88,6 +88,15 @@ export class ProductsController {
     return this.cadastroDispatch.dispatch(u.orgId, u.id, body)
   }
 
+  /** POST /products/dispatch-to-publish — despacha produtos sem anúncio pro
+   *  funil de Anúncios do Active; o operador cria/vincula o anúncio. */
+  @Post('dispatch-to-publish')
+  @HttpCode(HttpStatus.OK)
+  dispatchToPublish(@ReqUser() u: ReqUserPayload, @Body() body: DispatchInput) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.cadastroDispatch.dispatchToPublish(u.orgId, u.id, body)
+  }
+
   /** GET /products/operator-assignments?status=open&operator=... */
   @Get('operator-assignments')
   listOperatorAssignments(

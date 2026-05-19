@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { ProductsCompletenessService } from './products-completeness.service'
+import { ProductsListingCoverageService } from './products-listing-coverage.service'
 
 /**
  * F4 (sessão 2026-05-14) — Despacho de tarefas de cadastro pro operador (Active CRM)
@@ -48,6 +49,7 @@ export class ProductsCadastroDispatchService {
     private readonly bridge:        ActiveBridgeClient,
     private readonly activeResolver: ActiveResolverService,
     private readonly completeness:  ProductsCompletenessService,
+    private readonly coverage:      ProductsListingCoverageService,
   ) {}
 
   /** Despacha N produtos pro operador. Idempotente via dedup_key. */
@@ -263,6 +265,132 @@ export class ProductsCadastroDispatchService {
       ok:               true,
       dispatched:       dispatched.length,
       skipped_existing: skippedExisting,
+      errors,
+      assignments:      dispatched,
+    }
+  }
+
+  /**
+   * Despacha N produtos pro funil de Anúncios do Active — o operador cria ou
+   * vincula o anúncio. Diferente de `dispatch()` (que é o fluxo de COMPLETAR
+   * CADASTRO): aqui o produto já tem cadastro, falta colocar no ar.
+   *
+   * Card-only: a idempotência fica no `dedup_key` do bridge (não persiste
+   * product_operator_assignments — evita colisão com o assignment de cadastro,
+   * que é 1-por-produto). O card cai no funil de Anúncios e a automação do
+   * funil cuida do avanço.
+   */
+  async dispatchToPublish(
+    orgId: string,
+    dispatcherUserId: string | null,
+    input: DispatchInput,
+  ): Promise<DispatchResult> {
+    if (!Array.isArray(input.product_ids) || input.product_ids.length === 0) {
+      throw new BadRequestException('product_ids[] obrigatório')
+    }
+    if (!input.operator_user_id) throw new BadRequestException('operator_user_id obrigatório')
+    if (!input.pipeline_id || !input.stage_id) {
+      throw new BadRequestException('pipeline_id + stage_id obrigatórios (config Active)')
+    }
+    if (input.product_ids.length > 100) {
+      throw new BadRequestException('Máximo 100 produtos por dispatch.')
+    }
+
+    const dueDate = input.due_date ?? new Date(Date.now() + 24 * 3600_000).toISOString()
+
+    let activeOrgId: string
+    try {
+      if (!dispatcherUserId) throw new BadRequestException('dispatcherUserId ausente — não dá pra resolver org Active')
+      const resolved = await this.activeResolver.resolveActiveOrgForUser(dispatcherUserId)
+      activeOrgId = resolved.org_id
+    } catch (e) {
+      throw new BadRequestException(`Não foi possível resolver org no Active CRM: ${(e as Error).message}`)
+    }
+
+    const { data: products, error } = await supabaseAdmin
+      .from('products')
+      .select('id, sku, name')
+      .eq('organization_id', orgId)
+      .in('id', input.product_ids)
+    if (error) throw new BadRequestException(error.message)
+
+    // Destinos da org + cobertura atual — pra descrever no card o que falta.
+    const destinos = await this.coverage.resolveDestinos(orgId)
+    const { data: listings } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id, platform, account_id')
+      .eq('is_active', true)
+      .in('product_id', input.product_ids)
+    const coveredByProduct = new Map<string, Set<string>>()
+    for (const l of (listings ?? []) as Array<{ product_id: string; platform: string; account_id: string | null }>) {
+      if (!l.product_id || !l.platform) continue
+      let s = coveredByProduct.get(l.product_id)
+      if (!s) { s = new Set(); coveredByProduct.set(l.product_id, s) }
+      if (l.account_id) s.add(`${l.platform}:${l.account_id}`)
+      else for (const d of destinos.filter(d => d.channel === l.platform)) s.add(d.key)
+    }
+
+    const fetchedIds = new Set((products ?? []).map(p => p.id as string))
+    const dispatched: DispatchResult['assignments'] = []
+    const errors: DispatchResult['errors'] = []
+    for (const m of input.product_ids.filter(id => !fetchedIds.has(id))) {
+      errors.push({ product_id: m, message: 'Produto não encontrado nesse org' })
+    }
+
+    const baseUrl = process.env.FRONTEND_PUBLIC_URL ?? 'https://eclick.app.br'
+
+    for (const p of (products ?? [])) {
+      try {
+        const covered = coveredByProduct.get(p.id as string) ?? new Set<string>()
+        const missing = destinos.filter(d => !covered.has(d.key))
+        const missingLabels = missing.map(d =>
+          `${d.channel === 'mercadolivre' ? 'ML' : d.channel} ${d.label}`.trim())
+        const taskBody = missingLabels.length > 0
+          ? `Criar/vincular anúncio em: ${missingLabels.join(' • ')}`
+          : 'Criar anúncio do produto'
+
+        const dedupKey  = `product_publish:${p.id}`
+        // Deeplink abre o fluxo de Novo Anúncio do IA Criativo amarrado ao produto.
+        const deeplink  = `${baseUrl}/dashboard/creative/new?catalogProductId=${p.id}&source=anuncio`
+
+        const bridgeRes = await this.bridge.createCampaignCard({
+          organization_id: activeOrgId,
+          pipeline_id:     input.pipeline_id,
+          stage_id:        input.stage_id,
+          assigned_to:     input.operator_user_id,
+          title:           `Criar anúncio: ${(p as any).name} ${(p as any).sku ? `(${(p as any).sku})` : ''}`.trim(),
+          task_title:      taskBody.slice(0, 200),
+          due_date:        dueDate,
+          tags:            ['anuncio_pendente', ...[...new Set(missing.map(d => d.channel))].slice(0, 5)],
+          metadata: {
+            source:           'saas_anuncio',
+            card_kind:        'product_publish',
+            product_id:       p.id,
+            sku:              (p as any).sku,
+            missing_channels: missing.map(d => ({ key: d.key, channel: d.channel, label: d.label })),
+            deeplink,
+            priority:         input.task_priority ?? 'normal',
+            notes:            input.notes ?? null,
+          },
+          dedup_key:       dedupKey,
+        })
+
+        dispatched.push({
+          product_id:    p.id as string,
+          assignment_id: '',
+          deal_id:       bridgeRes.deal_id ?? undefined,
+          task_id:       bridgeRes.task_id ?? undefined,
+        })
+      } catch (e) {
+        this.log.error(`[publish-dispatch] product=${p.id} falhou: ${(e as Error).message}`)
+        errors.push({ product_id: p.id as string, message: (e as Error).message.slice(0, 200) })
+      }
+    }
+
+    return {
+      ok:               true,
+      dispatched:       dispatched.length,
+      skipped_existing: 0,
       errors,
       assignments:      dispatched,
     }
