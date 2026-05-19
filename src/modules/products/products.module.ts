@@ -6,6 +6,7 @@ import { ProductsEnrichmentWorker } from './products-enrichment.worker'
 import { ProductsEnrichmentBatchWorker } from './products-enrichment-batch.worker'
 import { ProductsImportService } from './products-import.service'
 import { ProductsCompletenessService } from './products-completeness.service'
+import { ProductsListingCoverageService } from './products-listing-coverage.service'
 import { MlCategoryRequirementsService } from './ml-category-requirements.service'
 import { ProductsCadastroDispatchService } from './products-cadastro-dispatch.service'
 import { StockModule } from '../stock/stock.module'
@@ -24,6 +25,7 @@ import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
     ProductsEnrichmentBatchWorker,
     ProductsImportService,
     ProductsCompletenessService,
+    ProductsListingCoverageService,
     MlCategoryRequirementsService,
     ProductsCadastroDispatchService,
   ],

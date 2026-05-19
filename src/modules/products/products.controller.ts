@@ -5,6 +5,7 @@ import { ProductsService, UpdateProductCostsDto, CreateVinculoDto, CreateStockMo
 import { ProductsEnrichmentService } from './products-enrichment.service'
 import { ProductsImportService } from './products-import.service'
 import { ProductsCompletenessService } from './products-completeness.service'
+import { ProductsListingCoverageService } from './products-listing-coverage.service'
 import { MlCategoryRequirementsService } from './ml-category-requirements.service'
 import { ProductsCadastroDispatchService, type DispatchInput } from './products-cadastro-dispatch.service'
 import { ActiveResolverService } from '../active-bridge/active-resolver.service'
@@ -26,6 +27,7 @@ export class ProductsController {
     private readonly enrichment: ProductsEnrichmentService,
     private readonly importer: ProductsImportService,
     private readonly completeness: ProductsCompletenessService,
+    private readonly coverage: ProductsListingCoverageService,
     private readonly mlReq: MlCategoryRequirementsService,
     private readonly cadastroDispatch: ProductsCadastroDispatchService,
     private readonly activeResolver:   ActiveResolverService,
@@ -183,6 +185,41 @@ export class ProductsController {
       stock_max:   parseOpt(stockMaxRaw),
       search:      search?.trim() || undefined,
       sort,
+    })
+  }
+
+  /** GET /products/listing-coverage — Operação de Cadastro: matriz produto ×
+   *  destino (canal × conta). Identifica produtos sem anúncio ou com cobertura
+   *  parcial multi-canal/multi-conta. */
+  @Get('listing-coverage')
+  async listingCoverage(
+    @ReqUser() u: ReqUserPayload,
+    @Query('sample_size') sampleSizeRaw?: string,
+    @Query('stock_min')   stockMinRaw?:   string,
+    @Query('stock_max')   stockMaxRaw?:   string,
+    @Query('search')      search?:        string,
+    @Query('sort')        sortRaw?:       string,
+    @Query('coverage')    coverageRaw?:   string,
+    @Query('only_complete') onlyCompleteRaw?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const parseOpt = (s?: string): number | undefined => {
+      if (!s) return undefined
+      const n = parseInt(s, 10)
+      return Number.isFinite(n) ? n : undefined
+    }
+    const sort: 'stock_desc' | 'stock_asc' | 'name' | undefined =
+      sortRaw === 'stock_desc' || sortRaw === 'stock_asc' || sortRaw === 'name' ? sortRaw : undefined
+    const coverage: 'sem' | 'parcial' | 'all' | undefined =
+      coverageRaw === 'sem' || coverageRaw === 'parcial' || coverageRaw === 'all' ? coverageRaw : undefined
+    return this.coverage.getCoverage(u.orgId, {
+      sample_size:   parseOpt(sampleSizeRaw),
+      stock_min:     parseOpt(stockMinRaw),
+      stock_max:     parseOpt(stockMaxRaw),
+      search:        search?.trim() || undefined,
+      sort,
+      coverage,
+      only_complete: onlyCompleteRaw === 'true' || onlyCompleteRaw === '1',
     })
   }
 
