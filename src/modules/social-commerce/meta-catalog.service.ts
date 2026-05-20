@@ -215,15 +215,44 @@ export class MetaCatalogService {
     return body.data ?? []
   }
 
-  /** Lista catálogos da Business Manager do user (precisa business_management). */
+  /** Lista catálogos da Business Manager do user (precisa business_management).
+   *
+   *  Com `businessId` → chamada direta retorna { data: [{id, name}] }.
+   *  Sem `businessId` → lista businesses do user, cada um com seus catalogs
+   *  aninhados em `owned_product_catalogs.data`. Aplanamos pra Array<{id,name}>
+   *  pra o frontend ter um shape unico. */
   async listCatalogs(accessToken: string, businessId?: string): Promise<Array<{ id: string; name: string }>> {
-    const path = businessId
-      ? `${GRAPH_API_BASE}/${businessId}/owned_product_catalogs?fields=id,name&access_token=${accessToken}`
-      : `${GRAPH_API_BASE}/me/businesses?fields=owned_product_catalogs{id,name}&access_token=${accessToken}`
-    const res = await fetch(path)
-    const body = await res.json() as { data?: Array<{ id: string; name: string }>; error?: { message?: string } }
+    if (businessId) {
+      const url = `${GRAPH_API_BASE}/${businessId}/owned_product_catalogs?fields=id,name&access_token=${accessToken}`
+      const res = await fetch(url)
+      const body = await res.json() as { data?: Array<{ id: string; name: string }>; error?: { message?: string } }
+      if (!res.ok) throw new BadRequestException(`Meta listCatalogs: ${body.error?.message ?? 'erro'}`)
+      return body.data ?? []
+    }
+    // Sem businessId: lista businesses do user com catalogs aninhados
+    const url = `${GRAPH_API_BASE}/me/businesses?fields=id,name,owned_product_catalogs{id,name}&access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as {
+      data?: Array<{
+        id: string
+        name?: string
+        owned_product_catalogs?: { data?: Array<{ id: string; name: string }> }
+      }>
+      error?: { message?: string }
+    }
     if (!res.ok) throw new BadRequestException(`Meta listCatalogs: ${body.error?.message ?? 'erro'}`)
-    return body.data ?? []
+    const flat: Array<{ id: string; name: string }> = []
+    for (const biz of body.data ?? []) {
+      const bizLabel = biz.name ?? ''
+      for (const cat of biz.owned_product_catalogs?.data ?? []) {
+        // Prefixa com nome do business pra clarear quando ha homonimos
+        // ("Catalog" em 3 businesses diferentes). Quando nao tem nome
+        // do business, devolve so o nome do catalog.
+        const name = bizLabel ? `${cat.name} — ${bizLabel}` : cat.name
+        flat.push({ id: cat.id, name })
+      }
+    }
+    return flat
   }
 
   /** Batch CREATE/UPDATE de produtos no catálogo Meta. Cada request item
