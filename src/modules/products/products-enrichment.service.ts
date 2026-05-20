@@ -759,7 +759,11 @@ export class ProductsEnrichmentService {
         feature:    'catalog_enrichment',
         userPrompt: this.buildEnrichmentPrompt(product),
         jsonMode:   true,
-        maxTokens:  2500,
+        // 8000 tokens (era 2500) — o prompt pede 18 campos incluindo 5
+        // titles/descriptions por canal; com 2500 o JSON era TRUNCADO
+        // sistematicamente (todas as ~1.400 calls/dia do Sonnet bateram
+        // exatamente em 2500 output → parser rejeitava → $$ na sarjeta).
+        maxTokens:  8000,
         catalog:    { productId, operation: 'catalog_enrichment' },
       })
 
