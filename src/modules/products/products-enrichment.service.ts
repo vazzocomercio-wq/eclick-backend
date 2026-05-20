@@ -765,6 +765,12 @@ export class ProductsEnrichmentService {
 
       const parsed = this.parseEnrichmentJson(out.text)
       if (!parsed) {
+        // Diagnóstico — captura o output bruto pra debugar por que falhou.
+        // Histórico: até 19/05 esse path consumia ~$2/h em silêncio porque
+        // o parse rejeitava 100% dos outputs do Sonnet sem logar a causa.
+        this.logger.warn(
+          `[catalog.enrich] ${productId} parse falhou — output (300c): ${out.text.slice(0, 300).replace(/\s+/g, ' ')}`,
+        )
         await supabaseAdmin
           .from('products')
           .update({ ai_enrichment_pending: false, updated_at: new Date().toISOString() })
@@ -949,13 +955,27 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
   }
 
   private parseEnrichmentJson(text: string): EnrichmentOutput | null {
+    // Tentativa 1: limpa code fences (```json ... ```) e parse direto.
+    // Tentativa 2 (fallback): extrai o primeiro bloco { ... } do texto —
+    // cobre casos em que o Sonnet manda comentário antes ou JSON com texto
+    // solto envolta (caso histórico que causou 100% de falha silenciosa em
+    // ~1.400 calls/dia — todas perdiam $$ sem gravar nada).
     const cleaned = text
       .replace(/^\s*```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
       .trim()
+    let parsedRaw: unknown = null
     try {
-      const parsed = JSON.parse(cleaned)
-      if (!parsed || typeof parsed !== 'object') return null
+      parsedRaw = JSON.parse(cleaned)
+    } catch {
+      const match = cleaned.match(/\{[\s\S]*\}/)
+      if (match) {
+        try { parsedRaw = JSON.parse(match[0]) } catch { /* segue null */ }
+      }
+    }
+    try {
+      if (!parsedRaw || typeof parsedRaw !== 'object') return null
+      const parsed = parsedRaw as Record<string, unknown>
       const arr = (v: unknown): string[] =>
         Array.isArray(v) ? v.map(String).filter(s => s.trim().length > 0) : []
       const str = (v: unknown): string | undefined =>

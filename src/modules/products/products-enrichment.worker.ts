@@ -22,6 +22,12 @@ export class ProductsEnrichmentWorker implements OnModuleInit, OnModuleDestroy {
   private readonly tickIntervalMs = 5 * 60 * 1_000  // 5 min
   private readonly bootDelayMs    = 90_000          // 90s
   private readonly maxPerTick     = 5
+  /** Circuit breaker: se N enriquecimentos consecutivos falharem, o worker
+   *  auto-pausa até o próximo deploy. Evita queimar $$ em silêncio (ex:
+   *  19/05: parser quebrado fez 100% das calls falharem, ~$120 perdidos). */
+  private readonly maxConsecutiveFailures = 8
+  private consecutiveFailures = 0
+  private circuitBreakerLogged = false
   private timer: NodeJS.Timeout | null = null
   private busy = false
 
@@ -48,16 +54,29 @@ export class ProductsEnrichmentWorker implements OnModuleInit, OnModuleDestroy {
 
   private async tick(): Promise<void> {
     if (this.busy) return
+    if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
+      if (!this.circuitBreakerLogged) {
+        this.logger.error(
+          `[circuit-breaker] enrichment auto-pausado — ${this.consecutiveFailures} falhas consecutivas. ` +
+          'Investigue a causa (Railway logs) e re-deploy pra resetar.',
+        )
+        this.circuitBreakerLogged = true
+      }
+      return
+    }
     this.busy = true
     try {
       const pending = await this.enrichment.listPendingEnrichment(this.maxPerTick)
       if (pending.length === 0) return
       this.logger.log(`processando ${pending.length} produto(s) pending`)
       for (const p of pending) {
+        if (this.consecutiveFailures >= this.maxConsecutiveFailures) break
         try {
           await this.enrichment.enrichProduct(p.organization_id, p.id)
+          this.consecutiveFailures = 0  // sucesso reseta o breaker
         } catch (e: unknown) {
-          this.logger.warn(`enrich ${p.id} falhou: ${(e as Error).message}`)
+          this.consecutiveFailures++
+          this.logger.warn(`enrich ${p.id} falhou (consec=${this.consecutiveFailures}): ${(e as Error).message}`)
           // enrichProduct já limpa pending=false em erro, segue pro próximo
         }
       }

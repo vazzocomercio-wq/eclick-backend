@@ -251,6 +251,16 @@ export class MlQuestionsAiService {
    */
   async handleQuestionWebhook(orgId: string, questionId: string): Promise<void> {
     try {
+      // Gating de custo: o webhook do ML chega VÁRIAS vezes pra mesma
+      // pergunta (a cada update do recurso). Sem auto-send, a sugestão só
+      // tem valor quando o usuário clica em "IA sugerir" no Inbox — gerar
+      // automaticamente queimava ~3,6k calls/mês na Vazzo (todas re-rodando
+      // a MESMA pergunta porque o status fica 'pending' indefinidamente).
+      // Decisão (2026-05-19): webhook só dispara Claude quando auto-send
+      // está LIGADO; modo manual = só o botão da UI gera sugestão.
+      const autoSendOn = await this.getAutoSendEnabled(orgId)
+      if (!autoSendOn) return
+
       const { data: existing } = await supabaseAdmin
         .from('ml_question_suggestions')
         .select('question_id, status')
@@ -264,10 +274,6 @@ export class MlQuestionsAiService {
       }
       // Gera sugestão (idempotente via upsert na suggestAnswer).
       await this.suggestAnswer(orgId, questionId)
-
-      // Aplica auto-send se ligado e elegível.
-      const autoSendOn = await this.getAutoSendEnabled(orgId)
-      if (!autoSendOn) return
 
       const { data: row } = await supabaseAdmin
         .from('ml_question_suggestions')
