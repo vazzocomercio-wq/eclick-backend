@@ -275,6 +275,11 @@ export class MetaCatalogService {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         access_token: accessToken,
+        // item_type virou obrigatorio em 2025 NO TOP-LEVEL do batch request
+        // (nao dentro de cada item.data). Sem ele:
+        //   (#100) The parameter item_type is required.
+        // Sempre PRODUCT_ITEM pra catalogo e-commerce.
+        item_type: 'PRODUCT_ITEM',
         requests: items.map(i => ({
           method:      i.method,
           retailer_id: i.retailer_id,

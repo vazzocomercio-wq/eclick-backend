@@ -580,7 +580,6 @@ export class SocialCommerceService {
     }
 
     const out: MetaProductData = {
-      item_type:    'PRODUCT_ITEM',
       title:        title.substring(0, 150),
       description:  description.substring(0, 9999),
       availability: stockNum > 0 ? 'in stock' : 'out of stock',
@@ -590,6 +589,8 @@ export class SocialCommerceService {
       image_link:   imageUrl,
       brand:        p.brand ?? 'Sem marca',
     }
+    // item_type='PRODUCT_ITEM' vai no top-level do batch (em meta-catalog
+    // batchUpdateProducts) — nao em cada item.data.
     if (p.photo_urls && p.photo_urls.length > 1) {
       out.additional_image_link = p.photo_urls.slice(1, 10)
     }
