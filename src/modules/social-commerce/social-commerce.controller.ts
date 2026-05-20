@@ -92,15 +92,21 @@ export class SocialCommerceController {
 
   // ── Setup ────────────────────────────────────────────────────────
 
-  /** GET /social-commerce/instagram/status — info pra UI */
+  /** GET /social-commerce/instagram/status — info pra UI.
+   *
+   *  "connected" aqui significa "tem token Meta valido + UI pode prosseguir
+   *  pro wizard". Inclui `connecting` (OAuth completo, falta escolher
+   *  Page + Catalog) — sem isso, o front mostra "Nao conectado" pro
+   *  estado intermediario, e o user nao consegue completar o setup. */
   @Get('instagram/status')
   @UseGuards(SupabaseAuthGuard)
   async status(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const ch = await this.svc.getStatus(u.orgId, 'instagram_shop')
+    const usable = !!ch && (ch.status === 'connected' || ch.status === 'connecting')
     return {
       configured_globally: this.meta.isConfigured(),
-      connected:           ch?.status === 'connected',
+      connected:           usable,
       channel:             ch ? {
         id:                ch.id,
         status:            ch.status,
