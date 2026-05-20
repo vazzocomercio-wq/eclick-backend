@@ -27,8 +27,7 @@ interface ProductForSync {
   condition:             string | null
   ml_permalink:          string | null
   sku:                   string | null
-  landing_page_enabled:  boolean | null
-  landing_page_slug:     string | null
+  storefront_visible:    boolean | null
 }
 
 @Injectable()
@@ -246,8 +245,9 @@ export class SocialCommerceService {
   }> {
     const ch = await this.requireConnected(orgId, 'instagram_shop')
     const product = await this.fetchProduct(productId, orgId)
+    const storeSlug = await this.fetchStoreSlug(orgId)
 
-    const metaData = this.mapToMetaFormat(product, ch)
+    const metaData = this.mapToMetaFormat(product, ch, storeSlug)
     const retailerId = product.sku || product.id
 
     // Marca como syncing
@@ -479,13 +479,17 @@ export class SocialCommerceService {
   }
 
   private async fetchProduct(productId: string, orgId: string): Promise<ProductForSync> {
+    // landing_page_enabled / landing_page_slug nao existem mais em products
+    // (eram da fase antiga de "landing page por produto"). storefront_visible
+    // substitui o conceito. URL publica do produto eh montada via
+    // store_config.store_slug (lookup separado em fetchStoreSlug).
     const { data, error } = await supabaseAdmin
       .from('products')
       .select(`
         id, organization_id, name, brand, category, price, stock,
         description, ai_short_description, photo_urls,
         channel_titles, channel_descriptions, gtin, condition,
-        ml_permalink, sku, landing_page_enabled, landing_page_slug
+        ml_permalink, sku, storefront_visible
       `)
       .eq('id', productId)
       .eq('organization_id', orgId)
@@ -493,6 +497,20 @@ export class SocialCommerceService {
     if (error)  throw new BadRequestException(`Erro: ${error.message}`)
     if (!data)  throw new NotFoundException('Produto não encontrado')
     return data as ProductForSync
+  }
+
+  /** Cache de store_slug por org_id pra evitar N queries durante syncAll. */
+  private storeSlugCache = new Map<string, string | null>()
+  private async fetchStoreSlug(orgId: string): Promise<string | null> {
+    if (this.storeSlugCache.has(orgId)) return this.storeSlugCache.get(orgId) ?? null
+    const { data } = await supabaseAdmin
+      .from('store_config')
+      .select('store_slug')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    const slug = (data?.store_slug as string | null) ?? null
+    this.storeSlugCache.set(orgId, slug)
+    return slug
   }
 
   private async upsertProductMapping(
@@ -521,8 +539,15 @@ export class SocialCommerceService {
       .eq('id', channelId)
   }
 
-  /** Onda 3 / S2 — mapeia produto do catálogo pra formato Meta. */
-  private mapToMetaFormat(p: ProductForSync, ch: SocialCommerceChannelRow): MetaProductData {
+  /** Onda 3 / S2 — mapeia produto do catálogo pra formato Meta.
+   *  `storeSlug` vem do store_config da org — usado pra montar a URL
+   *  publica do produto na vitrine (`/loja/{slug}/produto/{id}`). Quando
+   *  ausente, cai pro ml_permalink ou pra URL admin de fallback. */
+  private mapToMetaFormat(
+    p: ProductForSync,
+    ch: SocialCommerceChannelRow,
+    storeSlug: string | null,
+  ): MetaProductData {
     const title = p.channel_titles?.instagram
       ?? p.channel_titles?.loja_propria
       ?? p.name
@@ -537,9 +562,10 @@ export class SocialCommerceService {
       throw new BadRequestException(`Produto ${p.id} sem photo_url — Meta exige imagem`)
     }
 
-    const productUrl = p.landing_page_enabled && p.landing_page_slug
-      ? `${process.env.FRONTEND_URL ?? 'https://eclick.app.br'}/loja/${p.organization_id}/${p.landing_page_slug}`
-      : (p.ml_permalink ?? `${process.env.FRONTEND_URL ?? 'https://eclick.app.br'}/p/${p.id}`)
+    const frontendBase = process.env.FRONTEND_URL ?? 'https://eclick.app.br'
+    const productUrl = storeSlug
+      ? `${frontendBase}/loja/${storeSlug}/produto/${p.id}`
+      : (p.ml_permalink ?? `${frontendBase}/p/${p.id}`)
 
     const condition: MetaProductData['condition'] =
       p.condition === 'used'        ? 'used'
