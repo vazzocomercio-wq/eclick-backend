@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException, HttpException, BadRequestException } from '@nestjs/common'
+import { Injectable, NotFoundException, HttpException, BadRequestException, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { StockService } from '../stock/stock.service'
+import { SocialCommerceService } from '../social-commerce/social-commerce.service'
 
 const PRODUCT_FIELDS = `id,name,sku,brand,price,stock,status,platforms,photo_urls,
   ml_title,condition,category,created_at,
@@ -45,7 +46,12 @@ export interface UpdateStockDto {
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly stock: StockService) {}
+  private readonly logger = new Logger(ProductsService.name)
+
+  constructor(
+    private readonly stock: StockService,
+    private readonly socialCommerce: SocialCommerceService,
+  ) {}
 
   /**
    * Loja Propria — Fase 9: marca/desmarca produtos pra aparecer na vitrine.
@@ -83,6 +89,25 @@ export class ProductsService {
       .eq('organization_id', orgId)
       .in('id', targetIds)
     if (error) throw new BadRequestException(`Erro ao atualizar: ${error.message}`)
+
+    // Loja Propria + Catalogo Meta/WhatsApp: ao publicar produtos na vitrine
+    // (visible=true), tentamos sincronizar pro Meta Catalog automaticamente.
+    // Best-effort: se a org nao tem canal conectado, `tryAutoSyncProducts`
+    // retorna { skipped:true } silenciosamente. Fire-and-forget pra nao
+    // bloquear o response — o lojista nao precisa esperar a IA do Meta
+    // confirmar o sync. Erros vao pro log.
+    if (visible && targetIds.length > 0) {
+      this.socialCommerce.tryAutoSyncProducts(orgId, targetIds)
+        .then(r => {
+          if (!r.skipped) {
+            this.logger.log(
+              `[auto-sync] org=${orgId.slice(0,8)} produtos=${targetIds.length} synced=${r.synced} failed=${r.failed}`,
+            )
+          }
+        })
+        .catch(e => this.logger.warn(`[auto-sync] org=${orgId.slice(0,8)}: ${(e as Error).message}`))
+    }
+
     return { updated: targetIds.length, skipped }
   }
 

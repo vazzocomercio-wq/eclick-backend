@@ -14,9 +14,10 @@ import { CreativeModule } from '../creative/creative.module'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
+import { SocialCommerceModule } from '../social-commerce/social-commerce.module'
 
 @Module({
-  imports:     [StockModule, CreativeModule, AiModule, MercadolivreModule, ActiveBridgeModule],
+  imports:     [StockModule, CreativeModule, AiModule, MercadolivreModule, ActiveBridgeModule, SocialCommerceModule],
   controllers: [ProductsController],
   providers:   [
     ProductsService,

@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 import { MetaCatalogService } from './meta-catalog.service'
 import type {
@@ -188,6 +189,32 @@ export class SocialCommerceService {
       } catch { /* best-effort — segue desconectando local */ }
     }
     return this.disconnect(orgId, 'whatsapp_business')
+  }
+
+  /** Auto-sync usado pelo ProductsService quando produto vira
+   *  storefront_visible=true. Best-effort: se a org nao tem canal Meta
+   *  conectado, retorna { skipped:true } sem lancar. Se tem, dispara
+   *  syncProduct em paralelo (settled — falha de um nao bloqueia os
+   *  outros). Idempotente. */
+  async tryAutoSyncProducts(
+    orgId: string,
+    productIds: string[],
+  ): Promise<{ skipped: boolean; synced: number; failed: number }> {
+    if (!productIds || productIds.length === 0) {
+      return { skipped: true, synced: 0, failed: 0 }
+    }
+    const ch = await this.getStatus(orgId, 'instagram_shop')
+    if (!ch || ch.status !== 'connected') {
+      // Sem canal Meta conectado — silencioso. Lojista podera rodar sync
+      // depois quando conectar.
+      return { skipped: true, synced: 0, failed: 0 }
+    }
+    const results = await Promise.allSettled(
+      productIds.map(pid => this.syncProduct(orgId, pid)),
+    )
+    const synced = results.filter(r => r.status === 'fulfilled').length
+    const failed = results.length - synced
+    return { skipped: false, synced, failed }
   }
 
   async disconnect(orgId: string, channel: SocialCommerceChannel): Promise<{ ok: true }> {
@@ -542,5 +569,52 @@ export class SocialCommerceService {
     if (p.gtin)     out.gtin = p.gtin
     if (p.category) out.custom_label_0 = p.category
     return out
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // CRON — sync diario do catalogo Meta
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Reconciliacao noturna: 05:00 BRT (08:00 UTC) varre todas as orgs
+   *  com canal `instagram_shop` connected e roda `syncAll`.
+   *
+   *  Justificativa: auto-sync ao marcar produto visivel cobre o caso
+   *  comum, mas pode falhar (Meta API com 5xx, throttle, token expirado
+   *  no momento exato). Cron pega o que escapou + reflete mudancas de
+   *  preco/stock/foto que o lojista faz fora do toggle de visibilidade.
+   *
+   *  Best-effort: erros por org sao logados e nao quebram o loop. */
+  @Cron('0 5 * * *', { name: 'syncSocialCommerceCatalogs', timeZone: 'America/Sao_Paulo' })
+  async dailyCatalogSync(): Promise<void> {
+    const { data: channels, error } = await supabaseAdmin
+      .from('social_commerce_channels')
+      .select('organization_id, id')
+      .eq('channel', 'instagram_shop')
+      .eq('status', 'connected')
+
+    if (error) {
+      this.logger.error(`[daily-sync] select channels falhou: ${error.message}`)
+      return
+    }
+    if (!channels || channels.length === 0) {
+      this.logger.log('[daily-sync] nenhum canal conectado — skip')
+      return
+    }
+
+    this.logger.log(`[daily-sync] iniciando — ${channels.length} canais`)
+    let totalSynced = 0, totalFailed = 0
+    for (const ch of channels as Array<{ organization_id: string; id: string }>) {
+      try {
+        const r = await this.syncAll(ch.organization_id)
+        totalSynced += r.synced
+        totalFailed += r.failed
+        this.logger.log(
+          `[daily-sync] org=${ch.organization_id.slice(0,8)} synced=${r.synced} failed=${r.failed} skipped=${r.skipped}`,
+        )
+      } catch (e) {
+        this.logger.warn(`[daily-sync] org=${ch.organization_id.slice(0,8)} falhou: ${(e as Error).message}`)
+      }
+    }
+    this.logger.log(`[daily-sync] concluido — synced=${totalSynced} failed=${totalFailed}`)
   }
 }
