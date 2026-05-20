@@ -244,7 +244,9 @@ export class LlmService {
         'anthropic-version': '2023-06-01',
         'Content-Type':      'application/json',
       },
-      timeout: 60_000,
+      // 120s (era 60s) — Sonnet com maxTokens alto (ex: catalog_enrichment
+      // a 8k) leva ~80-100s. OpenAI segue em 60s.
+      timeout: 120_000,
     })
     const text = (res.data.content ?? [])
       .filter(b => b.type === 'text')
