@@ -354,28 +354,37 @@ export class SocialCommerceService {
     }
   }
 
-  /** Sync em massa — produtos com catalog_status='ready' que ainda não
-   *  estão sincronizados, OU produtos cujo synced_data ficou stale (mudou
-   *  preço/estoque/foto). Limita 100 por chamada pra não estourar API. */
+  /** Sync em massa — todo produto visível na vitrine (`storefront_visible=true`)
+   *  com nome + preço vai pro catálogo Meta. Reflete a Fase 9 da Loja:
+   *  visibilidade = `storefront_visible`, não `catalog_status` (este é
+   *  critério de ML). Limita 500 por chamada pra não estourar timeout HTTP. */
   async syncAll(orgId: string): Promise<{
     synced: number
     failed: number
     skipped: number
   }> {
-    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    await this.requireConnected(orgId, 'instagram_shop')
 
-    // Produtos elegíveis: catalog_status='ready' OR sync_status='pending'/error
+    // Produtos elegíveis: visíveis na vitrine + nome + preço válido.
+    // (Catálogo Meta é UM só — instagram_shop e whatsapp_business
+    //  compartilham external_catalog_id, então sincronizar uma vez serve
+    //  pra ambos.)
     const { data: candidates, error } = await supabaseAdmin
       .from('products')
-      .select('id')
+      .select('id, name, price')
       .eq('organization_id', orgId)
-      .in('catalog_status', ['ready', 'live'])
-      .limit(100)
+      .eq('storefront_visible', true)
+      .limit(500)
     if (error) throw new BadRequestException(`Erro ao listar produtos: ${error.message}`)
     if (!candidates?.length) return { synced: 0, failed: 0, skipped: 0 }
 
     let synced = 0, failed = 0, skipped = 0
     for (const c of candidates) {
+      // Pula produto sem nome ou sem preço — Meta rejeita ambos
+      if (!c.name?.trim() || !c.price || Number(c.price) <= 0) {
+        skipped++
+        continue
+      }
       try {
         await this.syncProduct(orgId, c.id)
         synced++
