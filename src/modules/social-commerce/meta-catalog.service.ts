@@ -25,17 +25,22 @@ const GRAPH_API_BASE   = 'https://graph.facebook.com/v19.0'
 const META_AUTH_URL    = 'https://www.facebook.com/v19.0/dialog/oauth'
 const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 
-// Scopes mínimos pra Catalog + Instagram Shop + WhatsApp Business
-// instagram_business_basic: substitui o antigo `instagram_basic` (Meta
-//   deprecou em 2025). Cobre acesso a conta Instagram Business vinculada
-//   à Page do Facebook — necessario pra Instagram Shop.
+// Scopes mínimos pra Catalog + WhatsApp Business.
+//
+// Instagram Shop fica fora deste batch — a Meta deprecou `instagram_basic`
+// e o substituto `instagram_business_basic` exige config especifica de
+// Login mode no painel do app (Instagram API with Instagram Login vs
+// Facebook Login). Pra reativar IG depois, descobrir o nome aceito pelo
+// app especifico e adicionar de volta — ou habilitar `instagram_business_*`
+// scopes diretamente no caso de uso "Gerenciar mensagens e conteudo no
+// Instagram" no painel da Meta.
+//
 // whatsapp_business_management: vincular catalog ao WABA + ler config
 // whatsapp_business_messaging: enviar produtos em conversas (futuro W4)
 const META_SCOPES = [
   'catalog_management',
   'business_management',
   'pages_read_engagement',
-  'instagram_business_basic',
   'whatsapp_business_management',
   'whatsapp_business_messaging',
 ].join(',')
