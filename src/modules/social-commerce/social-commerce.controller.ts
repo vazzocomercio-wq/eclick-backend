@@ -262,6 +262,36 @@ export class SocialCommerceController {
     })
   }
 
+  /** POST /social-commerce/whatsapp/setup-manual
+   *  { waba_id, catalog_id, phone_number_id?, display_phone? }
+   *
+   *  Bypass — pula a chamada API Meta (que retorna #10 SMB business
+   *  type quando o BM ainda nao passou pela Business Verification).
+   *  Salva o channel localmente como connected pra UI da loja exibir o
+   *  widget. Lojista deve fazer o vinculo real depois pela UI da Meta
+   *  OU re-rodar /setup quando Business Verification aprovar. */
+  @Post('whatsapp/setup-manual')
+  @UseGuards(SupabaseAuthGuard)
+  whatsappSetupManual(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      waba_id?:          string
+      catalog_id?:       string
+      phone_number_id?:  string
+      display_phone?:    string
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.waba_id)    throw new BadRequestException('waba_id obrigatório')
+    if (!body?.catalog_id) throw new BadRequestException('catalog_id obrigatório')
+    return this.svc.setupWhatsAppCatalogManual(u.orgId, {
+      waba_id:          body.waba_id,
+      catalog_id:       body.catalog_id,
+      phone_number_id:  body.phone_number_id,
+      display_phone:    body.display_phone,
+    })
+  }
+
   /** POST /social-commerce/whatsapp/disconnect — desvincula no Meta +
    *  zera channel local. */
   @Post('whatsapp/disconnect')

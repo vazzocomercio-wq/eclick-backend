@@ -179,6 +179,70 @@ export class SocialCommerceService {
     return data as SocialCommerceChannelRow
   }
 
+  /** Bypass — quando o BM eh SMB business type, a Meta recusa linkCatalogToWaba
+   *  com erro #10 mesmo se a UI tambem nao oferecer caminho manual. Esse
+   *  metodo PULA a chamada Meta e salva o channel local como connected
+   *  pra a UI da loja exibir o widget "Ver catalogo". A vinculacao Meta
+   *  real fica pendente ate Business Verification aprovar — apos isso,
+   *  rodar `setupWhatsAppCatalog` normal pra fazer o link via API. */
+  async setupWhatsAppCatalogManual(orgId: string, body: {
+    waba_id:           string
+    catalog_id:        string
+    phone_number_id?:  string
+    display_phone?:    string
+  }): Promise<SocialCommerceChannelRow> {
+    if (!body.waba_id || !body.catalog_id) {
+      throw new BadRequestException('waba_id e catalog_id obrigatórios')
+    }
+    const ig = await this.getStatus(orgId, 'instagram_shop')
+    if (!ig?.access_token) {
+      throw new BadRequestException('Conecte o Meta primeiro')
+    }
+
+    const existing = await this.getStatus(orgId, 'whatsapp_business')
+    const configPatch = {
+      waba_id:          body.waba_id,
+      catalog_id:       body.catalog_id,
+      phone_number_id:  body.phone_number_id ?? null,
+      display_phone:    body.display_phone ?? null,
+      manual_link:      true,  // marca como vinculado manualmente (sem chamada API Meta)
+    }
+
+    if (existing) {
+      const { data, error } = await supabaseAdmin
+        .from('social_commerce_channels')
+        .update({
+          access_token:        ig.access_token,
+          token_expires_at:    ig.token_expires_at,
+          external_account_id: body.waba_id,
+          external_catalog_id: body.catalog_id,
+          config: { ...existing.config, ...configPatch },
+          status: 'connected',
+          last_error: null,
+        })
+        .eq('id', existing.id)
+        .select('*').maybeSingle()
+      if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'sem dados'}`)
+      return data as SocialCommerceChannelRow
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('social_commerce_channels')
+      .insert({
+        organization_id:     orgId,
+        channel:             'whatsapp_business',
+        access_token:        ig.access_token,
+        token_expires_at:    ig.token_expires_at,
+        external_account_id: body.waba_id,
+        external_catalog_id: body.catalog_id,
+        config:              configPatch,
+        status:              'connected',
+      })
+      .select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'sem dados'}`)
+    return data as SocialCommerceChannelRow
+  }
+
   /** Desvincula no Meta + zera status local. */
   async disconnectWhatsAppCatalog(orgId: string): Promise<{ ok: true }> {
     const ch = await this.getStatus(orgId, 'whatsapp_business')
