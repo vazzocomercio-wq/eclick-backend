@@ -60,8 +60,11 @@ export interface SocialCommerceProductRow {
   updated_at:           string
 }
 
-/** Shape pra mapear produto ao formato do Meta Catalog API. */
+/** Shape pra mapear produto ao formato do Meta Catalog API.
+ *  `item_type` virou obrigatorio em 2025 — sempre 'PRODUCT_ITEM' pra
+ *  catalogo de e-commerce. Outros valores cobrem hotel/flight/home_listing. */
 export interface MetaProductData {
+  item_type:             'PRODUCT_ITEM'
   title:                 string
   description:           string
   availability:          'in stock' | 'out of stock'

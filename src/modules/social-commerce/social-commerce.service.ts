@@ -580,6 +580,7 @@ export class SocialCommerceService {
     }
 
     const out: MetaProductData = {
+      item_type:    'PRODUCT_ITEM',
       title:        title.substring(0, 150),
       description:  description.substring(0, 9999),
       availability: stockNum > 0 ? 'in stock' : 'out of stock',
