@@ -256,7 +256,16 @@ export class MetaCatalogService {
   }
 
   /** Batch CREATE/UPDATE de produtos no catálogo Meta. Cada request item
-   *  tem method ('CREATE'|'UPDATE'|'DELETE') + retailer_id (sku/uuid) + data. */
+   *  tem method ('CREATE'|'UPDATE'|'DELETE') + retailer_id (sku/uuid) + data.
+   *
+   *  ⚠️ items_batch tem 2 pegadinhas que custaram caro (2026-05-21):
+   *   1. O retailer id vai DENTRO de `data` como `id` — NAO `retailer_id`
+   *      no nivel do request. Sem isso a Meta responde HTTP 200 mas com
+   *      `validation_status: [{errors:[{message:"Can not find required
+   *      field id"}]}]` e NAO enfileira nada (handles vazio, catalog vazio).
+   *   2. Erros de validacao vem em `validation_status[]`, NAO em `errors[]`.
+   *      Se so olhar `body.errors`, o erro passa silencioso e o caller
+   *      acha que deu certo. */
   async batchUpdateProducts(
     accessToken: string,
     catalogId: string,
@@ -275,15 +284,13 @@ export class MetaCatalogService {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         access_token: accessToken,
-        // item_type virou obrigatorio em 2025 NO TOP-LEVEL do batch request
-        // (nao dentro de cada item.data). Sem ele:
-        //   (#100) The parameter item_type is required.
-        // Sempre PRODUCT_ITEM pra catalogo e-commerce.
+        // item_type obrigatorio NO TOP-LEVEL do batch (nao em item.data).
+        // Sem ele: (#100) The parameter item_type is required.
         item_type: 'PRODUCT_ITEM',
         requests: items.map(i => ({
-          method:      i.method,
-          retailer_id: i.retailer_id,
-          data:        i.data ?? {},
+          method: i.method,
+          // id (retailer id) vai DENTRO de data — ver pegadinha #1 acima
+          data:   { ...(i.data ?? {}), id: i.retailer_id },
         })),
       }),
     })
@@ -291,11 +298,22 @@ export class MetaCatalogService {
       handles?: string[]
       error?: { message?: string }
       errors?: Array<{ message?: string }>
+      validation_status?: Array<{ errors?: Array<{ message?: string }> }>
     }
     if (!res.ok) {
       throw new BadRequestException(`Meta batchUpdate: ${body.error?.message ?? 'erro'}`)
     }
-    return { handles: body.handles, errors: body.errors }
+
+    // Coleta erros de validacao (pegadinha #2). So entram itens com erro real.
+    const validationErrors: Array<{ message?: string }> = []
+    for (const v of body.validation_status ?? []) {
+      for (const e of v.errors ?? []) validationErrors.push({ message: e.message })
+    }
+
+    return {
+      handles: body.handles,
+      errors:  validationErrors.length > 0 ? validationErrors : body.errors,
+    }
   }
 
   /** Helper pra logar errors do Graph API com diagnostic completo. */
