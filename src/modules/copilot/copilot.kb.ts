@@ -2591,6 +2591,7 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - **Inspiração por link** — cole a URL de um site de referência; o sistema captura um print e a IA copia o estilo.
 - **Ajustar à mão** — editor manual: tema (modo, cores, fonte, cantos, densidade), cores premium, os efeitos globais (revelar seções ao rolar, marca d'água, parallax nos banners, troca de foto no hover) e o gerenciador de seções — reordenar, adicionar, remover e editar os textos de cada seção.
 - **Imagem do banner** — o botão "Gerar imagem do banner" cria com IA uma foto pro destaque da loja.
+- **Categorias / coleções** — na seção "Grade de coleções", cada card de categoria tem nome + imagem. A imagem pode vir de upload, URL, ou ser **gerada por IA usando o nome da categoria** (ex.: digite "Sala de Jantar" e clique em "Gerar imagem da categoria" — a IA cria uma cena ambiente combinando com o estilo da loja). Gera uma por vez, sob demanda.
 - O **preview ao lado** mostra a vitrine na hora.
 
 **A vitrine premium** tem faixa de anúncio, cabeçalho fixo, hero em carrossel, vitrines de produtos, banners, grade de categorias, bloco editorial e rodapé rico — além de uma página de catálogo em /loja/seu-slug/produtos com filtro por categoria e ordenação.
@@ -2605,6 +2606,99 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - Os produtos da vitrine vêm do catálogo: só aparecem os que foram enviados para a loja (Catálogo > Produtos > "Enviar para a loja") e com estoque maior que zero.
 - Gerar um design substitui o anterior — é seguro, dá pra gerar quantas vezes quiser.`,
     tags: ['loja', 'storefront', 'design', 'vitrine', 'ia', 'premium', 'catalogo'],
+  },
+]
+
+// ════════════════════════════════════════════════════════════════════════
+// Loja Própria — ferramentas comerciais (hub + reviews + recovery + etc)
+// ════════════════════════════════════════════════════════════════════════
+
+const STOREFRONT_TOOLS_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/loja'],
+    category: 'loja',
+    title:    'Hub da Loja Própria — central de gestão da vitrine',
+    content: `**Tela central da sua loja própria** (a vitrine pública em /loja/seu-slug).
+
+Reúne todos os atalhos comerciais em cards:
+- **Designer da loja** — visual da vitrine com IA (Tema Premium v3)
+- **Cupons** — códigos de desconto (% / valor fixo / frete grátis)
+- **Frete** — regras de entrega (fixo, grátis, por CEP, por peso, Melhor Envio)
+- **Pagamentos** — parcelas, Pix, formato de preço + gateways (Mercado Pago / Stripe)
+- **Promoções** — preço de oferta por produto (riscado + badge OFERTA)
+- **Campanhas** — agrupa N produtos com desconto comum + override individual
+- **Afiliados** — pessoas indicam sua loja e ganham % por venda
+- **Cashback** — % de cada pedido vira saldo pro cliente usar depois
+- **Bônus & Brindes** — Leve X Pague Y, brinde acima de R$ X, presente surpresa
+- **Avaliações** — modera as estrelas dos clientes
+- **Recovery de carrinho** — WhatsApp pra quem abandonou o carrinho
+- **Banners IA** — galeria de banners gerados por IA
+- **Fidelidade** — níveis (Bronze/Prata/Ouro) por gasto acumulado
+
+**Pra loja ficar pública:** status Ativa em Config da Loja + produtos enviados pra vitrine (Catálogo > Produtos > "Enviar para a loja") com estoque > 0.`,
+    tags: ['loja', 'hub', 'vitrine', 'storefront', 'comercial'],
+  },
+  {
+    routes:   ['/dashboard/loja/reviews'],
+    category: 'loja',
+    title:    'Avaliações — moderação de reviews dos clientes',
+    content: `**Fila de moderação das avaliações de produto da sua vitrine.**
+
+**Como o cliente avalia:** depois que o pedido vira *entregue*, o cliente loga na conta dele (/loja/seu-slug/conta), vê "Avalie suas compras" e dá nota de 1 a 5 estrelas + título + texto (+ fotos opcionais). A avaliação só pode ser feita por quem comprou E recebeu aquele produto naquele pedido.
+
+**O que você faz aqui:**
+- Vê 4 contadores no topo: pendentes / aprovadas / rejeitadas / média geral
+- Filtra por status
+- Em cada avaliação: **Aprovar** (vira pública na vitrine), **Rejeitar** (com motivo interno), **Responder** (sua resposta aparece pública junto da review) ou **Remover**
+
+**Configurações** (botão Configurações):
+- **Aprovar automaticamente** — reviews ficam públicas na hora, sem moderação
+- **Esconder sobrenome do cliente** — mostra "Maria S." em vez do nome completo (LGPD)
+- Mínimo de caracteres / máximo de fotos
+- **Convidar cliente a avaliar** — liga o WhatsApp automático pós-entrega (ver abaixo)
+
+**Onde as estrelas aparecem:** assim que uma avaliação é aprovada, a média + contagem aparecem nos cards de produto do grid, no carrossel e no topo da página do produto. Prova social aumenta conversão.
+
+**Convite automático:** com "Convidar cliente a avaliar" ligado, um robô manda WhatsApp X dias depois da entrega (padrão 3) pedindo a avaliação, com link direto pra conta do cliente. Isso enche o funil — sem ele, poucos avaliam sozinhos.`,
+    tags: ['loja', 'reviews', 'avaliacoes', 'estrelas', 'moderacao', 'prova social', 'whatsapp'],
+  },
+  {
+    routes:   ['/dashboard/loja/recovery'],
+    category: 'loja',
+    title:    'Recovery de carrinho — recupera quem abandonou via WhatsApp',
+    content: `**Recupera vendas perdidas: manda WhatsApp pra quem deixou produtos no carrinho mas não finalizou.**
+
+**Como funciona:**
+1. Quando o cliente preenche telefone ou email no checkout mas não paga, o sistema guarda o carrinho dele automaticamente.
+2. Um robô roda a cada 15 min e, depois de X minutos parado (você configura, padrão 30 min), manda um WhatsApp lembrando dos produtos com link pra finalizar.
+3. Se o cliente volta e paga, o carrinho é marcado como **recuperado** — entra na sua taxa de recuperação.
+4. Carrinhos muito antigos expiram sozinhos (padrão 72h).
+
+**O que você vê:** 5 indicadores (aguardando / lembrete enviado / recuperados / expirados / **taxa de recuperação %**), lista de carrinhos com os itens e timeline, e ações por carrinho: **Enviar agora** (dispara o WhatsApp na hora, sem esperar) ou **Descartar**.
+
+**Configurações:**
+- **Habilitar recovery automático** — liga/desliga o robô (vem desligado)
+- Minutos pra disparar + horas pra expirar
+- **Mensagem custom** — opcional, com placeholders {{name}} {{store}} {{items}} {{subtotal}} {{link}}. Vazio = mensagem padrão amigável.
+
+**Importante:** o envio depende da integração com o WhatsApp (Active) estar configurada. Sem ela, os carrinhos são rastreados mas nenhuma mensagem sai. O recovery vem **desligado por padrão** — ligue nas configurações quando quiser começar.`,
+    tags: ['loja', 'recovery', 'carrinho abandonado', 'whatsapp', 'recuperar venda', 'conversao'],
+  },
+  {
+    routes:   ['/dashboard/loja/banners'],
+    category: 'loja',
+    title:    'Banners IA — galeria + download dos banners gerados',
+    content: `**Galeria de todos os banners que você gerou com IA pra sua loja.**
+
+Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) fica salvo aqui. Você pode:
+- **Filtrar por formato** — Desktop, Mobile, Story, Wide, Quadrado
+- **Gerar novo banner** — abre o assistente em 4 passos (escolhe produtos → estilo → ajustes → resultado)
+- **Baixar** — cada banner tem botão de download; e dá pra **baixar todos de uma vez** pelo botão no topo
+- **Copiar URL** — pega o link pra usar em outro lugar
+- **Remover** do histórico
+
+**Download:** no resultado do assistente, cada imagem tem um botão de baixar (ícone no canto) e há "Baixar todas" no cabeçalho. Funciona uma a uma ou em massa. As imagens ficam no formato PNG com nome amigável (banner-formato-data.png).`,
+    tags: ['loja', 'banners', 'ia', 'download', 'baixar', 'imagens'],
   },
 ]
 
@@ -2631,6 +2725,7 @@ export const KB: KbEntry[] = [
   ...MULTI_ACCOUNT_ENTRIES,
   ...CONFIG_ENTRIES,
   ...STOREFRONT_DESIGNER_ENTRIES,
+  ...STOREFRONT_TOOLS_ENTRIES,
   // Catch-all sempre por último — só preenche o que sobrou do budget
   // após entries route-específicas
   ...CATCHALL_ENTRIES,
