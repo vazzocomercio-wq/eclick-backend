@@ -5,6 +5,7 @@ import { StripeService } from './stripe.service'
 import { CashbackService } from '../cashback/cashback.service'
 import { BonusService } from '../bonus/bonus.service'
 import { LoyaltyService } from '../loyalty/loyalty.service'
+import { StorefrontNotificationsService } from '../storefront-notifications/storefront-notifications.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -32,11 +33,12 @@ export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name)
 
   constructor(
-    private readonly mp:       MercadoPagoService,
-    private readonly stripe:   StripeService,
-    private readonly cashback: CashbackService,
-    private readonly bonus:    BonusService,
-    private readonly loyalty:  LoyaltyService,
+    private readonly mp:            MercadoPagoService,
+    private readonly stripe:        StripeService,
+    private readonly cashback:      CashbackService,
+    private readonly bonus:         BonusService,
+    private readonly loyalty:       LoyaltyService,
+    private readonly notifications: StorefrontNotificationsService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -102,15 +104,22 @@ export class PaymentsService {
       if (!loyaltySettings.enabled) return
       const totalCents = Math.round(Number(order.total ?? 0) * 100)
       if (totalCents <= 0) return
-      await this.loyalty.recordPurchase({
+      const result = await this.loyalty.recordPurchase({
         orgId:       order.organization_id as string,
         email,
         amountCents: totalCents,
         orderId,
       })
+      // Se subiu de tier, dispara notificação WhatsApp (idempotente via dedup_key)
+      if (result.promotionId) {
+        void this.notifications.notifyTierPromotion(result.promotionId)
+      }
     } catch (err) {
       this.logger.error(`[loyalty] falhou pra order=${orderId}: ${(err as Error).message}`)
     }
+
+    // ── WhatsApp: notifica cliente do pagamento confirmado ────────────
+    void this.notifications.notifyOrderPaid(orderId)
 
     // ── Cashback resgatado: debita o saldo ────────────────────────────
     try {
@@ -598,6 +607,14 @@ export class PaymentsService {
       await this.creditCashbackAfterDelivery(orderId).catch(err =>
         this.logger.warn(`[cashback.after_delivery] order=${orderId}: ${(err as Error).message}`)
       )
+    }
+
+    // ── WhatsApp: notifica cliente das transições importantes ─────────
+    if (patch.shipping_status === 'shipped' || patch.shipping_status === 'in_transit') {
+      void this.notifications.notifyOrderShipped(orderId)
+    }
+    if (patch.shipping_status === 'delivered') {
+      void this.notifications.notifyOrderDelivered(orderId)
     }
 
     return { ok: true }

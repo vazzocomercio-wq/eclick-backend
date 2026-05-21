@@ -61,6 +61,7 @@ import { CashbackModule } from './modules/cashback/cashback.module'
 import { BonusModule } from './modules/bonus/bonus.module'
 import { LoyaltyModule } from './modules/loyalty/loyalty.module'
 import { StorefrontCustomersModule } from './modules/storefront-customers/storefront-customers.module'
+import { StorefrontNotificationsModule } from './modules/storefront-notifications/storefront-notifications.module'
 import { StorefrontEventsModule } from './modules/storefront-events/storefront-events.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
 import { PaymentsModule } from './modules/payments/payments.module'
@@ -140,6 +141,7 @@ import { RadarModule } from './modules/radar/radar.module'
     BonusModule,
     LoyaltyModule,
     StorefrontCustomersModule,
+    StorefrontNotificationsModule,
     StorefrontEventsModule,
     BannerGeneratorModule,
     PaymentsModule,

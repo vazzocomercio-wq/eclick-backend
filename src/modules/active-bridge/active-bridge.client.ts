@@ -193,6 +193,53 @@ export class ActiveBridgeClient {
   /** Dispara WhatsApp broadcast pra um segmento (ou lista de contatos)
    *  via Active. Texto vem pronto do SaaS (Conteúdo Social), Active só
    *  resolve audiência e usa WhatsAppService.sendText com rate limit. */
+  /** Envia mensagem WhatsApp direta pra UM contato específico
+   *  (não-segmento). Usado em notificações transacionais da Loja Própria:
+   *  pedido pago, enviado, entregue, promoção de tier.
+   *
+   *  Endpoint Active esperado: POST /commerce/automation-bridge/send-direct
+   *  com { organization_id, phone (E.164 ou nacional), message, dedup_key? }.
+   *
+   *  Se Active não tem o endpoint ainda, retorna { skipped_no_bridge: true }
+   *  silenciosamente — notificação é feature opcional. */
+  async sendDirectMessage(input: {
+    organization_id: string
+    phone:           string                // E.164 preferido (+55...) ou nacional (11)
+    message:         string
+    dedup_key?:      string                // pra idempotência ("order:xxx:shipped")
+  }): Promise<{ sent?: boolean; skipped_no_bridge?: boolean; error?: string }> {
+    if (!this.isConfigured()) {
+      this.logger.warn('[active-bridge] sendDirectMessage no-op (bridge não configurado)')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/send-direct`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (res.status === 404) {
+        // Endpoint não existe ainda no Active — não é erro, apenas no-op.
+        this.logger.warn('[active-bridge] sendDirectMessage skipped — endpoint não existe no Active')
+        return { skipped_no_bridge: true }
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        this.logger.warn(`[active-bridge] sendDirectMessage HTTP ${res.status}: ${body.slice(0, 200)}`)
+        return { skipped_no_bridge: true, error: `${res.status}` }
+      }
+      return await res.json() as { sent?: boolean }
+    } catch (e) {
+      this.logger.warn(`[active-bridge] sendDirectMessage falhou: ${(e as Error).message}`)
+      return { skipped_no_bridge: true, error: (e as Error).message }
+    }
+  }
+
   async sendBroadcast(input: SendBroadcastInput): Promise<{
     dispatched?: number
     skipped?:    number

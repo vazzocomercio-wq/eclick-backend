@@ -224,7 +224,7 @@ export class LoyaltyService {
     email:       string
     amountCents: number
     orderId:     string  // pra idempotência
-  }): Promise<{ recorded: boolean; loyalty: CustomerLoyalty; promotedTo?: LoyaltyTier }> {
+  }): Promise<{ recorded: boolean; loyalty: CustomerLoyalty; promotedTo?: LoyaltyTier; promotionId?: string }> {
     const email = normalizeEmail(args.email)
     if (!email) throw new BadRequestException('email obrigatório')
 
@@ -290,18 +290,21 @@ export class LoyaltyService {
       this.logger.log(`[loyalty] ${email} promovido pra ${matched.name} (total: ${loyalty.total_spent_cents}c)`)
 
       // Registra a promoção pra audit + notificação futura
+      let promotionId: string | undefined
       try {
-        await supabaseAdmin.from('loyalty_promotions').insert({
+        const { data: promo } = await supabaseAdmin.from('loyalty_promotions').insert({
           organization_id:        args.orgId,
           customer_identifier:    email,
           previous_tier_id:       previousTierId,
           new_tier_id:            matched.id,
           triggered_by_order_id:  args.orderId,
           total_spent_cents:      loyalty.total_spent_cents,
-        })
+        }).select('id').maybeSingle()
+        promotionId = (promo as { id?: string } | null)?.id
       } catch (err) {
         this.logger.warn(`[loyalty.promotion] audit falhou: ${(err as Error).message}`)
       }
+      return { recorded: true, loyalty, promotedTo, promotionId }
     }
 
     return { recorded: true, loyalty, promotedTo }
