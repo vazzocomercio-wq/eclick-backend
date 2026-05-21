@@ -69,7 +69,7 @@ export class PromotionCampaignsService {
   }
 
   async get(orgId: string, id: string): Promise<{ campaign: PromotionCampaign; products: Array<CampaignProduct & {
-    product?: { id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null }
+    product?: { id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null; stock: number | null }
   }> }> {
     const { data, error } = await supabaseAdmin
       .from('promotion_campaigns').select('*')
@@ -84,14 +84,14 @@ export class PromotionCampaignsService {
       .order('added_at', { ascending: false })
 
     const productIds = ((pcRows ?? []) as CampaignProduct[]).map(r => r.product_id)
-    let productMap = new Map<string, { id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null }>()
+    let productMap = new Map<string, { id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null; stock: number | null }>()
     if (productIds.length > 0) {
       const { data: prods } = await supabaseAdmin
         .from('products')
-        .select('id, name, sku, price, photo_urls')
+        .select('id, name, sku, price, photo_urls, stock')
         .in('id', productIds)
         .eq('organization_id', orgId)
-      productMap = new Map(((prods ?? []) as Array<{ id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null }>)
+      productMap = new Map(((prods ?? []) as Array<{ id: string; name: string; sku: string | null; price: number; photo_urls: string[] | null; stock: number | null }>)
         .map(p => [p.id, p]))
     }
     const products = ((pcRows ?? []) as CampaignProduct[]).map(r => ({
