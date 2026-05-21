@@ -1,5 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
+import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 
 /**
  * Z1 — Avaliações de produtos da Loja Própria.
@@ -30,6 +32,9 @@ export interface ReviewSettings {
   max_photos:                number
   ask_after_days:            number
   hide_customer_full_name:   boolean
+  /** AE1 — quando true, o cron diário manda WhatsApp pós-entrega
+   *  convidando o cliente a avaliar (depois de ask_after_days). */
+  invite_enabled:            boolean
 }
 
 const DEFAULT_SETTINGS: ReviewSettings = {
@@ -38,6 +43,7 @@ const DEFAULT_SETTINGS: ReviewSettings = {
   max_photos:              3,
   ask_after_days:          3,
   hide_customer_full_name: true,
+  invite_enabled:          false,
 }
 
 export interface ProductReview {
@@ -82,6 +88,8 @@ interface OrderRow {
 @Injectable()
 export class ProductReviewsService {
   private readonly logger = new Logger(ProductReviewsService.name)
+
+  constructor(private readonly bridge: ActiveBridgeClient) {}
 
   // ── Settings ──────────────────────────────────────────────────────
 
@@ -477,6 +485,120 @@ export class ProductReviewsService {
     return stats
   }
 
+  // ── AE1: Cron de convite pra avaliar (WhatsApp pós-entrega) ───────
+
+  /** Roda 1x/dia (11:00 BRT = 14:00 UTC). Pra cada org com
+   *  review_settings.invite_enabled, acha pedidos entregues há
+   *  `ask_after_days` dias e ainda sem convite enviado, e manda
+   *  WhatsApp convidando o cliente a avaliar. Marca
+   *  review_invite_sent_at pra não duplicar. */
+  @Cron('0 0 14 * * *') // 14:00 UTC = 11:00 BRT (6-campos nestjs/schedule)
+  async runReviewInviteTick(): Promise<{ sent: number; skipped: number }> {
+    let sent = 0, skipped = 0
+
+    const { data: configs } = await supabaseAdmin
+      .from('store_config')
+      .select('organization_id, store_slug, store_name, review_settings, public_url')
+      .eq('status', 'active')
+
+    const enabledOrgs = ((configs ?? []) as Array<{
+      organization_id: string; store_slug: string; store_name: string
+      review_settings: Partial<ReviewSettings> | null; public_url: string | null
+    }>).filter(c => (c.review_settings?.invite_enabled === true))
+
+    if (enabledOrgs.length === 0) return { sent: 0, skipped: 0 }
+    this.logger.log(`[review-invite] tick start orgs=${enabledOrgs.length}`)
+
+    for (const cfg of enabledOrgs) {
+      const settings: ReviewSettings = { ...DEFAULT_SETTINGS, ...(cfg.review_settings ?? {}) }
+      const askDays = clamp(settings.ask_after_days, 0, 60)
+      const threshold = new Date(Date.now() - askDays * 86_400_000).toISOString()
+
+      // Pedidos entregues há >= askDays, pagos, sem convite enviado
+      const { data: orders } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('id, customer, items, delivered_at')
+        .eq('organization_id', cfg.organization_id)
+        .eq('status', 'paid')
+        .eq('shipping_status', 'delivered')
+        .is('review_invite_sent_at', null)
+        .lte('delivered_at', threshold)
+        .order('delivered_at', { ascending: true })
+        .limit(50)
+
+      const list = (orders ?? []) as Array<{
+        id: string
+        customer: { name?: string; phone?: string } | null
+        items: OrderItemRow[] | null
+        delivered_at: string | null
+      }>
+
+      for (const order of list) {
+        const customer = order.customer ?? {}
+        const phone = sanitizePhone(customer.phone)
+        const items: OrderItemRow[] = Array.isArray(order.items) ? order.items : []
+        const productCount = items.length
+
+        // Sem telefone → marca como enviado (não dá pra mandar; evita
+        // re-processar todo dia)
+        if (!phone || productCount === 0) {
+          await supabaseAdmin
+            .from('storefront_orders')
+            .update({ review_invite_sent_at: new Date().toISOString() })
+            .eq('id', order.id)
+          skipped++
+          continue
+        }
+
+        const link = cfg.public_url
+          ? `${cfg.public_url}/conta`
+          : `https://eclick.app.br/loja/${cfg.store_slug}/conta`
+
+        const firstName = (customer.name ?? 'cliente').trim().split(/\s+/)[0]
+        const productLabel = productCount === 1
+          ? `o produto que você comprou`
+          : `os ${productCount} produtos que você comprou`
+
+        const message = [
+          `Oi, ${firstName}! 🌟`,
+          ``,
+          `Esperamos que você esteja amando ${productLabel} na *${cfg.store_name}*.`,
+          ``,
+          `Que tal contar pra outros clientes o que achou? Sua avaliação ajuda demais — e leva menos de 1 minuto! 🙏`,
+          ``,
+          `Avalie aqui:`,
+          link,
+        ].join('\n')
+
+        try {
+          const result = await this.bridge.sendDirectMessage({
+            organization_id: cfg.organization_id,
+            phone,
+            message,
+            dedup_key:       `review_invite:${order.id}`,
+          })
+          // Marca como enviado em qualquer caso (sent ou skip do bridge)
+          // pra não floodar — exceto quando bridge indisponível (retry amanhã)
+          if (result.skipped_no_bridge) {
+            skipped++
+          } else {
+            await supabaseAdmin
+              .from('storefront_orders')
+              .update({ review_invite_sent_at: new Date().toISOString() })
+              .eq('id', order.id)
+            if (result.sent) sent++; else skipped++
+          }
+        } catch (e) {
+          this.logger.warn(`[review-invite] envio falhou order=${order.id}: ${(e as Error).message}`)
+          skipped++
+        }
+      }
+    }
+
+    this.logger.log(`[review-invite] tick done sent=${sent} skipped=${skipped}`)
+    return { sent, skipped }
+  }
+
   // ── Helpers internos ──────────────────────────────────────────────
 
   private async getOwned(orgId: string, reviewId: string): Promise<ProductReview> {
@@ -501,6 +623,13 @@ export class ProductReviewsService {
 function clamp(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min
   return Math.max(min, Math.min(max, Math.floor(n)))
+}
+
+/** Sanitiza telefone — só dígitos. Retorna '' se ficar curto demais. */
+function sanitizePhone(raw?: string | null): string {
+  if (!raw) return ''
+  const digits = raw.replace(/\D/g, '')
+  return digits.length >= 10 ? digits : ''
 }
 
 /** Pra LGPD: por default exibe só primeiro nome + inicial do sobrenome.

@@ -62,9 +62,16 @@ export class ProductReviewsController {
     max_photos?:              number
     ask_after_days?:          number
     hide_customer_full_name?: boolean
+    invite_enabled?:          boolean
   }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateSettings(u.orgId, body)
+  }
+
+  @Post('run-invite-tick')
+  runInviteTick(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.runReviewInviteTick()
   }
 
   @Put(':id/approve')
