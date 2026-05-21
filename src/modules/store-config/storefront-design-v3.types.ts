@@ -19,7 +19,10 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 export type ThemeMode = 'dark' | 'light'
-export type FontPair  = 'elegant' | 'modern' | 'bold' | 'classic' | 'editorial' | 'playful'
+// FontPair vem do dicionario central pra escalar (30 pares).
+export type { FontPair } from './storefront-design-v3.font-pairs'
+import type { FontPair as _FP } from './storefront-design-v3.font-pairs'
+type FontPair = _FP
 export type Radius    = 'none' | 'sm' | 'md' | 'lg' | 'full'
 export type Density   = 'compact' | 'cozy' | 'spacious'
 export type ButtonStyleKind = 'solid' | 'outline' | 'pill' | 'sharp'
@@ -510,7 +513,7 @@ export interface StorefrontDesignV3 {
 // ─────────────────────────────────────────────────────────────────────────
 
 export const THEME_MODES_V3:        readonly ThemeMode[]   = ['dark', 'light']
-export const FONT_PAIRS_V3:         readonly FontPair[]    = ['elegant', 'modern', 'bold', 'classic', 'editorial', 'playful']
+export { FONT_PAIRS_V3 } from './storefront-design-v3.font-pairs'
 export const RADII_V3:              readonly Radius[]      = ['none', 'sm', 'md', 'lg', 'full']
 export const DENSITIES_V3:          readonly Density[]     = ['compact', 'cozy', 'spacious']
 export const BUTTON_STYLES_V3:      readonly ButtonStyleKind[] = ['solid', 'outline', 'pill', 'sharp']
