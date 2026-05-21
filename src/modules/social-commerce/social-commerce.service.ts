@@ -355,46 +355,110 @@ export class SocialCommerceService {
   }
 
   /** Sync em massa — todo produto visível na vitrine (`storefront_visible=true`)
-   *  com nome + preço vai pro catálogo Meta. Reflete a Fase 9 da Loja:
-   *  visibilidade = `storefront_visible`, não `catalog_status` (este é
-   *  critério de ML). Limita 500 por chamada pra não estourar timeout HTTP. */
+   *  com nome + preço vai pro catálogo Meta.
+   *
+   *  Implementação: UMA chamada batch por chunk de 1000 produtos
+   *  (Meta `items_batch` aceita até 5000 items). Antes era 1 chamada por
+   *  produto — bate rate limit #80014 com 100+ produtos rapidinho. */
   async syncAll(orgId: string): Promise<{
     synced: number
     failed: number
     skipped: number
   }> {
-    await this.requireConnected(orgId, 'instagram_shop')
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    const storeSlug = await this.fetchStoreSlug(orgId)
 
-    // Produtos elegíveis: visíveis na vitrine + nome + preço válido.
-    // (Catálogo Meta é UM só — instagram_shop e whatsapp_business
-    //  compartilham external_catalog_id, então sincronizar uma vez serve
-    //  pra ambos.)
-    const { data: candidates, error } = await supabaseAdmin
+    // 1) Lista produtos visíveis com tudo que mapToMetaFormat precisa
+    const { data: products, error } = await supabaseAdmin
       .from('products')
-      .select('id, name, price')
+      .select(`
+        id, organization_id, name, brand, category, price, stock,
+        description, ai_short_description, photo_urls,
+        channel_titles, channel_descriptions, gtin, condition,
+        ml_permalink, sku, storefront_visible
+      `)
       .eq('organization_id', orgId)
       .eq('storefront_visible', true)
-      .limit(500)
-    if (error) throw new BadRequestException(`Erro ao listar produtos: ${error.message}`)
-    if (!candidates?.length) return { synced: 0, failed: 0, skipped: 0 }
+      .limit(5000)
+    if (error) throw new BadRequestException(`Erro ao listar: ${error.message}`)
+    if (!products?.length) return { synced: 0, failed: 0, skipped: 0 }
 
-    let synced = 0, failed = 0, skipped = 0
-    for (const c of candidates) {
-      // Pula produto sem nome ou sem preço — Meta rejeita ambos
-      if (!c.name?.trim() || !c.price || Number(c.price) <= 0) {
+    // 2) Constrói requests + pula inválidos
+    type R = { method: 'UPDATE'; retailer_id: string; data: MetaProductData; product_id: string }
+    const requests: R[] = []
+    let skipped = 0
+    for (const p of products as ProductForSync[]) {
+      if (!p.name?.trim() || !p.price || Number(p.price) <= 0) {
         skipped++
         continue
       }
+      const metaData = this.mapToMetaFormat(p, ch, storeSlug)
+      const retailerId = p.sku || p.id
+      requests.push({ method: 'UPDATE', retailer_id: retailerId, data: metaData, product_id: p.id })
+    }
+    if (!requests.length) return { synced: 0, failed: 0, skipped }
+
+    // 3) Envia em chunks de 1000 (margem do limite 5000 da Meta)
+    const CHUNK_SIZE = 1000
+    let synced = 0, failed = 0
+    const now = new Date().toISOString()
+
+    for (let i = 0; i < requests.length; i += CHUNK_SIZE) {
+      const chunk = requests.slice(i, i + CHUNK_SIZE)
       try {
-        await this.syncProduct(orgId, c.id)
-        synced++
+        const result = await this.meta.batchUpdateProducts(
+          ch.access_token!,
+          ch.external_catalog_id!,
+          chunk.map(r => ({ method: r.method, retailer_id: r.retailer_id, data: r.data })),
+        )
+
+        // Erros em batch (rate limit, auth, etc) — marca todo o chunk como error
+        if (result.errors && result.errors.length > 0) {
+          const errMsg = result.errors.map(e => e.message).join('; ').slice(0, 300)
+          const errorRows = chunk.map(r => ({
+            channel_id:      ch.id,
+            product_id:      r.product_id,
+            organization_id: orgId,
+            sync_status:     'error' as const,
+            last_error:      errMsg,
+          }))
+          await supabaseAdmin
+            .from('social_commerce_products')
+            .upsert(errorRows, { onConflict: 'channel_id,product_id' })
+          failed += chunk.length
+          this.logger.warn(`[social-commerce.syncAll] chunk ${i / CHUNK_SIZE} (${chunk.length} items) falhou: ${errMsg}`)
+          continue
+        }
+
+        // Sucesso — marca todos como synced num upsert só
+        const successRows = chunk.map((r, idx) => ({
+          channel_id:          ch.id,
+          product_id:          r.product_id,
+          organization_id:     orgId,
+          sync_status:         'synced' as const,
+          external_product_id: result.handles?.[idx] ?? r.retailer_id,
+          last_synced_at:      now,
+          synced_data:         r.data as unknown as Record<string, unknown>,
+          last_error:          null,
+        }))
+        await supabaseAdmin
+          .from('social_commerce_products')
+          .upsert(successRows, { onConflict: 'channel_id,product_id' })
+        synced += chunk.length
       } catch (e) {
-        const msg = (e as Error).message
-        if (msg.includes('already')) skipped++
-        else failed++
-        this.logger.warn(`[social-commerce.syncAll] produto ${c.id} falhou: ${msg}`)
+        const msg = (e as Error).message ?? 'erro'
+        this.logger.warn(`[social-commerce.syncAll] chunk ${i / CHUNK_SIZE} excecao: ${msg}`)
+        failed += chunk.length
       }
     }
+
+    // 4) Atualiza contadores do canal de uma vez
+    await this.bumpChannelMetric(ch.id, {
+      products_synced:  ch.products_synced + synced,
+      sync_errors:      ch.sync_errors + failed,
+      last_sync_at:     now,
+      last_sync_status: failed === 0 ? 'success' : (synced > 0 ? 'partial' : 'error'),
+    })
 
     return { synced, failed, skipped }
   }
