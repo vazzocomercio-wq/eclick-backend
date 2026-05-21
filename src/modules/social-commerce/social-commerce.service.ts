@@ -457,12 +457,17 @@ export class SocialCommerceService {
     //    entao TODOS os canais do org que apontam pro mesmo catalog devem
     //    refletir o sync — senao a tela do WhatsApp mostra "0 sincronizados"
     //    mesmo depois do sync rodar (porque o counter so subiu na row do IG).
+    //
+    //    products_synced/sync_errors sao SETADOS (nao somados): syncAll
+    //    re-sincroniza TODOS os produtos visiveis a cada chamada, entao o
+    //    total deste run JA E o total atual. Somar inflava o numero a cada
+    //    clique + cron (chegou em 2714 com ~260 produtos reais).
     const status = failed === 0 ? 'success' : (synced > 0 ? 'partial' : 'error')
     await supabaseAdmin
       .from('social_commerce_channels')
       .update({
-        products_synced:  ch.products_synced + synced,
-        sync_errors:      ch.sync_errors + failed,
+        products_synced:  synced,
+        sync_errors:      failed,
         last_sync_at:     now,
         last_sync_status: status,
       })
