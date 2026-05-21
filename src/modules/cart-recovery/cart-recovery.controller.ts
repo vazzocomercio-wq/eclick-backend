@@ -47,10 +47,13 @@ export class CartRecoveryController {
 
   @Put('settings')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: {
-    enabled?:          boolean
-    minutes_after?:    number
-    ttl_hours?:        number
-    message_template?: string
+    enabled?:              boolean
+    minutes_after?:        number
+    ttl_hours?:            number
+    message_template?:     string
+    coupon_enabled?:       boolean
+    coupon_discount_pct?:  number
+    coupon_expires_hours?: number
   }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateSettings(u.orgId, body)

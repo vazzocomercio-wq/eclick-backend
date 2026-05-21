@@ -1,8 +1,9 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { CouponsService } from '../coupons/coupons.service'
 
 /**
  * AB1 — Recovery de carrinho abandonado.
@@ -33,14 +34,21 @@ export interface CartRecoverySettings {
   enabled:           boolean
   minutes_after:     number   // default 30
   ttl_hours:         number   // default 72
-  message_template:  string   // pode usar {{name}} {{store}} {{items}} {{subtotal}} {{link}}
+  message_template:  string   // pode usar {{name}} {{store}} {{items}} {{subtotal}} {{link}} {{coupon}}
+  // AB2 — cupom de incentivo
+  coupon_enabled:        boolean   // gera cupom único por lembrete
+  coupon_discount_pct:   number    // % de desconto (1-90)
+  coupon_expires_hours:  number    // validade do cupom em horas
 }
 
 const DEFAULT_SETTINGS: CartRecoverySettings = {
-  enabled:          false,
-  minutes_after:    30,
-  ttl_hours:        72,
-  message_template: '',
+  enabled:              false,
+  minutes_after:        30,
+  ttl_hours:            72,
+  message_template:     '',
+  coupon_enabled:       false,
+  coupon_discount_pct:  10,
+  coupon_expires_hours: 48,
 }
 
 export interface CartItem {
@@ -64,19 +72,23 @@ export interface WhatsappCart {
   items_count:        number
   status:             'active' | 'sent_reminder' | 'recovered' | 'expired' | 'dismissed'
   last_activity_at:   string
-  reminder_sent_at:   string | null
-  reminder_dedup_key: string | null
-  recovered_order_id: string | null
-  recovered_at:       string | null
-  created_at:         string
-  updated_at:         string
+  reminder_sent_at:    string | null
+  reminder_dedup_key:  string | null
+  reminder_coupon_code: string | null
+  recovered_order_id:  string | null
+  recovered_at:        string | null
+  created_at:          string
+  updated_at:          string
 }
 
 @Injectable()
 export class CartRecoveryService {
   private readonly logger = new Logger(CartRecoveryService.name)
 
-  constructor(private readonly bridge: ActiveBridgeClient) {}
+  constructor(
+    private readonly bridge:  ActiveBridgeClient,
+    private readonly coupons: CouponsService,
+  ) {}
 
   // ── Settings ──────────────────────────────────────────────────────
 
@@ -95,8 +107,10 @@ export class CartRecoveryService {
     const next: CartRecoverySettings = {
       ...cur,
       ...patch,
-      minutes_after: clamp(patch.minutes_after ?? cur.minutes_after, 5, 1440),
-      ttl_hours:     clamp(patch.ttl_hours     ?? cur.ttl_hours,     1, 720),
+      minutes_after:        clamp(patch.minutes_after        ?? cur.minutes_after,        5, 1440),
+      ttl_hours:            clamp(patch.ttl_hours            ?? cur.ttl_hours,            1, 720),
+      coupon_discount_pct:  clamp(patch.coupon_discount_pct  ?? cur.coupon_discount_pct,  1, 90),
+      coupon_expires_hours: clamp(patch.coupon_expires_hours ?? cur.coupon_expires_hours, 1, 720),
     }
     const { error } = await supabaseAdmin
       .from('store_config')
@@ -308,12 +322,19 @@ export class CartRecoveryService {
 
       for (const cart of list) {
         try {
+          // AB2 — gera cupom único se habilitado
+          const couponCode = settings.coupon_enabled
+            ? await this.generateCouponForCart(cfg.organization_id, settings)
+            : null
+
           const message = renderMessage(settings.message_template, {
             name:     cart.customer_name ?? 'cliente',
             store:    cfg.store_name,
             items:    cart.items,
             subtotal: cart.subtotal,
             link:     cfg.public_url ? `${cfg.public_url}/checkout` : `https://eclick.app.br/loja/${cfg.store_slug}/checkout`,
+            coupon:   couponCode,
+            couponPct: settings.coupon_discount_pct,
           })
 
           const dedup = `cart_recovery:${cart.id}:${todayStr()}`
@@ -328,9 +349,10 @@ export class CartRecoveryService {
             await supabaseAdmin
               .from('whatsapp_carts')
               .update({
-                status:             'sent_reminder',
-                reminder_sent_at:   new Date().toISOString(),
-                reminder_dedup_key: dedup,
+                status:               'sent_reminder',
+                reminder_sent_at:     new Date().toISOString(),
+                reminder_dedup_key:   dedup,
+                reminder_coupon_code: couponCode,
               })
               .eq('id', cart.id)
             sent++
@@ -342,9 +364,10 @@ export class CartRecoveryService {
             await supabaseAdmin
               .from('whatsapp_carts')
               .update({
-                status:           'sent_reminder',
-                reminder_sent_at: new Date().toISOString(),
-                reminder_dedup_key: dedup,
+                status:               'sent_reminder',
+                reminder_sent_at:     new Date().toISOString(),
+                reminder_dedup_key:   dedup,
+                reminder_coupon_code: couponCode,
               })
               .eq('id', cart.id)
             skipped++
@@ -437,12 +460,18 @@ export class CartRecoveryService {
       store_name: string; store_slug: string; public_url: string | null
     }
 
+    // AB2 — reusa cupom já gerado pro cart, ou gera um novo se habilitado
+    const couponCode = cart.reminder_coupon_code
+      ?? (settings.coupon_enabled ? await this.generateCouponForCart(orgId, settings) : null)
+
     const message = renderMessage(settings.message_template, {
       name:     cart.customer_name ?? 'cliente',
       store:    store.store_name,
       items:    cart.items,
       subtotal: cart.subtotal,
       link:     store.public_url ? `${store.public_url}/checkout` : `https://eclick.app.br/loja/${store.store_slug}/checkout`,
+      coupon:   couponCode,
+      couponPct: settings.coupon_discount_pct,
     })
 
     const dedup = `cart_recovery:${cart.id}:manual:${todayStr()}`
@@ -457,14 +486,40 @@ export class CartRecoveryService {
       await supabaseAdmin
         .from('whatsapp_carts')
         .update({
-          status:             'sent_reminder',
-          reminder_sent_at:   new Date().toISOString(),
-          reminder_dedup_key: dedup,
+          status:               'sent_reminder',
+          reminder_sent_at:     new Date().toISOString(),
+          reminder_dedup_key:   dedup,
+          reminder_coupon_code: couponCode,
         })
         .eq('id', cart.id)
       return { sent: true }
     }
     return { sent: false, reason: result.skipped_no_bridge ? 'bridge_not_configured' : (result.error ?? 'unknown') }
+  }
+
+  /** Gera um cupom único de recovery: % off, 1 uso, expira em N horas.
+   *  Código no formato VOLTA{pct}-{rand6}. Retorna o código ou null se
+   *  a criação falhar (não bloqueia o envio — manda sem cupom). */
+  private async generateCouponForCart(orgId: string, settings: CartRecoverySettings): Promise<string | null> {
+    const pct = clamp(settings.coupon_discount_pct, 1, 90)
+    const rand = randomBytes(4).toString('hex').toUpperCase().slice(0, 6)
+    const code = `VOLTA${pct}-${rand}`
+    const expiresAt = new Date(Date.now() + clamp(settings.coupon_expires_hours, 1, 720) * 3_600_000).toISOString()
+    try {
+      await this.coupons.create(orgId, {
+        code,
+        type:        'percentage',
+        value:       pct,
+        usage_limit: 1,
+        expires_at:  expiresAt,
+        description: `Recovery de carrinho — gerado automaticamente`,
+        active:      true,
+      })
+      return code
+    } catch (e) {
+      this.logger.warn(`[cart-recovery] falha ao gerar cupom org=${orgId}: ${(e as Error).message}`)
+      return null
+    }
   }
 }
 
@@ -489,21 +544,33 @@ export function hashIp(ip: string): string {
   return createHash('sha256').update(ip).digest('hex')
 }
 
-const DEFAULT_TEMPLATE = (args: { name: string; store: string; itemsLine: string; subtotalBRL: string; link: string }) => [
-  `Oi, ${args.name}! 👋`,
-  ``,
-  `Vimos que você deixou alguns produtos no carrinho da *${args.store}*:`,
-  ``,
-  args.itemsLine,
-  ``,
-  `💰 Total: *${args.subtotalBRL}*`,
-  ``,
-  `Que tal finalizar? 🛒`,
-  args.link,
-].join('\n')
+const DEFAULT_TEMPLATE = (args: {
+  name: string; store: string; itemsLine: string; subtotalBRL: string; link: string
+  coupon?: string | null; couponPct?: number
+}) => {
+  const lines = [
+    `Oi, ${args.name}! 👋`,
+    ``,
+    `Vimos que você deixou alguns produtos no carrinho da *${args.store}*:`,
+    ``,
+    args.itemsLine,
+    ``,
+    `💰 Total: *${args.subtotalBRL}*`,
+  ]
+  if (args.coupon) {
+    lines.push(
+      ``,
+      `🎁 Pra te ajudar a decidir, separamos *${args.couponPct ?? 10}% de desconto* só pra você:`,
+      `Use o cupom *${args.coupon}* no checkout (validade limitada!).`,
+    )
+  }
+  lines.push(``, `Que tal finalizar? 🛒`, args.link)
+  return lines.join('\n')
+}
 
 function renderMessage(template: string, ctx: {
   name: string; store: string; items: CartItem[]; subtotal: number; link: string
+  coupon?: string | null; couponPct?: number
 }): string {
   const itemsLine = ctx.items
     .slice(0, 5)
@@ -512,12 +579,20 @@ function renderMessage(template: string, ctx: {
   const subtotalBRL = ctx.subtotal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 
   const tpl = (template ?? '').trim()
-  if (!tpl) return DEFAULT_TEMPLATE({ name: ctx.name, store: ctx.store, itemsLine, subtotalBRL, link: ctx.link })
+  if (!tpl) {
+    return DEFAULT_TEMPLATE({
+      name: ctx.name, store: ctx.store, itemsLine, subtotalBRL,
+      link: ctx.link, coupon: ctx.coupon, couponPct: ctx.couponPct,
+    })
+  }
 
+  // No template custom: {{coupon}} vira o código (ou string vazia se sem cupom)
+  const couponText = ctx.coupon ?? ''
   return tpl
     .replace(/\{\{\s*name\s*\}\}/g,     ctx.name)
     .replace(/\{\{\s*store\s*\}\}/g,    ctx.store)
     .replace(/\{\{\s*items\s*\}\}/g,    itemsLine)
     .replace(/\{\{\s*subtotal\s*\}\}/g, subtotalBRL)
     .replace(/\{\{\s*link\s*\}\}/g,     ctx.link)
+    .replace(/\{\{\s*coupon\s*\}\}/g,   couponText)
 }
