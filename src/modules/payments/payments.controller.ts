@@ -38,6 +38,7 @@ export class PaymentsController {
     gateway?:        Gateway
     cashbackToUse?:  number   // centavos — opt-in
     customerId?:     string   // FK opcional (cliente logado)
+    affiliateCode?:  string   // code do afiliado vindo do cookie ?ref=
   }) {
     if (!body?.slug)     throw new BadRequestException('slug obrigatório')
     if (!body?.items)    throw new BadRequestException('items obrigatório')
@@ -52,6 +53,7 @@ export class PaymentsController {
                         ? Math.floor(body.cashbackToUse)
                         : undefined,
       customerId:     body.customerId,
+      affiliateCode:  body.affiliateCode,
     })
   }
 

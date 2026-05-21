@@ -6,6 +6,7 @@ import { CashbackService } from '../cashback/cashback.service'
 import { BonusService } from '../bonus/bonus.service'
 import { LoyaltyService } from '../loyalty/loyalty.service'
 import { StorefrontNotificationsService } from '../storefront-notifications/storefront-notifications.service'
+import { AffiliateAttributionService } from '../affiliates/affiliate-attribution.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -39,6 +40,7 @@ export class PaymentsService {
     private readonly bonus:         BonusService,
     private readonly loyalty:       LoyaltyService,
     private readonly notifications: StorefrontNotificationsService,
+    private readonly affiliate:     AffiliateAttributionService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -120,6 +122,11 @@ export class PaymentsService {
 
     // ── WhatsApp: notifica cliente do pagamento confirmado ────────────
     void this.notifications.notifyOrderPaid(orderId)
+
+    // ── Afiliados: atribui comissão (idempotente via UNIQUE) ──────────
+    void this.affiliate.attributeOrder(orderId).catch(err =>
+      this.logger.warn(`[affiliate.attr] order=${orderId}: ${(err as Error).message}`)
+    )
 
     // ── Cashback resgatado: debita o saldo ────────────────────────────
     try {
@@ -295,6 +302,7 @@ export class PaymentsService {
     gateway: Gateway | null
     cashbackUsedCents?: number
     customerId?: string
+    affiliateId?: string
   }): Promise<StorefrontOrder> {
     const subtotal = args.items.reduce((s, i) => s + i.price * i.qty, 0)
     const cashbackUsedReais = (args.cashbackUsedCents ?? 0) / 100
@@ -312,6 +320,7 @@ export class PaymentsService {
         status:                'pending',
         cashback_used_cents:   args.cashbackUsedCents ?? 0,
         customer_id:           args.customerId ?? null,
+        affiliate_id:          args.affiliateId ?? null,
       })
       .select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar pedido: ${error?.message ?? '?'}`)
@@ -357,6 +366,7 @@ export class PaymentsService {
     gateway:        Gateway
     cashbackToUse?: number  // centavos — opt-in pelo cliente
     customerId?:    string  // FK opcional pra storefront_customers (cliente logado)
+    affiliateCode?: string  // code do afiliado (cookie ?ref=)
   }): Promise<{ orderId: string; initPoint: string }> {
     if (!input.slug)               throw new BadRequestException('slug obrigatório')
     if (!Array.isArray(input.items) || input.items.length === 0)
@@ -405,6 +415,21 @@ export class PaymentsService {
       })
     }
 
+    // Resolve affiliateCode → affiliateId (afiliado deve estar approved)
+    let affiliateId: string | undefined
+    if (input.affiliateCode) {
+      const code = input.affiliateCode.trim().toLowerCase()
+      if (code) {
+        const { data: aff } = await supabaseAdmin
+          .from('affiliates').select('id, status')
+          .eq('organization_id', store.orgId).eq('code', code).maybeSingle()
+        if (aff && (aff as { status: string }).status === 'approved') {
+          affiliateId = (aff as { id: string }).id
+        }
+        // Silent skip se code inválido — não bloqueia checkout
+      }
+    }
+
     const order = await this.insertOrder({
       orgId:             store.orgId,
       slug:              input.slug,
@@ -413,6 +438,7 @@ export class PaymentsService {
       gateway:           input.gateway,
       cashbackUsedCents,
       customerId:        input.customerId,
+      affiliateId,
     })
 
     const urls = this.buildReturnUrls(input.slug, store.customDomain, order.id)
