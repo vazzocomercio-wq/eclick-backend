@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Body, UseGuards, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Delete, Param, Query, Body, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { BannerGeneratorService } from './banner-generator.service'
@@ -40,5 +40,28 @@ export class BannerGeneratorController {
   generate(@ReqUser() u: ReqUserPayload, @Body() body: BannerGenerateInput) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.generateBanner(u.orgId, body)
+  }
+
+  /** GET /banner-generator/history?format=&limit=&offset= — galeria */
+  @Get('history')
+  history(
+    @ReqUser() u: ReqUserPayload,
+    @Query('format') format?: string,
+    @Query('limit')  limit?:  string,
+    @Query('offset') offset?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listHistory(u.orgId, {
+      format,
+      limit:  limit  ? parseInt(limit,  10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    })
+  }
+
+  /** DELETE /banner-generator/:id — remove do histórico */
+  @Delete(':id')
+  remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.deleteBanner(u.orgId, id)
   }
 }

@@ -174,6 +174,29 @@ export class BannerGeneratorService {
       `total=${uploaded.length} cost=$${totalCost.toFixed(4)} fallback=${anyFallback}`,
     )
 
+    // Persiste no histórico — 1 row por imagem gerada. Custo é dividido
+    // entre as imagens (estimativa). Falha silenciosa pra não derrubar
+    // a resposta caso o INSERT falhe.
+    try {
+      const costPerImage = uploaded.length > 0 ? totalCost / uploaded.length : 0
+      const rows = uploaded.map(u => ({
+        organization_id: orgId,
+        image_url:       u.url,
+        format:          u.format,
+        style_key:       input.styleKey,
+        prompt_used:     finalPrompt,
+        custom_prompt:   Boolean(input.customPrompt?.trim()),
+        product_ids:     input.productIds,
+        cost_usd:        costPerImage,
+        fallback_used:   anyFallback,
+        variations:      variations,
+      }))
+      const { error: insErr } = await supabaseAdmin.from('generated_banners').insert(rows)
+      if (insErr) this.logger.warn(`[banner-gen.persist] ${insErr.message}`)
+    } catch (err) {
+      this.logger.warn(`[banner-gen.persist] ${(err as Error).message}`)
+    }
+
     return {
       images:       uploaded,
       promptUsed:   finalPrompt,
@@ -182,6 +205,55 @@ export class BannerGeneratorService {
       costUsd:      totalCost,
       fallbackUsed: anyFallback,
     }
+  }
+
+  /** Lista banners gerados (histórico, mais recentes primeiro). */
+  async listHistory(orgId: string, opts: { format?: string; limit?: number; offset?: number } = {}): Promise<{
+    banners: Array<{
+      id:            string
+      image_url:     string
+      format:        string
+      style_key:     string | null
+      prompt_used:   string | null
+      custom_prompt: boolean
+      product_ids:   string[]
+      cost_usd:      number
+      fallback_used: boolean
+      created_at:    string
+    }>
+    total: number
+  }> {
+    const limit  = Math.min(opts.limit ?? 24, 100)
+    const offset = Math.max(opts.offset ?? 0, 0)
+    let q = supabaseAdmin
+      .from('generated_banners')
+      .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1)
+    if (opts.format) q = q.eq('format', opts.format)
+    const { data, error, count } = await q
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return {
+      banners: (data ?? []) as unknown as Array<{
+        id: string; image_url: string; format: string; style_key: string | null
+        prompt_used: string | null; custom_prompt: boolean; product_ids: string[]
+        cost_usd: number; fallback_used: boolean; created_at: string
+      }>,
+      total: count ?? 0,
+    }
+  }
+
+  /** Remove um banner do histórico (não apaga do storage pra evitar
+   *  quebrar refs externas — TODO: cleanup job que remove órfãos). */
+  async deleteBanner(orgId: string, id: string): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin
+      .from('generated_banners')
+      .delete()
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true }
   }
 
   private async loadThemeInfo(orgId: string): Promise<BannerThemeInfo> {
