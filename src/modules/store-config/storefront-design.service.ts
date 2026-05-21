@@ -271,6 +271,64 @@ export class StorefrontDesignService {
     return { url }
   }
 
+  /** Gera UMA imagem de "cena" sem mexer no design — pra editores
+   *  estruturados (ex: card de categoria no collectionGrid v3) que
+   *  controlam a persistência por conta própria. Recebe um `prompt`
+   *  curto (label da categoria etc.) + formato opcional, gera com IA,
+   *  faz upload pro bucket público e devolve só `{ url }`. */
+  async generateSceneImage(
+    orgId: string,
+    input: { prompt?: string; format?: 'wide' | 'square' | 'story' },
+  ): Promise<{ url: string }> {
+    const store = await this.loadStoreForHero(orgId)
+    const design = store.design ?? DEFAULT_DESIGN
+    const userHint = (input.prompt ?? '').trim()
+    if (!userHint) throw new BadRequestException('Descreva a imagem (ex.: nome da categoria).')
+
+    const imagePrompt = this.buildHeroImagePrompt({
+      storeName:        store.store_name,
+      storeDescription: store.store_description,
+      design,
+      hint:             userHint,
+    })
+
+    let img: GenerateImageOutput
+    try {
+      img = await this.llm.generateImage({
+        orgId,
+        feature: 'storefront_hero_image',
+        prompt:  imagePrompt,
+        format:  input.format ?? 'square',
+        n:       1,
+      })
+    } catch (e) {
+      this.logger.error(`[storefront-design] geração de cena falhou: ${(e as Error).message}`)
+      throw new BadRequestException('A IA não conseguiu gerar a imagem agora. Tente de novo em instantes.')
+    }
+
+    const first = img.images?.[0]
+    if (!first?.b64 && !first?.url) {
+      throw new BadRequestException('A IA não retornou nenhuma imagem.')
+    }
+    const buffer = first.b64
+      ? Buffer.from(first.b64, 'base64')
+      : Buffer.from(
+          (await axios.get<ArrayBuffer>(first.url!, { responseType: 'arraybuffer', timeout: 30_000 })).data,
+        )
+
+    const path = `${orgId}/scene/${randomUUID()}.png`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(STOREFRONT_BUCKET)
+      .upload(path, buffer, { contentType: 'image/png', upsert: false })
+    if (upErr) throw new BadRequestException(`Erro ao salvar a imagem: ${upErr.message}`)
+
+    const url = supabaseAdmin.storage.from(STOREFRONT_BUCKET).getPublicUrl(path).data.publicUrl
+    this.logger.log(
+      `[storefront-design] org=${orgId} cena gerada (model=${img.model}, custo=$${img.costUsd.toFixed(4)}) hint="${userHint.slice(0, 40)}"`,
+    )
+    return { url }
+  }
+
   /** Gera (e/ou injeta) uma imagem em UMA secao especifica do design.
    *
    *  `slot` decide onde a URL vai parar:

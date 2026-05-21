@@ -15,6 +15,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   POST /store/config/design/generate-from-url    { url, prompt? }
  *   POST /store/config/design/hero-image           { prompt? }
  *   POST /store/config/design/section-image        { sectionIndex, slot?, prompt?, imageBase64?, imageMimeType? }
+ *   POST /store/config/design/scene-image          { prompt, format? }   ← gera sem mutar design
  *   POST /store/config/design/upload-asset         { imageBase64, imageMimeType? }
  *   GET  /store/config/design/canva/designs        ?query=
  *   POST /store/config/design/canva/generate       { designId, prompt? }
@@ -88,6 +89,19 @@ export class StorefrontDesignController {
       prompt:        body.prompt,
       imageBase64:   body.imageBase64,
       imageMimeType: body.imageMimeType,
+    })
+  }
+
+  @Post('scene-image')
+  generateSceneImage(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { prompt?: string; format?: 'wide' | 'square' | 'story' },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.prompt?.trim()) throw new BadRequestException('prompt obrigatório')
+    return this.svc.generateSceneImage(u.orgId, {
+      prompt: body.prompt,
+      format: body.format,
     })
   }
 
