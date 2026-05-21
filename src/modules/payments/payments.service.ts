@@ -4,6 +4,7 @@ import { MercadoPagoService } from './mercado-pago.service'
 import { StripeService } from './stripe.service'
 import { CashbackService } from '../cashback/cashback.service'
 import { BonusService } from '../bonus/bonus.service'
+import { LoyaltyService } from '../loyalty/loyalty.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -35,6 +36,7 @@ export class PaymentsService {
     private readonly stripe:   StripeService,
     private readonly cashback: CashbackService,
     private readonly bonus:    BonusService,
+    private readonly loyalty:  LoyaltyService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -82,6 +84,31 @@ export class PaymentsService {
       })
     } catch (err) {
       this.logger.error(`[cashback] falhou pra order=${orderId}: ${(err as Error).message}`)
+    }
+
+    // ── Loyalty: registra compra + recalcula tier ────────────────────
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, total, customer, status')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+      const customer = (order.customer as { email?: string } | null) ?? {}
+      const email    = (customer.email ?? '').trim().toLowerCase()
+      if (!email) return
+      const loyaltySettings = await this.loyalty.getSettings(order.organization_id as string)
+      if (!loyaltySettings.enabled) return
+      const totalCents = Math.round(Number(order.total ?? 0) * 100)
+      if (totalCents <= 0) return
+      await this.loyalty.recordPurchase({
+        orgId:       order.organization_id as string,
+        email,
+        amountCents: totalCents,
+        orderId,
+      })
+    } catch (err) {
+      this.logger.error(`[loyalty] falhou pra order=${orderId}: ${(err as Error).message}`)
     }
   }
 

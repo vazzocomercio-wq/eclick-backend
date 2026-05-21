@@ -6,9 +6,10 @@ import { StripeService } from './stripe.service'
 import { CredentialsModule } from '../credentials/credentials.module'
 import { CashbackModule } from '../cashback/cashback.module'
 import { BonusModule } from '../bonus/bonus.module'
+import { LoyaltyModule } from '../loyalty/loyalty.module'
 
 @Module({
-  imports:     [CredentialsModule, CashbackModule, BonusModule],
+  imports:     [CredentialsModule, CashbackModule, BonusModule, LoyaltyModule],
   providers:   [PaymentsService, MercadoPagoService, StripeService],
   controllers: [PaymentsController],
   exports:     [PaymentsService],
