@@ -285,6 +285,7 @@ export class PaymentsService {
     items: CheckoutItem[]
     gateway: Gateway | null
     cashbackUsedCents?: number
+    customerId?: string
   }): Promise<StorefrontOrder> {
     const subtotal = args.items.reduce((s, i) => s + i.price * i.qty, 0)
     const cashbackUsedReais = (args.cashbackUsedCents ?? 0) / 100
@@ -298,9 +299,10 @@ export class PaymentsService {
         items:                args.items,
         subtotal,
         total,
-        gateway:              args.gateway,
-        status:               'pending',
-        cashback_used_cents:  args.cashbackUsedCents ?? 0,
+        gateway:               args.gateway,
+        status:                'pending',
+        cashback_used_cents:   args.cashbackUsedCents ?? 0,
+        customer_id:           args.customerId ?? null,
       })
       .select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar pedido: ${error?.message ?? '?'}`)
@@ -345,6 +347,7 @@ export class PaymentsService {
     customer:       CheckoutCustomer
     gateway:        Gateway
     cashbackToUse?: number  // centavos — opt-in pelo cliente
+    customerId?:    string  // FK opcional pra storefront_customers (cliente logado)
   }): Promise<{ orderId: string; initPoint: string }> {
     if (!input.slug)               throw new BadRequestException('slug obrigatório')
     if (!Array.isArray(input.items) || input.items.length === 0)
@@ -400,6 +403,7 @@ export class PaymentsService {
       items,
       gateway:           input.gateway,
       cashbackUsedCents,
+      customerId:        input.customerId,
     })
 
     const urls = this.buildReturnUrls(input.slug, store.customDomain, order.id)

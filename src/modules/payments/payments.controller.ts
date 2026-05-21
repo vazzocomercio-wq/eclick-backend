@@ -37,6 +37,7 @@ export class PaymentsController {
     customer?:       CheckoutCustomer
     gateway?:        Gateway
     cashbackToUse?:  number   // centavos — opt-in
+    customerId?:     string   // FK opcional (cliente logado)
   }) {
     if (!body?.slug)     throw new BadRequestException('slug obrigatório')
     if (!body?.items)    throw new BadRequestException('items obrigatório')
@@ -50,6 +51,7 @@ export class PaymentsController {
       cashbackToUse:  typeof body.cashbackToUse === 'number' && body.cashbackToUse > 0
                         ? Math.floor(body.cashbackToUse)
                         : undefined,
+      customerId:     body.customerId,
     })
   }
 
