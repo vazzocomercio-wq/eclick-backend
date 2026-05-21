@@ -10,6 +10,19 @@ import type {
   MetaProductData,
 } from './social-commerce.types'
 
+/** Força https:// em URLs de imagem. Meta rejeita/não-carrega image_link
+ *  em http (insecure). Fotos do ML vêm de http://http2.mlstatic.com mas o
+ *  mesmo host serve em https — só trocar o protocolo. URLs já https ou
+ *  protocol-relative (//) passam intactas; vazias retornam ''. */
+function toHttps(url: string | null | undefined): string {
+  if (!url) return ''
+  const trimmed = url.trim()
+  if (trimmed.startsWith('https://')) return trimmed
+  if (trimmed.startsWith('http://'))  return 'https://' + trimmed.slice('http://'.length)
+  if (trimmed.startsWith('//'))       return 'https:' + trimmed
+  return trimmed
+}
+
 interface ProductForSync {
   id:                    string
   organization_id:       string
@@ -708,7 +721,7 @@ export class SocialCommerceService {
       ?? p.description
       ?? p.name
 
-    const imageUrl = (p.photo_urls && p.photo_urls.length > 0) ? p.photo_urls[0] : ''
+    const imageUrl = (p.photo_urls && p.photo_urls.length > 0) ? toHttps(p.photo_urls[0]) : ''
     if (!imageUrl) {
       throw new BadRequestException(`Produto ${p.id} sem photo_url — Meta exige imagem`)
     }
@@ -743,7 +756,7 @@ export class SocialCommerceService {
     // item_type='PRODUCT_ITEM' vai no top-level do batch (em meta-catalog
     // batchUpdateProducts) — nao em cada item.data.
     if (p.photo_urls && p.photo_urls.length > 1) {
-      out.additional_image_link = p.photo_urls.slice(1, 10)
+      out.additional_image_link = p.photo_urls.slice(1, 10).map(toHttps)
     }
     if (p.gtin)     out.gtin = p.gtin
     if (p.category) out.custom_label_0 = p.category
