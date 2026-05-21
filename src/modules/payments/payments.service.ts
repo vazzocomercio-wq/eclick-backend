@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { MercadoPagoService } from './mercado-pago.service'
 import { StripeService } from './stripe.service'
 import { CashbackService } from '../cashback/cashback.service'
+import { BonusService } from '../bonus/bonus.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -33,6 +34,7 @@ export class PaymentsService {
     private readonly mp:       MercadoPagoService,
     private readonly stripe:   StripeService,
     private readonly cashback: CashbackService,
+    private readonly bonus:    BonusService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -151,6 +153,73 @@ export class PaymentsService {
         imageUrl:  p.photo ?? undefined,
       })
     }
+
+    // ── Bônus & Brindes — adiciona linhas com price=0 ──────────────────
+    // Avalia regras ativas. Pra BOGO, reduz qty da linha paga em vez de
+    // criar linha brinde (cliente vê "Leve 2 pague 1" como desconto puro
+    // no item). Pra free_above_value/gift_with_product, adiciona linha
+    // separada com price=0 do produto presente.
+    try {
+      const applied = await this.bonus.evaluateCart(orgId, out.map(i => ({
+        productId: i.productId, qty: i.qty, price: i.price,
+      })))
+      if (applied.length > 0) {
+        // Coleta gift_product_ids que ainda não estão no carrinho (precisamos
+        // dos dados pra criar a linha)
+        const giftIds = [...new Set(applied.map(a => a.giftProductId).filter(id => !out.some(o => o.productId === id)))]
+        let giftData: Map<string, { name: string; photo: string | null }> = new Map()
+        if (giftIds.length > 0) {
+          const { data: gifts } = await supabaseAdmin
+            .from('products')
+            .select('id, name, photo_urls, storefront_visible')
+            .in('id', giftIds)
+            .eq('organization_id', orgId)
+          for (const g of gifts ?? []) {
+            if (!g.storefront_visible) continue
+            giftData.set(g.id as string, {
+              name:  String(g.name ?? ''),
+              photo: Array.isArray(g.photo_urls) && g.photo_urls[0] ? String(g.photo_urls[0]) : null,
+            })
+          }
+        }
+
+        for (const bonus of applied) {
+          if (bonus.type === 'bogo') {
+            // BOGO: o brinde é o próprio trigger product. Em vez de criar
+            // linha duplicada, baixamos o price médio da linha existente
+            // (mantém qty intacto, cliente vê total reduzido).
+            // Implementação simples: adiciona linha extra com price=0 +
+            // qty=giftQty. Total fica certo (qtde paga × price + qtde grátis × 0).
+            const triggerLine = out.find(o => o.productId === bonus.giftProductId)
+            if (triggerLine) {
+              // Diminui qty pago + cria linha brinde
+              triggerLine.qty -= bonus.giftQty
+              if (triggerLine.qty < 0) triggerLine.qty = 0
+              out.push({
+                productId: bonus.giftProductId,
+                name:      `🎁 ${triggerLine.name} (${bonus.ruleName})`,
+                price:     0,
+                qty:       bonus.giftQty,
+                imageUrl:  triggerLine.imageUrl,
+              })
+            }
+          } else {
+            const gift = giftData.get(bonus.giftProductId) ?? out.find(o => o.productId === bonus.giftProductId)
+            if (!gift) continue
+            out.push({
+              productId: bonus.giftProductId,
+              name:      `🎁 ${gift.name} (brinde — ${bonus.ruleName})`,
+              price:     0,
+              qty:       bonus.giftQty,
+              imageUrl:  (gift as { photo?: string | null }).photo ?? (gift as { imageUrl?: string }).imageUrl,
+            })
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`[bonus] avaliação falhou — checkout sem brindes: ${(err as Error).message}`)
+    }
+
     return out
   }
 

@@ -58,6 +58,7 @@ import { StoreConfigModule } from './modules/store-config/store-config.module'
 import { CouponsModule } from './modules/coupons/coupons.module'
 import { ShippingModule } from './modules/shipping/shipping.module'
 import { CashbackModule } from './modules/cashback/cashback.module'
+import { BonusModule } from './modules/bonus/bonus.module'
 import { StorefrontEventsModule } from './modules/storefront-events/storefront-events.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
 import { PaymentsModule } from './modules/payments/payments.module'
@@ -134,6 +135,7 @@ import { RadarModule } from './modules/radar/radar.module'
     CouponsModule,
     ShippingModule,
     CashbackModule,
+    BonusModule,
     StorefrontEventsModule,
     BannerGeneratorModule,
     PaymentsModule,
