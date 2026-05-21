@@ -40,4 +40,13 @@ export class StorefrontDesignV3Controller {
     if (!body?.templateKey) throw new BadRequestException('templateKey obrigatório')
     return this.svc.applyTemplate(u.orgId, body.templateKey).then(design => ({ design }))
   }
+
+  @Post('generate')
+  generate(@ReqUser() u: ReqUserPayload, @Body() body: { prompt?: string; templateKey?: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.generateDesign(u.orgId, {
+      prompt:      body?.prompt ?? '',
+      templateKey: body?.templateKey,
+    }).then(design => ({ design }))
+  }
 }
