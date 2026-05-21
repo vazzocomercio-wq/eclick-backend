@@ -25,7 +25,7 @@ export class BannerGeneratorService {
     const limit = Math.min(opts.limit ?? 50, 100)
     let q = supabaseAdmin
       .from('products')
-      .select('id, name, category, brand, price, sale_price, photo_urls, ai_short_description, description, storefront_visible')
+      .select('id, name, category, brand, price, photo_urls, ai_short_description, description, storefront_visible')
       .eq('organization_id', orgId)
       .eq('storefront_visible', true)
       .order('updated_at', { ascending: false })
@@ -41,7 +41,7 @@ export class BannerGeneratorService {
     return (data ?? []).map(p => {
       const row = p as {
         id: string; name: string; category: string | null; brand: string | null
-        price: number; sale_price: number | null
+        price: number
         photo_urls: string[] | null
         ai_short_description: string | null; description: string | null
       }
@@ -51,7 +51,7 @@ export class BannerGeneratorService {
         category:          row.category,
         brand:             row.brand,
         price:             Number(row.price ?? 0),
-        sale_price:        row.sale_price != null ? Number(row.sale_price) : null,
+        sale_price:        null,  // coluna nao existe em products — promo via outra fonte (ml_promotions, etc.) — TODO
         photo_url:         row.photo_urls?.[0] ?? null,
         short_description: row.ai_short_description ?? (row.description ? row.description.slice(0, 200) : null),
       }
@@ -74,7 +74,7 @@ export class BannerGeneratorService {
     // 1. Busca dados ricos dos produtos selecionados
     const { data: products, error } = await supabaseAdmin
       .from('products')
-      .select('id, name, category, brand, price, sale_price, photo_urls, ai_short_description, description')
+      .select('id, name, category, brand, price, photo_urls, ai_short_description, description')
       .eq('organization_id', orgId)
       .in('id', input.productIds)
     if (error) throw new BadRequestException(error.message)
@@ -83,7 +83,7 @@ export class BannerGeneratorService {
     const productsInfo: BannerProductInfo[] = products.map(p => {
       const row = p as {
         id: string; name: string; category: string | null; brand: string | null
-        price: number; sale_price: number | null
+        price: number
         photo_urls: string[] | null
         ai_short_description: string | null; description: string | null
       }
@@ -93,7 +93,7 @@ export class BannerGeneratorService {
         category:          row.category,
         brand:             row.brand,
         price:             Number(row.price ?? 0),
-        sale_price:        row.sale_price != null ? Number(row.sale_price) : null,
+        sale_price:        null,  // sem coluna de promo direta em products (TODO: enriquecer via ml_promotions)
         photo_url:         row.photo_urls?.[0] ?? null,
         short_description: row.ai_short_description ?? (row.description ? row.description.slice(0, 200) : null),
       }
