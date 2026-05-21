@@ -209,6 +209,72 @@ export class StorefrontCustomersService {
     return stripPasswordHash(data as Record<string, unknown>)
   }
 
+  // ── Wishlist (favoritos) ────────────────────────────────────────
+
+  /** Lista produtos favoritos do cliente. Retorna shape compatível
+   *  com StorefrontProduct do renderer. */
+  async listWishlist(orgId: string, customerId: string): Promise<Array<Record<string, unknown>>> {
+    const { data: items } = await supabaseAdmin
+      .from('customer_wishlists')
+      .select('product_id, created_at')
+      .eq('customer_id', customerId)
+      .order('created_at', { ascending: false })
+      .limit(200)
+    const ids = ((items ?? []) as Array<{ product_id: string }>).map(r => r.product_id)
+    if (ids.length === 0) return []
+
+    // Busca produtos com mesmos campos do public storefront
+    const { data: products } = await supabaseAdmin
+      .from('products')
+      .select([
+        'id', 'name', 'sku', 'model',
+        'price', 'my_price',
+        'sale_price', 'sale_start_at', 'sale_end_at', 'sale_badge_text',
+        'photo_urls', 'category', 'brand', 'stock',
+        'ai_short_description', 'created_at',
+      ].join(','))
+      .in('id', ids)
+      .eq('organization_id', orgId)
+      .eq('storefront_visible', true)
+    return (products ?? []) as unknown as Array<Record<string, unknown>>
+  }
+
+  async addToWishlist(customerId: string, productId: string): Promise<{ ok: true; alreadyExists: boolean }> {
+    const { error } = await supabaseAdmin
+      .from('customer_wishlists')
+      .insert({ customer_id: customerId, product_id: productId })
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '23505') return { ok: true, alreadyExists: true } // UNIQUE
+      throw new BadRequestException(`Erro: ${error.message}`)
+    }
+    return { ok: true, alreadyExists: false }
+  }
+
+  async removeFromWishlist(customerId: string, productId: string): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin
+      .from('customer_wishlists')
+      .delete()
+      .eq('customer_id', customerId)
+      .eq('product_id', productId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true }
+  }
+
+  /** Checa quais productIds o cliente já tem favoritados. Frontend
+   *  usa pra pintar o coração preenchido no ProductGrid. */
+  async checkWishlist(customerId: string, productIds: string[]): Promise<{ favorited: string[] }> {
+    if (productIds.length === 0) return { favorited: [] }
+    const { data } = await supabaseAdmin
+      .from('customer_wishlists')
+      .select('product_id')
+      .eq('customer_id', customerId)
+      .in('product_id', productIds)
+    return {
+      favorited: ((data ?? []) as Array<{ product_id: string }>).map(r => r.product_id),
+    }
+  }
+
   /** Histórico de pedidos do cliente (pelo email ou customer_id). */
   async listOrders(orgId: string, customerId: string, email: string): Promise<Array<{
     id:               string

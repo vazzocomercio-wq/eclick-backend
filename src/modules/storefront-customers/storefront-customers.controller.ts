@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Get, Patch, Body, Param, Headers,
+  Controller, Post, Get, Patch, Delete, Body, Param, Query, Headers,
   BadRequestException, UnauthorizedException,
 } from '@nestjs/common'
 import { Public } from '../../common/decorators/public.decorator'
@@ -77,6 +77,47 @@ export class StorefrontCustomersController {
     const token = extractToken(auth)
     const cur = await this.svc.getCurrentByToken(token)
     return this.svc.listOrders(cur.organization_id, cur.id, cur.email)
+  }
+
+  // ── Wishlist (favoritos) ──────────────────────────────────────────
+
+  @Get('me/wishlist')
+  @Public()
+  async myWishlist(@Headers('authorization') auth?: string) {
+    const token = extractToken(auth)
+    const cur = await this.svc.getCurrentByToken(token)
+    return this.svc.listWishlist(cur.organization_id, cur.id)
+  }
+
+  /** GET /public/store/auth/me/wishlist/check?ids=a,b,c — checa quais já favoritados */
+  @Get('me/wishlist/check')
+  @Public()
+  async checkWishlist(
+    @Headers('authorization') auth: string | undefined,
+    @Query('ids') idsCsv?: string,
+  ) {
+    const token = extractToken(auth)
+    const cur = await this.svc.getCurrentByToken(token)
+    const ids = (idsCsv ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    return this.svc.checkWishlist(cur.id, ids)
+  }
+
+  /** POST /public/store/auth/me/wishlist/:productId — adiciona. */
+  @Post('me/wishlist/:productId')
+  @Public()
+  async addToWishlist(@Headers('authorization') auth: string | undefined, @Param('productId') productId: string) {
+    const token = extractToken(auth)
+    const cur = await this.svc.getCurrentByToken(token)
+    return this.svc.addToWishlist(cur.id, productId)
+  }
+
+  /** DELETE /public/store/auth/me/wishlist/:productId — remove. */
+  @Delete('me/wishlist/:productId')
+  @Public()
+  async removeFromWishlist(@Headers('authorization') auth: string | undefined, @Param('productId') productId: string) {
+    const token = extractToken(auth)
+    const cur = await this.svc.getCurrentByToken(token)
+    return this.svc.removeFromWishlist(cur.id, productId)
   }
 
   private async resolveOrg(slug: string): Promise<string | null> {
