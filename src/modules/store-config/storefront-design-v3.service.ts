@@ -64,7 +64,74 @@ export class StorefrontDesignV3Service {
       throw new NotFoundException(`Template "${templateKey}" nao encontrado.`)
     }
     const cloned = cloneDesignWithFreshIds(template.design)
+    await this.snapshotCurrent(orgId, 'template_applied', `Template: ${template.label}`)
     return this.saveDesign(orgId, cloned)
+  }
+
+  // ─ Versionamento (Fase E) ────────────────────────────────────
+
+  /**
+   * Lista as ultimas N versions (mais recentes primeiro).
+   */
+  async listVersions(orgId: string, limit = 20): Promise<Array<{
+    id: string; label: string | null; source: string; created_at: string
+  }>> {
+    const { data, error } = await supabaseAdmin
+      .from('store_design_versions')
+      .select('id, label, source, created_at')
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(limit, 100))
+    if (error) throw new BadRequestException(error.message)
+    return (data ?? []) as Array<{ id: string; label: string | null; source: string; created_at: string }>
+  }
+
+  /**
+   * Snapshot da versao atual em store_config.design_v3 → store_design_versions.
+   * Chamado antes de operacoes destrutivas (apply template, generate AI,
+   * revert) pra permitir desfazer.
+   */
+  async snapshotCurrent(orgId: string, source: 'manual_save' | 'ai_generated' | 'template_applied' | 'publish', label?: string): Promise<void> {
+    const current = await this.getDesign(orgId)
+    const { error } = await supabaseAdmin
+      .from('store_design_versions')
+      .insert({
+        organization_id: orgId,
+        design:          current as unknown as Record<string, unknown>,
+        source,
+        label:           label ?? null,
+      })
+    if (error) {
+      this.logger.warn(`[v3] snapshot falhou: ${error.message}`)
+    }
+  }
+
+  /**
+   * Publish — snapshot da versao atual marcado como 'publish' + label
+   * opcional. A vitrine ja serve o design_v3 atual (sem stage draft/
+   * published separado neste MVP — toda mudanca ja vai pro ar).
+   */
+  async publish(orgId: string, label?: string): Promise<StorefrontDesignV3> {
+    await this.snapshotCurrent(orgId, 'publish', label ?? `Publicado em ${new Date().toLocaleString('pt-BR')}`)
+    return this.getDesign(orgId)
+  }
+
+  /**
+   * Revert — copia design da version informada de volta pro
+   * store_config.design_v3, e cria snapshot do que foi sobrescrito
+   * (pra poder reverter o revert).
+   */
+  async revert(orgId: string, versionId: string): Promise<StorefrontDesignV3> {
+    const { data, error } = await supabaseAdmin
+      .from('store_design_versions')
+      .select('design, label')
+      .eq('organization_id', orgId)
+      .eq('id', versionId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(error.message)
+    if (!data) throw new NotFoundException('Versão não encontrada.')
+    await this.snapshotCurrent(orgId, 'manual_save', `Antes do revert ${new Date().toLocaleString('pt-BR')}`)
+    return this.saveDesign(orgId, (data as { design: unknown }).design)
   }
 
   /**
@@ -95,7 +162,9 @@ export class StorefrontDesignV3Service {
 
     let raw: string
     try {
-      const out = await this.llm.generateText({
+      await this.snapshotCurrent(orgId, 'ai_generated', `Antes da geracao IA — prompt: ${prompt.slice(0, 60)}`)
+
+    const out = await this.llm.generateText({
         orgId,
         feature:      'storefront_design',
         systemPrompt: SYSTEM_PROMPT_V3,

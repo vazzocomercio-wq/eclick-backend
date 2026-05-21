@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Put, Post, Body, UseGuards, BadRequestException,
+  Controller, Get, Put, Post, Body, Param, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -48,5 +48,26 @@ export class StorefrontDesignV3Controller {
       prompt:      body?.prompt ?? '',
       templateKey: body?.templateKey,
     }).then(design => ({ design }))
+  }
+
+  // ─ Versionamento (Fase E) ────────────────────────────────────
+
+  @Get('versions')
+  listVersions(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listVersions(u.orgId).then(versions => ({ versions }))
+  }
+
+  @Post('publish')
+  publish(@ReqUser() u: ReqUserPayload, @Body() body: { label?: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.publish(u.orgId, body?.label).then(design => ({ design }))
+  }
+
+  @Post('revert/:versionId')
+  revert(@ReqUser() u: ReqUserPayload, @Param('versionId') versionId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!versionId) throw new BadRequestException('versionId obrigatório')
+    return this.svc.revert(u.orgId, versionId).then(design => ({ design }))
   }
 }
