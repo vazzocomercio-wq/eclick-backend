@@ -297,6 +297,8 @@ export class StoreConfigService {
       .select([
         'id', 'name', 'sku', 'model',
         'price', 'cost_price', 'my_price',
+        // Promoções por produto (migration 20260604)
+        'sale_price', 'sale_start_at', 'sale_end_at', 'sale_badge_text',
         'photo_urls', 'images',
         'category', 'brand', 'condition',
         'stock', 'weight_kg',
@@ -316,7 +318,11 @@ export class StoreConfigService {
     if (opts.category) q = q.eq('category', opts.category)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
-    return (data ?? []) as unknown as Array<Record<string, unknown>>
+    const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+    // Calcula campos derivados de promoção (effective_price, on_sale, discount_pct)
+    // pra vitrine renderizar sem repetir lógica.
+    const now = Date.now()
+    return rows.map(r => enrichWithPromotionFields(r, now))
   }
 
   /** Detalhe de produto público. */
@@ -328,6 +334,166 @@ export class StoreConfigService {
       .eq('id', productId)
       .eq('storefront_visible', true)
       .maybeSingle()
-    return data ?? null
+    if (!data) return null
+    return enrichWithPromotionFields(data as Record<string, unknown>, Date.now())
+  }
+
+  /** Aplica/remove promoção em um produto. Aceita partial — null limpa o
+   *  campo (ex: remover janela de fim). Valida sale_price > 0 e <= price. */
+  async setProductPromotion(
+    orgId: string,
+    productId: string,
+    patch: {
+      sale_price?: number | null
+      sale_start_at?: string | null
+      sale_end_at?: string | null
+      sale_badge_text?: string | null
+    },
+  ): Promise<{ ok: true }> {
+    const fields: Record<string, unknown> = {}
+    if ('sale_price'      in patch) fields.sale_price      = patch.sale_price
+    if ('sale_start_at'   in patch) fields.sale_start_at   = patch.sale_start_at
+    if ('sale_end_at'     in patch) fields.sale_end_at     = patch.sale_end_at
+    if ('sale_badge_text' in patch) fields.sale_badge_text = patch.sale_badge_text
+
+    if (Object.keys(fields).length === 0) {
+      throw new BadRequestException('Nenhum campo de promoção informado')
+    }
+
+    // Validação cruzada: se sale_price > 0, deve ser <= price atual
+    if (typeof patch.sale_price === 'number' && patch.sale_price > 0) {
+      const { data: p } = await supabaseAdmin
+        .from('products').select('price').eq('id', productId).eq('organization_id', orgId).maybeSingle()
+      if (p && typeof (p as { price?: number }).price === 'number' && patch.sale_price >= (p as { price: number }).price) {
+        throw new BadRequestException('sale_price deve ser menor que price')
+      }
+    }
+
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update(fields)
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro ao salvar promoção: ${error.message}`)
+    return { ok: true }
+  }
+
+  /** Bulk: aplica MESMO patch em vários produtos (ex: "20% off em 50
+   *  produtos selecionados"). Pra desconto percentual o frontend resolve
+   *  produto-a-produto e chama múltiplos setProductPromotion via Promise.all
+   *  — aqui só aplica datas/badge_text em batch. */
+  async bulkSetPromotionMetadata(
+    orgId: string,
+    productIds: string[],
+    patch: {
+      sale_start_at?: string | null
+      sale_end_at?: string | null
+      sale_badge_text?: string | null
+    },
+  ): Promise<{ updated: number }> {
+    if (productIds.length === 0) return { updated: 0 }
+    const fields: Record<string, unknown> = {}
+    if ('sale_start_at'   in patch) fields.sale_start_at   = patch.sale_start_at
+    if ('sale_end_at'     in patch) fields.sale_end_at     = patch.sale_end_at
+    if ('sale_badge_text' in patch) fields.sale_badge_text = patch.sale_badge_text
+    if (Object.keys(fields).length === 0) return { updated: 0 }
+    const { error, count } = await supabaseAdmin
+      .from('products')
+      .update(fields, { count: 'exact' })
+      .eq('organization_id', orgId)
+      .in('id', productIds)
+    if (error) throw new BadRequestException(`Erro bulk: ${error.message}`)
+    return { updated: count ?? productIds.length }
+  }
+
+  /** Lista produtos pra dashboard de promoções (filtros: ativa, agendada,
+   *  expirada, sem). Retorna campos mínimos pra grid editável. */
+  async listProductsForPromotionAdmin(
+    orgId: string,
+    opts: {
+      filter?: 'all' | 'active' | 'scheduled' | 'expired' | 'none'
+      q?:      string
+      limit?:  number
+      offset?: number
+    } = {},
+  ): Promise<{ products: Array<Record<string, unknown>>; total: number }> {
+    const limit  = Math.min(opts.limit ?? 50, 200)
+    const offset = Math.max(opts.offset ?? 0, 0)
+    const nowIso = new Date().toISOString()
+
+    let q = supabaseAdmin
+      .from('products')
+      .select('id, name, sku, price, sale_price, sale_start_at, sale_end_at, sale_badge_text, photo_urls, stock, storefront_visible, category', { count: 'exact' })
+      .eq('organization_id', orgId)
+      .order('updated_at', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    if (opts.q?.trim()) {
+      const esc = opts.q.trim().replace(/[%]/g, '')
+      q = q.or(`name.ilike.%${esc}%,sku.ilike.%${esc}%`)
+    }
+
+    // Filtros de janela
+    switch (opts.filter) {
+      case 'active':
+        // sale_price NOT NULL E (start IS NULL OR start <= now) E (end IS NULL OR end > now)
+        q = q.not('sale_price', 'is', null)
+        q = q.or(`sale_start_at.is.null,sale_start_at.lte.${nowIso}`)
+        q = q.or(`sale_end_at.is.null,sale_end_at.gt.${nowIso}`)
+        break
+      case 'scheduled':
+        q = q.not('sale_price', 'is', null)
+        q = q.gt('sale_start_at', nowIso)
+        break
+      case 'expired':
+        q = q.not('sale_price', 'is', null)
+        q = q.lte('sale_end_at', nowIso)
+        break
+      case 'none':
+        q = q.is('sale_price', null)
+        break
+    }
+
+    const { data, error, count } = await q
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    const now = Date.now()
+    const products = (data ?? []).map(r => enrichWithPromotionFields(r as Record<string, unknown>, now))
+    return { products, total: count ?? 0 }
+  }
+}
+
+// ── Helpers de promoção ─────────────────────────────────────────────────────
+
+/** Calcula preço efetivo considerando janela ativa. Se sale_price não
+ *  estiver setado ou janela inativa, retorna price. */
+export function getEffectivePrice(
+  product: { price: number | null; sale_price?: number | null; sale_start_at?: string | null; sale_end_at?: string | null },
+  nowMs = Date.now(),
+): number {
+  const price = Number(product.price ?? 0)
+  const sale  = product.sale_price
+  if (sale == null || Number(sale) <= 0) return price
+  if (Number(sale) >= price)             return price  // safety
+  if (product.sale_start_at && nowMs < Date.parse(product.sale_start_at)) return price
+  if (product.sale_end_at   && nowMs > Date.parse(product.sale_end_at))   return price
+  return Number(sale)
+}
+
+/** Anexa campos derivados (effective_price, on_sale, discount_pct) ao
+ *  objeto retornado pro frontend. Mantém price/sale_price originais. */
+function enrichWithPromotionFields(row: Record<string, unknown>, nowMs: number): Record<string, unknown> {
+  const price        = Number(row.price ?? 0)
+  const salePrice    = row.sale_price
+  const effective    = getEffectivePrice(row as { price: number | null; sale_price?: number | null; sale_start_at?: string | null; sale_end_at?: string | null }, nowMs)
+  const onSale       = effective < price && effective > 0
+  const discountPct  = onSale && price > 0 ? Math.round(((price - effective) / price) * 100) : 0
+  return {
+    ...row,
+    effective_price: effective,
+    on_sale:         onSale,
+    discount_pct:    discountPct,
+    // sale_price também já vem do row; mantém pra UI saber se há promoção
+    // setada (mesmo que janela inativa → on_sale=false).
+    has_sale_set:    salePrice != null && Number(salePrice) > 0,
   }
 }

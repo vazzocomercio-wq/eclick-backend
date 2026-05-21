@@ -59,6 +59,62 @@ export class StoreConfigController {
   themePresets() {
     return THEME_PRESETS
   }
+
+  // ── Promoções por produto ─────────────────────────────────────────────
+  // GET    /store/config/promotions?filter=active|scheduled|expired|none|all&q=&limit=&offset=
+  // PATCH  /store/config/promotions/:productId
+  // PATCH  /store/config/promotions/bulk
+
+  @Get('promotions')
+  listPromotions(
+    @ReqUser() u: ReqUserPayload,
+    @Query('filter') filter?: string,
+    @Query('q')      q?:      string,
+    @Query('limit')  limit?:  string,
+    @Query('offset') offset?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    const validFilters = ['all', 'active', 'scheduled', 'expired', 'none'] as const
+    const safeFilter = (validFilters as readonly string[]).includes(filter ?? 'all')
+      ? (filter as typeof validFilters[number])
+      : 'all'
+    return this.svc.listProductsForPromotionAdmin(u.orgId, {
+      filter: safeFilter,
+      q,
+      limit:  limit  ? parseInt(limit,  10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    })
+  }
+
+  @Patch('promotions/:productId')
+  setPromotion(
+    @ReqUser() u: ReqUserPayload,
+    @Param('productId') productId: string,
+    @Body() body: {
+      sale_price?: number | null
+      sale_start_at?: string | null
+      sale_end_at?: string | null
+      sale_badge_text?: string | null
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.setProductPromotion(u.orgId, productId, body)
+  }
+
+  @Patch('promotions/bulk/metadata')
+  bulkSetPromotionMetadata(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      productIds: string[]
+      sale_start_at?: string | null
+      sale_end_at?: string | null
+      sale_badge_text?: string | null
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.productIds)) throw new BadRequestException('productIds[] obrigatório')
+    return this.svc.bulkSetPromotionMetadata(u.orgId, body.productIds, body)
+  }
 }
 
 @Controller('public/store')

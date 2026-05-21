@@ -58,17 +58,30 @@ export class PaymentsService {
     if (ids.length === 0) return []
     const { data, error } = await supabaseAdmin
       .from('products')
-      .select('id, name, price, photo_urls, stock, storefront_visible')
+      .select('id, name, price, sale_price, sale_start_at, sale_end_at, photo_urls, stock, storefront_visible')
       .in('id', ids)
       .eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Erro ao validar produtos: ${error.message}`)
 
+    // Preço efetivo = sale_price se janela ativa, senão price. SEMPRE
+    // calculado server-side — frontend não decide preço final, só sugere.
+    const nowMs = Date.now()
     const byId = new Map<string, { id: string; name: string; price: number; photo: string | null; stock: number; visible: boolean }>()
     for (const r of data ?? []) {
+      const basePrice = Number(r.price ?? 0)
+      const sale      = r.sale_price as number | null
+      const starts    = r.sale_start_at as string | null
+      const ends      = r.sale_end_at as string | null
+      let effective = basePrice
+      if (sale != null && Number(sale) > 0 && Number(sale) < basePrice) {
+        const okStart = !starts || nowMs >= Date.parse(starts)
+        const okEnd   = !ends   || nowMs <= Date.parse(ends)
+        if (okStart && okEnd) effective = Number(sale)
+      }
       byId.set(r.id as string, {
         id:      r.id as string,
         name:    String(r.name ?? ''),
-        price:   Number(r.price ?? 0),
+        price:   effective,
         photo:   Array.isArray(r.photo_urls) && r.photo_urls[0] ? String(r.photo_urls[0]) : null,
         stock:   Number(r.stock ?? 0),
         visible: Boolean(r.storefront_visible),
