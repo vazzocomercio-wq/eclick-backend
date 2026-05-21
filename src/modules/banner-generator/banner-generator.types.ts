@@ -18,17 +18,22 @@ export interface BannerGenerateInput {
   customPrompt?:  string
   /** Adicoes ao prompt padrao (ex.: "use cores mais frias"). */
   customAdditions?: string
-  /** Override do formato sugerido pelo estilo. */
+  /** Formato unico (legado, use formats[] preferencialmente). */
   format?:        BannerFormat
-  /** Quantas variacoes gerar (1-4). Default 1. */
+  /** Lista de formatos a gerar em paralelo (ex: ['wide', 'square'] gera
+   * desktop+mobile). Se omitido, cai no `format` ou no default do estilo. */
+  formats?:       BannerFormat[]
+  /** Quantas variacoes gerar POR FORMATO (1-4). Default 1. */
   variations?:    number
 }
 
 export interface BannerGenerateOutput {
-  images:           Array<{ url: string }>
+  /** Imagens geradas — agora com format por item. */
+  images:           Array<{ url: string; format: BannerFormat }>
   promptUsed:       string
   styleKey:         string
-  format:           BannerFormat
+  /** Formatos gerados (pode ter 1 ou N). */
+  formats:          BannerFormat[]
   costUsd:          number
   fallbackUsed:     boolean
   primaryError?:    string

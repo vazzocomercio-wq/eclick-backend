@@ -113,46 +113,56 @@ export class BannerGeneratorService {
       .filter((u): u is string => !!u && u.startsWith('http'))
       .slice(0, 4)  // limite pra evitar prompts gigantes
 
-    const format = input.format ?? style.defaultFormat
+    // Aceita formats[] (preferencial) ou format (legado).
+    const formats: BannerFormat[] = input.formats && input.formats.length > 0
+      ? input.formats
+      : [input.format ?? style.defaultFormat]
     const variations = Math.max(1, Math.min(input.variations ?? 1, 4))
 
-    // 5. Chama LlmService.generateImage (Gemini preferido — fallback gpt-image-1)
-    let out
+    // 5. Chama LlmService.generateImage em paralelo, 1 chamada por formato
+    let outs
     try {
-      out = await this.llm.generateImage({
-        orgId,
-        feature:         'storefront_hero_image',  // reusa config existente (Gemini primary)
-        prompt:          finalPrompt,
-        format,
-        n:               variations,
-        sourceImageUrls: sourceUrls.length > 0 ? sourceUrls : undefined,
-      })
+      outs = await Promise.all(formats.map(fmt =>
+        this.llm.generateImage({
+          orgId,
+          feature:         'storefront_hero_image',
+          prompt:          finalPrompt,
+          format:          fmt,
+          n:               variations,
+          sourceImageUrls: sourceUrls.length > 0 ? sourceUrls : undefined,
+        }).then(out => ({ fmt, out }))
+      ))
     } catch (e) {
       this.logger.error(`[banner-gen] LLM falhou: ${(e as Error).message}`)
       throw new BadRequestException('A IA não conseguiu gerar o banner agora. Tente de novo em instantes.')
     }
 
     // 6. Upload das imagens geradas no bucket (algumas vem como base64)
-    const uploaded: Array<{ url: string }> = []
-    for (const img of out.images) {
-      if (img.url && img.url.startsWith('http')) {
-        // Ja e URL publica (Gemini pode retornar URL direta).
-        uploaded.push({ url: img.url })
-        continue
-      }
-      if (img.b64) {
-        const ext = 'png'
-        const path = `${orgId}/banner/${randomUUID()}.${ext}`
-        const buffer = Buffer.from(img.b64, 'base64')
-        const { error: upErr } = await supabaseAdmin.storage
-          .from(BUCKET)
-          .upload(path, buffer, { contentType: 'image/png', upsert: false })
-        if (upErr) {
-          this.logger.error(`[banner-gen] upload falhou: ${upErr.message}`)
+    const uploaded: Array<{ url: string; format: BannerFormat }> = []
+    let totalCost = 0
+    let anyFallback = false
+    for (const { fmt, out } of outs) {
+      totalCost += out.costUsd
+      if (out.fallbackUsed) anyFallback = true
+      for (const img of out.images) {
+        if (img.url && img.url.startsWith('http')) {
+          uploaded.push({ url: img.url, format: fmt })
           continue
         }
-        const { data: pub } = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path)
-        if (pub?.publicUrl) uploaded.push({ url: pub.publicUrl })
+        if (img.b64) {
+          const ext = 'png'
+          const path = `${orgId}/banner/${randomUUID()}.${ext}`
+          const buffer = Buffer.from(img.b64, 'base64')
+          const { error: upErr } = await supabaseAdmin.storage
+            .from(BUCKET)
+            .upload(path, buffer, { contentType: 'image/png', upsert: false })
+          if (upErr) {
+            this.logger.error(`[banner-gen] upload falhou: ${upErr.message}`)
+            continue
+          }
+          const { data: pub } = supabaseAdmin.storage.from(BUCKET).getPublicUrl(path)
+          if (pub?.publicUrl) uploaded.push({ url: pub.publicUrl, format: fmt })
+        }
       }
     }
     if (!uploaded.length) {
@@ -160,18 +170,17 @@ export class BannerGeneratorService {
     }
 
     this.logger.log(
-      `[banner-gen] org=${orgId} style=${input.styleKey} variations=${uploaded.length} ` +
-      `model=${out.model} cost=$${out.costUsd.toFixed(4)} fallback=${out.fallbackUsed}`,
+      `[banner-gen] org=${orgId} style=${input.styleKey} formats=${formats.join(',')} ` +
+      `total=${uploaded.length} cost=$${totalCost.toFixed(4)} fallback=${anyFallback}`,
     )
 
     return {
       images:       uploaded,
       promptUsed:   finalPrompt,
       styleKey:     input.styleKey,
-      format,
-      costUsd:      out.costUsd,
-      fallbackUsed: out.fallbackUsed,
-      primaryError: out.primaryError,
+      formats,
+      costUsd:      totalCost,
+      fallbackUsed: anyFallback,
     }
   }
 
