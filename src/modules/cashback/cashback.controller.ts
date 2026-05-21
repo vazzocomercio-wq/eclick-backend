@@ -70,6 +70,15 @@ export class CashbackController {
     })
   }
 
+  /** POST /cashback/expire-now — dispara expiração manualmente (admin).
+   *  Cron já roda diário às 03:00 BRT; este endpoint é pra emergência. */
+  @Post('expire-now')
+  expireNow(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    // svc roda pra TODA a base (não filtra por org) — só admin trigger.
+    return this.svc.expireOldEarns()
+  }
+
   /** Ajuste manual de saldo — entrada ou saída. Útil pra suporte/correção. */
   @Post('adjust')
   adjust(

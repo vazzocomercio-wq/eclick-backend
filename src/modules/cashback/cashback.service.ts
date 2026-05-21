@@ -258,6 +258,103 @@ export class CashbackService {
     }
   }
 
+  // ── Expiração de saldos ────────────────────────────────────────────
+
+  /** Cron diário: detecta earns expirados e cria expire movements.
+   *  Idempotente — source_id=earn_movement_id previne re-expiração.
+   *
+   *  Lógica:
+   *   1. Busca movements type='earn' com expires_at <= now()
+   *   2. Pra cada um, verifica se já existe movement type='expire' com
+   *      source_id apontando pra ele (idempotência)
+   *   3. Se não, cria expire movement (-amount) + atualiza balance row
+   *
+   *  Conservativo: só expira earns que JÁ FORAM creditados (a coluna
+   *  expires_at vem setada no INSERT do credit). Não toca em valores
+   *  que vieram de redeem/adjustment. */
+  async expireOldEarns(now = new Date()): Promise<{
+    expiredCount: number
+    expiredCents: number
+  }> {
+    const nowIso = now.toISOString()
+    // Pega earns expirados (com expires_at não-NULL e passado)
+    const { data: expired } = await supabaseAdmin
+      .from('customer_cashback_movements')
+      .select('id, organization_id, customer_identifier, amount_cents, expires_at')
+      .eq('type', 'earn')
+      .not('expires_at', 'is', null)
+      .lte('expires_at', nowIso)
+      .order('created_at', { ascending: true })
+      .limit(5000)
+
+    const rows = (expired ?? []) as Array<{
+      id: string; organization_id: string; customer_identifier: string;
+      amount_cents: number; expires_at: string;
+    }>
+
+    if (rows.length === 0) return { expiredCount: 0, expiredCents: 0 }
+
+    // Idempotência: filtra fora os que já tiveram expire movement criado.
+    const earnIds = rows.map(r => r.id)
+    const { data: existing } = await supabaseAdmin
+      .from('customer_cashback_movements')
+      .select('source_id')
+      .eq('type', 'expire')
+      .eq('source_kind', 'cron_expire')
+      .in('source_id', earnIds)
+
+    const alreadyExpired = new Set(((existing ?? []) as Array<{ source_id: string }>).map(r => r.source_id))
+    const toExpire = rows.filter(r => !alreadyExpired.has(r.id))
+
+    if (toExpire.length === 0) return { expiredCount: 0, expiredCents: 0 }
+
+    let totalCents = 0
+    for (const earn of toExpire) {
+      try {
+        // Cria expire movement
+        const { error: mvErr } = await supabaseAdmin
+          .from('customer_cashback_movements')
+          .insert({
+            organization_id:      earn.organization_id,
+            customer_identifier:  earn.customer_identifier,
+            type:                 'expire',
+            amount_cents:         -Number(earn.amount_cents),
+            reason:               `Expirado em ${earn.expires_at.slice(0, 10)}`,
+            source_kind:          'cron_expire',
+            source_id:            earn.id,
+          })
+        if (mvErr) {
+          const code = (mvErr as { code?: string }).code
+          if (code === '23505') continue  // já expirado, race condition
+          this.logger.warn(`[cashback.expire] mv failed: ${mvErr.message}`)
+          continue
+        }
+
+        // Decrementa o balance — pode zerar mas não negativar
+        const { data: bal } = await supabaseAdmin
+          .from('customer_cashback_balances')
+          .select('balance_cents')
+          .eq('organization_id', earn.organization_id)
+          .eq('customer_identifier', earn.customer_identifier)
+          .maybeSingle()
+        if (bal) {
+          const newBalance = Math.max(0, Number((bal as { balance_cents: number }).balance_cents) - Number(earn.amount_cents))
+          await supabaseAdmin
+            .from('customer_cashback_balances')
+            .update({ balance_cents: newBalance, last_movement_at: nowIso })
+            .eq('organization_id', earn.organization_id)
+            .eq('customer_identifier', earn.customer_identifier)
+        }
+        totalCents += Number(earn.amount_cents)
+      } catch (err) {
+        this.logger.warn(`[cashback.expire] earn=${earn.id} falhou: ${(err as Error).message}`)
+      }
+    }
+
+    this.logger.log(`[cashback.expire] expirou ${toExpire.length} earns (${totalCents}c)`)
+    return { expiredCount: toExpire.length, expiredCents: totalCents }
+  }
+
   // ── Stats admin ─────────────────────────────────────────────────────
 
   async getStats(orgId: string): Promise<{
