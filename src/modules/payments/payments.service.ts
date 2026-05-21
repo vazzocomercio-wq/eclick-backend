@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadoPagoService } from './mercado-pago.service'
 import { StripeService } from './stripe.service'
+import { CashbackService } from '../cashback/cashback.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -29,9 +30,58 @@ export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name)
 
   constructor(
-    private readonly mp:     MercadoPagoService,
-    private readonly stripe: StripeService,
+    private readonly mp:       MercadoPagoService,
+    private readonly stripe:   StripeService,
+    private readonly cashback: CashbackService,
   ) {}
+
+  /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
+   *  'paid'. Lê email do customer + total do pedido, busca settings da
+   *  org, e credita earnPct * total. Idempotente via source_id = orderId.
+   *  Erro aqui NÃO derruba o webhook (cashback é feature opcional). */
+  private async creditCashbackOnPaid(orderId: string): Promise<void> {
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, total, customer, status')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+      const customer = (order.customer as { email?: string } | null) ?? {}
+      const email    = (customer.email ?? '').trim().toLowerCase()
+      if (!email) {
+        this.logger.log(`[cashback] order=${orderId} sem email — pulando`)
+        return
+      }
+      const settings = await this.cashback.getSettings(order.organization_id as string)
+      if (!settings.enabled || settings.earnPct <= 0) return
+      if (settings.earnDelay !== 'immediate') {
+        // TODO: agendar job pro after_delivery / after_7_days (cron) — MVP só immediate
+        this.logger.log(`[cashback] earnDelay=${settings.earnDelay} ignorado por enquanto (MVP)`)
+        return
+      }
+
+      const totalCents = Math.round(Number(order.total ?? 0) * 100)
+      const amountCents = Math.round((totalCents * settings.earnPct) / 100)
+      if (amountCents <= 0) return
+
+      const expiresAt = settings.expirationDays > 0
+        ? new Date(Date.now() + settings.expirationDays * 86400_000).toISOString()
+        : null
+
+      await this.cashback.credit({
+        orgId:       order.organization_id as string,
+        email,
+        amountCents,
+        reason:      `Pedido ${orderId.slice(0, 8)} — ${settings.earnPct}% cashback`,
+        sourceKind:  'storefront_order',
+        sourceId:    orderId,
+        expiresAt,
+      })
+    } catch (err) {
+      this.logger.error(`[cashback] falhou pra order=${orderId}: ${(err as Error).message}`)
+    }
+  }
 
   /** Resolve org_id + custom_domain a partir do slug publico. */
   private async resolveStore(slug: string): Promise<{ orgId: string; storeName: string; customDomain: string | null }> {
@@ -265,6 +315,10 @@ export class PaymentsService {
       .eq('id', orderId)
 
     this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> ${status}`)
+
+    if (status === 'paid') {
+      await this.creditCashbackOnPaid(orderId)
+    }
   }
 
   /** Stripe webhook — payload no body (raw), signature em header. */
@@ -322,6 +376,10 @@ export class PaymentsService {
       .eq('organization_id', orgId)
 
     this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> ${status}`)
+
+    if (status === 'paid') {
+      await this.creditCashbackOnPaid(orderId)
+    }
   }
 
   /** Detalhe publico do pedido — usado pelas paginas /sucesso /falha /pendente. */
