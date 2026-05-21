@@ -56,6 +56,7 @@ import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 import { StoreConfigModule } from './modules/store-config/store-config.module'
 import { CouponsModule } from './modules/coupons/coupons.module'
+import { ShippingModule } from './modules/shipping/shipping.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
 import { MlCampaignsModule } from './modules/ml-campaigns/ml-campaigns.module'
@@ -128,6 +129,7 @@ import { RadarModule } from './modules/radar/radar.module'
     StoreCopilotModule,
     StoreConfigModule,
     CouponsModule,
+    ShippingModule,
     PaymentsModule,
     MlAiCoreModule,
     MlCampaignsModule,
