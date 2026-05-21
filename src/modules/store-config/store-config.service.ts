@@ -432,6 +432,119 @@ export class StoreConfigService {
     return { updated: count ?? productIds.length }
   }
 
+  /** Bulk apply de desconto linear: aplica % (ou preço fixo) em N produtos
+   *  de uma vez. Calcula sale_price por produto baseado no price atual
+   *  quando vier discountPct. Quando vier salePrice, aplica o mesmo valor
+   *  literal em todos (use com cuidado — só faz sentido pra produtos
+   *  com mesma faixa de preço). */
+  async bulkApplyDiscount(
+    orgId: string,
+    args: {
+      productIds:    string[]
+      discountPct?:  number     // 1..99
+      salePrice?:    number     // preço fixo (alternativo a discountPct)
+      startAt?:      string | null
+      endAt?:        string | null
+      badgeText?:    string | null
+    },
+  ): Promise<{ updated: number; skipped: number }> {
+    if (args.productIds.length === 0) return { updated: 0, skipped: 0 }
+    if (args.discountPct == null && args.salePrice == null) {
+      throw new BadRequestException('discountPct OU salePrice obrigatório')
+    }
+
+    // Pra discountPct: precisamos do price atual de cada produto pra
+    // calcular sale_price. Busca em batch.
+    let products: Array<{ id: string; price: number }> = []
+    if (args.discountPct != null) {
+      const pct = args.discountPct
+      if (pct <= 0 || pct >= 100) throw new BadRequestException('discountPct deve ser entre 1 e 99')
+
+      const { data, error } = await supabaseAdmin
+        .from('products')
+        .select('id, price')
+        .eq('organization_id', orgId)
+        .in('id', args.productIds)
+      if (error) throw new BadRequestException(`Erro: ${error.message}`)
+      products = ((data ?? []) as Array<{ id: string; price: number | null }>)
+        .filter(p => Number(p.price) > 0)
+        .map(p => ({ id: p.id, price: Number(p.price) }))
+    }
+
+    const startIso = args.startAt ?? null
+    const endIso   = args.endAt   ?? null
+    const badge    = args.badgeText?.trim() || null
+
+    let updated = 0
+    let skipped = 0
+
+    if (args.discountPct != null) {
+      const pct = args.discountPct
+      // 1 UPDATE por produto (preço varia). Faz em paralelo controlado.
+      const batch = 20
+      for (let i = 0; i < products.length; i += batch) {
+        const slice = products.slice(i, i + batch)
+        const results = await Promise.allSettled(slice.map(async p => {
+          const salePrice = Math.round(p.price * (1 - pct / 100) * 100) / 100
+          if (salePrice <= 0 || salePrice >= p.price) return 'skip' as const
+          const { error } = await supabaseAdmin
+            .from('products')
+            .update({
+              sale_price:       salePrice,
+              sale_start_at:    startIso,
+              sale_end_at:      endIso,
+              sale_badge_text:  badge,
+            })
+            .eq('id', p.id)
+            .eq('organization_id', orgId)
+          if (error) throw new Error(error.message)
+          return 'ok' as const
+        }))
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value === 'ok') updated++
+          else skipped++
+        }
+      }
+      // produtos que vieram nos productIds mas não no SELECT (não existem/sem price)
+      skipped += args.productIds.length - products.length
+    } else if (args.salePrice != null) {
+      // Aplica preço fixo nos N produtos (UPDATE batch único)
+      const { error, count } = await supabaseAdmin
+        .from('products')
+        .update({
+          sale_price:       args.salePrice,
+          sale_start_at:    startIso,
+          sale_end_at:      endIso,
+          sale_badge_text:  badge,
+        }, { count: 'exact' })
+        .eq('organization_id', orgId)
+        .in('id', args.productIds)
+        .gt('price', args.salePrice)  // só onde faz sentido
+      if (error) throw new BadRequestException(`Erro: ${error.message}`)
+      updated = count ?? 0
+      skipped = args.productIds.length - updated
+    }
+
+    return { updated, skipped }
+  }
+
+  /** Bulk remove promoção (limpa sale_price + janelas + badge de N produtos). */
+  async bulkClearPromotions(orgId: string, productIds: string[]): Promise<{ updated: number }> {
+    if (productIds.length === 0) return { updated: 0 }
+    const { error, count } = await supabaseAdmin
+      .from('products')
+      .update({
+        sale_price:       null,
+        sale_start_at:    null,
+        sale_end_at:      null,
+        sale_badge_text:  null,
+      }, { count: 'exact' })
+      .eq('organization_id', orgId)
+      .in('id', productIds)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { updated: count ?? 0 }
+  }
+
   /** Lista produtos pra dashboard de promoções (filtros: ativa, agendada,
    *  expirada, sem). Retorna campos mínimos pra grid editável. */
   async listProductsForPromotionAdmin(

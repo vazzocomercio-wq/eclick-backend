@@ -59,6 +59,7 @@ import { CouponsModule } from './modules/coupons/coupons.module'
 import { ShippingModule } from './modules/shipping/shipping.module'
 import { CashbackModule } from './modules/cashback/cashback.module'
 import { BonusModule } from './modules/bonus/bonus.module'
+import { PromotionCampaignsModule } from './modules/promotion-campaigns/promotion-campaigns.module'
 import { LoyaltyModule } from './modules/loyalty/loyalty.module'
 import { StorefrontCustomersModule } from './modules/storefront-customers/storefront-customers.module'
 import { StorefrontNotificationsModule } from './modules/storefront-notifications/storefront-notifications.module'
@@ -139,6 +140,7 @@ import { RadarModule } from './modules/radar/radar.module'
     ShippingModule,
     CashbackModule,
     BonusModule,
+    PromotionCampaignsModule,
     LoyaltyModule,
     StorefrontCustomersModule,
     StorefrontNotificationsModule,

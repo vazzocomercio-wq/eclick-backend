@@ -115,6 +115,39 @@ export class StoreConfigController {
     if (!Array.isArray(body?.productIds)) throw new BadRequestException('productIds[] obrigatório')
     return this.svc.bulkSetPromotionMetadata(u.orgId, body.productIds, body)
   }
+
+  /** POST /store/config/promotions/bulk-apply
+   *  Body: { productIds[], discountPct? | salePrice?, startAt?, endAt?, badgeText? }
+   *  Aplica desconto linear (% calcula por produto, salePrice fixo idem em todos). */
+  @Post('promotions/bulk-apply')
+  bulkApplyDiscount(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      productIds:   string[]
+      discountPct?: number
+      salePrice?:   number
+      startAt?:     string | null
+      endAt?:       string | null
+      badgeText?:   string | null
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.productIds) || body.productIds.length === 0) {
+      throw new BadRequestException('productIds[] obrigatório')
+    }
+    return this.svc.bulkApplyDiscount(u.orgId, body)
+  }
+
+  /** POST /store/config/promotions/bulk-clear — remove promoção de N produtos */
+  @Post('promotions/bulk-clear')
+  bulkClearPromotions(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { productIds: string[] },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.productIds)) throw new BadRequestException('productIds[] obrigatório')
+    return this.svc.bulkClearPromotions(u.orgId, body.productIds)
+  }
 }
 
 @Controller('public/store')

@@ -12,12 +12,12 @@
  */
 
 import type {
-  StorefrontDesignV3, ThemeV3, PageDesign, Section, Block,
+  StorefrontDesignV3, ThemeV3, PageDesign,
   SiteHeaderSection, SiteFooterSection, AnnouncementBarSection,
   HeroSection, SliderSection, ImageBannerSection, ImageWithTextSection, MarqueeSection,
   ProductGridSection, ProductCarouselSection, FeaturedProductSection, CollectionGridSection,
   ProductDetailLayoutSection, CartLayoutSection, CheckoutLayoutSection,
-  TestimonialsSection, NewsletterSection, FaqSection, BreadcrumbSection,
+  TestimonialsSection, NewsletterSection, BreadcrumbSection,
   Spacing, BackgroundStyle, Visibility, ProductSource,
 } from './storefront-design-v3.types'
 
@@ -27,7 +27,6 @@ import type {
 
 const defaultVisibility = (): Visibility => ({ desktop: true, mobile: true })
 const defaultSpacing    = (): Spacing => ({ paddingTop: 80, paddingBottom: 80, marginTop: 0, marginBottom: 0 })
-const tightSpacing      = (): Spacing => ({ paddingTop: 40, paddingBottom: 40, marginTop: 0, marginBottom: 0 })
 const noSpacing         = (): Spacing => ({ paddingTop: 0,  paddingBottom: 0,  marginTop: 0, marginBottom: 0 })
 const bgNone            = (): BackgroundStyle => ({ kind: 'none' })
 const bgColor           = (color: string): BackgroundStyle => ({ kind: 'color', color })
