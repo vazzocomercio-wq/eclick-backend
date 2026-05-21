@@ -18,6 +18,30 @@ export interface StoreTheme {
   footer_style?:       'standard' | 'minimal' | 'rich'
 }
 
+/** Settings de exibição de preço + condições de pagamento. */
+export interface PaymentDisplaySettings {
+  installments: {
+    enabled:          boolean
+    max:              number  // 1..12 (até quantas vezes mostrar)
+    interestFreeUpTo: number  // 1..max (até quantas sem juros)
+  }
+  pix: {
+    enabled:      boolean
+    discountPct:  number      // 0..30 (% desconto no Pix)
+  }
+  display: {
+    format:              'total_first' | 'installment_first' | 'pix_first'
+    showInstallmentLabel: boolean
+    showPixPrice:         boolean
+  }
+}
+
+export const DEFAULT_PAYMENT_DISPLAY: PaymentDisplaySettings = {
+  installments: { enabled: true, max: 12, interestFreeUpTo: 6 },
+  pix:          { enabled: true, discountPct: 5 },
+  display:      { format: 'installment_first', showInstallmentLabel: true, showPixPrice: true },
+}
+
 export interface StoreConfig {
   id:                       string
   organization_id:          string
@@ -41,6 +65,7 @@ export interface StoreConfig {
   language:                 string
   shipping_enabled:         boolean
   payments_enabled:         boolean
+  payment_display_settings: PaymentDisplaySettings | null
   whatsapp_widget_enabled:  boolean
   whatsapp_number:          string | null
   ai_seller_widget_enabled: boolean
@@ -131,6 +156,7 @@ export class StoreConfigService {
       'google_analytics_id', 'meta_pixel_id', 'gtm_id',
       'currency', 'language',
       'shipping_enabled', 'payments_enabled',
+      'payment_display_settings',
       'whatsapp_widget_enabled', 'whatsapp_number',
       'ai_seller_widget_enabled', 'social_links', 'pages',
       'status',
