@@ -7,6 +7,7 @@ import { BonusService } from '../bonus/bonus.service'
 import { LoyaltyService } from '../loyalty/loyalty.service'
 import { StorefrontNotificationsService } from '../storefront-notifications/storefront-notifications.service'
 import { AffiliateAttributionService } from '../affiliates/affiliate-attribution.service'
+import { CartRecoveryService } from '../cart-recovery/cart-recovery.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -41,6 +42,7 @@ export class PaymentsService {
     private readonly loyalty:       LoyaltyService,
     private readonly notifications: StorefrontNotificationsService,
     private readonly affiliate:     AffiliateAttributionService,
+    private readonly cartRecovery:  CartRecoveryService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -122,6 +124,9 @@ export class PaymentsService {
 
     // ── WhatsApp: notifica cliente do pagamento confirmado ────────────
     void this.notifications.notifyOrderPaid(orderId)
+
+    // ── Cart Recovery: marca cart como recovered (não bloqueia) ───────
+    void this.cartRecovery.markRecoveredByOrder(orderId)
 
     // ── Afiliados: atribui comissão (idempotente via UNIQUE) ──────────
     void this.affiliate.attributeOrder(orderId).catch(err =>
