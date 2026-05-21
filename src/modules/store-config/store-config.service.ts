@@ -285,13 +285,29 @@ export class StoreConfigService {
     return whatsapp_catalog ? { ...cfg, whatsapp_catalog } : cfg
   }
 
-  /** Lista produtos públicos da vitrine (storefront_visible=true, com estoque). */
+  /** Lista produtos públicos da vitrine (storefront_visible=true, com estoque).
+   *  Retorna dados ricos pro frontend renderizar cards completos sem fazer
+   *  fetch detalhado por item (marca, atributos basicos, descricao curta,
+   *  estoque pra badge "esgotando", created_at pra badge "novidade", etc). */
   async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string } = {}): Promise<Array<Record<string, unknown>>> {
     const limit  = Math.min(opts.limit  ?? 24, 60)
     const offset = Math.max(opts.offset ?? 0, 0)
     let q = supabaseAdmin
       .from('products')
-      .select('id, name, price, photo_urls, category, ai_score, ai_short_description')
+      .select([
+        'id', 'name', 'sku', 'model',
+        'price', 'cost_price', 'my_price',
+        'photo_urls', 'images',
+        'category', 'brand', 'condition',
+        'stock', 'weight_kg',
+        'gtin',
+        'ai_score', 'ai_short_description', 'ai_long_description', 'ai_keywords',
+        'bullets', 'description',
+        'attributes',
+        'wholesale_enabled', 'wholesale_levels',
+        'sale_format',
+        'created_at', 'updated_at',
+      ].join(','))
       .eq('organization_id', orgId)
       .eq('storefront_visible', true)
       .gt('stock', 0)
@@ -300,7 +316,7 @@ export class StoreConfigService {
     if (opts.category) q = q.eq('category', opts.category)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
-    return (data ?? []) as Array<Record<string, unknown>>
+    return (data ?? []) as unknown as Array<Record<string, unknown>>
   }
 
   /** Detalhe de produto público. */
