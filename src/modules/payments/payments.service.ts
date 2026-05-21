@@ -60,8 +60,9 @@ export class PaymentsService {
       const settings = await this.cashback.getSettings(order.organization_id as string)
       if (!settings.enabled || settings.earnPct <= 0) return
       if (settings.earnDelay !== 'immediate') {
-        // TODO: agendar job pro after_delivery / after_7_days (cron) — MVP só immediate
-        this.logger.log(`[cashback] earnDelay=${settings.earnDelay} ignorado por enquanto (MVP)`)
+        // Delayed earn — não credita agora. CashbackCron.delayedEarnsDaily
+        // varre pedidos paid antigos e credita quando a janela passa.
+        this.logger.log(`[cashback] order=${orderId} earnDelay=${settings.earnDelay} — credit adiado`)
         return
       }
 

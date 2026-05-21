@@ -355,6 +355,85 @@ export class CashbackService {
     return { expiredCount: toExpire.length, expiredCents: totalCents }
   }
 
+  // ── Earns adiados (delayed credit) ─────────────────────────────────
+
+  /** Cron diário: credita cashbacks pendentes de pedidos paid antigos
+   *  quando earnDelay='after_7_days' (settings da org).
+   *
+   *  Idempotente — credit() ignora 23505 silenciosamente quando o
+   *  movement com source_id já existe.
+   *
+   *  after_delivery NÃO é processado aqui ainda — depende de tracking
+   *  de entrega que a Loja Própria não tem (deixado como TODO). */
+  async creditDelayedEarns(now = new Date()): Promise<{ credited: number; orgsScanned: number }> {
+    // Busca todas as orgs com cashback enabled + earnDelay != immediate
+    // diretamente do store_config (sem usar a service.getSettings pra
+    // não fazer N queries — pega tudo de uma vez).
+    const { data: orgs } = await supabaseAdmin
+      .from('store_config')
+      .select('organization_id, cashback_settings')
+    const enabledOrgs = ((orgs ?? []) as Array<{ organization_id: string; cashback_settings: Partial<CashbackSettings> | null }>)
+      .map(r => ({
+        orgId:    r.organization_id,
+        settings: { ...DEFAULT_CASHBACK_SETTINGS, ...(r.cashback_settings ?? {}) },
+      }))
+      .filter(o => o.settings.enabled && o.settings.earnPct > 0 && o.settings.earnDelay !== 'immediate')
+
+    if (enabledOrgs.length === 0) return { credited: 0, orgsScanned: 0 }
+
+    let totalCredited = 0
+    for (const { orgId, settings } of enabledOrgs) {
+      try {
+        // after_7_days: pedidos paid com updated_at <= now - 7 days
+        // after_delivery: TODO — skipa por ora
+        if (settings.earnDelay !== 'after_7_days') continue
+        const cutoff = new Date(now.getTime() - 7 * 86400_000).toISOString()
+
+        // Busca pedidos elegíveis (status=paid, updated_at <= cutoff)
+        const { data: paidOrders } = await supabaseAdmin
+          .from('storefront_orders')
+          .select('id, total, customer, updated_at')
+          .eq('organization_id', orgId)
+          .eq('status', 'paid')
+          .lte('updated_at', cutoff)
+          .order('updated_at', { ascending: true })
+          .limit(500)
+
+        for (const o of (paidOrders ?? []) as Array<{ id: string; total: number; customer: { email?: string } | null; updated_at: string }>) {
+          const email = (o.customer?.email ?? '').trim().toLowerCase()
+          if (!email) continue
+          const totalCents = Math.round(Number(o.total ?? 0) * 100)
+          if (totalCents <= 0) continue
+          const amountCents = Math.round((totalCents * settings.earnPct) / 100)
+          if (amountCents <= 0) continue
+          const expiresAt = settings.expirationDays > 0
+            ? new Date(now.getTime() + settings.expirationDays * 86400_000).toISOString()
+            : null
+
+          try {
+            const result = await this.credit({
+              orgId,
+              email,
+              amountCents,
+              reason:     `Pedido ${o.id.slice(0, 8)} — ${settings.earnPct}% cashback (após 7 dias)`,
+              sourceKind: 'storefront_order',  // mesmo source que immediate — UNIQUE previne duplicação
+              sourceId:   o.id,
+              expiresAt,
+            })
+            if (result.credited) totalCredited++
+          } catch (err) {
+            this.logger.warn(`[cashback.delayed] order=${o.id}: ${(err as Error).message}`)
+          }
+        }
+      } catch (err) {
+        this.logger.error(`[cashback.delayed] org=${orgId}: ${(err as Error).message}`)
+      }
+    }
+
+    this.logger.log(`[cashback.delayed] scan completo: ${enabledOrgs.length} orgs, ${totalCredited} earns creditados`)
+    return { credited: totalCredited, orgsScanned: enabledOrgs.length }
+  }
+
   // ── Stats admin ─────────────────────────────────────────────────────
 
   async getStats(orgId: string): Promise<{
