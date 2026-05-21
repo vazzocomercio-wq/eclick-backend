@@ -64,6 +64,19 @@ export class LoyaltyController {
     return this.svc.getStats(u.orgId)
   }
 
+  @Get('promotions')
+  listPromotions(
+    @ReqUser() u: ReqUserPayload,
+    @Query('limit')  limit?:  string,
+    @Query('offset') offset?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listRecentPromotions(u.orgId, {
+      limit:  limit  ? parseInt(limit,  10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    })
+  }
+
   @Get('customer/:email')
   getCustomer(@ReqUser() u: ReqUserPayload, @Param('email') email: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')

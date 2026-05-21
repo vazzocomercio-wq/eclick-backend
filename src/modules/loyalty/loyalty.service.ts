@@ -215,13 +215,16 @@ export class LoyaltyService {
   }
 
   /** Registra compra paga — soma valor ao total_spent e recalcula tier.
-   *  Idempotente: passa por order_id pra detectar reentrega. */
+   *  Idempotente: passa por order_id pra detectar reentrega.
+   *
+   *  Quando detecta subida de nível (current_tier_id mudou), insere
+   *  row em loyalty_promotions pra audit + futura notificação. */
   async recordPurchase(args: {
     orgId:       string
     email:       string
     amountCents: number
     orderId:     string  // pra idempotência
-  }): Promise<{ recorded: boolean; loyalty: CustomerLoyalty }> {
+  }): Promise<{ recorded: boolean; loyalty: CustomerLoyalty; promotedTo?: LoyaltyTier }> {
     const email = normalizeEmail(args.email)
     if (!email) throw new BadRequestException('email obrigatório')
 
@@ -274,17 +277,86 @@ export class LoyaltyService {
     const tiers = await this.listTiers(args.orgId)
     const active = tiers.filter(t => t.active).sort((a, b) => b.min_spent_cents - a.min_spent_cents)
     const matched = active.find(t => loyalty.total_spent_cents >= t.min_spent_cents)
+    let promotedTo: LoyaltyTier | undefined
     if (matched && matched.id !== loyalty.current_tier_id) {
+      const previousTierId = loyalty.current_tier_id
       await supabaseAdmin
         .from('customer_loyalty')
         .update({ current_tier_id: matched.id })
         .eq('organization_id', args.orgId)
         .eq('customer_identifier', email)
       loyalty.current_tier_id = matched.id
+      promotedTo = matched
       this.logger.log(`[loyalty] ${email} promovido pra ${matched.name} (total: ${loyalty.total_spent_cents}c)`)
+
+      // Registra a promoção pra audit + notificação futura
+      try {
+        await supabaseAdmin.from('loyalty_promotions').insert({
+          organization_id:        args.orgId,
+          customer_identifier:    email,
+          previous_tier_id:       previousTierId,
+          new_tier_id:            matched.id,
+          triggered_by_order_id:  args.orderId,
+          total_spent_cents:      loyalty.total_spent_cents,
+        })
+      } catch (err) {
+        this.logger.warn(`[loyalty.promotion] audit falhou: ${(err as Error).message}`)
+      }
     }
 
-    return { recorded: true, loyalty }
+    return { recorded: true, loyalty, promotedTo }
+  }
+
+  /** Lista promoções recentes pra exibir no dashboard. */
+  async listRecentPromotions(orgId: string, opts: { limit?: number; offset?: number } = {}): Promise<Array<{
+    id:                  string
+    customer_identifier: string
+    previous_tier_name:  string | null
+    new_tier_name:       string
+    new_tier_color:      string
+    new_tier_emoji:      string | null
+    total_spent_cents:   number
+    promoted_at:         string
+  }>> {
+    const limit  = Math.min(opts.limit  ?? 20, 100)
+    const offset = Math.max(opts.offset ?? 0, 0)
+    const { data: promos } = await supabaseAdmin
+      .from('loyalty_promotions')
+      .select('id, customer_identifier, previous_tier_id, new_tier_id, total_spent_cents, promoted_at')
+      .eq('organization_id', orgId)
+      .order('promoted_at', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    const rows = (promos ?? []) as Array<{
+      id: string; customer_identifier: string;
+      previous_tier_id: string | null; new_tier_id: string;
+      total_spent_cents: number; promoted_at: string;
+    }>
+    if (rows.length === 0) return []
+
+    // Buscar tiers em batch pra evitar N+1
+    const tierIds = [...new Set(rows.flatMap(r => [r.previous_tier_id, r.new_tier_id].filter((x): x is string => !!x)))]
+    const { data: tierRows } = await supabaseAdmin
+      .from('loyalty_tiers')
+      .select('id, name, color, icon_emoji')
+      .in('id', tierIds)
+    const tierMap = new Map(((tierRows ?? []) as Array<{ id: string; name: string; color: string; icon_emoji: string | null }>)
+      .map(t => [t.id, t]))
+
+    return rows.map(r => {
+      const newT = tierMap.get(r.new_tier_id)
+      const prevT = r.previous_tier_id ? tierMap.get(r.previous_tier_id) : null
+      return {
+        id:                  r.id,
+        customer_identifier: r.customer_identifier,
+        previous_tier_name:  prevT?.name ?? null,
+        new_tier_name:       newT?.name ?? 'Desconhecido',
+        new_tier_color:      newT?.color ?? '#a1a1aa',
+        new_tier_emoji:      newT?.icon_emoji ?? '⭐',
+        total_spent_cents:   Number(r.total_spent_cents ?? 0),
+        promoted_at:         r.promoted_at,
+      }
+    })
   }
 
   /** Stats admin: distribuição de clientes por tier. */
