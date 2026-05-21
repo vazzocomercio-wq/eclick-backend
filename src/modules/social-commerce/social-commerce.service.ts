@@ -452,13 +452,22 @@ export class SocialCommerceService {
       }
     }
 
-    // 4) Atualiza contadores do canal de uma vez
-    await this.bumpChannelMetric(ch.id, {
-      products_synced:  ch.products_synced + synced,
-      sync_errors:      ch.sync_errors + failed,
-      last_sync_at:     now,
-      last_sync_status: failed === 0 ? 'success' : (synced > 0 ? 'partial' : 'error'),
-    })
+    // 4) Atualiza contadores. O catalog Meta eh compartilhado entre
+    //    instagram_shop e whatsapp_business (mesmo external_catalog_id),
+    //    entao TODOS os canais do org que apontam pro mesmo catalog devem
+    //    refletir o sync — senao a tela do WhatsApp mostra "0 sincronizados"
+    //    mesmo depois do sync rodar (porque o counter so subiu na row do IG).
+    const status = failed === 0 ? 'success' : (synced > 0 ? 'partial' : 'error')
+    await supabaseAdmin
+      .from('social_commerce_channels')
+      .update({
+        products_synced:  ch.products_synced + synced,
+        sync_errors:      ch.sync_errors + failed,
+        last_sync_at:     now,
+        last_sync_status: status,
+      })
+      .eq('organization_id', orgId)
+      .eq('external_catalog_id', ch.external_catalog_id!)
 
     return { synced, failed, skipped }
   }
