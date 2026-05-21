@@ -94,10 +94,19 @@ export class OrdersService {
       q?:         string
       seller_id?: number
       tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao' | 'canceladas'
+      platform?:  'mercadolivre' | 'manual' | 'storefront' | 'all'
     } = {},
   ) {
     const offset = Math.max(options.offset ?? 0, 0)
     const limit  = Math.min(options.limit  ?? 20, 200)
+
+    // Pedidos da Loja Própria moram em storefront_orders — schema diferente.
+    // Quando o user filtra explicitamente "storefront", redireciona pra
+    // listStorefrontOrders que mapeia pro shape canônico. Tabs marketplace
+    // não fazem sentido aqui (pending/paid em vez de shipping_status).
+    if (options.platform === 'storefront') {
+      return this.listStorefrontOrders(orgId, { offset, limit, q: options.q })
+    }
 
     let q = supabaseAdmin
       .from('orders')
@@ -106,7 +115,15 @@ export class OrdersService {
 
     if (orgId)              q = q.eq('organization_id', orgId)
     if (options.seller_id)  q = q.eq('seller_id',       options.seller_id)
-    q = q.in('source', ['mercadolivre', 'manual'])
+
+    // Filtro de source: específico ou ambos (default ml+manual igual antes).
+    if (options.platform === 'mercadolivre') {
+      q = q.eq('source', 'mercadolivre')
+    } else if (options.platform === 'manual') {
+      q = q.eq('source', 'manual')
+    } else {
+      q = q.in('source', ['mercadolivre', 'manual'])
+    }
 
     // Filtro de busca: matcheia external_order_id, sku ou buyer_name
     const search = options.q?.trim()
@@ -185,6 +202,44 @@ export class OrdersService {
       }
     }
 
+    return { orders, total: count ?? 0 }
+  }
+
+  /** Lista pedidos da Loja Própria (tabela `storefront_orders`).
+   *
+   *  Tabela tem schema diferente do `orders` (customer JSONB, items JSONB
+   *  array, totais agregados — não 1 row por item como ML). Mapeamos pro
+   *  shape canônico do `mapRowToFrontend` pra que o PedidosTable consuma
+   *  igual qualquer outra origem. Tabs marketplace (mediação/flex/etc) não
+   *  se aplicam — busca é flat com filtro de texto opcional. */
+  async listStorefrontOrders(
+    orgId: string | null,
+    opts: { offset?: number; limit?: number; q?: string } = {},
+  ) {
+    const offset = Math.max(opts.offset ?? 0, 0)
+    const limit  = Math.min(opts.limit  ?? 20, 200)
+
+    let q = supabaseAdmin
+      .from('storefront_orders')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+
+    if (orgId) q = q.eq('organization_id', orgId)
+
+    const search = opts.q?.trim()
+    if (search) {
+      const esc = search.replace(/[%]/g, '')
+      // ILIKE em jsonb não rola direto — match em campos textuais top-level + id.
+      // Filtro mais robusto (nome do cliente/email) precisaria função SQL custom.
+      q = q.or(`id.ilike.%${esc}%,gateway_session_id.ilike.%${esc}%,gateway_payment_id.ilike.%${esc}%`)
+    }
+
+    q = q.range(offset, offset + limit - 1)
+
+    const { data, error, count } = await q
+    if (error) throw new Error(error.message)
+
+    const orders = (data ?? []).map(row => mapStorefrontRowToCanonical(row as DbStorefrontOrderRow))
     return { orders, total: count ?? 0 }
   }
 
@@ -424,16 +479,26 @@ export class OrdersService {
    *  Antes a tela contava só o que estava na página atual (10 itens),
    *  então as badges eram enganosas. Aqui rodamos count exact por tab
    *  em paralelo (head:true = sem fetch de rows). */
-  async listOrdersTabCounts(orgId: string | null, sellerId?: number): Promise<{
+  async listOrdersTabCounts(
+    orgId: string | null,
+    sellerId?: number,
+    platform?: 'mercadolivre' | 'manual' | 'storefront' | 'all',
+  ): Promise<{
     abertas: number; em_preparacao: number; despachadas: number;
     pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
     canceladas: number;
   }> {
+    if (platform === 'storefront') {
+      return this.listStorefrontTabCounts(orgId)
+    }
+
     const buildBase = () => {
       let q = supabaseAdmin.from('orders').select('*', { count: 'exact', head: true })
       if (orgId)    q = q.eq('organization_id', orgId)
       if (sellerId) q = q.eq('seller_id', sellerId)
-      q = q.in('source', ['mercadolivre', 'manual'])
+      if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
+      else if (platform === 'manual')       q = q.eq('source', 'manual')
+      else                                  q = q.in('source', ['mercadolivre', 'manual'])
       return q
     }
 
@@ -473,7 +538,49 @@ export class OrdersService {
     return { abertas, em_preparacao, despachadas, pgto_pendente, flex, encerradas, mediacao, canceladas }
   }
 
-  async listOrdersKpis(orgId: string | null, sellerId?: number) {
+  /** Counts de tabs pra Loja Própria. Mapeia status próprio nas abas que
+   *  o frontend já usa, pra mesma UI funcionar sem refactor:
+   *    pgto_pendente  ← pending + awaiting_payment
+   *    em_preparacao  ← paid (= aguardando envio pelo lojista)
+   *    encerradas     ← refunded (entregue + reembolsado já não tá nesse fluxo)
+   *    canceladas     ← failed + cancelled + expired
+   *  abertas/despachadas/flex/mediacao não se aplicam → 0. */
+  private async listStorefrontTabCounts(orgId: string | null): Promise<{
+    abertas: number; em_preparacao: number; despachadas: number;
+    pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
+    canceladas: number;
+  }> {
+    const baseQ = () => {
+      let q = supabaseAdmin.from('storefront_orders').select('*', { count: 'exact', head: true })
+      if (orgId) q = q.eq('organization_id', orgId)
+      return q
+    }
+    const [pendingPay, paid, cancelled, refunded] = await Promise.all([
+      baseQ().in('status', ['pending', 'awaiting_payment']).then(r => r.count ?? 0),
+      baseQ().eq('status', 'paid').then(r => r.count ?? 0),
+      baseQ().in('status', ['failed', 'cancelled', 'expired']).then(r => r.count ?? 0),
+      baseQ().eq('status', 'refunded').then(r => r.count ?? 0),
+    ])
+    return {
+      abertas:        0,
+      em_preparacao:  paid,
+      despachadas:    0,
+      pgto_pendente:  pendingPay,
+      flex:           0,
+      encerradas:     refunded,
+      mediacao:       0,
+      canceladas:     cancelled,
+    }
+  }
+
+  async listOrdersKpis(
+    orgId: string | null,
+    sellerId?: number,
+    platform?: 'mercadolivre' | 'manual' | 'storefront' | 'all',
+  ) {
+    if (platform === 'storefront') {
+      return this.listStorefrontKpis(orgId)
+    }
     const now = new Date()
     const todayFr = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
     const curFrom = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
@@ -502,7 +609,9 @@ export class OrdersService {
         if (to)         q = q.lte('sold_at', to)
         if (orgId)      q = q.eq('organization_id', orgId)
         if (sellerId)   q = q.eq('seller_id', sellerId)
-        q = q.in('source', ['mercadolivre', 'manual'])
+        if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
+        else if (platform === 'manual')       q = q.eq('source', 'manual')
+        else                                  q = q.in('source', ['mercadolivre', 'manual'])
         q = q.range(pageStart, pageStart + PAGE_SIZE - 1)
 
         const { data, error } = await q
@@ -549,6 +658,76 @@ export class OrdersService {
       aggregateRange(prvFrom, prvTo),
     ])
 
+    return { today, current_month: currentMonth, last_month: lastMonth }
+  }
+
+  /** KPIs específicos da Loja Própria. Lê de storefront_orders e retorna
+   *  shape compatível com a UI (count, revenue, by_day). Pendentes de
+   *  envio = pedidos pagos. Em trânsito/entregue = 0 (loja própria não
+   *  trackeia entrega ainda — feature futura). */
+  private async listStorefrontKpis(orgId: string | null) {
+    const now      = new Date()
+    const todayFr  = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
+    const curFrom  = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+    const prvFrom  = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString()
+    const prvTo    = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59).toISOString()
+
+    type Agg = { count: number; revenue: number; pending_shipment: number; in_transit: number; delivered: number; by_day: Array<{ date: string; count: number; revenue: number }> }
+    type Row = { created_at: string; total: number; status: string }
+
+    const aggregate = async (from: string, to?: string): Promise<Agg> => {
+      const PAGE = 1000
+      const all: Row[] = []
+      let start = 0
+      while (start < 50_000) {
+        let q = supabaseAdmin
+          .from('storefront_orders')
+          .select('created_at, total, status')
+          .gte('created_at', from)
+          .in('status', ['paid', 'refunded'])  // só conta pedidos confirmados
+        if (to)    q = q.lte('created_at', to)
+        if (orgId) q = q.eq('organization_id', orgId)
+        q = q.range(start, start + PAGE - 1)
+        const { data, error } = await q
+        if (error) throw new Error(error.message)
+        const page = (data ?? []) as Row[]
+        if (page.length === 0) break
+        all.push(...page)
+        if (page.length < PAGE) break
+        start += PAGE
+      }
+
+      const byDay: Record<string, { count: number; revenue: number }> = {}
+      let count = 0, revenue = 0, pendingShipment = 0
+      for (const r of all) {
+        const d = (r.created_at ?? '').substring(0, 10)
+        const v = Number(r.total ?? 0)
+        if (d) {
+          byDay[d] = byDay[d] ?? { count: 0, revenue: 0 }
+          byDay[d].count++
+          byDay[d].revenue += v
+        }
+        count++
+        revenue += v
+        if (r.status === 'paid') pendingShipment++
+      }
+      return {
+        count,
+        revenue: Math.round(revenue * 100) / 100,
+        pending_shipment: pendingShipment,
+        in_transit: 0,
+        delivered: 0,
+        by_day: Object.entries(byDay)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([date, v]) => ({ date, count: v.count, revenue: Math.round(v.revenue * 100) / 100 })),
+      }
+    }
+
+    const [today, currentMonth, lastMonth] = await Promise.all([
+      aggregate(todayFr),
+      aggregate(curFrom),
+      aggregate(prvFrom, prvTo),
+    ])
     return { today, current_month: currentMonth, last_month: lastMonth }
   }
 }
@@ -724,5 +903,177 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     has_problem:      row.has_problem,
     problem_note:     row.problem_note,
     problem_severity: row.problem_severity,
+  }
+}
+
+// ── Loja Própria (storefront_orders) ────────────────────────────────────────
+
+interface DbStorefrontOrderRow {
+  id:                  string
+  organization_id:     string
+  store_slug:          string
+  customer:            Record<string, unknown>
+  items:               Array<Record<string, unknown>>
+  subtotal:            number
+  shipping:            number
+  total:               number
+  gateway:             string | null
+  gateway_session_id:  string | null
+  gateway_payment_id:  string | null
+  status:              string
+  created_at:          string
+  updated_at:          string
+}
+
+/** Mapeia 1 pedido da loja própria pro shape canônico consumido pelo
+ *  PedidosTable. Mantém compatibilidade com OrderCard:
+ *  - order_id = storefront_orders.id (uuid; string, não numérico)
+ *  - status normalizado: pending/awaiting_payment→'payment_in_process',
+ *    paid→'paid', cancelled/failed/expired→'cancelled', refunded→'refunded'
+ *  - source/platform = 'storefront' pra FE identificar
+ *  - order_items[] sintetizado a partir do JSON items[]
+ *  - shipping.receiver_address derivado de customer.address
+ *  - buyer.* extraído de customer
+ */
+function mapStorefrontRowToCanonical(row: DbStorefrontOrderRow): Record<string, unknown> {
+  const customer = (row.customer ?? {}) as {
+    name?: string; email?: string; phone?: string; doc?: string;
+    address?: {
+      zip?: string; street?: string; number?: string; complement?: string;
+      neighborhood?: string; city?: string; state?: string;
+    };
+    notes?: string;
+  }
+  const items = Array.isArray(row.items) ? row.items : []
+
+  // Status normalizado pra reaproveitar fluxos da UI marketplace
+  let normalizedStatus: string
+  switch (row.status) {
+    case 'paid':              normalizedStatus = 'paid'; break
+    case 'refunded':          normalizedStatus = 'refunded'; break
+    case 'cancelled':
+    case 'failed':
+    case 'expired':           normalizedStatus = 'cancelled'; break
+    case 'pending':
+    case 'awaiting_payment':
+    default:                  normalizedStatus = 'payment_in_process'
+  }
+
+  const [firstName, ...lastParts] = (customer.name ?? '').trim().split(/\s+/)
+  const lastName = lastParts.join(' ') || null
+
+  const addr = customer.address ?? {}
+  const receiverAddress = {
+    zip_code:      addr.zip ?? null,
+    street_name:   addr.street ?? null,
+    street_number: addr.number ?? null,
+    complement:    addr.complement ?? null,
+    neighborhood:  addr.neighborhood ?? null,
+    city:          addr.city ?? null,
+    state:         addr.state ?? null,
+  }
+
+  // Sintetiza order_items[] no shape esperado. Primeiro item agrega título
+  // pra Card; demais aparecem na expansão.
+  const totalQty = items.reduce((s, it) => s + Number((it as { qty?: number }).qty ?? 1), 0)
+  const orderItems = items.map((it, idx) => {
+    const i = it as { productId?: string; name?: string; price?: number; qty?: number; imageUrl?: string }
+    return {
+      item_id:              i.productId ?? `STORE-ITEM-${idx}`,
+      item:                 { id: i.productId ?? null },
+      title:                i.name ?? `Item ${idx + 1}`,
+      seller_sku:           i.productId ?? null,
+      thumbnail:            i.imageUrl ?? null,
+      variation_id:         null,
+      variation_attributes: [],
+      quantity:             i.qty ?? 1,
+      unit_price:           i.price ?? 0,
+      full_unit_price:      i.price ?? 0,
+      sale_fee:             0,
+    }
+  })
+  if (orderItems.length === 0) {
+    // Pedido sem items (corrupto) — fallback pra UI não quebrar.
+    orderItems.push({
+      item_id: 'STORE-EMPTY', item: { id: null }, title: 'Pedido sem itens',
+      seller_sku: null, thumbnail: null, variation_id: null,
+      variation_attributes: [], quantity: 1,
+      unit_price: Number(row.total ?? 0),
+      full_unit_price: Number(row.total ?? 0), sale_fee: 0,
+    })
+  }
+
+  return {
+    order_id:      row.id,
+    status:        normalizedStatus,
+    status_detail: null,
+    date_created:  row.created_at,
+    date_closed:   normalizedStatus === 'paid' ? row.updated_at : null,
+    total_amount:  Number(row.total ?? 0),
+    paid_amount:   normalizedStatus === 'paid' ? Number(row.total ?? 0) : null,
+    payments:      row.gateway_payment_id ? [{ id: row.gateway_payment_id, status: row.status, transaction_amount: Number(row.total ?? 0) }] : [],
+    mediations:    [],
+    tags:          ['storefront'],  // FE pode identificar origem
+    pack_id:       null,
+    coupon:        null,
+    discounts:     null,
+    context:       null,
+    // Marcadores de origem — PedidosTable pode renderizar badge "Loja"
+    source:        'storefront',
+    platform:      'storefront',
+    store_slug:    row.store_slug,
+    gateway:       row.gateway,
+    buyer: {
+      first_name: firstName || null,
+      last_name:  lastName,
+      email:      customer.email ?? null,
+      phone_full: customer.phone ?? null,
+      doc_number: customer.doc ?? null,
+      doc_type:   null,
+      nickname:   null,
+    },
+    shipping: {
+      id:                null,
+      status:            normalizedStatus === 'paid' ? 'pending' : null,
+      logistic_type:     null,
+      receiver_address:  receiverAddress,
+      receiver_name:     customer.name ?? null,
+      receiver_cost:     null,
+      base_cost:         Number(row.shipping ?? 0),
+      estimated_delivery_date: null,
+      posting_deadline:        null,
+      date_created:            null,
+      substatus:               null,
+      tracking_number:         null,
+      tracking_method:         null,
+      service_id:              null,
+      lead_time:               null,
+      mode:                    null,
+      delivery_type:           null,
+    },
+    order_items:   orderItems,
+    cost_price:    0,
+    platform_fee:  0,
+    shipping_cost: Number(row.shipping ?? 0),
+    tax_amount:    0,
+    gross_profit:  Number(row.total ?? 0) - Number(row.shipping ?? 0),
+    contribution_margin:     0,
+    contribution_margin_pct: 0,
+    tarifa_ml:        0,
+    frete_vendedor:   Number(row.shipping ?? 0),
+    frete_comprador:  Number(row.shipping ?? 0),
+    lucro_bruto:      Number(row.total ?? 0) - Number(row.shipping ?? 0),
+    margem_contribuicao_pct: 0,
+    shipping_breakdown: {
+      buyer_paid:  Number(row.shipping ?? 0),
+      ml_refund:   0,
+      seller_paid: 0,
+      gross:       Number(row.shipping ?? 0),
+    },
+    // Resumo agregado pro Card mostrar "X itens"
+    items_summary: totalQty > 1 ? `${totalQty} itens` : null,
+    has_problem:      null,
+    problem_note:     null,
+    problem_severity: null,
   }
 }
