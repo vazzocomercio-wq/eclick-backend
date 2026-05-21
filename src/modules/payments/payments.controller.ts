@@ -28,20 +28,24 @@ export class PaymentsController {
   @Post('checkout')
   @Public()
   async checkout(@Body() body: {
-    slug?:     string
-    items?:    CheckoutItem[]
-    customer?: CheckoutCustomer
-    gateway?:  Gateway
+    slug?:           string
+    items?:          CheckoutItem[]
+    customer?:       CheckoutCustomer
+    gateway?:        Gateway
+    cashbackToUse?:  number   // centavos — opt-in
   }) {
     if (!body?.slug)     throw new BadRequestException('slug obrigatório')
     if (!body?.items)    throw new BadRequestException('items obrigatório')
     if (!body?.customer) throw new BadRequestException('customer obrigatório')
     if (!body?.gateway)  throw new BadRequestException('gateway obrigatório')
     return this.svc.checkout({
-      slug:     body.slug,
-      items:    body.items,
-      customer: body.customer,
-      gateway:  body.gateway,
+      slug:           body.slug,
+      items:          body.items,
+      customer:       body.customer,
+      gateway:        body.gateway,
+      cashbackToUse:  typeof body.cashbackToUse === 'number' && body.cashbackToUse > 0
+                        ? Math.floor(body.cashbackToUse)
+                        : undefined,
     })
   }
 

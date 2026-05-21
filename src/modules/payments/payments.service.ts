@@ -110,6 +110,32 @@ export class PaymentsService {
     } catch (err) {
       this.logger.error(`[loyalty] falhou pra order=${orderId}: ${(err as Error).message}`)
     }
+
+    // ── Cashback resgatado: debita o saldo ────────────────────────────
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, customer, status, cashback_used_cents')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+      const used = Number((order as { cashback_used_cents?: number }).cashback_used_cents ?? 0)
+      if (used <= 0) return
+      const customer = (order.customer as { email?: string } | null) ?? {}
+      const email    = (customer.email ?? '').trim().toLowerCase()
+      if (!email) return
+      await this.cashback.redeem({
+        orgId:       order.organization_id as string,
+        email,
+        amountCents: used,
+        reason:      `Resgate no pedido ${orderId.slice(0, 8)}`,
+        sourceKind:  'storefront_order_redeem',
+        sourceId:    orderId,
+      })
+    } catch (err) {
+      // Já debitado (idempotência) ou saldo zerou no meio — apenas log
+      this.logger.warn(`[cashback.redeem] order=${orderId} skipped: ${(err as Error).message}`)
+    }
   }
 
   /** Resolve org_id + custom_domain a partir do slug publico. */
@@ -257,20 +283,23 @@ export class PaymentsService {
     customer: CheckoutCustomer
     items: CheckoutItem[]
     gateway: Gateway | null
+    cashbackUsedCents?: number
   }): Promise<StorefrontOrder> {
     const subtotal = args.items.reduce((s, i) => s + i.price * i.qty, 0)
-    const total = subtotal // sem frete configurado nesta fase
+    const cashbackUsedReais = (args.cashbackUsedCents ?? 0) / 100
+    const total = Math.max(0, subtotal - cashbackUsedReais) // sem frete configurado nesta fase
     const { data, error } = await supabaseAdmin
       .from('storefront_orders')
       .insert({
-        organization_id: args.orgId,
-        store_slug:      args.slug,
-        customer:        args.customer,
-        items:           args.items,
+        organization_id:      args.orgId,
+        store_slug:           args.slug,
+        customer:             args.customer,
+        items:                args.items,
         subtotal,
         total,
-        gateway:         args.gateway,
-        status:          'pending',
+        gateway:              args.gateway,
+        status:               'pending',
+        cashback_used_cents:  args.cashbackUsedCents ?? 0,
       })
       .select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar pedido: ${error?.message ?? '?'}`)
@@ -310,10 +339,11 @@ export class PaymentsService {
 
   /** Endpoint public-facing — sem auth, chamado pela vitrine. */
   async checkout(input: {
-    slug:     string
-    items:    CheckoutItem[]
-    customer: CheckoutCustomer
-    gateway:  Gateway
+    slug:           string
+    items:          CheckoutItem[]
+    customer:       CheckoutCustomer
+    gateway:        Gateway
+    cashbackToUse?: number  // centavos — opt-in pelo cliente
   }): Promise<{ orderId: string; initPoint: string }> {
     if (!input.slug)               throw new BadRequestException('slug obrigatório')
     if (!Array.isArray(input.items) || input.items.length === 0)
@@ -327,12 +357,48 @@ export class PaymentsService {
     const items = await this.revalidateItems(store.orgId, input.items)
     if (items.length === 0) throw new BadRequestException('Nenhum dos itens está disponível.')
 
+    // ── Resgate de cashback (opt-in) ─────────────────────────────────
+    // Server-side: valida saldo + regras (minBalance, maxRedemptionPct).
+    // Em vez de mexer nos items individuais (gateways tratam diferente),
+    // injeta linha negativa "💰 Cashback aplicado" pro MP. Stripe não
+    // aceita unit_amount negativo — bloqueia cashback com Stripe por ora.
+    let cashbackUsedCents = 0
+    if (input.cashbackToUse && input.cashbackToUse > 0) {
+      if (input.gateway === 'stripe') {
+        throw new BadRequestException('Resgate de cashback com Stripe ainda não está disponível. Use Mercado Pago ou desative o cashback no checkout.')
+      }
+      const subtotalCents = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100)
+      const preview = await this.cashback.previewRedemption(
+        store.orgId,
+        input.customer.email,
+        subtotalCents,
+      )
+      if (!preview.enabled) {
+        throw new BadRequestException('Cashback não está ativo nesta loja.')
+      }
+      if (input.cashbackToUse > preview.maxRedeemableCents) {
+        throw new BadRequestException(
+          `Saldo insuficiente ou acima do limite. Máximo permitido: R$ ${(preview.maxRedeemableCents / 100).toFixed(2)}`,
+        )
+      }
+      cashbackUsedCents = input.cashbackToUse
+
+      // Adiciona linha negativa pro gateway entender o desconto
+      items.push({
+        productId: 'CASHBACK_DISCOUNT',
+        name:      `💰 Cashback aplicado`,
+        price:     -(cashbackUsedCents / 100),
+        qty:       1,
+      })
+    }
+
     const order = await this.insertOrder({
-      orgId:   store.orgId,
-      slug:    input.slug,
-      customer:input.customer,
+      orgId:             store.orgId,
+      slug:              input.slug,
+      customer:          input.customer,
       items,
-      gateway: input.gateway,
+      gateway:           input.gateway,
+      cashbackUsedCents,
     })
 
     const urls = this.buildReturnUrls(input.slug, store.customDomain, order.id)
