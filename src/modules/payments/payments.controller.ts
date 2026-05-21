@@ -1,11 +1,15 @@
 import {
-  Controller, Post, Get, Body, Query, Param, Req, Headers, BadRequestException,
-  HttpCode, HttpStatus,
+  Controller, Post, Get, Patch, Body, Query, Param, Req, Headers, BadRequestException,
+  HttpCode, HttpStatus, UseGuards,
 } from '@nestjs/common'
 import { Public } from '../../common/decorators/public.decorator'
+import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { ReqUser } from '../../common/decorators/user.decorator'
 import { PaymentsService } from './payments.service'
 import type { CheckoutCustomer, CheckoutItem, Gateway } from './types'
 import type { Request } from 'express'
+
+interface ReqUserPayload { id: string; orgId: string | null }
 
 /**
  * Loja Propria — Frente C: endpoints public-facing do checkout.
@@ -98,5 +102,31 @@ export class PaymentsController {
         : JSON.stringify(req.body ?? {})
     await this.svc.handleStripeWebhook(raw, signature)
     return { ok: true }
+  }
+}
+
+/**
+ * Admin (autenticado): gerenciar pedidos da Loja Própria.
+ *
+ *   PATCH /storefront-orders/:id/shipping
+ *       { shipping_status?, shipping_carrier?, tracking_code? }
+ */
+@Controller('storefront-orders')
+@UseGuards(SupabaseAuthGuard)
+export class StorefrontOrdersAdminController {
+  constructor(private readonly svc: PaymentsService) {}
+
+  @Patch(':id/shipping')
+  updateShipping(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: {
+      shipping_status?:  'pending' | 'preparing' | 'shipped' | 'in_transit' | 'delivered' | 'returned' | 'lost'
+      shipping_carrier?: string | null
+      tracking_code?:    string | null
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.updateShipping(u.orgId, id, body)
   }
 }

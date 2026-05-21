@@ -921,6 +921,11 @@ interface DbStorefrontOrderRow {
   gateway_session_id:  string | null
   gateway_payment_id:  string | null
   status:              string
+  shipping_status?:    string | null
+  shipping_carrier?:   string | null
+  tracking_code?:      string | null
+  shipped_at?:         string | null
+  delivered_at?:       string | null
   created_at:          string
   updated_at:          string
 }
@@ -1034,7 +1039,8 @@ function mapStorefrontRowToCanonical(row: DbStorefrontOrderRow): Record<string, 
     },
     shipping: {
       id:                null,
-      status:            normalizedStatus === 'paid' ? 'pending' : null,
+      // Usa shipping_status real do storefront_orders (mapeado pelo lojista)
+      status:            row.shipping_status ?? (normalizedStatus === 'paid' ? 'pending' : null),
       logistic_type:     null,
       receiver_address:  receiverAddress,
       receiver_name:     customer.name ?? null,
@@ -1042,14 +1048,22 @@ function mapStorefrontRowToCanonical(row: DbStorefrontOrderRow): Record<string, 
       base_cost:         Number(row.shipping ?? 0),
       estimated_delivery_date: null,
       posting_deadline:        null,
-      date_created:            null,
+      date_created:            row.shipped_at ?? null,
       substatus:               null,
-      tracking_number:         null,
-      tracking_method:         null,
+      tracking_number:         row.tracking_code ?? null,
+      tracking_method:         row.shipping_carrier ?? null,
       service_id:              null,
       lead_time:               null,
       mode:                    null,
       delivery_type:           null,
+    },
+    // Marcadores explícitos pra UI de storefront
+    storefront_shipping: {
+      status:   row.shipping_status ?? 'pending',
+      carrier:  row.shipping_carrier ?? null,
+      code:     row.tracking_code ?? null,
+      shipped_at:   row.shipped_at ?? null,
+      delivered_at: row.delivered_at ?? null,
     },
     order_items:   orderItems,
     cost_price:    0,

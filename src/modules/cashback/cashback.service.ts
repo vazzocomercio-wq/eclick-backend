@@ -384,20 +384,28 @@ export class CashbackService {
     let totalCredited = 0
     for (const { orgId, settings } of enabledOrgs) {
       try {
-        // after_7_days: pedidos paid com updated_at <= now - 7 days
-        // after_delivery: TODO — skipa por ora
-        if (settings.earnDelay !== 'after_7_days') continue
-        const cutoff = new Date(now.getTime() - 7 * 86400_000).toISOString()
-
-        // Busca pedidos elegíveis (status=paid, updated_at <= cutoff)
-        const { data: paidOrders } = await supabaseAdmin
+        // 2 modos suportados:
+        //  - after_7_days: pedidos paid com updated_at <= now - 7 days
+        //  - after_delivery: pedidos paid com shipping_status='delivered'
+        //  (idempotência via source_id na credit())
+        const sb = supabaseAdmin
           .from('storefront_orders')
           .select('id, total, customer, updated_at')
           .eq('organization_id', orgId)
           .eq('status', 'paid')
-          .lte('updated_at', cutoff)
           .order('updated_at', { ascending: true })
           .limit(500)
+
+        let qBuilder = sb
+        if (settings.earnDelay === 'after_7_days') {
+          const cutoff = new Date(now.getTime() - 7 * 86400_000).toISOString()
+          qBuilder = qBuilder.lte('updated_at', cutoff)
+        } else if (settings.earnDelay === 'after_delivery') {
+          qBuilder = qBuilder.eq('shipping_status', 'delivered')
+        } else {
+          continue
+        }
+        const { data: paidOrders } = await qBuilder
 
         for (const o of (paidOrders ?? []) as Array<{ id: string; total: number; customer: { email?: string } | null; updated_at: string }>) {
           const email = (o.customer?.email ?? '').trim().toLowerCase()

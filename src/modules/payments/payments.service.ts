@@ -545,6 +545,98 @@ export class PaymentsService {
     }
   }
 
+  /** Atualiza status de entrega de um pedido (admin).
+   *  Quando vai pra 'shipped', preenche shipped_at (se não veio).
+   *  Quando vai pra 'delivered', preenche delivered_at. */
+  async updateShipping(
+    orgId: string,
+    orderId: string,
+    patch: {
+      shipping_status?:  'pending' | 'preparing' | 'shipped' | 'in_transit' | 'delivered' | 'returned' | 'lost'
+      shipping_carrier?: string | null
+      tracking_code?:    string | null
+    },
+  ): Promise<{ ok: true }> {
+    const fields: Record<string, unknown> = {}
+    if ('shipping_status'  in patch) fields.shipping_status  = patch.shipping_status
+    if ('shipping_carrier' in patch) fields.shipping_carrier = patch.shipping_carrier ?? null
+    if ('tracking_code'    in patch) fields.tracking_code    = patch.tracking_code ?? null
+
+    // Auto-stamp timestamps quando transiciona
+    if (patch.shipping_status === 'shipped' || patch.shipping_status === 'in_transit') {
+      const { data: cur } = await supabaseAdmin
+        .from('storefront_orders').select('shipped_at').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      if (cur && !(cur as { shipped_at?: string | null }).shipped_at) {
+        fields.shipped_at = new Date().toISOString()
+      }
+    }
+    if (patch.shipping_status === 'delivered') {
+      const { data: cur } = await supabaseAdmin
+        .from('storefront_orders').select('delivered_at').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      if (cur && !(cur as { delivered_at?: string | null }).delivered_at) {
+        fields.delivered_at = new Date().toISOString()
+      }
+    }
+
+    if (Object.keys(fields).length === 0) {
+      throw new BadRequestException('Nenhum campo de tracking informado')
+    }
+
+    const { error } = await supabaseAdmin
+      .from('storefront_orders')
+      .update(fields)
+      .eq('id', orderId)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+
+    // Quando muda pra 'delivered', dispara hook de cashback after_delivery
+    if (patch.shipping_status === 'delivered') {
+      await this.creditCashbackAfterDelivery(orderId).catch(err =>
+        this.logger.warn(`[cashback.after_delivery] order=${orderId}: ${(err as Error).message}`)
+      )
+    }
+
+    return { ok: true }
+  }
+
+  /** Quando pedido vira 'delivered' e a org tem earnDelay='after_delivery',
+   *  credita o cashback agora (idempotente via source_id). */
+  private async creditCashbackAfterDelivery(orderId: string): Promise<void> {
+    const { data: order } = await supabaseAdmin
+      .from('storefront_orders')
+      .select('organization_id, total, customer, status, shipping_status')
+      .eq('id', orderId)
+      .maybeSingle()
+    if (!order || (order.status as string) !== 'paid') return
+    if ((order.shipping_status as string) !== 'delivered') return
+
+    const customer = (order.customer as { email?: string } | null) ?? {}
+    const email = (customer.email ?? '').trim().toLowerCase()
+    if (!email) return
+
+    const settings = await this.cashback.getSettings(order.organization_id as string)
+    if (!settings.enabled || settings.earnPct <= 0) return
+    if (settings.earnDelay !== 'after_delivery') return
+
+    const totalCents = Math.round(Number(order.total ?? 0) * 100)
+    const amountCents = Math.round((totalCents * settings.earnPct) / 100)
+    if (amountCents <= 0) return
+
+    const expiresAt = settings.expirationDays > 0
+      ? new Date(Date.now() + settings.expirationDays * 86400_000).toISOString()
+      : null
+
+    await this.cashback.credit({
+      orgId:       order.organization_id as string,
+      email,
+      amountCents,
+      reason:      `Pedido ${orderId.slice(0, 8)} entregue — ${settings.earnPct}% cashback`,
+      sourceKind:  'storefront_order',
+      sourceId:    orderId,
+      expiresAt,
+    })
+  }
+
   /** Detalhe publico do pedido — usado pelas paginas /sucesso /falha /pendente. */
   async getPublicOrder(orderId: string): Promise<{
     id:        string
