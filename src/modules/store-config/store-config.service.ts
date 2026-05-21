@@ -334,6 +334,8 @@ export class StoreConfigService {
         'attributes',
         'wholesale_enabled', 'wholesale_levels',
         'sale_format',
+        // Reviews (denormalizado — AD1)
+        'review_count', 'review_avg',
         'created_at', 'updated_at',
       ].join(','))
       .eq('organization_id', orgId)
