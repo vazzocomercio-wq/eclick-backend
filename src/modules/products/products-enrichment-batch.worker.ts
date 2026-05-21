@@ -63,8 +63,16 @@ export class ProductsEnrichmentBatchWorker implements OnModuleInit, OnModuleDest
           await this.enrichment.finalizeJob(job.id, 'failed', `Limite de custo $${job.max_cost_usd} atingido`)
           return
         }
-        const r = await this.enrichment.processJobProduct(job.id, job.organization_id, productId)
-        if (r.success) costAccumulated += r.cost
+        // Try-catch por produto — falha individual NÃO derruba o job
+        // inteiro. Antes de 2026-05-20: exceção saía do for-loop e o job
+        // ficava em 'processing' pra sempre (vimos 2 jobs travados em
+        // 9/100 e 27/100 — backlog parado e dinheiro queimado).
+        try {
+          const r = await this.enrichment.processJobProduct(job.id, job.organization_id, productId)
+          if (r.success) costAccumulated += r.cost
+        } catch (e: unknown) {
+          this.logger.warn(`enrich product ${productId} falhou: ${(e as Error).message} — seguindo`)
+        }
       }
 
       await this.enrichment.finalizeJob(job.id, 'completed')
