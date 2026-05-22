@@ -65,6 +65,7 @@ import { LoyaltyModule } from './modules/loyalty/loyalty.module'
 import { StorefrontCustomersModule } from './modules/storefront-customers/storefront-customers.module'
 import { ProductReviewsModule } from './modules/product-reviews/product-reviews.module'
 import { CartRecoveryModule } from './modules/cart-recovery/cart-recovery.module'
+import { StorefrontLeadsModule } from './modules/storefront-leads/storefront-leads.module'
 import { StorefrontNotificationsModule } from './modules/storefront-notifications/storefront-notifications.module'
 import { StorefrontEventsModule } from './modules/storefront-events/storefront-events.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
@@ -149,6 +150,7 @@ import { RadarModule } from './modules/radar/radar.module'
     StorefrontCustomersModule,
     ProductReviewsModule,
     CartRecoveryModule,
+    StorefrontLeadsModule,
     StorefrontNotificationsModule,
     StorefrontEventsModule,
     BannerGeneratorModule,

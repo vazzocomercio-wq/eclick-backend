@@ -33,6 +33,28 @@ interface CreateCampaignCardInput {
   dedup_key?:      string
 }
 
+export interface CreateLeadInput {
+  organization_id: string
+  pipeline_id:     string
+  stage_id:        string
+  assigned_to?:    string
+  contact:         { name?: string; email?: string; phone?: string }
+  title?:          string
+  message?:        string
+  custom_fields?:  Record<string, unknown>
+  tags?:           string[]
+  dedup_key?:      string
+}
+
+export interface CreateLeadResult {
+  ok?:                true
+  deal_id?:           string
+  contact_id?:        string | null
+  assigned_to?:       string | null
+  created?:           boolean
+  skipped_no_bridge?: boolean
+}
+
 export interface CreateCampaignCardResult {
   ok?:                true
   deal_id?:           string
@@ -304,6 +326,37 @@ export class ActiveBridgeClient {
       return await res.json() as CreateCampaignCardResult
     } catch (e) {
       this.logger.error(`[active-bridge] createCampaignCard falhou: ${(e as Error).message}`)
+      throw e
+    }
+  }
+
+  /** Cria um lead (contato + deal no funil escolhido) no Active a partir
+   *  de um formulário da Loja Própria. No-op se bridge não configurado. */
+  async createLead(input: CreateLeadInput): Promise<CreateLeadResult> {
+    if (!this.isConfigured()) {
+      return { skipped_no_bridge: true }
+    }
+    if (!input.pipeline_id || !input.stage_id) {
+      this.logger.warn('[active-bridge] createLead skipped — pipeline_id/stage_id ausente')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/create-lead`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw new BadRequestException(`Active responded ${res.status}: ${body.slice(0, 200)}`)
+      }
+      return await res.json() as CreateLeadResult
+    } catch (e) {
+      this.logger.error(`[active-bridge] createLead falhou: ${(e as Error).message}`)
       throw e
     }
   }
