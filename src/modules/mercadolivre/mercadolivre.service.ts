@@ -9,6 +9,19 @@ import { estimateSaleFee } from '../../common/margin'
 const ML_BASE = 'https://api.mercadolibre.com'
 const ML_AUTH = 'https://auth.mercadolivre.com.br'
 
+// Cache em memória dos atributos de categoria. O endpoint é público e a
+// resposta muda raramente (estrutura da categoria), mas o build de preview
+// consulta a mesma categoria várias vezes (required + recommended + envio) e
+// re-roda a cada tecla. TTL 1h evita o tráfego repetido.
+type MlCategoryAttribute = {
+  id: string; name: string; value_type: string
+  value_max_length?: number; values?: Array<{ id: string; name: string }>
+  tags?: Record<string, boolean>; hint?: string; hierarchy?: string
+  relevance?: number; default_unit?: string
+}
+const CATEGORY_ATTRS_TTL_MS = 60 * 60 * 1000
+const categoryAttrsCache = new Map<string, { at: number; data: MlCategoryAttribute[] }>()
+
 export interface MlTokens {
   access_token: string
   refresh_token: string
@@ -764,24 +777,20 @@ export class MercadolivreService {
   }
 
   /** Lista atributos de uma categoria. Endpoint público. */
-  async getCategoryAttributes(categoryId: string): Promise<Array<{
-    id:                    string
-    name:                  string
-    value_type:            string
-    value_max_length?:     number
-    values?:               Array<{ id: string; name: string }>
-    tags?:                 Record<string, boolean>
-    hint?:                 string
-    hierarchy?:            string
-    relevance?:            number
-    default_unit?:         string
-  }>> {
+  async getCategoryAttributes(categoryId: string): Promise<MlCategoryAttribute[]> {
+    const cached = categoryAttrsCache.get(categoryId)
+    if (cached && Date.now() - cached.at < CATEGORY_ATTRS_TTL_MS) {
+      return cached.data
+    }
     try {
       const { data } = await axios.get(
         `${ML_BASE}/categories/${encodeURIComponent(categoryId)}/attributes`,
         { timeout: 10_000 },
       )
-      return Array.isArray(data) ? data : []
+      const attrs = Array.isArray(data) ? data as MlCategoryAttribute[] : []
+      // Só cacheia respostas não-vazias (vazio = falha transitória do ML).
+      if (attrs.length > 0) categoryAttrsCache.set(categoryId, { at: Date.now(), data: attrs })
+      return attrs
     } catch {
       return []
     }

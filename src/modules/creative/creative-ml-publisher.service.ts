@@ -386,11 +386,19 @@ export class CreativeMlPublisherService {
     // Required + recommended attributes
     let requiredAttrs:    MlAttributeSpec[] = []
     let recommendedAttrs: MlAttributeSpec[] = []
+    // A categoria usa Mercado Envios quando declara SELLER_PACKAGE_WEIGHT.
+    // Esse atributo é `hidden` no /attributes — não cai em required/recommended
+    // — mas o ML o EXIGE no POST /items. Detectamos pra validar as medidas.
+    let categoryNeedsShipping = false
     if (categoryId) {
-      ;[requiredAttrs, recommendedAttrs] = await Promise.all([
+      const [req, rec, rawAttrs] = await Promise.all([
         this.getRequiredAttributes(categoryId),
         this.getRecommendedAttributes(categoryId),
+        this.ml.getCategoryAttributes(categoryId),
       ])
+      requiredAttrs    = req
+      recommendedAttrs = rec
+      categoryNeedsShipping = rawAttrs.some(a => a.id === 'SELLER_PACKAGE_WEIGHT')
     }
 
     // Valida attributes preenchidos
@@ -437,19 +445,34 @@ export class CreativeMlPublisherService {
     }
 
     // Dimensões da embalagem (SELLER_PACKAGE_*) — obrigatórias em categorias
-    // com frete (ex: iluminação). Lidas de `creative_products.dimensions`,
+    // com Mercado Envios (ex: iluminação). Lidas de `creative_products.dimensions`,
     // que pode trazer valores nus ("420") ou com unidade ("3 kg").
+    //
+    // ⚠️ O ML valida o conjunto: se você manda PARTE das medidas (ex: só
+    // altura/largura/profundidade, sem peso), ele rejeita com "[seller_package_
+    // weight] are all required". Por isso só enviamos quando as 4 estão
+    // completas; incompleto + categoria com envio = warning (barra o publish
+    // com mensagem clara em vez de deixar o POST /items estourar 502).
     const dims = (product.dimensions ?? {}) as Record<string, unknown>
-    const pkgAttrs: Array<[string, number | null, 'cm' | 'g']> = [
-      ['SELLER_PACKAGE_HEIGHT', parsePackageDim(dims.altura,        'length'), 'cm'],
-      ['SELLER_PACKAGE_WIDTH',  parsePackageDim(dims.largura,       'length'), 'cm'],
-      ['SELLER_PACKAGE_LENGTH', parsePackageDim(dims.profundidade,  'length'), 'cm'],
-      ['SELLER_PACKAGE_WEIGHT', parsePackageDim(dims.peso,          'weight'), 'g'],
+    const pkgVals: Array<[string, number | null, 'cm' | 'g', string]> = [
+      ['SELLER_PACKAGE_HEIGHT', parsePackageDim(dims.altura,       'length'), 'cm', 'altura'],
+      ['SELLER_PACKAGE_WIDTH',  parsePackageDim(dims.largura,      'length'), 'cm', 'largura'],
+      ['SELLER_PACKAGE_LENGTH', parsePackageDim(dims.profundidade, 'length'), 'cm', 'profundidade'],
+      ['SELLER_PACKAGE_WEIGHT', parsePackageDim(dims.peso,         'weight'), 'g',  'peso'],
     ]
-    for (const [id, val, unit] of pkgAttrs) {
-      if (val != null && !attributesPayload.find(a => a.id === id)) {
-        attributesPayload.push({ id, value_name: `${val} ${unit}` })
+    const pkgComplete = pkgVals.every(([, val]) => val != null)
+    if (pkgComplete) {
+      for (const [id, val, unit] of pkgVals) {
+        if (!attributesPayload.find(a => a.id === id)) {
+          attributesPayload.push({ id, value_name: `${val} ${unit}` })
+        }
       }
+    } else if (categoryNeedsShipping) {
+      const faltando = pkgVals.filter(([, val]) => val == null).map(([, , , label]) => label)
+      warnings.push(
+        `Informe as medidas da embalagem (${faltando.join(', ')}) no painel de precificação — ` +
+        `o Mercado Livre exige largura, altura, profundidade e peso para calcular o frete.`,
+      )
     }
 
     // Normaliza atributos number_unit: valor nu ("15") sem unidade →
