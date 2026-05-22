@@ -2724,6 +2724,31 @@ Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) 
 **Download:** no resultado do assistente, cada imagem tem um botão de baixar (ícone no canto) e há "Baixar todas" no cabeçalho. Funciona uma a uma ou em massa. As imagens ficam no formato PNG com nome amigável (banner-formato-data.png).`,
     tags: ['loja', 'banners', 'ia', 'download', 'baixar', 'imagens'],
   },
+  {
+    routes:   ['/dashboard/social-commerce/instagram/posts'],
+    category: 'loja',
+    title:    'Tag de produtos em posts/reels do Instagram',
+    content: `**Marque produtos do seu catálogo nos posts e reels do Instagram — vira sacolinha clicável (🛍️) no feed.**
+
+**Pré-requisitos:**
+- Meta conectado em Social Shop > Instagram/Facebook, com o catálogo sincronizado (mesmos 260 produtos do catálogo Meta).
+- O @perfil precisa estar aprovado pro Instagram Shopping (acontece junto com a aprovação dos produtos no catálogo).
+- Permissões do Instagram concedidas — se a tela der erro de permissão, vá em Social Shop > Instagram/Facebook e clique **"Atualizar permissões"** pra refazer o login na Meta.
+
+**Como usar:**
+1. A tela lista seus posts/reels recentes em grade. O selo verde com número mostra quantos produtos já estão tagueados naquele post.
+2. Clique num post → abre o modal de tagueamento.
+3. Busque um produto do catálogo no campo de busca e clique pra adicioná-lo.
+4. Em **posts de imagem**, clique no produto da lista pra "selecioná-lo" e depois clique na imagem pra posicionar a sacolinha (x,y). Em reels/vídeo a posição não se aplica — o produto aparece como sacolinha sem posição na tela.
+5. Clique **"Salvar tags"**.
+
+**Importante:**
+- Só produtos do catálogo Meta podem ser tagueados (o que está sincronizado).
+- O produto precisa estar **aprovado** na revisão de Commerce da Meta pra tag funcionar.
+- Você pode remover tags clicando no X de cada produto e salvando.
+- A confirmação é validada na fonte (a Meta confirma quantos produtos ficaram tagueados de fato).`,
+    tags: ['loja', 'instagram', 'shopping', 'tag', 'posts', 'reels', 'sacolinha', 'social commerce', 'produtos'],
+  },
 ]
 
 export const KB: KbEntry[] = [
