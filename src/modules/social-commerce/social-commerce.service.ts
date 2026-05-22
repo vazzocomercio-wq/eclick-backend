@@ -147,35 +147,25 @@ export class SocialCommerceService {
     return { data: withTags, after: media.after }
   }
 
-  /** Produtos disponíveis pra taguear — vem do NOSSO DB (mappings já
-   *  sincronizados ao catálogo Meta). external_product_id é o ID do produto
-   *  no catálogo IG, que é o que tagProductsOnMedia espera. */
+  /** Produtos disponíveis pra taguear — vem do CATÁLOGO META (não do nosso
+   *  DB), porque o product_tags do Instagram exige o `id` NUMÉRICO do produto
+   *  no catálogo (ex: 35920057667609727), e não o SKU/retailer_id que
+   *  guardamos em external_product_id. Esse `id` é o que vai pra tag. */
   async listTaggableProducts(orgId: string, search?: string): Promise<Array<{
-    product_id: string; external_product_id: string; name: string; image?: string; price?: number
+    id: string; retailer_id?: string; name: string; image?: string; price?: string
   }>> {
     const ch = await this.requireConnected(orgId, 'instagram_shop')
-    const { data, error } = await supabaseAdmin
-      .from('social_commerce_products')
-      .select('product_id, external_product_id, synced_data')
-      .eq('channel_id', ch.id)
-      .eq('sync_status', 'synced')
-      .not('external_product_id', 'is', null)
-      .limit(500)
-    if (error) throw new BadRequestException(`Erro: ${error.message}`)
-
-    let rows = (data ?? []).map(r => {
-      const sd = (r.synced_data ?? {}) as Record<string, unknown>
-      return {
-        product_id:          r.product_id as string,
-        external_product_id: r.external_product_id as string,
-        name:                (sd.title as string) ?? '',
-        image:               (sd.image_link as string) ?? undefined,
-        price:               undefined as number | undefined,
-      }
-    })
+    const products = await this.meta.listCatalogProducts(ch.access_token!, ch.external_catalog_id!, 500)
+    let rows = products.map(p => ({
+      id:          p.id,
+      retailer_id: p.retailer_id,
+      name:        p.name ?? '',
+      image:       p.image_url,
+      price:       p.price,
+    }))
     if (search?.trim()) {
       const q = search.trim().toLowerCase()
-      rows = rows.filter(r => r.name.toLowerCase().includes(q))
+      rows = rows.filter(r => r.name.toLowerCase().includes(q) || (r.retailer_id ?? '').toLowerCase().includes(q))
     }
     return rows
   }
@@ -186,27 +176,28 @@ export class SocialCommerceService {
     return this.meta.getMediaProductTags(ch.access_token!, mediaId)
   }
 
-  /** Tagueia produtos numa mídia. `tags[].external_product_id` é o ID do
-   *  produto no catálogo IG (não o product_id interno). x,y opcionais (0-1). */
+  /** Tagueia produtos numa mídia. `tags[].product_id` é o ID NUMÉRICO do
+   *  produto no catálogo Meta (vem de listTaggableProducts, NÃO é o SKU).
+   *  x,y opcionais (0-1, só pra IMAGE). */
   async tagProductsOnMedia(orgId: string, mediaId: string, tags: Array<{
-    external_product_id: string; x?: number; y?: number
+    product_id: string; x?: number; y?: number
   }>): Promise<{ success: boolean; tagged: number }> {
     const ch = await this.requireConnected(orgId, 'instagram_shop')
     if (!tags.length) throw new BadRequestException('Nenhum produto pra taguear')
     await this.meta.tagProductsOnMedia(
       ch.access_token!,
       mediaId,
-      tags.map(t => ({ product_id: t.external_product_id, x: t.x, y: t.y })),
+      tags.map(t => ({ product_id: t.product_id, x: t.x, y: t.y })),
     )
     // Valida na fonte (regra de ouro Meta) — confirma que landou
     const after = await this.meta.getMediaProductTags(ch.access_token!, mediaId)
     return { success: true, tagged: after.length }
   }
 
-  /** Remove tags de produtos de uma mídia. */
-  async untagProductsOnMedia(orgId: string, mediaId: string, externalProductIds: string[]): Promise<{ success: boolean }> {
+  /** Remove tags de produtos de uma mídia. productIds = IDs numéricos Meta. */
+  async untagProductsOnMedia(orgId: string, mediaId: string, productIds: string[]): Promise<{ success: boolean }> {
     const ch = await this.requireConnected(orgId, 'instagram_shop')
-    return this.meta.untagProductsOnMedia(ch.access_token!, mediaId, externalProductIds)
+    return this.meta.untagProductsOnMedia(ch.access_token!, mediaId, productIds)
   }
 
   /** Salva escolhas finais (Page + IG Business Account + Catalog ID).

@@ -279,6 +279,28 @@ export class MetaCatalogService {
     return { data: body.data ?? [], after: body.paging?.cursors?.after }
   }
 
+  /** Lista produtos do catálogo Meta com o `id` NUMÉRICO (necessário pra
+   *  product_tags do Instagram — o SKU/retailer_id NAO funciona la). Pagina
+   *  até `max`. Retorna id (numerico), retailer_id (sku), name, image, price. */
+  async listCatalogProducts(accessToken: string, catalogId: string, max = 500): Promise<Array<{
+    id: string; retailer_id?: string; name?: string; image_url?: string; price?: string
+  }>> {
+    const out: Array<{ id: string; retailer_id?: string; name?: string; image_url?: string; price?: string }> = []
+    let url: string | null = `${GRAPH_API_BASE}/${catalogId}/products?fields=id,retailer_id,name,image_url,price&limit=100&access_token=${accessToken}`
+    while (url && out.length < max) {
+      const res = await fetch(url)
+      const body = await res.json() as {
+        data?: Array<{ id: string; retailer_id?: string; name?: string; image_url?: string; price?: string }>
+        paging?: { next?: string }
+        error?: { message?: string }
+      }
+      if (!res.ok) throw new BadRequestException(`Meta listCatalogProducts: ${body.error?.message ?? 'erro'}`)
+      out.push(...(body.data ?? []))
+      url = body.paging?.next ?? null
+    }
+    return out.slice(0, max)
+  }
+
   /** Lê os product tags ja aplicados num media. Precisa instagram_shopping_tag_products. */
   async getMediaProductTags(accessToken: string, mediaId: string): Promise<Array<{
     product_id: string; merchant_id?: string; x?: number; y?: number; name?: string

@@ -198,7 +198,7 @@ export class SocialCommerceController {
   tagProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('id') mediaId: string,
-    @Body() body: { tags: Array<{ external_product_id: string; x?: number; y?: number }> },
+    @Body() body: { tags: Array<{ product_id: string; x?: number; y?: number }> },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!Array.isArray(body?.tags)) throw new BadRequestException('tags[] obrigatório')
@@ -212,11 +212,11 @@ export class SocialCommerceController {
   untagProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('id') mediaId: string,
-    @Body() body: { external_product_ids: string[] },
+    @Body() body: { product_ids: string[] },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    if (!Array.isArray(body?.external_product_ids)) throw new BadRequestException('external_product_ids[] obrigatório')
-    return this.svc.untagProductsOnMedia(u.orgId, mediaId, body.external_product_ids)
+    if (!Array.isArray(body?.product_ids)) throw new BadRequestException('product_ids[] obrigatório')
+    return this.svc.untagProductsOnMedia(u.orgId, mediaId, body.product_ids)
   }
 
   // ── Sync ─────────────────────────────────────────────────────────
