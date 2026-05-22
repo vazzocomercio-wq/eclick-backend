@@ -248,6 +248,7 @@ export type SectionType =
   | 'productGrid' | 'productCarousel' | 'featuredProduct' | 'collectionGrid' | 'productDetailLayout'
   | 'richText' | 'testimonials' | 'logoList' | 'faq' | 'newsletter' | 'videoBlock' | 'customHtml'
   | 'cartLayout' | 'checkoutLayout' | 'whatsappCatalog'
+  | 'leadForm'
 
 export interface SectionBase<T extends SectionType, S> {
   id:           string
@@ -542,5 +543,6 @@ export const SECTION_TYPES_V3:      readonly SectionType[] = [
   'productGrid','productCarousel','featuredProduct','collectionGrid','productDetailLayout',
   'richText','testimonials','logoList','faq','newsletter','videoBlock','customHtml',
   'cartLayout','checkoutLayout','whatsappCatalog',
+  'leadForm',
 ]
 export const PAGE_KEYS_V3:          readonly (keyof PageMap)[] = ['home','product','collection','cart','checkout']
