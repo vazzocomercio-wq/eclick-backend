@@ -2729,9 +2729,11 @@ Reúne todos os atalhos comerciais em cards:
 
 **Nesta tela (/dashboard/loja/ambientador):**
 - **Ligar/desligar** o recurso na vitrine + texto do botão.
-- **Gerações por cliente**, **cupom de incentivo** (vai no WhatsApp), **funil/etapa/responsável** de destino e uma **instrução extra pra IA**.
+- **Gerações por cliente**, **teto de custo por dia (US$)** (atingiu, pausa até amanhã), **cupom de incentivo** (vai no WhatsApp), **funil/etapa/responsável** de destino e uma **instrução extra pra IA**.
 - 3 indicadores (clientes / ambientações geradas / enviadas no WhatsApp).
 - Lista de **clientes** (com créditos restantes + botão "Dar créditos") e **galeria** das ambientações.
+
+**Privacidade + UX:** no cadastro o cliente aceita o uso dos dados e da foto (consentimento LGPD registrado); o resultado tem **slider antes/depois**; as dicas de captura se adaptam à categoria (luminária→teto, tapete→chão, móvel→canto). Limite de código por IP + teto de custo diário protegem contra abuso.
 
 **Importante:** vem **desligado por padrão** — ligue aqui pra aparecer na loja. A entrega no WhatsApp depende da integração com o Active (bridge) estar configurada.
 

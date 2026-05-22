@@ -37,6 +37,13 @@ const IMAGES_PER_GEN    = 2                     // 2 imagens por geração
 const MAX_SCENE_BYTES   = 7 * 1024 * 1024       // 7MB decodificado
 const ALLOWED_MIME      = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
+// Anti-abuso de envio de OTP por IP
+const OTP_IP_WINDOW_MS      = 60 * 60 * 1000    // janela de 1h
+const OTP_IP_MAX_PER_WINDOW = 8                 // máx OTPs por IP/hora
+
+// Teto de custo de geração por org/dia (override em visualizer_settings)
+const DEFAULT_DAILY_COST_CAP_USD = 15
+
 export interface VisualizerSettings {
   enabled?:             boolean
   pipeline_id?:         string
@@ -46,6 +53,8 @@ export interface VisualizerSettings {
   default_generations?: number
   prompt_extra?:        string
   button_label?:        string
+  /** Teto de custo de geração por dia (USD) pra esta org. Default 15. */
+  daily_cost_cap_usd?:  number
 }
 
 export interface VisualizerCustomer {
@@ -61,6 +70,7 @@ export interface VisualizerCustomer {
   generations_allowed: number
   generations_used:    number
   last_renewed_at:     string | null
+  consent_at:          string | null
   created_at:          string
   updated_at:          string
 }
@@ -153,6 +163,7 @@ export class StorefrontVisualizerService {
     name:   string
     email:  string
     phone:  string
+    consent?: boolean
     ipHash?: string | null
   }): Promise<{ ok: true; otpSent: boolean; expiresInSec: number }> {
     const store = await this.resolveStore(input.slug)
@@ -167,8 +178,27 @@ export class StorefrontVisualizerService {
     if (!name)  throw new BadRequestException('Informe seu nome.')
     if (!email || !email.includes('@')) throw new BadRequestException('Informe um e-mail válido.')
     if (phone.length < 10) throw new BadRequestException('Informe um WhatsApp válido com DDD.')
+    // LGPD — consentimento obrigatório (foto do ambiente + dados pessoais)
+    if (input.consent !== true) {
+      throw new BadRequestException('É necessário aceitar o uso dos seus dados e da foto para continuar.')
+    }
 
     const orgId = store.organization_id
+    const nowIso = new Date().toISOString()
+
+    // Anti-abuso: limite de OTPs por IP (além do limite por telefone). Protege
+    // contra script que dispara WhatsApp pra muitos números do mesmo IP.
+    if (input.ipHash) {
+      const sinceIso = new Date(Date.now() - OTP_IP_WINDOW_MS).toISOString()
+      const { count } = await supabaseAdmin
+        .from('storefront_visualizer_otps')
+        .select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).eq('client_ip_hash', input.ipHash)
+        .gte('created_at', sinceIso)
+      if ((count ?? 0) >= OTP_IP_MAX_PER_WINDOW) {
+        throw new HttpException('Muitas solicitações. Tente novamente mais tarde.', HttpStatus.TOO_MANY_REQUESTS)
+      }
+    }
 
     // Upsert do cliente (mantém créditos se já existe; reseta validação)
     const existing = await this.findCustomer(orgId, phone)
@@ -177,7 +207,7 @@ export class StorefrontVisualizerService {
       customerId = existing.id
       await supabaseAdmin
         .from('storefront_visualizer_customers')
-        .update({ name, email, store_slug: input.slug })
+        .update({ name, email, store_slug: input.slug, consent_at: nowIso })
         .eq('id', customerId)
     } else {
       const { data, error } = await supabaseAdmin
@@ -188,6 +218,7 @@ export class StorefrontVisualizerService {
           name, email, phone,
           generations_allowed: clampInt(settings.default_generations ?? DEFAULT_GENERATIONS, 1, 50),
           client_ip_hash:      input.ipHash ?? null,
+          consent_at:          nowIso,
         })
         .select('id')
         .maybeSingle()
@@ -215,6 +246,7 @@ export class StorefrontVisualizerService {
         phone,
         code_hash:  this.hashCode(code),
         expires_at: new Date(Date.now() + OTP_TTL_MS).toISOString(),
+        client_ip_hash: input.ipHash ?? null,
       })
 
     // Envia o código por WhatsApp (cria contato no Active de quebra)
@@ -342,6 +374,22 @@ export class StorefrontVisualizerService {
 
     const store = await this.resolveStore(customer.store_slug)
     const settings = store.visualizer_settings ?? {}
+
+    // 0. Teto de custo diário por org (anti-runaway). Soma o custo das gerações
+    //    de hoje; se passou do limite, recusa sem debitar crédito.
+    const cap = Number(settings.daily_cost_cap_usd ?? DEFAULT_DAILY_COST_CAP_USD)
+    if (Number.isFinite(cap) && cap > 0) {
+      const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
+      const { data: todays } = await supabaseAdmin
+        .from('storefront_visualizer_generations')
+        .select('cost_usd')
+        .eq('organization_id', orgId)
+        .gte('created_at', dayStart.toISOString())
+      const spent = (todays ?? []).reduce((s, r) => s + Number((r as { cost_usd: number | null }).cost_usd ?? 0), 0)
+      if (spent >= cap) {
+        throw new ForbiddenException('O limite diário de gerações desta loja foi atingido. Tente novamente amanhã.')
+      }
+    }
 
     // 1. Valida + decodifica a foto da cena
     const { buffer, mime } = this.decodeImage(input.sceneImageBase64)
@@ -688,6 +736,7 @@ export class StorefrontVisualizerService {
     if (patch.coupon_code !== undefined)         next.coupon_code = String(patch.coupon_code).trim().slice(0, 40) || undefined
     if (patch.prompt_extra !== undefined)        next.prompt_extra = String(patch.prompt_extra).slice(0, 600) || undefined
     if (patch.default_generations !== undefined) next.default_generations = clampInt(Number(patch.default_generations), 1, 50)
+    if (patch.daily_cost_cap_usd !== undefined)  next.daily_cost_cap_usd = clampInt(Number(patch.daily_cost_cap_usd), 1, 500)
     if (patch.pipeline_id !== undefined)         next.pipeline_id = patch.pipeline_id || undefined
     if (patch.stage_id !== undefined)            next.stage_id = patch.stage_id || undefined
     if (patch.assigned_to !== undefined)         next.assigned_to = patch.assigned_to || undefined

@@ -36,7 +36,7 @@ export class StorefrontVisualizerPublicController {
   register(
     @Req() req: Request,
     @Param('slug') slug: string,
-    @Body() body: { name?: string; email?: string; phone?: string },
+    @Body() body: { name?: string; email?: string; phone?: string; consent?: boolean },
   ) {
     if (!body?.name || !body?.email || !body?.phone) {
       throw new BadRequestException('Preencha nome, e-mail e WhatsApp.')
@@ -47,10 +47,11 @@ export class StorefrontVisualizerPublicController {
     )
     return this.svc.register({
       slug,
-      name:   body.name,
-      email:  body.email,
-      phone:  body.phone,
-      ipHash: ip ? hashIp(ip) : null,
+      name:    body.name,
+      email:   body.email,
+      phone:   body.phone,
+      consent: body.consent === true,
+      ipHash:  ip ? hashIp(ip) : null,
     })
   }
 
