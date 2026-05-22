@@ -10,8 +10,20 @@ import {
   type SocialChannel,
   type SocialContent,
   type SocialContentStatus,
+  type SocialImageFormat,
+  type SocialPostImage,
   SOCIAL_CHANNELS,
+  SOCIAL_IMAGE_FORMATS,
 } from './social-content.types'
+import { randomUUID } from 'node:crypto'
+
+/** Força https:// (fotos do ML vêm http://; provedores de imagem rejeitam http). */
+function toHttps(url: string): string {
+  const u = (url ?? '').trim()
+  if (u.startsWith('http://')) return 'https://' + u.slice('http://'.length)
+  if (u.startsWith('//'))      return 'https:' + u
+  return u
+}
 
 interface GenerateInput {
   orgId:    string
@@ -184,6 +196,185 @@ export class SocialContentService {
       cost_usd:  totalCost,
       items:     allItems,
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // GERAÇÃO VISUAL (e-Click Social AI — SV1)
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Gera N imagens de post social a partir de um produto. Usa a foto do
+   *  produto como REFERÊNCIA (Gemini multi-image edit, feature creative_image)
+   *  pra preservar o produto real numa cena social estilizada. Cada imagem é
+   *  persistida no bucket público + tabela social_post_images. */
+  async generatePostImage(input: {
+    orgId:       string
+    userId:      string
+    productId:   string
+    format:      SocialImageFormat
+    style?:      string
+    n?:          number
+    extraPrompt?: string
+  }): Promise<{ images: SocialPostImage[]; cost_usd: number }> {
+    if (!SOCIAL_IMAGE_FORMATS.includes(input.format)) {
+      throw new BadRequestException(`format inválido: ${input.format}`)
+    }
+    const n = Math.max(1, Math.min(4, input.n ?? 2))
+
+    const product = await this.fetchProductForImage(input.productId, input.orgId)
+    const refPhoto = product.photo_urls?.find(u => !!u)
+    if (!refPhoto) {
+      throw new BadRequestException('Produto sem foto — adicione ao menos 1 imagem antes de gerar')
+    }
+
+    const prompt = this.buildImagePrompt(product, input.format, input.style, input.extraPrompt)
+    // feed=square(1:1), story=story(9:16), wide=wide(16:9)
+    const imgFormat = input.format === 'feed' ? 'square' : input.format === 'story' ? 'story' : 'wide'
+
+    const out = await this.llm.generateImage({
+      orgId:           input.orgId,
+      feature:         'creative_image',
+      prompt,
+      sourceImageUrls: [toHttps(refPhoto)],
+      format:          imgFormat as 'square' | 'story' | 'wide',
+      n,
+    })
+
+    if (!out.images?.length) {
+      throw new BadRequestException('IA não retornou imagem — tente novamente')
+    }
+
+    // Upload de cada variação pro bucket + persiste
+    const perImageCost = out.images.length > 0 ? out.costUsd / out.images.length : 0
+    const rows: Array<Partial<SocialPostImage>> = []
+    for (const img of out.images) {
+      const bytes = await this.imageToBuffer(img)
+      if (!bytes) continue
+      const path = `${input.orgId}/social/${randomUUID()}.png`
+      const publicUrl = await this.uploadToBucket(path, bytes)
+      rows.push({
+        organization_id: input.orgId,
+        product_id:      input.productId,
+        user_id:         input.userId,
+        format:          input.format,
+        style:           input.style ?? null,
+        prompt,
+        image_url:       publicUrl,
+        storage_path:    path,
+        provider:        out.provider,
+        model:           out.model,
+        cost_usd:        perImageCost,
+      })
+    }
+    if (rows.length === 0) {
+      throw new BadRequestException('Falha ao processar as imagens geradas')
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('social_post_images')
+      .insert(rows)
+      .select('*')
+    if (error) {
+      this.logger.error(`[social-content] insert social_post_images falhou: ${error.message}`)
+      throw new BadRequestException(`Erro ao salvar imagens: ${error.message}`)
+    }
+    return { images: (data ?? []) as SocialPostImage[], cost_usd: out.costUsd }
+  }
+
+  async listPostImages(orgId: string, productId?: string, limit = 60): Promise<SocialPostImage[]> {
+    let q = supabaseAdmin
+      .from('social_post_images')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(limit, 200))
+    if (productId) q = q.eq('product_id', productId)
+    const { data, error } = await q
+    if (error) throw new BadRequestException(`Erro ao listar: ${error.message}`)
+    return (data ?? []) as SocialPostImage[]
+  }
+
+  async deletePostImage(id: string, orgId: string): Promise<{ ok: true }> {
+    const { data } = await supabaseAdmin
+      .from('social_post_images')
+      .select('storage_path')
+      .eq('id', id).eq('organization_id', orgId)
+      .maybeSingle()
+    await supabaseAdmin.from('social_post_images').delete().eq('id', id).eq('organization_id', orgId)
+    const path = (data as { storage_path?: string } | null)?.storage_path
+    if (path) {
+      await supabaseAdmin.storage.from('storefront-assets').remove([path]).catch(() => {})
+    }
+    return { ok: true }
+  }
+
+  /** Monta o prompt de imagem a partir do produto + estilo + formato. */
+  private buildImagePrompt(
+    product: { name: string; brand: string | null; category: string | null },
+    format: SocialImageFormat,
+    style?: string,
+    extra?: string,
+  ): string {
+    const styleHint: Record<string, string> = {
+      lifestyle: 'em um ambiente real de uso, contexto lifestyle aspiracional, luz natural suave',
+      studio:    'em fundo de estúdio limpo e elegante, iluminação profissional de produto',
+      promo:     'com clima promocional energético, destaque visual forte, cores chamativas',
+      seasonal:  'com ambientação sazonal sutil e elegante',
+      minimal:   'composição minimalista, muito espaço negativo, estética clean premium',
+      vibrant:   'cores vibrantes e saturadas, composição moderna e energética',
+    }
+    const formatHint: Record<SocialImageFormat, string> = {
+      feed:  'enquadramento quadrado (1:1) para feed do Instagram',
+      story: 'enquadramento vertical (9:16) para Story/Reels, produto centralizado com respiro no topo e base',
+      wide:  'enquadramento horizontal (16:9)',
+    }
+    const sty = style && styleHint[style] ? styleHint[style] : styleHint.lifestyle
+    const parts = [
+      `Crie uma imagem de post para redes sociais do produto "${product.name}"`,
+      product.brand ? `da marca ${product.brand}` : '',
+      product.category ? `(categoria: ${product.category})` : '',
+      `${sty}.`,
+      `${formatHint[format]}.`,
+      'PRESERVE FIELMENTE o produto da imagem de referência — mesma forma, cor e detalhes; apenas componha a cena ao redor.',
+      'Sem texto sobreposto, sem marca dágua, sem logos inventados. Resultado fotográfico realista, alta qualidade, pronto pra publicar.',
+      extra?.trim() ? `Instrução adicional: ${extra.trim()}` : '',
+    ]
+    return parts.filter(Boolean).join(' ')
+  }
+
+  /** Converte a saída do generateImage (b64 ou url) em Buffer. */
+  private async imageToBuffer(img: { url?: string; b64?: string }): Promise<Buffer | null> {
+    try {
+      if (img.b64) return Buffer.from(img.b64, 'base64')
+      if (img.url) {
+        const res = await fetch(img.url)
+        if (!res.ok) return null
+        return Buffer.from(await res.arrayBuffer())
+      }
+    } catch (e) {
+      this.logger.warn(`[social-content] imageToBuffer falhou: ${(e as Error).message}`)
+    }
+    return null
+  }
+
+  /** Upload pro bucket público storefront-assets, retorna URL pública. */
+  private async uploadToBucket(path: string, bytes: Buffer): Promise<string> {
+    const { error } = await supabaseAdmin.storage
+      .from('storefront-assets')
+      .upload(path, bytes, { contentType: 'image/png', upsert: true })
+    if (error) throw new BadRequestException(`Erro no upload: ${error.message}`)
+    return supabaseAdmin.storage.from('storefront-assets').getPublicUrl(path).data.publicUrl
+  }
+
+  private async fetchProductForImage(productId: string, orgId: string) {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('id, name, brand, category, photo_urls')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (error) throw new BadRequestException(`Erro ao buscar produto: ${error.message}`)
+    if (!data) throw new NotFoundException('Produto não encontrado')
+    return data as { id: string; name: string; brand: string | null; category: string | null; photo_urls: string[] | null }
   }
 
   // ─────────────────────────────────────────────────────────────────

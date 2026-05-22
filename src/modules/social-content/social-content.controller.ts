@@ -9,6 +9,7 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import type {
   SocialChannel,
   SocialContentStatus,
+  SocialImageFormat,
 } from './social-content.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -155,5 +156,45 @@ export class SocialContentController {
   publishNow(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.publishContent(id, u.orgId)
+  }
+
+  // ── Social AI — geração visual (SV1) ──────────────────────────────
+
+  /** POST /social/products/:id/generate-image — gera N imagens de post. */
+  @Post('products/:id/generate-image')
+  @HttpCode(HttpStatus.OK)
+  generateImage(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') productId: string,
+    @Body() body: { format: SocialImageFormat; style?: string; n?: number; extra_prompt?: string },
+  ) {
+    if (!u.orgId)       throw new BadRequestException('orgId ausente')
+    if (!body?.format)  throw new BadRequestException('format obrigatório (feed|story|wide)')
+    return this.svc.generatePostImage({
+      orgId:       u.orgId,
+      userId:      u.id,
+      productId,
+      format:      body.format,
+      style:       body.style,
+      n:           body.n,
+      extraPrompt: body.extra_prompt,
+    })
+  }
+
+  /** GET /social/post-images?product_id= — galeria de imagens geradas. */
+  @Get('post-images')
+  listPostImages(
+    @ReqUser() u: ReqUserPayload,
+    @Query('product_id') productId?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listPostImages(u.orgId, productId)
+  }
+
+  /** DELETE /social/post-images/:id */
+  @Delete('post-images/:id')
+  deletePostImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.deletePostImage(id, u.orgId)
   }
 }

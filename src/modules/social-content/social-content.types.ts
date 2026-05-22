@@ -51,3 +51,38 @@ export const SOCIAL_CHANNELS: SocialChannel[] = [
   'whatsapp_broadcast',
   'email_marketing',
 ]
+
+// ── e-Click Social AI — geração visual (SV1) ───────────────────────────
+
+/** Formato da imagem social. feed=1:1, story=9:16 (story/reels), wide=16:9. */
+export type SocialImageFormat = 'feed' | 'story' | 'wide'
+
+/** Estilo visual da cena gerada. */
+export type SocialImageStyle =
+  | 'lifestyle'   // produto em ambiente real/uso
+  | 'studio'      // fundo limpo, foco no produto
+  | 'promo'       // com clima promocional/destaque
+  | 'seasonal'    // temática sazonal
+  | 'minimal'     // minimalista, espaço negativo
+  | 'vibrant'     // cores vibrantes, energético
+
+export const SOCIAL_IMAGE_FORMATS: SocialImageFormat[] = ['feed', 'story', 'wide']
+export const SOCIAL_IMAGE_STYLES: SocialImageStyle[] = [
+  'lifestyle', 'studio', 'promo', 'seasonal', 'minimal', 'vibrant',
+]
+
+export interface SocialPostImage {
+  id:              string
+  organization_id: string
+  product_id:      string | null
+  user_id:         string | null
+  format:          SocialImageFormat
+  style:           string | null
+  prompt:          string | null
+  image_url:       string
+  storage_path:    string | null
+  provider:        string | null
+  model:           string | null
+  cost_usd:        number
+  created_at:      string
+}
