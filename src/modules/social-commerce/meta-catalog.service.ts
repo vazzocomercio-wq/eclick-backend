@@ -104,6 +104,11 @@ export class MetaCatalogService {
       scope:         META_SCOPES,
       state,
       redirect_uri:  redirectUri,
+      // Força a Meta a RE-EXIBIR o diálogo de permissões mesmo se o app já
+      // estiver autorizado. Sem isso, ao adicionar scopes novos (ex: os do
+      // Instagram) a Meta pula o consent e devolve token com os scopes
+      // ANTIGOS — o usuário "reconecta" mas nada muda.
+      auth_type:     'rerequest',
     })
     return { authorize_url: `${META_AUTH_URL}?${params.toString()}` }
   }
