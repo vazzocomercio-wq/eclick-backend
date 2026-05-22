@@ -226,6 +226,8 @@ export type SlideBlock = BlockBase<'slide', {
   ctaHref?:     string
   textColor?:   string
   textAlign?:   'left' | 'center' | 'right'
+  overlayColor?:   string
+  overlayOpacity?: number
 }>
 
 export type Block =
