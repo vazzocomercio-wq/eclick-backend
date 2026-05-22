@@ -2592,6 +2592,8 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - **Ajustar à mão** — editor manual: tema (modo, cores, fonte, cantos, densidade), cores premium, os efeitos globais (revelar seções ao rolar, marca d'água, parallax nos banners, troca de foto no hover) e o gerenciador de seções — reordenar, adicionar, remover e editar os textos de cada seção.
 - **Imagem do banner** — o botão "Gerar imagem do banner" cria com IA uma foto pro destaque da loja.
 - **Categorias / coleções** — na seção "Grade de coleções", cada card de categoria tem nome + imagem. A imagem pode vir de upload, URL, ou ser **gerada por IA usando o nome da categoria** (ex.: digite "Sala de Jantar" e clique em "Gerar imagem da categoria" — a IA cria uma cena ambiente combinando com o estilo da loja). Gera uma por vez, sob demanda.
+- **Tipografia por seção (Avançado)** — toda seção em "Avançado" tem o painel *Tipografia*, que sobrescreve o tema SÓ naquela seção: **cor do texto** (títulos + corpo), **cor do texto secundário** e **fonte** (30 opções, agrupadas). Deixe vazio = herda o tema global. Use, por exemplo, pra deixar o título de UM banner amarelo sem mudar a loja inteira. Ex.: "como deixo o texto do banner amarelo?" → abra a seção em Avançado > Tipografia > ligue "Cor do texto" e escolha o amarelo.
+- **Transparência (overlay) sobre imagens** — onde tem imagem servindo de fundo com texto por cima, dá pra escurecer/clarear a imagem pra o texto ficar legível: (a) no **Banner com imagem** (ImageBanner) tem "Overlay (cor)" + "Transparência do overlay (0-1)" no editor; (b) em cada **slide do carrossel**, idem; (c) em qualquer seção que use imagem no painel *Fundo*, tem os campos de overlay ali. 0 = imagem pura; 0.4 ≈ escurece pra dar contraste. Ex.: "como escureço a imagem do banner pra ler o texto?" → editor do banner > Transparência do overlay > 0.4.
 - O **preview ao lado** mostra a vitrine na hora.
 
 **A vitrine premium** tem faixa de anúncio, cabeçalho fixo, hero em carrossel, vitrines de produtos, banners, grade de categorias, bloco editorial e rodapé rico — além de uma página de catálogo em /loja/seu-slug/produtos com filtro por categoria e ordenação.
@@ -2605,7 +2607,7 @@ const STOREFRONT_DESIGNER_ENTRIES: KbEntry[] = [
 - A loja precisa estar com status Ativa (em Config da Loja) para ficar pública.
 - Os produtos da vitrine vêm do catálogo: só aparecem os que foram enviados para a loja (Catálogo > Produtos > "Enviar para a loja") e com estoque maior que zero.
 - Gerar um design substitui o anterior — é seguro, dá pra gerar quantas vezes quiser.`,
-    tags: ['loja', 'storefront', 'design', 'vitrine', 'ia', 'premium', 'catalogo'],
+    tags: ['loja', 'storefront', 'design', 'vitrine', 'ia', 'premium', 'catalogo', 'tipografia', 'fonte', 'cor do texto', 'overlay', 'transparencia', 'banner'],
   },
 ]
 
