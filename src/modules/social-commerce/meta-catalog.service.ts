@@ -25,24 +25,34 @@ const GRAPH_API_BASE   = 'https://graph.facebook.com/v19.0'
 const META_AUTH_URL    = 'https://www.facebook.com/v19.0/dialog/oauth'
 const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 
-// Scopes mínimos pra Catalog + WhatsApp Business.
+// Scopes pra Catalog + WhatsApp Business + Instagram Shopping.
 //
-// Instagram Shop fica fora deste batch — a Meta deprecou `instagram_basic`
-// e o substituto `instagram_business_basic` exige config especifica de
-// Login mode no painel do app (Instagram API with Instagram Login vs
-// Facebook Login). Pra reativar IG depois, descobrir o nome aceito pelo
-// app especifico e adicionar de volta — ou habilitar `instagram_business_*`
-// scopes diretamente no caso de uso "Gerenciar mensagens e conteudo no
-// Instagram" no painel da Meta.
+// IMPORTANTE — modelo de login: usamos "Instagram API with Facebook Login"
+// (o app principal, NAO o app separado "e-Click-IG" do Instagram Login).
+// Por isso os scopes sao os classicos `instagram_*` (NAO `instagram_business_*`,
+// que pertencem ao modelo Instagram Login e quebrariam o OAuth se misturados).
+// Os `instagram_*` ficam disponiveis depois de adicionar o caso de uso
+// "API do Instagram (com login do Facebook)" no painel do app.
 //
 // whatsapp_business_management: vincular catalog ao WABA + ler config
-// whatsapp_business_messaging: enviar produtos em conversas (futuro W4)
+// whatsapp_business_messaging: enviar produtos em conversas (W4)
+// instagram_basic: ler conta IG + midia (posts/reels) — Frente 2 S1
+// instagram_shopping_tag_products: taguear produtos em posts — Frente 2 S2
+// instagram_content_publish: publicar posts do e-Click (Frente 2 modo B)
+// pages_show_list: necessario pro fluxo IG (listar Pages com IG vinculado)
+//
+// Frente 4 (DM no Active) vai precisar de instagram_manage_messages +
+// instagram_manage_comments — adicionar quando construir (re-OAuth na epoca).
 const META_SCOPES = [
   'catalog_management',
   'business_management',
   'pages_read_engagement',
+  'pages_show_list',
   'whatsapp_business_management',
   'whatsapp_business_messaging',
+  'instagram_basic',
+  'instagram_shopping_tag_products',
+  'instagram_content_publish',
 ].join(',')
 
 @Injectable()
@@ -163,19 +173,24 @@ export class MetaCatalogService {
     // depois selecionar Page+IG via /setup-catalog)
     const { data: existing } = await supabaseAdmin
       .from('social_commerce_channels')
-      .select('id')
+      .select('id, external_catalog_id, status')
       .eq('organization_id', stateRow.organization_id)
       .eq('channel', 'instagram_shop')
       .maybeSingle()
 
     let channelId: string
     if (existing?.id) {
+      // Re-OAuth (renovar token / adicionar scopes IG): se o canal JA tem
+      // catalog configurado, preservar 'connected' — senao o re-OAuth
+      // derrubaria o catalogo que ja funciona pra 'connecting' (requireConnected
+      // exige 'connected', quebraria sync + widget ate refazer o setup).
+      const keepConnected = Boolean(existing.external_catalog_id) && existing.status === 'connected'
       const { error: updErr } = await supabaseAdmin
         .from('social_commerce_channels')
         .update({
           access_token:     accessToken,
           token_expires_at: expiresAt,
-          status:           'connecting',
+          status:           keepConnected ? 'connected' : 'connecting',
           last_error:       null,
         })
         .eq('id', existing.id)
@@ -213,6 +228,97 @@ export class MetaCatalogService {
     }
     if (!res.ok) throw new BadRequestException(`Meta listPages: ${body.error?.message ?? 'erro'}`)
     return body.data ?? []
+  }
+
+  // ── Instagram Shopping (Frente 2) ────────────────────────────────────────
+
+  /** Resolve o IG Business Account de uma Page (id + username + foto).
+   *  Precisa do scope instagram_basic. Retorna null se a Page nao tem IG. */
+  async getInstagramAccount(accessToken: string, pageId: string): Promise<{
+    id: string; username?: string; profile_picture_url?: string; name?: string
+  } | null> {
+    const url = `${GRAPH_API_BASE}/${pageId}?fields=instagram_business_account{id,username,name,profile_picture_url}&access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as {
+      instagram_business_account?: { id: string; username?: string; name?: string; profile_picture_url?: string }
+      error?: { message?: string }
+    }
+    if (!res.ok) throw new BadRequestException(`Meta getInstagramAccount: ${body.error?.message ?? 'erro'}`)
+    return body.instagram_business_account ?? null
+  }
+
+  /** Lista mídia (posts/reels) de um IG Business Account.
+   *  Precisa instagram_basic. `after` = cursor de paginação. */
+  async listInstagramMedia(accessToken: string, igUserId: string, limit = 25, after?: string): Promise<{
+    data: Array<{
+      id: string
+      media_type: 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM'
+      media_url?: string
+      thumbnail_url?: string
+      caption?: string
+      permalink?: string
+      timestamp?: string
+    }>
+    after?: string
+  }> {
+    const fields = 'id,media_type,media_url,thumbnail_url,caption,permalink,timestamp'
+    let url = `${GRAPH_API_BASE}/${igUserId}/media?fields=${fields}&limit=${limit}&access_token=${accessToken}`
+    if (after) url += `&after=${encodeURIComponent(after)}`
+    const res = await fetch(url)
+    const body = await res.json() as {
+      data?: Array<{ id: string; media_type: 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM'; media_url?: string; thumbnail_url?: string; caption?: string; permalink?: string; timestamp?: string }>
+      paging?: { cursors?: { after?: string } }
+      error?: { message?: string }
+    }
+    if (!res.ok) throw new BadRequestException(`Meta listInstagramMedia: ${body.error?.message ?? 'erro'}`)
+    return { data: body.data ?? [], after: body.paging?.cursors?.after }
+  }
+
+  /** Lê os product tags ja aplicados num media. Precisa instagram_shopping_tag_products. */
+  async getMediaProductTags(accessToken: string, mediaId: string): Promise<Array<{
+    product_id: string; merchant_id?: string; x?: number; y?: number; name?: string
+  }>> {
+    const url = `${GRAPH_API_BASE}/${mediaId}/product_tags?access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as {
+      data?: Array<{ product_id: string; merchant_id?: string; x?: number; y?: number; name?: string }>
+      error?: { message?: string }
+    }
+    if (!res.ok) throw new BadRequestException(`Meta getMediaProductTags: ${body.error?.message ?? 'erro'}`)
+    return body.data ?? []
+  }
+
+  /** Aplica product tags num media JA publicado. Precisa
+   *  instagram_shopping_tag_products. Para IMAGE: x,y relativos 0-1.
+   *  Para CAROUSEL/VIDEO a Meta ignora x,y. */
+  async tagProductsOnMedia(accessToken: string, mediaId: string, tags: Array<{
+    product_id: string; x?: number; y?: number
+  }>): Promise<{ success: boolean }> {
+    const url = `${GRAPH_API_BASE}/${mediaId}/product_tags`
+    const params = new URLSearchParams({
+      access_token: accessToken,
+      updated_tags: JSON.stringify(tags.map(t => ({
+        product_id: t.product_id,
+        ...(t.x != null && t.y != null ? { x: t.x, y: t.y } : {}),
+      }))),
+    })
+    const res = await fetch(`${url}?${params.toString()}`, { method: 'POST' })
+    const body = await res.json() as { success?: boolean; error?: { message?: string } }
+    if (!res.ok) throw new BadRequestException(`Meta tagProductsOnMedia: ${body.error?.message ?? 'erro'}`)
+    return { success: Boolean(body.success ?? true) }
+  }
+
+  /** Remove product tags de um media. */
+  async untagProductsOnMedia(accessToken: string, mediaId: string, productIds: string[]): Promise<{ success: boolean }> {
+    const url = `${GRAPH_API_BASE}/${mediaId}/product_tags`
+    const params = new URLSearchParams({
+      access_token:   accessToken,
+      deleted_tags:   JSON.stringify(productIds.map(id => ({ product_id: id }))),
+    })
+    const res = await fetch(`${url}?${params.toString()}`, { method: 'DELETE' })
+    const body = await res.json() as { success?: boolean; error?: { message?: string } }
+    if (!res.ok) throw new BadRequestException(`Meta untagProductsOnMedia: ${body.error?.message ?? 'erro'}`)
+    return { success: Boolean(body.success ?? true) }
   }
 
   /** Lista catálogos da Business Manager do user (precisa business_management).

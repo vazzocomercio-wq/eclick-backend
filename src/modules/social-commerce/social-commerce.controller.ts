@@ -157,6 +157,68 @@ export class SocialCommerceController {
     return this.svc.setupCatalog(u.orgId, body)
   }
 
+  // ── Instagram Shopping — Tag de produtos (Frente 2) ──────────────
+
+  /** GET /social-commerce/instagram/ig-account — resolve + persiste IG account id */
+  @Get('instagram/ig-account')
+  @UseGuards(SupabaseAuthGuard)
+  igAccount(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.resolveInstagramAccount(u.orgId)
+  }
+
+  /** GET /social-commerce/instagram/media?after= — lista posts/reels */
+  @Get('instagram/media')
+  @UseGuards(SupabaseAuthGuard)
+  igMedia(@ReqUser() u: ReqUserPayload, @Query('after') after?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listInstagramMedia(u.orgId, after)
+  }
+
+  /** GET /social-commerce/instagram/taggable-products?search= */
+  @Get('instagram/taggable-products')
+  @UseGuards(SupabaseAuthGuard)
+  taggableProducts(@ReqUser() u: ReqUserPayload, @Query('search') search?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listTaggableProducts(u.orgId, search)
+  }
+
+  /** GET /social-commerce/instagram/media/:id/tags */
+  @Get('instagram/media/:id/tags')
+  @UseGuards(SupabaseAuthGuard)
+  getMediaTags(@ReqUser() u: ReqUserPayload, @Param('id') mediaId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getMediaTags(u.orgId, mediaId)
+  }
+
+  /** POST /social-commerce/instagram/media/:id/tag-products */
+  @Post('instagram/media/:id/tag-products')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  tagProducts(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') mediaId: string,
+    @Body() body: { tags: Array<{ external_product_id: string; x?: number; y?: number }> },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.tags)) throw new BadRequestException('tags[] obrigatório')
+    return this.svc.tagProductsOnMedia(u.orgId, mediaId, body.tags)
+  }
+
+  /** POST /social-commerce/instagram/media/:id/untag-products */
+  @Post('instagram/media/:id/untag-products')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  untagProducts(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') mediaId: string,
+    @Body() body: { external_product_ids: string[] },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.external_product_ids)) throw new BadRequestException('external_product_ids[] obrigatório')
+    return this.svc.untagProductsOnMedia(u.orgId, mediaId, body.external_product_ids)
+  }
+
   // ── Sync ─────────────────────────────────────────────────────────
 
   /** POST /social-commerce/instagram/sync */

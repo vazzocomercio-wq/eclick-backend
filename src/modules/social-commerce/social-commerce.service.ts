@@ -76,6 +76,139 @@ export class SocialCommerceService {
     return this.meta.listCatalogs(ch.access_token, businessId)
   }
 
+  // ── Instagram Shopping — Tag de produtos (Frente 2) ──────────────────
+
+  /** Resolve o IG Business Account a partir da Page configurada e persiste
+   *  em config.instagram_account_id (corrige o null herdado do setup que
+   *  só capturava a Page). Retorna a conta IG resolvida. */
+  async resolveInstagramAccount(orgId: string): Promise<{
+    id: string; username?: string; name?: string; profile_picture_url?: string
+  }> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    const pageId = (ch.config as Record<string, unknown>)?.page_id as string | undefined
+      ?? ch.external_account_id
+    if (!pageId) throw new BadRequestException('Page do Facebook não configurada no canal')
+
+    const igAccount = await this.meta.getInstagramAccount(ch.access_token!, pageId)
+    if (!igAccount) {
+      throw new BadRequestException(
+        'A Página do Facebook não tem uma conta Instagram Business vinculada. ' +
+        'Vincule @vazzooficial à Página Vazzo no Meta Business Suite.',
+      )
+    }
+
+    await supabaseAdmin
+      .from('social_commerce_channels')
+      .update({ config: { ...(ch.config as Record<string, unknown>), instagram_account_id: igAccount.id, instagram_username: igAccount.username } })
+      .eq('id', ch.id)
+
+    return igAccount
+  }
+
+  /** IG account id atual (do config) ou resolve on-the-fly. */
+  private async getIgUserId(ch: SocialCommerceChannelRow): Promise<string> {
+    const cfg = (ch.config ?? {}) as Record<string, unknown>
+    const cached = cfg.instagram_account_id as string | null | undefined
+    if (cached) return cached
+    const pageId = (cfg.page_id as string | undefined) ?? ch.external_account_id
+    if (!pageId) throw new BadRequestException('Page do Facebook não configurada')
+    const ig = await this.meta.getInstagramAccount(ch.access_token!, pageId)
+    if (!ig) throw new BadRequestException('Página sem conta Instagram Business vinculada')
+    await supabaseAdmin
+      .from('social_commerce_channels')
+      .update({ config: { ...cfg, instagram_account_id: ig.id, instagram_username: ig.username } })
+      .eq('id', ch.id)
+    return ig.id
+  }
+
+  /** Lista posts/reels do IG, marcando quais já têm produtos tagueados
+   *  (1 chamada extra de product_tags por mídia — só pros que são IMAGE/
+   *  CAROUSEL, que aceitam tag). */
+  async listInstagramMedia(orgId: string, after?: string): Promise<{
+    data: Array<{
+      id: string; media_type: string; media_url?: string; thumbnail_url?: string
+      caption?: string; permalink?: string; timestamp?: string; tagged_count: number
+    }>
+    after?: string
+  }> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    const igUserId = await this.getIgUserId(ch)
+    const media = await this.meta.listInstagramMedia(ch.access_token!, igUserId, 25, after)
+
+    // Anota tagged_count por mídia (best-effort — falha não quebra a lista)
+    const withTags = await Promise.all(media.data.map(async m => {
+      let tagged_count = 0
+      try {
+        const tags = await this.meta.getMediaProductTags(ch.access_token!, m.id)
+        tagged_count = tags.length
+      } catch { /* mídia que não aceita tag ou sem permissão — ignora */ }
+      return { ...m, tagged_count }
+    }))
+    return { data: withTags, after: media.after }
+  }
+
+  /** Produtos disponíveis pra taguear — vem do NOSSO DB (mappings já
+   *  sincronizados ao catálogo Meta). external_product_id é o ID do produto
+   *  no catálogo IG, que é o que tagProductsOnMedia espera. */
+  async listTaggableProducts(orgId: string, search?: string): Promise<Array<{
+    product_id: string; external_product_id: string; name: string; image?: string; price?: number
+  }>> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    const { data, error } = await supabaseAdmin
+      .from('social_commerce_products')
+      .select('product_id, external_product_id, synced_data')
+      .eq('channel_id', ch.id)
+      .eq('sync_status', 'synced')
+      .not('external_product_id', 'is', null)
+      .limit(500)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+
+    let rows = (data ?? []).map(r => {
+      const sd = (r.synced_data ?? {}) as Record<string, unknown>
+      return {
+        product_id:          r.product_id as string,
+        external_product_id: r.external_product_id as string,
+        name:                (sd.title as string) ?? '',
+        image:               (sd.image_link as string) ?? undefined,
+        price:               undefined as number | undefined,
+      }
+    })
+    if (search?.trim()) {
+      const q = search.trim().toLowerCase()
+      rows = rows.filter(r => r.name.toLowerCase().includes(q))
+    }
+    return rows
+  }
+
+  /** Lê tags existentes de uma mídia. */
+  async getMediaTags(orgId: string, mediaId: string) {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    return this.meta.getMediaProductTags(ch.access_token!, mediaId)
+  }
+
+  /** Tagueia produtos numa mídia. `tags[].external_product_id` é o ID do
+   *  produto no catálogo IG (não o product_id interno). x,y opcionais (0-1). */
+  async tagProductsOnMedia(orgId: string, mediaId: string, tags: Array<{
+    external_product_id: string; x?: number; y?: number
+  }>): Promise<{ success: boolean; tagged: number }> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    if (!tags.length) throw new BadRequestException('Nenhum produto pra taguear')
+    await this.meta.tagProductsOnMedia(
+      ch.access_token!,
+      mediaId,
+      tags.map(t => ({ product_id: t.external_product_id, x: t.x, y: t.y })),
+    )
+    // Valida na fonte (regra de ouro Meta) — confirma que landou
+    const after = await this.meta.getMediaProductTags(ch.access_token!, mediaId)
+    return { success: true, tagged: after.length }
+  }
+
+  /** Remove tags de produtos de uma mídia. */
+  async untagProductsOnMedia(orgId: string, mediaId: string, externalProductIds: string[]): Promise<{ success: boolean }> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+    return this.meta.untagProductsOnMedia(ch.access_token!, mediaId, externalProductIds)
+  }
+
   /** Salva escolhas finais (Page + IG Business Account + Catalog ID).
    *  Marca o canal como 'connected'. */
   async setupCatalog(orgId: string, body: {
