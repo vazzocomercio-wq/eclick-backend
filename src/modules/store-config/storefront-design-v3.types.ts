@@ -99,6 +99,13 @@ export interface Visibility {
   mobile:  boolean
 }
 
+/** Override de tipografia por seção (opcional) — espelho do frontend. */
+export interface SectionTypography {
+  textColor?:  string
+  mutedColor?: string
+  fontPair?:   FontPair
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Blocks (atomos)
 // ─────────────────────────────────────────────────────────────────────────
@@ -248,6 +255,7 @@ export interface SectionBase<T extends SectionType, S> {
   visibility:   Visibility
   spacing:      Spacing
   background:   BackgroundStyle
+  typography?:  SectionTypography
   mobileOverrides?: {
     settings?:   Partial<S>
     spacing?:    Partial<Spacing>

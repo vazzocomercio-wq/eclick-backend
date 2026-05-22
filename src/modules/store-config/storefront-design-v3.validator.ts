@@ -21,7 +21,7 @@ import type {
   StorefrontDesignV3, ThemeV3, DesignColorsV3, DesignEffects, ThemeButtons,
   PageDesign, PageMap, Section, SectionType, Block, BlockType, BackgroundStyle,
   Spacing, Visibility, DesignGlobals, SiteHeaderSection, SiteFooterSection,
-  ProductSource,
+  ProductSource, SectionTypography,
 } from './storefront-design-v3.types'
 import {
   THEME_MODES_V3, FONT_PAIRS_V3, RADII_V3, DENSITIES_V3,
@@ -180,6 +180,21 @@ function validateVisibility(raw: unknown): Visibility {
   return { desktop: bool(r.desktop, true), mobile: bool(r.mobile, true) }
 }
 
+/** Override de tipografia da seção. Retorna undefined se nada válido —
+ *  mantém o design enxuto (seção herda 100% do tema). */
+function validateTypography(raw: unknown): SectionTypography | undefined {
+  if (!isObj(raw)) return undefined
+  const out: SectionTypography = {}
+  const tc = optHex(raw.textColor, undefined)
+  if (tc) out.textColor = tc
+  const mc = optHex(raw.mutedColor, undefined)
+  if (mc) out.mutedColor = mc
+  if (typeof raw.fontPair === 'string' && (FONT_PAIRS_V3 as readonly string[]).includes(raw.fontPair)) {
+    out.fontPair = raw.fontPair as SectionTypography['fontPair']
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Blocks (passthrough leniente — confia no editor)
 // ─────────────────────────────────────────────────────────────────────────
@@ -220,13 +235,14 @@ function validateSection(raw: unknown, fallbackId: string): Section | null {
     paddingTop: 80, paddingBottom: 80, marginTop: 0, marginBottom: 0,
   })
   const background = validateBackground(raw.background, { kind: 'none' })
+  const typography = validateTypography(raw.typography)
   const mob = isObj(raw.mobileOverrides) ? raw.mobileOverrides : undefined
   const mobileOverrides = mob ? {
     settings:   isObj(mob.settings)   ? mob.settings   : undefined,
     spacing:    isObj(mob.spacing)    ? mob.spacing    : undefined,
     background: isObj(mob.background) ? mob.background : undefined,
   } : undefined
-  return { id, type, settings, blocks, visibility, spacing, background, mobileOverrides } as Section
+  return { id, type, settings, blocks, visibility, spacing, background, typography, mobileOverrides } as Section
 }
 
 function validateSections(raw: unknown, prefix: string): Section[] {
