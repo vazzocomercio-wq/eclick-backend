@@ -2779,6 +2779,27 @@ Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) 
 - A confirmação é validada na fonte (a Meta confirma quantos produtos ficaram tagueados de fato).`,
     tags: ['loja', 'instagram', 'shopping', 'tag', 'posts', 'reels', 'sacolinha', 'social commerce', 'produtos'],
   },
+  {
+    routes:   ['/dashboard/social/images'],
+    category: 'producao',
+    title:    'Gerador de Imagens IA — Social AI',
+    content: `**A IA transforma a foto do seu produto numa imagem pronta pra postar nas redes sociais.**
+
+**Como usar:**
+1. **Escolha o produto** (busca pelo nome). Só funciona com produto que tem ao menos 1 foto.
+2. **Formato:** Feed (1:1 quadrado), Story/Reels (9:16 vertical) ou Horizontal (16:9).
+3. **Estilo:** Lifestyle (produto em ambiente de uso), Estúdio (fundo limpo), Promocional, Sazonal, Minimalista ou Vibrante.
+4. **Variações:** quantas imagens gerar de uma vez (1 a 4).
+5. **Instrução extra** (opcional): detalhe livre, ex "fundo de natal", "cores quentes".
+6. Clique **Gerar** — em segundos as imagens aparecem na galeria abaixo.
+
+**Como funciona por dentro:** a IA usa a foto real do produto como referência e compõe uma cena social ao redor, **preservando o produto** (mesma forma e cor). Não coloca texto na imagem — a legenda/preço você adiciona ao publicar (use também o Conteúdo Social pra gerar a legenda).
+
+**Galeria:** todas as imagens geradas ficam salvas. Cada uma tem **Baixar** (PNG) e **Excluir**. Clique na imagem pra ampliar.
+
+**Dica:** gere 2-4 variações e escolha a melhor. Custo de IA por imagem é baixo e fica registrado no painel de uso de IA.`,
+    tags: ['social', 'imagem', 'ia', 'post', 'reels', 'instagram', 'gerar', 'criativo', 'produto', 'banner'],
+  },
 ]
 
 export const KB: KbEntry[] = [
