@@ -2633,6 +2633,7 @@ Reúne todos os atalhos comerciais em cards:
 - **Cashback** — % de cada pedido vira saldo pro cliente usar depois
 - **Bônus & Brindes** — Leve X Pague Y, brinde acima de R$ X, presente surpresa
 - **Avaliações** — modera as estrelas dos clientes
+- **Leads da loja** — formulários da vitrine viram contato + card no funil do Active CRM
 - **Recovery de carrinho** — WhatsApp pra quem abandonou o carrinho
 - **Banners IA** — galeria de banners gerados por IA
 - **Fidelidade** — níveis (Bronze/Prata/Ouro) por gasto acumulado
@@ -2685,6 +2686,27 @@ Reúne todos os atalhos comerciais em cards:
 
 **Importante:** o envio depende da integração com o WhatsApp (Active) estar configurada. Sem ela, os carrinhos são rastreados mas nenhuma mensagem sai. O recovery vem **desligado por padrão** — ligue nas configurações quando quiser começar.`,
     tags: ['loja', 'recovery', 'carrinho abandonado', 'whatsapp', 'recuperar venda', 'conversao'],
+  },
+  {
+    routes:   ['/dashboard/loja/leads'],
+    category: 'loja',
+    title:    'Leads da loja — formulários da vitrine que viram card no Active',
+    content: `**Captação de leads: formulários editáveis na vitrine que viram contato + card num funil do Active CRM.**
+
+**Como montar o formulário:** no **Designer da Loja** (modo Avançado), adicione a seção **"Formulário de captação (lead)"**. No inspetor da seção você define:
+- **Conteúdo:** título, descrição, texto do botão e mensagem de sucesso
+- **Campos:** liga/desliga os padrão (nome, telefone, e-mail, mensagem), marca quais são obrigatórios, e adiciona **campos custom** (texto, texto longo, e-mail, telefone)
+- **Destino no Active CRM:** escolhe o **funil** (pipeline) → a **etapa de entrada** → o **responsável** (opcional; vazio = dono da loja recebe)
+
+**O que acontece quando um visitante envia:**
+1. O lead é **sempre salvo** primeiro no e-Click (nada se perde, mesmo se o Active estiver fora do ar).
+2. O sistema empurra pro Active: cria/acha o **contato** (por telefone, senão por e-mail) e abre um **card** no funil/etapa escolhidos, atribuído ao responsável.
+3. O status do lead vira **No Active** (enviado), **Na fila** (aguardando push) ou **Falhou**.
+
+**Nesta tela (/dashboard/loja/leads):** 3 contadores (na fila / no Active / falharam), filtros por status, e a lista com nome + contato + mensagem + campos custom de cada lead. Leads com status *Na fila* ou *Falhou* têm botão **"Enviar pro Active"** pra reprocessar manualmente.
+
+**Importante:** se você não escolher funil/etapa na seção, o formulário ainda funciona e os leads ficam acumulados aqui *Na fila* até você configurar o destino. O push pro Active depende da loja estar conectada ao Active CRM (bridge).`,
+    tags: ['loja', 'leads', 'formulario', 'captacao', 'active', 'crm', 'funil', 'pipeline', 'contato'],
   },
   {
     routes:   ['/dashboard/loja/banners'],
