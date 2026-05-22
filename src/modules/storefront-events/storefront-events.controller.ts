@@ -1,6 +1,8 @@
-import { Controller, Post, Body, BadRequestException } from '@nestjs/common'
+import { Controller, Post, Body, Req, BadRequestException } from '@nestjs/common'
+import { Request } from 'express'
 import { Public } from '../../common/decorators/public.decorator'
 import { StorefrontEventsService } from './storefront-events.service'
+import { hashIp } from '../storefront-leads/storefront-leads.service'
 
 /**
  * Endpoints publicos chamados pela vitrine pra disparar eventos
@@ -38,6 +40,33 @@ export class StorefrontEventsController {
       items:          body.items,
       subtotal:       body.subtotal ?? 0,
       cart_id:        body.cart_id,
+    })
+  }
+
+  /**
+   * POST /storefront/events/track  (beacon público, fire-and-forget)
+   * Body: { slug, sessionId, events: [{ type, productId?, value?, source?, meta? }] }
+   * Nunca retorna erro — beacon não pode quebrar a vitrine.
+   */
+  @Post('track')
+  @Public()
+  track(
+    @Req() req: Request,
+    @Body() body: {
+      slug?:      string
+      sessionId?: string
+      events?:    Array<{ type: string; productId?: string; value?: number; source?: string; meta?: Record<string, unknown> }>
+    },
+  ) {
+    const ip = String(
+      req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim()
+      ?? req.socket?.remoteAddress ?? '',
+    )
+    return this.svc.track({
+      slug:      body?.slug ?? '',
+      sessionId: body?.sessionId ?? '',
+      events:    Array.isArray(body?.events) ? body.events : [],
+      ipHash:    ip ? hashIp(ip) : null,
     })
   }
 }

@@ -5,9 +5,57 @@ import { supabaseAdmin } from '../../common/supabase'
 const ACTIVE_BRIDGE_URL = process.env.ACTIVE_BRIDGE_URL ?? 'https://api.active.eclick.app.br'
 const ACTIVE_BRIDGE_SECRET = process.env.ACTIVE_AUTOMATION_BRIDGE_SECRET ?? ''
 
+const ALLOWED_EVENT_TYPES = new Set([
+  'page_view', 'product_view', 'add_to_cart', 'begin_checkout', 'purchase',
+])
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 @Injectable()
 export class StorefrontEventsService {
   private readonly logger = new Logger(StorefrontEventsService.name)
+
+  /** AI1 — ingest de eventos da vitrine (beacon público, fire-and-forget).
+   *  Nunca lança: beacon não pode quebrar a navegação do cliente. */
+  async track(input: {
+    slug:      string
+    sessionId: string
+    events:    Array<{ type: string; productId?: string; value?: number; source?: string; meta?: Record<string, unknown> }>
+    ipHash?:   string | null
+  }): Promise<{ ok: true; inserted: number }> {
+    try {
+      const session = (input.sessionId ?? '').trim().slice(0, 80)
+      if (!session || !input.slug) return { ok: true, inserted: 0 }
+      const { data: store } = await supabaseAdmin
+        .from('store_config')
+        .select('organization_id')
+        .eq('store_slug', input.slug).eq('status', 'active')
+        .maybeSingle()
+      if (!store) return { ok: true, inserted: 0 }
+      const orgId = (store as { organization_id: string }).organization_id
+
+      const rows = (input.events ?? [])
+        .slice(0, 20)
+        .filter(e => e && ALLOWED_EVENT_TYPES.has(e.type))
+        .map(e => ({
+          organization_id: orgId,
+          store_slug:      input.slug,
+          session_id:      session,
+          event_type:      e.type,
+          product_id:      (typeof e.productId === 'string' && UUID_RE.test(e.productId)) ? e.productId : null,
+          value:           typeof e.value === 'number' && Number.isFinite(e.value) ? e.value : null,
+          source:          (e.source ?? '').toString().trim().slice(0, 60) || null,
+          meta:            (e.meta && typeof e.meta === 'object') ? e.meta : {},
+          client_ip_hash:  input.ipHash ?? null,
+        }))
+      if (!rows.length) return { ok: true, inserted: 0 }
+      const { error } = await supabaseAdmin.from('storefront_events').insert(rows)
+      if (error) this.logger.warn(`[events.track] insert falhou: ${error.message}`)
+      return { ok: true, inserted: rows.length }
+    } catch (e) {
+      this.logger.warn(`[events.track] ${(e as Error).message}`)
+      return { ok: true, inserted: 0 }
+    }
+  }
 
   /**
    * Dispara `cart_abandoned` no Active. O Active decide se manda WhatsApp

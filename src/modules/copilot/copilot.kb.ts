@@ -2633,6 +2633,7 @@ Reúne todos os atalhos comerciais em cards:
 - **Cashback** — % de cada pedido vira saldo pro cliente usar depois
 - **Bônus & Brindes** — Leve X Pague Y, brinde acima de R$ X, presente surpresa
 - **Avaliações** — modera as estrelas dos clientes
+- **Analytics da vitrine** — funil de conversão (visitas→pago), receita, produtos mais vistos×vendidos, origem do tráfego
 - **Leads da loja** — formulários da vitrine viram contato + card no funil do Active CRM
 - **Ambientador IA** — cliente fotografa o ambiente e a IA mostra o produto no espaço dele (vira lead no Active)
 - **Recovery de carrinho** — WhatsApp pra quem abandonou o carrinho
@@ -2739,6 +2740,27 @@ Reúne todos os atalhos comerciais em cards:
 
 **Onde mais aparece:** você pode adicionar a seção **"Ambientador IA"** no Designer (modo Avançado) pra destacar o recurso em qualquer página.`,
     tags: ['loja', 'ambientador', 'visualizar', 'veja no seu ambiente', 'ia', 'foto', 'whatsapp', 'creditos', 'lead', 'active', 'realidade aumentada'],
+  },
+  {
+    routes:   ['/dashboard/loja/analytics'],
+    category: 'loja',
+    title:    'Analytics da Vitrine — funil de conversão da loja',
+    content: `**Mostra como as pessoas se comportam na sua loja: de onde vêm, quantas viram produto, quantas compraram — e onde você perde venda.**
+
+**Funil de conversão** (escolha 7/30/90 dias): Visitas → Viram um produto → Adicionaram ao carrinho → Iniciaram checkout → Pedidos → Pagos. Cada etapa mostra a **taxa de passagem** pra próxima — assim você vê exatamente onde o cliente desiste.
+
+**KPIs no topo:** Visitas, Receita (paga), Ticket médio (AOV) e Conversão geral (visitas → pago).
+
+**Insights:**
+- **Mais vistos × Mais vendidos** — produtos que recebem muita visita mas vendem pouco são candidatos a ajustar preço/foto/descrição.
+- **Origem do tráfego** — de onde vêm os visitantes (Instagram, Google, direto, afiliado…), via utm_source/referrer.
+- **Carrinhos** — abandonados × recuperados + taxa de recuperação (puxa do Recovery de carrinho).
+- **Tendência diária** — visitas e receita por dia no período.
+
+**De onde vêm os dados:** visitas/views/carrinho/checkout são rastreados na própria vitrine (sem cookies de terceiros — sessão anônima); pedidos e receita vêm dos **pedidos reais**. Começa a coletar assim que a loja recebe tráfego — números aparecem conforme as visitas acontecem.
+
+**Dica:** use junto com Cupons, Recovery e Ambientador IA pra medir o efeito de cada um na conversão.`,
+    tags: ['loja', 'analytics', 'funil', 'conversao', 'visitas', 'trafego', 'receita', 'metricas', 'vitrine'],
   },
   {
     routes:   ['/dashboard/loja/banners'],
