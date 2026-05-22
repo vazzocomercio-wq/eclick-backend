@@ -223,6 +223,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  // Loja Propria AH — Ambientador IA ("Veja no seu espaço"). Coloca o produto
+  // na foto do ambiente do cliente preservando cena + produto (Nano Banana é
+  // excelente nesse "place this product in this room"). Fallback gpt-image-1 edits.
+  storefront_room_compose: {
+    label:       'Ambientador IA (Veja no seu espaço)',
+    description: 'Aplica o produto na foto do ambiente do cliente, fiel à cena e ao produto (só corrige exposição/ruído/inclinação)',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

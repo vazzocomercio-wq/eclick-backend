@@ -23,14 +23,24 @@ interface CreateCampaignCardInput {
   organization_id: string
   pipeline_id:     string
   stage_id:        string
-  assigned_to:     string
+  assigned_to?:    string
   title:           string
   task_title:      string
   due_date?:       string
   value?:          number
   tags?:           string[]
   metadata?:       Record<string, unknown>
+  contact_id?:     string
   dedup_key?:      string
+}
+
+export interface EnsureServicePipelineResult {
+  ok?:                true
+  pipeline_id?:       string
+  default_stage_id?:  string
+  stages?:            Array<{ id: string; name: string }>
+  created?:           boolean
+  skipped_no_bridge?: boolean
 }
 
 export interface CreateLeadInput {
@@ -51,6 +61,22 @@ export interface CreateLeadResult {
   deal_id?:           string
   contact_id?:        string | null
   assigned_to?:       string | null
+  created?:           boolean
+  skipped_no_bridge?: boolean
+}
+
+export interface UpsertContactInput {
+  organization_id: string
+  name?:           string
+  email?:          string
+  phone?:          string
+  tags?:           string[]
+  source?:         string
+}
+
+export interface UpsertContactResult {
+  ok?:                true
+  contact_id?:        string | null
   created?:           boolean
   skipped_no_bridge?: boolean
 }
@@ -228,6 +254,7 @@ export class ActiveBridgeClient {
     organization_id: string
     phone:           string                // E.164 preferido (+55...) ou nacional (11)
     message:         string
+    image_urls?:     string[]              // imagens (https) — 1ª leva message como legenda
     dedup_key?:      string                // pra idempotência ("order:xxx:shipped")
   }): Promise<{ sent?: boolean; skipped_no_bridge?: boolean; error?: string }> {
     if (!this.isConfigured()) {
@@ -304,8 +331,8 @@ export class ActiveBridgeClient {
     if (!this.isConfigured()) {
       return { skipped_no_bridge: true }
     }
-    if (!input.pipeline_id || !input.stage_id || !input.assigned_to) {
-      this.logger.warn('[active-bridge] createCampaignCard skipped — config incompleto (pipeline_id/stage_id/assigned_to)')
+    if (!input.pipeline_id || !input.stage_id) {
+      this.logger.warn('[active-bridge] createCampaignCard skipped — config incompleto (pipeline_id/stage_id)')
       return { skipped_no_bridge: true }
     }
     const { url, secret } = this.getEnv()
@@ -358,6 +385,79 @@ export class ActiveBridgeClient {
     } catch (e) {
       this.logger.error(`[active-bridge] createLead falhou: ${(e as Error).message}`)
       throw e
+    }
+  }
+
+  /** Cria/acha um contato no Active (sem abrir card). Usado pelo Ambientador
+   *  IA da Loja Própria: ao validar o WhatsApp do cliente, registra o contato
+   *  e devolve o contact_id pra guardar no SaaS. No-op se bridge não
+   *  configurado ou se o endpoint ainda não existe no Active (404). */
+  async upsertContact(input: UpsertContactInput): Promise<UpsertContactResult> {
+    if (!this.isConfigured()) {
+      return { skipped_no_bridge: true }
+    }
+    if (!input.phone && !input.email) {
+      this.logger.warn('[active-bridge] upsertContact skipped — sem phone/email')
+      return { skipped_no_bridge: true }
+    }
+    const { url, secret } = this.getEnv()
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/upsert-contact`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (res.status === 404) {
+        this.logger.warn('[active-bridge] upsertContact skipped — endpoint não existe no Active')
+        return { skipped_no_bridge: true }
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        this.logger.warn(`[active-bridge] upsertContact HTTP ${res.status}: ${body.slice(0, 200)}`)
+        return { skipped_no_bridge: true }
+      }
+      return await res.json() as UpsertContactResult
+    } catch (e) {
+      this.logger.warn(`[active-bridge] upsertContact falhou: ${(e as Error).message}`)
+      return { skipped_no_bridge: true }
+    }
+  }
+
+  /** Garante (idempotente) um funil dedicado de atendimento pra org no
+   *  Active, com etapas padrão. Devolve o pipeline_id + a etapa de entrada.
+   *  No-op se bridge não configurado / endpoint ausente (404). */
+  async ensureServicePipeline(input: {
+    organization_id: string
+    name?:           string
+    stages?:         string[]
+  }): Promise<EnsureServicePipelineResult> {
+    if (!this.isConfigured()) return { skipped_no_bridge: true }
+    const { url, secret } = this.getEnv()
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/ensure-service-pipeline`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':              'application/json',
+          'X-Automation-Bridge-Token': secret,
+        },
+        body: JSON.stringify(input),
+      })
+      if (res.status === 404) {
+        this.logger.warn('[active-bridge] ensureServicePipeline skipped — endpoint não existe no Active')
+        return { skipped_no_bridge: true }
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        this.logger.warn(`[active-bridge] ensureServicePipeline HTTP ${res.status}: ${body.slice(0, 200)}`)
+        return { skipped_no_bridge: true }
+      }
+      return await res.json() as EnsureServicePipelineResult
+    } catch (e) {
+      this.logger.warn(`[active-bridge] ensureServicePipeline falhou: ${(e as Error).message}`)
+      return { skipped_no_bridge: true }
     }
   }
 
