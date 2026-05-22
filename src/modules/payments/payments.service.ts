@@ -525,6 +525,7 @@ export class PaymentsService {
 
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
+      await this.renewVisualizerCreditsOnPaid(orderId)
     }
   }
 
@@ -586,6 +587,43 @@ export class PaymentsService {
 
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
+      await this.renewVisualizerCreditsOnPaid(orderId)
+    }
+  }
+
+  /** Hook do Ambientador IA — quando o pedido vira 'paid', renova os
+   *  créditos de geração do cliente (reseta generations_used → ele recupera
+   *  a cota cheia). Casa o cliente por telefone (senão e-mail) na org.
+   *  Best-effort — erro não derruba o webhook. */
+  private async renewVisualizerCreditsOnPaid(orderId: string): Promise<void> {
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, customer, status')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+      const c = (order.customer as { phone?: string; email?: string } | null) ?? {}
+      const phone = (c.phone ?? '').replace(/\D/g, '')
+      const email = (c.email ?? '').trim().toLowerCase()
+      if (!phone && !email) return
+      const orgId = order.organization_id as string
+
+      let q = supabaseAdmin
+        .from('storefront_visualizer_customers')
+        .select('id')
+        .eq('organization_id', orgId)
+      q = phone ? q.eq('phone', phone) : q.eq('email', email)
+      const { data: vc } = await q.limit(1).maybeSingle()
+      if (!vc) return
+
+      await supabaseAdmin
+        .from('storefront_visualizer_customers')
+        .update({ generations_used: 0, last_renewed_at: new Date().toISOString() })
+        .eq('id', (vc as { id: string }).id)
+      this.logger.log(`[visualizer] créditos renovados após compra paga (order=${orderId})`)
+    } catch (e) {
+      this.logger.warn(`[visualizer] renew créditos falhou order=${orderId}: ${(e as Error).message}`)
     }
   }
 

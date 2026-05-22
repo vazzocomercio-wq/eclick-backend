@@ -1,11 +1,15 @@
 import {
-  Controller, Get, Post, Body, Param, Headers, Req,
+  Controller, Get, Post, Put, Body, Param, Headers, Req, UseGuards,
   BadRequestException,
 } from '@nestjs/common'
 import { Request } from 'express'
 import { Public } from '../../common/decorators/public.decorator'
-import { StorefrontVisualizerService } from './storefront-visualizer.service'
+import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { ReqUser } from '../../common/decorators/user.decorator'
+import { StorefrontVisualizerService, type VisualizerSettings } from './storefront-visualizer.service'
 import { hashIp } from '../storefront-leads/storefront-leads.service'
+
+interface ReqUserPayload { id: string; orgId: string | null }
 
 /**
  * AH1 — endpoints públicos do Ambientador IA (gate de cadastro + OTP).
@@ -92,5 +96,40 @@ export class StorefrontVisualizerPublicController {
       sceneWidth:       body.sceneWidth,
       sceneHeight:      body.sceneHeight,
     })
+  }
+}
+
+/**
+ * Lojista (dashboard) — config, galeria, clientes, créditos.
+ *
+ *   GET  /storefront-visualizer            → settings + stats + gerações + clientes
+ *   PUT  /storefront-visualizer/settings   → atualiza config
+ *   POST /storefront-visualizer/customers/:id/grant-credits  { amount }
+ */
+@Controller('storefront-visualizer')
+@UseGuards(SupabaseAuthGuard)
+export class StorefrontVisualizerOwnerController {
+  constructor(private readonly svc: StorefrontVisualizerService) {}
+
+  @Get()
+  view(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.ownerView(u.orgId)
+  }
+
+  @Put('settings')
+  updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: Partial<VisualizerSettings>) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.ownerUpdateSettings(u.orgId, body ?? {})
+  }
+
+  @Post('customers/:id/grant-credits')
+  grant(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { amount?: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.grantCredits(u.orgId, id, Number(body?.amount ?? 0))
   }
 }

@@ -249,6 +249,7 @@ export type SectionType =
   | 'richText' | 'testimonials' | 'logoList' | 'faq' | 'newsletter' | 'videoBlock' | 'customHtml'
   | 'cartLayout' | 'checkoutLayout' | 'whatsappCatalog'
   | 'leadForm'
+  | 'roomVisualizer'
 
 export interface SectionBase<T extends SectionType, S> {
   id:           string
@@ -544,5 +545,6 @@ export const SECTION_TYPES_V3:      readonly SectionType[] = [
   'richText','testimonials','logoList','faq','newsletter','videoBlock','customHtml',
   'cartLayout','checkoutLayout','whatsappCatalog',
   'leadForm',
+  'roomVisualizer',
 ]
 export const PAGE_KEYS_V3:          readonly (keyof PageMap)[] = ['home','product','collection','cart','checkout']

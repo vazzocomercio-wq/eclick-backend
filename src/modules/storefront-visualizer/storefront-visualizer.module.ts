@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common'
 import { StorefrontVisualizerService } from './storefront-visualizer.service'
-import { StorefrontVisualizerPublicController } from './storefront-visualizer.controller'
+import { StorefrontVisualizerPublicController, StorefrontVisualizerOwnerController } from './storefront-visualizer.controller'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { AiModule } from '../ai/ai.module'
 
 @Module({
   imports:     [ActiveBridgeModule, AiModule],
-  controllers: [StorefrontVisualizerPublicController],
+  controllers: [StorefrontVisualizerPublicController, StorefrontVisualizerOwnerController],
   providers:   [StorefrontVisualizerService],
   exports:     [StorefrontVisualizerService],
 })

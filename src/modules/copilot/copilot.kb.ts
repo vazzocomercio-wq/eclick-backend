@@ -2634,6 +2634,7 @@ Reúne todos os atalhos comerciais em cards:
 - **Bônus & Brindes** — Leve X Pague Y, brinde acima de R$ X, presente surpresa
 - **Avaliações** — modera as estrelas dos clientes
 - **Leads da loja** — formulários da vitrine viram contato + card no funil do Active CRM
+- **Ambientador IA** — cliente fotografa o ambiente e a IA mostra o produto no espaço dele (vira lead no Active)
 - **Recovery de carrinho** — WhatsApp pra quem abandonou o carrinho
 - **Banners IA** — galeria de banners gerados por IA
 - **Fidelidade** — níveis (Bronze/Prata/Ouro) por gasto acumulado
@@ -2707,6 +2708,35 @@ Reúne todos os atalhos comerciais em cards:
 
 **Importante:** se você não escolher funil/etapa na seção, o formulário ainda funciona e os leads ficam acumulados aqui *Na fila* até você configurar o destino. O push pro Active depende da loja estar conectada ao Active CRM (bridge).`,
     tags: ['loja', 'leads', 'formulario', 'captacao', 'active', 'crm', 'funil', 'pipeline', 'contato'],
+  },
+  {
+    routes:   ['/dashboard/loja/ambientador'],
+    category: 'loja',
+    title:    'Ambientador IA — "Veja no seu ambiente" (foto do cliente + produto)',
+    content: `**O cliente fotografa o ambiente dele e a IA mostra o seu produto aplicado no espaço — fiel ao ambiente. Cada ambientação vira um lead quente no Active.**
+
+**Como o cliente usa (na vitrine):** no detalhe de qualquer produto aparece o botão **"Veja no seu ambiente"**. O cliente:
+1. Recebe dicas de como fotografar (celular na horizontal, ambiente todo, boa luz).
+2. Faz um cadastro rápido (Nome + e-mail + **WhatsApp validado por código/OTP**) — só uma vez.
+3. Tira/sobe a foto do espaço → a IA gera **2 imagens** do produto no ambiente dele (preserva a cena e o produto; só corrige luz/ruído/inclinação).
+4. As imagens chegam **automaticamente no WhatsApp** dele com o link do produto + (se você configurar) um cupom.
+
+**Imagem-modelo:** a IA usa a imagem inicial do produto no **IA Criativo > Produtos**; se não houver, usa as fotos do anúncio.
+
+**Créditos:** cada cliente tem N gerações (padrão 3, cada uma com 2 imagens). Você pode **conceder créditos extras** a um cliente nesta tela, e quando ele faz uma **compra aprovada os créditos renovam sozinhos**.
+
+**O que acontece no CRM:** ao validar o WhatsApp, criamos o **contato no Active**. A cada ambientação, abrimos um **card + tarefa** no funil **"Atendimento da Loja"** (criado automaticamente; você pode trocar por outro funil), com a foto da cena e os resultados anexados — contexto de venda ouro pro vendedor dar retorno.
+
+**Nesta tela (/dashboard/loja/ambientador):**
+- **Ligar/desligar** o recurso na vitrine + texto do botão.
+- **Gerações por cliente**, **cupom de incentivo** (vai no WhatsApp), **funil/etapa/responsável** de destino e uma **instrução extra pra IA**.
+- 3 indicadores (clientes / ambientações geradas / enviadas no WhatsApp).
+- Lista de **clientes** (com créditos restantes + botão "Dar créditos") e **galeria** das ambientações.
+
+**Importante:** vem **desligado por padrão** — ligue aqui pra aparecer na loja. A entrega no WhatsApp depende da integração com o Active (bridge) estar configurada.
+
+**Onde mais aparece:** você pode adicionar a seção **"Ambientador IA"** no Designer (modo Avançado) pra destacar o recurso em qualquer página.`,
+    tags: ['loja', 'ambientador', 'visualizar', 'veja no seu ambiente', 'ia', 'foto', 'whatsapp', 'creditos', 'lead', 'active', 'realidade aumentada'],
   },
   {
     routes:   ['/dashboard/loja/banners'],

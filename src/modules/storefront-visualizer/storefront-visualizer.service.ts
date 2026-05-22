@@ -633,6 +633,86 @@ export class StorefrontVisualizerService {
     if (!customer) throw new NotFoundException('Cliente não encontrado.')
     return toPublic(customer)
   }
+
+  // ── Lojista (dashboard) ────────────────────────────────────────────────
+
+  private async getStoreByOrg(orgId: string): Promise<{ store_slug: string; visualizer_settings: VisualizerSettings }> {
+    const { data } = await supabaseAdmin
+      .from('store_config')
+      .select('store_slug, visualizer_settings')
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!data) throw new NotFoundException('Loja não configurada.')
+    const row = data as { store_slug: string; visualizer_settings: VisualizerSettings | null }
+    return { store_slug: row.store_slug, visualizer_settings: row.visualizer_settings ?? {} }
+  }
+
+  /** Visão do dashboard: config + stats + gerações recentes + clientes. */
+  async ownerView(orgId: string): Promise<{
+    settings:    VisualizerSettings
+    stats:       { customers: number; generations: number; whatsappSent: number }
+    generations: Array<Record<string, unknown>>
+    customers:   Array<Record<string, unknown>>
+  }> {
+    const store = await this.getStoreByOrg(orgId)
+
+    const [{ data: gens }, { count: custCount }, { data: custs }, { count: genDone }, { count: sentCount }] = await Promise.all([
+      supabaseAdmin.from('storefront_visualizer_generations')
+        .select('id, customer_id, product_name, scene_image_url, output_urls, status, whatsapp_sent, active_deal_id, created_at')
+        .eq('organization_id', orgId).order('created_at', { ascending: false }).limit(60),
+      supabaseAdmin.from('storefront_visualizer_customers')
+        .select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+      supabaseAdmin.from('storefront_visualizer_customers')
+        .select('id, name, email, phone, whatsapp_validated, generations_allowed, generations_used, last_renewed_at, created_at')
+        .eq('organization_id', orgId).order('created_at', { ascending: false }).limit(100),
+      supabaseAdmin.from('storefront_visualizer_generations')
+        .select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('status', 'done'),
+      supabaseAdmin.from('storefront_visualizer_generations')
+        .select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('whatsapp_sent', true),
+    ])
+
+    return {
+      settings:    store.visualizer_settings,
+      stats:       { customers: custCount ?? 0, generations: genDone ?? 0, whatsappSent: sentCount ?? 0 },
+      generations: (gens ?? []) as Array<Record<string, unknown>>,
+      customers:   (custs ?? []) as Array<Record<string, unknown>>,
+    }
+  }
+
+  /** Atualiza a config do Ambientador (merge no store_config.visualizer_settings). */
+  async ownerUpdateSettings(orgId: string, patch: Partial<VisualizerSettings>): Promise<VisualizerSettings> {
+    const store = await this.getStoreByOrg(orgId)
+    const next: VisualizerSettings = { ...store.visualizer_settings }
+    if (patch.enabled !== undefined)             next.enabled = Boolean(patch.enabled)
+    if (patch.button_label !== undefined)        next.button_label = String(patch.button_label).slice(0, 60)
+    if (patch.coupon_code !== undefined)         next.coupon_code = String(patch.coupon_code).trim().slice(0, 40) || undefined
+    if (patch.prompt_extra !== undefined)        next.prompt_extra = String(patch.prompt_extra).slice(0, 600) || undefined
+    if (patch.default_generations !== undefined) next.default_generations = clampInt(Number(patch.default_generations), 1, 50)
+    if (patch.pipeline_id !== undefined)         next.pipeline_id = patch.pipeline_id || undefined
+    if (patch.stage_id !== undefined)            next.stage_id = patch.stage_id || undefined
+    if (patch.assigned_to !== undefined)         next.assigned_to = patch.assigned_to || undefined
+
+    const { error } = await supabaseAdmin
+      .from('store_config')
+      .update({ visualizer_settings: next })
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro ao salvar: ${error.message}`)
+    return next
+  }
+
+  /** Concede créditos extras a um cliente (aumenta generations_allowed). */
+  async grantCredits(orgId: string, customerId: string, amount: number): Promise<{ ok: true; generationsLeft: number }> {
+    const n = clampInt(Number(amount), 1, 100)
+    const customer = await this.getCustomerById(orgId, customerId)
+    if (!customer) throw new NotFoundException('Cliente não encontrado.')
+    const allowed = customer.generations_allowed + n
+    const { error } = await supabaseAdmin
+      .from('storefront_visualizer_customers')
+      .update({ generations_allowed: allowed })
+      .eq('id', customerId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true, generationsLeft: Math.max(0, allowed - customer.generations_used) }
+  }
 }
 
 export interface PublicCustomer {
