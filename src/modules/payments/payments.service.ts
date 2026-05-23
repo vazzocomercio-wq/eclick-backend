@@ -226,8 +226,15 @@ export class PaymentsService {
         price:     p.price,
         qty,
         imageUrl:  p.photo ?? undefined,
+        kitId:     it.kitId,
       })
     }
+
+    // ── Desconto de kit ("Monte o ambiente") — server-authoritative ────
+    // Aplica ANTES de bônus/cashback. Reescala o preço das linhas do kit pro
+    // kit_price oficial (linhas positivas → vale MP e Stripe). Nunca confia
+    // no preço do cliente.
+    await this.applyKitDiscounts(orgId, out)
 
     // ── Bônus & Brindes — adiciona linhas com price=0 ──────────────────
     // Avalia regras ativas. Pra BOGO, reduz qty da linha paga em vez de
@@ -296,6 +303,46 @@ export class PaymentsService {
     }
 
     return out
+  }
+
+  /** Aplica o desconto dos kits ("Monte o ambiente") server-side. Pra cada
+   *  kit reivindicado (via kitId nas linhas), busca o kit ATIVO, valida que
+   *  todos os itens dele estão no carrinho na qtd certa, e reescala o preço
+   *  daquelas linhas pra somar exatamente o kit_price oficial. Mutação
+   *  in-place. Falha de validação = sem desconto (cobra cheio = seguro). */
+  private async applyKitDiscounts(orgId: string, lines: CheckoutItem[]): Promise<void> {
+    const kitIds = [...new Set(lines.map(l => l.kitId).filter((k): k is string => !!k))]
+    if (kitIds.length === 0) return
+
+    const { data: kits } = await supabaseAdmin
+      .from('product_kits')
+      .select('id, kit_price, items')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .in('id', kitIds)
+
+    for (const kit of (kits ?? []) as Array<{ id: string; kit_price: number | null; items: Array<{ product_id: string; quantity: number }> }>) {
+      const kitPrice = Number(kit.kit_price ?? 0)
+      if (!(kitPrice > 0)) continue
+      const kitLines = lines.filter(l => l.kitId === kit.id && l.price > 0)
+      if (kitLines.length === 0) continue
+
+      // Valida: todo item do kit presente com qtd >= a do kit (senão, sem desconto)
+      const allPresent = (kit.items ?? []).every(ki => {
+        const ln = kitLines.find(l => l.productId === ki.product_id)
+        return ln && ln.qty >= (ki.quantity ?? 1)
+      })
+      if (!allPresent) continue
+
+      const currentSum = kitLines.reduce((s, l) => s + l.price * l.qty, 0)
+      if (!(currentSum > kitPrice)) continue   // já <= preço do kit (ex: promo melhor) → não encarece
+
+      const factor = kitPrice / currentSum
+      for (const l of kitLines) {
+        l.price = Math.round(l.price * factor * 100) / 100
+      }
+      this.logger.log(`[kits] desconto aplicado kit=${kit.id}: R$${currentSum.toFixed(2)} -> R$${kitPrice.toFixed(2)}`)
+    }
   }
 
   /** Snapshot inicial do pedido em storefront_orders (status=pending). */
