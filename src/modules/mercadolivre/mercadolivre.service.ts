@@ -296,6 +296,27 @@ export class MercadolivreService {
     return this.getConnectionsFromApiCredentials()
   }
 
+  /**
+   * Como `getAllConnections`, porém RESTRITO a uma organização. Use em
+   * fluxos que recebem `orgId` (ex: listagem de anúncios) — o
+   * `getAllConnections()` sem filtro retorna as contas ML de TODAS as orgs
+   * e o fan-out multi-conta acaba vazando anúncios entre tenants.
+   */
+  async getAllConnectionsForOrg(orgId: string): Promise<MlConnection[]> {
+    const { data } = await supabaseAdmin
+      .from('ml_connections')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('expires_at', { ascending: false })
+
+    const rows = (data || []) as MlConnection[]
+    if (rows.length > 0) return rows
+
+    // Fallback api_credentials — também restrito à org.
+    const all = await this.getConnectionsFromApiCredentials()
+    return all.filter(c => c.organization_id === orgId)
+  }
+
   private async getConnectionsFromApiCredentials(): Promise<MlConnection[]> {
     const { data, error } = await supabaseAdmin
       .from('api_credentials')
@@ -1757,7 +1778,7 @@ export class MercadolivreService {
   }
 
   async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string, sellerIdFilter?: number) {
-    const all = await this.getAllConnections()
+    const all = await this.getAllConnectionsForOrg(orgId)
     if (!all.length) throw new UnauthorizedException('ML não conectado')
 
     // Multi-conta: quando `sellerIdFilter` vem setado, restringe o fan-out
@@ -1802,7 +1823,7 @@ export class MercadolivreService {
   }
 
   async getListingsCounts(orgId: string, sellerIdFilter?: number) {
-    const all = await this.getAllConnections()
+    const all = await this.getAllConnectionsForOrg(orgId)
     // Quando filtrado por conta, conta SÓ os anúncios dela. Antes esse
     // param existia mas era ignorado — counts vinham sempre agregados.
     const connections = sellerIdFilter != null
