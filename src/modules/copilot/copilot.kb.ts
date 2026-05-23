@@ -2759,6 +2759,23 @@ Reúne todos os atalhos comerciais em cards:
     tags: ['loja', 'kits', 'combos', 'cross-sell', 'monte o ambiente', 'complete o ambiente', 'ticket medio', 'ia', 'designer', 'vitrine', 'upsell'],
   },
   {
+    routes:   ['/dashboard/produtos/.*/editar', '/dashboard/produtos'],
+    category: 'loja',
+    title:    'Provador de cor/acabamento IA — "Ver em outra cor"',
+    content: `**Extensão do Ambientador: depois de ver o produto no espaço dele, o cliente troca a cor/acabamento na MESMA cena — a IA recolore mantendo ambiente e posição idênticos.**
+
+**Como cada cor funciona aqui:** no e-Click cada cor é um **produto separado** (a cor está no nome/SKU). O Provador liga os produtos que são a mesma peça em cores diferentes.
+
+**Como ligar as variantes (você, lojista):** no **editor do produto** (Produtos → editar → aba **Vínculos**), no painel **"Variantes de cor/acabamento (Provador IA)"**:
+1. Sugerimos candidatos automaticamente por **raiz de SKU** (mesmo tronco, final diferente = cor). Ex: \`LUM-CRISTAL-DOU\` ↔ \`LUM-CRISTAL-BRA\`.
+2. Você **confirma** quais são variantes reais (a sugestão NÃO vincula sozinha) e salva. É a mesma peça pra anúncios (marketplace) e pra loja.
+
+**Como o cliente usa (vitrine):** depois de gerar a ambientação, aparece **"Ver em outra cor"** com os swatches das variantes. Clicou → a IA recolore a cena. **Cada troca usa 1 geração** da mesma cota do Ambientador (não cria cota nova). As imagens também vão pro WhatsApp + card no funil de atendimento, como a ambientação normal.
+
+**Importante:** só aparece variante **disponível** (visível na loja + com estoque). Se o produto não tem variantes ligadas, o "Ver em outra cor" não aparece.`,
+    tags: ['loja', 'provador', 'variantes', 'cor', 'acabamento', 'ver em outra cor', 'ambientador', 'ia', 'sku', 'produto', 'recolor'],
+  },
+  {
     routes:   ['/dashboard/loja/analytics'],
     category: 'loja',
     title:    'Analytics da Vitrine — funil de conversão da loja',
