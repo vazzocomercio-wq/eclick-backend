@@ -573,6 +573,7 @@ export class PaymentsService {
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
       await this.renewVisualizerCreditsOnPaid(orderId)
+      await this.bumpKitStatsOnPaid(orderId)
     }
   }
 
@@ -635,6 +636,49 @@ export class PaymentsService {
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
       await this.renewVisualizerCreditsOnPaid(orderId)
+      await this.bumpKitStatsOnPaid(orderId)
+    }
+  }
+
+  /** Métrica do "Monte o ambiente" — quando o pedido vira 'paid', soma +1
+   *  venda e a receita do kit (preço já com desconto) em product_kits. Soft
+   *  metric, best-effort (nunca quebra o checkout). Pode super-contar de leve
+   *  em retry de webhook — aceitável pra um indicador. */
+  private async bumpKitStatsOnPaid(orderId: string): Promise<void> {
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, items, status')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+
+      const items = (order.items as CheckoutItem[]) ?? []
+      const revByKit = new Map<string, number>()
+      for (const it of items) {
+        if (!it.kitId) continue
+        revByKit.set(it.kitId, (revByKit.get(it.kitId) ?? 0) + Number(it.price) * Number(it.qty))
+      }
+      if (revByKit.size === 0) return
+
+      const orgId = order.organization_id as string
+      for (const [kitId, rev] of revByKit.entries()) {
+        const { data: kit } = await supabaseAdmin
+          .from('product_kits')
+          .select('sales, revenue')
+          .eq('id', kitId).eq('organization_id', orgId)
+          .maybeSingle()
+        if (!kit) continue
+        await supabaseAdmin
+          .from('product_kits')
+          .update({
+            sales:   Number((kit as { sales?: number }).sales ?? 0) + 1,
+            revenue: Math.round((Number((kit as { revenue?: number }).revenue ?? 0) + rev) * 100) / 100,
+          })
+          .eq('id', kitId).eq('organization_id', orgId)
+      }
+    } catch (err) {
+      this.logger.warn(`[kits] bumpKitStatsOnPaid falhou: ${(err as Error).message}`)
     }
   }
 
