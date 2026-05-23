@@ -232,6 +232,12 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  storefront_room_recolor: {
+    label:       'Provador de cor/acabamento IA',
+    description: 'Recolore o produto numa cena já ambientada pra bater com a variante escolhida, mantendo cena e posição idênticas',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

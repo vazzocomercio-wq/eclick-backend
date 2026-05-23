@@ -98,6 +98,21 @@ export class StorefrontVisualizerPublicController {
       sceneHeight:      body.sceneHeight,
     })
   }
+
+  @Post(':slug/visualizer/recolor')
+  @Public()
+  recolor(
+    @Headers('x-visualizer-token') token: string | undefined,
+    @Body() body: { baseProductId?: string; variantProductId?: string },
+  ) {
+    if (!token) throw new BadRequestException('Sessão ausente. Refaça o cadastro.')
+    if (!body?.baseProductId || !body?.variantProductId) throw new BadRequestException('Produto/variante não informado.')
+    return this.svc.recolor({
+      token,
+      baseProductId:    body.baseProductId,
+      variantProductId: body.variantProductId,
+    })
+  }
 }
 
 /**
