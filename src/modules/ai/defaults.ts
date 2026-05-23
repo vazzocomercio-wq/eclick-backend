@@ -232,6 +232,21 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  // F12 Fulfillment — triagem de avaria por foto (visão, exige anthropic).
+  // Best-effort: assistivo, não bloqueante. OFF por padrão (toggle por org).
+  fulfillment_damage_triage: {
+    label:       'Triagem de avaria por foto (Fulfillment)',
+    description: 'Vision: classifica severidade (minor/major/total_loss) + destino sugerido a partir da foto da avaria',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
+  // F12 Fulfillment — conferência do pacote por foto (visão, exige anthropic).
+  fulfillment_pack_verify: {
+    label:       'Conferência de pacote por foto (Fulfillment)',
+    description: 'Vision: confere se os itens esperados aparecem na foto do pacote antes de fechar a expedição',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
