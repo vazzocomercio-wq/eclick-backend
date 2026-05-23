@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { LlmService } from '../ai/llm.service'
 import { supabaseAdmin } from '../../common/supabase'
+import { getEffectivePrice } from '../store-config/store-config.service'
 
 /** Onda 4 / A5 — Kits e Combos IA. */
 
@@ -50,6 +51,33 @@ interface ProductForKitGen {
   cost_price: number | null
   stock:      number
   ai_score:   number | null
+}
+
+/** Item de kit já enriquecido com snapshot atual do produto (pra vitrine). */
+export interface PublicKitItem {
+  productId: string
+  name:      string
+  imageUrl:  string | null
+  qty:       number
+  role:      KitItem['role']
+  unitPrice: number   // preço efetivo atual (considera promoção ativa)
+}
+
+/** Kit pronto pra renderizar na vitrine ("Monte o ambiente"). Total e
+ *  economia recalculados com o preço EFETIVO atual de cada item. */
+export interface PublicKit {
+  id:            string
+  name:          string
+  slug:          string | null
+  description:   string | null
+  coverImageUrl: string | null
+  kitType:       KitType
+  reasoning:     string | null
+  items:         PublicKitItem[]
+  itemsTotal:    number   // soma do preço atual dos itens
+  kitPrice:      number   // preço do kit
+  savings:       number   // itemsTotal - kitPrice (>= 0)
+  discountPct:   number
 }
 
 const SYSTEM_PROMPT = `Você é um especialista em merchandising para e-commerce brasileiro.
@@ -294,5 +322,115 @@ Sugira ${targetCount} kits variados.
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     if (!data) throw new BadRequestException(`Transição inválida: '${to}' só de [${fromAllowed.join(',')}]`)
     return data as ProductKit
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PUBLIC (vitrine) — "Monte o ambiente" / "Complete o ambiente"
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Kits ATIVOS da loja, enriquecidos com snapshot atual de cada produto.
+   *  Ordena por mais vendidos. Usado na seção "Monte o ambiente". */
+  async listPublicForStore(
+    orgId: string,
+    opts: { kitTypes?: KitType[]; limit?: number } = {},
+  ): Promise<PublicKit[]> {
+    const limit = Math.min(opts.limit ?? 24, 50)
+    let q = supabaseAdmin
+      .from('product_kits')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .order('sales', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    if (opts.kitTypes?.length) q = q.in('kit_type', opts.kitTypes)
+    const { data, error } = await q
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return this.enrichKitsForPublic(orgId, (data ?? []) as ProductKit[])
+  }
+
+  /** Kits ATIVOS que contêm um produto específico — bloco "Complete o
+   *  ambiente" da página de produto. */
+  async listPublicForProduct(orgId: string, productId: string): Promise<PublicKit[]> {
+    const { data, error } = await supabaseAdmin
+      .from('product_kits')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .contains('items', [{ product_id: productId }])
+      .order('sales', { ascending: false })
+      .limit(12)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return this.enrichKitsForPublic(orgId, (data ?? []) as ProductKit[])
+  }
+
+  /** Anexa snapshot atual (nome, imagem, preço efetivo) a cada item e
+   *  recalcula total/economia. Kit é tudo-ou-nada: descarta kits com algum
+   *  item escondido da vitrine, sem estoque ou inexistente. */
+  private async enrichKitsForPublic(orgId: string, kits: ProductKit[]): Promise<PublicKit[]> {
+    if (kits.length === 0) return []
+
+    const ids = Array.from(new Set(
+      kits.flatMap(k => (k.items ?? []).map(i => i.product_id)),
+    ))
+    if (ids.length === 0) return []
+
+    const { data: prods } = await supabaseAdmin
+      .from('products')
+      .select('id, name, photo_urls, price, sale_price, sale_start_at, sale_end_at, stock, storefront_visible')
+      .eq('organization_id', orgId)
+      .in('id', ids)
+
+    type PRow = {
+      id: string; name: string; photo_urls: string[] | null
+      price: number | null; sale_price: number | null
+      sale_start_at: string | null; sale_end_at: string | null
+      stock: number | null; storefront_visible: boolean | null
+    }
+    const map = new Map<string, PRow>((prods ?? []).map(p => [(p as PRow).id, p as PRow]))
+    const now = Date.now()
+
+    const out: PublicKit[] = []
+    for (const k of kits) {
+      const rawItems = k.items ?? []
+      if (rawItems.length === 0) continue
+
+      const items: PublicKitItem[] = []
+      let allAvailable = true
+      for (const it of rawItems) {
+        const p = map.get(it.product_id)
+        if (!p || p.storefront_visible === false || (p.stock ?? 0) <= 0) { allAvailable = false; break }
+        items.push({
+          productId: it.product_id,
+          name:      p.name,
+          imageUrl:  Array.isArray(p.photo_urls) && p.photo_urls.length ? p.photo_urls[0] : null,
+          qty:       it.quantity ?? 1,
+          role:      it.role,
+          unitPrice: getEffectivePrice(p, now),
+        })
+      }
+      if (!allAvailable || items.length < 2) continue   // kit é tudo-ou-nada
+
+      const itemsTotal  = Math.round(items.reduce((s, i) => s + i.unitPrice * i.qty, 0) * 100) / 100
+      const kitPrice    = Math.round(Number(k.kit_price ?? itemsTotal) * 100) / 100
+      const savings     = Math.max(0, Math.round((itemsTotal - kitPrice) * 100) / 100)
+      const discountPct = itemsTotal > 0 ? Math.round((savings / itemsTotal) * 100) : 0
+
+      out.push({
+        id:            k.id,
+        name:          k.name,
+        slug:          k.slug,
+        description:   k.description,
+        coverImageUrl: k.cover_image_url ?? items[0]?.imageUrl ?? null,
+        kitType:       k.kit_type,
+        reasoning:     k.ai_reasoning,
+        items,
+        itemsTotal,
+        kitPrice,
+        savings,
+        discountPct,
+      })
+    }
+    return out
   }
 }

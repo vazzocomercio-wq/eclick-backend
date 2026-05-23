@@ -2742,6 +2742,23 @@ Reúne todos os atalhos comerciais em cards:
     tags: ['loja', 'ambientador', 'visualizar', 'veja no seu ambiente', 'ia', 'foto', 'whatsapp', 'creditos', 'lead', 'active', 'realidade aumentada'],
   },
   {
+    routes:   ['/dashboard/store/designer-v3', '/dashboard/kits'],
+    category: 'loja',
+    title:    'Monte o ambiente — kits/combos IA na vitrine (cross-sell)',
+    content: `**Mostra na vitrine os kits/combos da loja ("Monte o ambiente" / "Complete o ambiente") pra aumentar o ticket médio — o cliente leva o conjunto que combina, com desconto, num clique.**
+
+**De onde vêm os kits:** dos seus **Kits & Combos** (gerados por IA ou montados por você em Loja → Kits & Combos). Só aparecem na vitrine os kits com status **Ativo** e **100% disponíveis** (todos os itens visíveis na loja + com estoque). Se um item sai de linha/zera estoque, o kit some sozinho da vitrine.
+
+**Como colocar na loja:** no **Designer (modo Avançado)** adicione a seção **"Monte o ambiente (kits/combos IA)"**. Na seção você escolhe:
+- **Quais kits:** todos os ativos · por tipo (ex: \`by_room\`, \`cross_sell\`, \`buy_together\`) · uma seleção específica de kits · ou **"kits do produto da página"** — esse último, colocado na **página de produto**, vira o bloco **"Complete o ambiente"** (mostra só os kits que contêm aquele produto).
+- Título/subtítulo, nº de colunas, limite e se mostra o **"por que combina"** (o raciocínio da IA).
+
+**Preço:** o card mostra o preço somado dos itens riscado, o **preço do kit** e quanto o cliente **economiza**. O botão **"Adicionar o kit"** joga todos os itens no carrinho já com o desconto distribuído — fecha pelo WhatsApp normalmente.
+
+**Dica:** use junto com o **Ambientador IA** — depois que o cliente vê o produto no espaço dele, o "Complete o ambiente" sugere o que falta pra fechar o ambiente.`,
+    tags: ['loja', 'kits', 'combos', 'cross-sell', 'monte o ambiente', 'complete o ambiente', 'ticket medio', 'ia', 'designer', 'vitrine', 'upsell'],
+  },
+  {
     routes:   ['/dashboard/loja/analytics'],
     category: 'loja',
     title:    'Analytics da Vitrine — funil de conversão da loja',

@@ -245,7 +245,7 @@ export type Block =
 export type SectionType =
   | 'siteHeader' | 'siteFooter' | 'announcementBar' | 'breadcrumb'
   | 'hero' | 'slider' | 'imageBanner' | 'imageHotspot' | 'imageWithText' | 'marquee'
-  | 'productGrid' | 'productCarousel' | 'featuredProduct' | 'collectionGrid' | 'productDetailLayout'
+  | 'productGrid' | 'productCarousel' | 'featuredProduct' | 'collectionGrid' | 'productDetailLayout' | 'productKits'
   | 'richText' | 'testimonials' | 'logoList' | 'faq' | 'newsletter' | 'videoBlock' | 'customHtml'
   | 'cartLayout' | 'checkoutLayout' | 'whatsappCatalog'
   | 'leadForm'
@@ -541,7 +541,7 @@ export const BLOCK_TYPES_V3:        readonly BlockType[]   = [
 export const SECTION_TYPES_V3:      readonly SectionType[] = [
   'siteHeader','siteFooter','announcementBar','breadcrumb',
   'hero','slider','imageBanner','imageHotspot','imageWithText','marquee',
-  'productGrid','productCarousel','featuredProduct','collectionGrid','productDetailLayout',
+  'productGrid','productCarousel','featuredProduct','collectionGrid','productDetailLayout','productKits',
   'richText','testimonials','logoList','faq','newsletter','videoBlock','customHtml',
   'cartLayout','checkoutLayout','whatsappCatalog',
   'leadForm',
