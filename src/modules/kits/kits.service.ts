@@ -171,7 +171,9 @@ Sugira ${targetCount} kits variados.
       jsonMode:     true,
     })
 
-    let parsed: { kits?: Array<{
+    // Claude (modelo primário) às vezes embrulha o JSON em markdown ou
+    // preâmbulo mesmo com jsonMode → parse tolerante (fences / primeiro..último).
+    const parsed = parseJsonLoose(out.text) as { kits?: Array<{
       name:                   string
       kit_type:               KitType
       items:                  KitItem[]
@@ -179,9 +181,8 @@ Sugira ${targetCount} kits variados.
       reasoning:              string
       target_audience?:       string
       confidence:             number
-    }> }
-    try { parsed = JSON.parse(out.text) }
-    catch { throw new BadRequestException('IA retornou JSON inválido') }
+    }> } | null
+    if (!parsed) throw new BadRequestException('IA retornou JSON inválido')
 
     if (!parsed.kits?.length) {
       throw new BadRequestException('IA não retornou nenhum kit')
@@ -433,4 +434,19 @@ Sugira ${targetCount} kits variados.
     }
     return out
   }
+}
+
+/** Parse tolerante de JSON vindo de LLM (Claude embrulha em markdown/preâmbulo
+ *  mesmo com jsonMode). Tenta direto → bloco ```json``` → primeiro{..último}. */
+function parseJsonLoose(text: string): unknown {
+  const trimmed = (text ?? '').trim()
+  try { return JSON.parse(trimmed) } catch { /* continua */ }
+  const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (m) { try { return JSON.parse(m[1]) } catch { /* continua */ } }
+  const open = trimmed.indexOf('{')
+  const close = trimmed.lastIndexOf('}')
+  if (open >= 0 && close > open) {
+    try { return JSON.parse(trimmed.slice(open, close + 1)) } catch { /* continua */ }
+  }
+  return null
 }
