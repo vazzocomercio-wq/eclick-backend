@@ -89,7 +89,7 @@ export class SocialVideoBridgeService {
     const sourceImageId = await this.registerSourceImage(orgId, product.id, briefing.id, seed.buffer, seed.label)
 
     // 5. job encadeado image-to-video
-    const job = await this.videos.createChainedJobFromImage(orgId, uid ?? 'social-bridge', {
+    const job = await this.videos.createChainedJobFromImage(orgId, (uid ?? null) as unknown as string, {
       product_id:              product.id,
       briefing_id:             briefing.id,
       source_image_id:         sourceImageId,
@@ -155,7 +155,9 @@ export class SocialVideoBridgeService {
     if (upErr) throw new BadRequestException(`upload foto produto: ${upErr.message}`)
     const signed = await this.creative.signImage(storagePath, 3600).catch(() => dto.product_photo_url)
 
-    return this.creative.createProduct(orgId, userId ?? 'social-bridge', {
+    // user_id é nullable (FK auth.users ON DELETE SET NULL). A ponte interna
+    // não tem usuário do SaaS → passa null (não 'social-bridge', que não é uuid).
+    return this.creative.createProduct(orgId, (userId ?? null) as unknown as string, {
       name:                    (dto.product_title ?? 'Produto').slice(0, 200),
       category:                (dto.category ?? 'Geral').slice(0, 120),
       main_image_url:          signed,
