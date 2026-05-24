@@ -20,6 +20,22 @@ export type ActionType =
 export type DamageSeverity = 'minor' | 'major' | 'total_loss'
 export type DamageResolution = 'discard' | 'return_supplier' | 'sell_as_b' | 'pending'
 
+// Onda B — cartão do painel tempo real (KDS)
+export interface BoardCard {
+  id:           string
+  reference:    string
+  channel:      string | null
+  platform:     string | null
+  accountLabel: string | null
+  companyName:  string | null
+  itemsCount:   number
+  deadline:     string | null
+  urgency:      'ok' | 'soon' | 'late' | 'none'
+  logisticType: string | null
+  customerName: string | null
+  status:       string
+}
+
 export interface FulfillmentCustomer {
   name?:    string
   doc?:     string
