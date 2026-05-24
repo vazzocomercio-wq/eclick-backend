@@ -414,6 +414,49 @@ export class StockService {
     return 'reversed'
   }
 
+  /** Reestoque de devolução (F12): soma de volta ao estoque quando um item
+   *  devolvido entra em boas condições. Idempotente via stock_movements
+   *  (reference_type='fulfillment_return', reference_id='{returnId}:{produto}').
+   *  Re-chamar é noop. recalcAndPropagate re-espelha + re-distribui. */
+  async applyReturnRestock(params: {
+    productId: string
+    quantity: number
+    returnId: string
+  }): Promise<'restocked' | 'noop'> {
+    const productId = params.productId
+    const qty = Math.max(0, Math.round(Number(params.quantity) || 0))
+    if (!productId || qty <= 0) return 'noop'
+    const refId = `${params.returnId}:${productId}`
+
+    const { data: stock } = await supabaseAdmin
+      .from('product_stock').select('id, quantity')
+      .eq('product_id', productId).is('platform', null).maybeSingle()
+    if (!stock) {
+      this.logger.warn(`[stock.return] produto ${productId} sem registro de estoque — devolução ${params.returnId} ignorada`)
+      return 'noop'
+    }
+
+    const { data: movs } = await supabaseAdmin
+      .from('stock_movements').select('id')
+      .eq('reference_type', 'fulfillment_return').eq('reference_id', refId)
+    if ((movs ?? []).length > 0) return 'noop' // já reestocado
+
+    const novaQtd = Number(stock.quantity || 0) + qty
+    await supabaseAdmin
+      .from('product_stock')
+      .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', stock.id)
+    await supabaseAdmin.from('stock_movements').insert({
+      product_id: productId, stock_id: stock.id,
+      movement_type: 'return_restock', quantity: qty, balance_after: novaQtd,
+      reference_type: 'fulfillment_return', reference_id: refId,
+      notes: `Devolução reestocada — ${params.returnId}`,
+    })
+    await this.recalcAndPropagate(productId, 'return_restock')
+      .catch(e => this.logger.warn(`[stock.return] recalc ${productId}: ${e?.message}`))
+    return 'restocked'
+  }
+
   // ── Channel distribution ──────────────────────────────────────────────────
 
   async calculateChannelQuantities(productId: string): Promise<Array<{

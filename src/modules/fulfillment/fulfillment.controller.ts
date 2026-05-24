@@ -4,6 +4,7 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { FulfillmentService } from './fulfillment.service'
+import { FulfillmentReturnsService, type ReturnItemCondition } from './fulfillment-returns.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -15,7 +16,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('fulfillment')
 @UseGuards(SupabaseAuthGuard)
 export class FulfillmentController {
-  constructor(private readonly svc: FulfillmentService) {}
+  constructor(
+    private readonly svc: FulfillmentService,
+    private readonly returns: FulfillmentReturnsService,
+  ) {}
 
   private org(u: ReqUserPayload): string {
     if (!u.orgId) throw new BadRequestException('Usuário sem organização.')
@@ -82,6 +86,32 @@ export class FulfillmentController {
   @Post('reconcile')
   reconcile(@ReqUser() u: ReqUserPayload) {
     return this.svc.reconcileOrg(this.org(u))
+  }
+
+  // ── Devoluções (Sprint 5) ────────────────────────────────────────────
+  @Get('returns')
+  listReturns(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.returns.list(this.org(u), warehouseId)
+  }
+
+  @Get('returns/:id')
+  getReturn(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.returns.get(this.org(u), id)
+  }
+
+  @Post('returns')
+  registerReturn(@ReqUser() u: ReqUserPayload, @Body() body: {
+    warehouseId?: string; fulfillmentOrderId?: string; reference?: string
+    customer?: Record<string, unknown>; reason?: string
+    items?: Array<{ sku: string; productId?: string; qty: number; title?: string }>
+  }) {
+    return this.returns.register(this.org(u), u.id, body ?? {})
+  }
+
+  @Post('returns/:id/resolve')
+  resolveReturn(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { resolutions: Array<{ sku: string; condition: ReturnItemCondition }> }) {
+    if (!Array.isArray(body?.resolutions)) throw new BadRequestException('Informe as resoluções dos itens.')
+    return this.returns.resolve(this.org(u), u.id, id, body.resolutions)
   }
 
   // ── Seed (ingestão de pedido → tarefas) ──────────────────────────────
