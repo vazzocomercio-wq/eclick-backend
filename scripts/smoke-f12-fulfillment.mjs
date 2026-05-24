@@ -212,7 +212,27 @@ async function main() {
   assert(Array.isArray(sq.json), 'Fila inteligente retorna lista ordenada')
   await call(token, 'PUT', '/fulfillment/settings', { ai_smart_queue_enabled: false }, 200)
 
-  // ── 18. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
+  // ── 18. Sprint 3: reconciliação (pedido pago "perdido" → fila) ───────────
+  // SÓ storefront (evita tocar nos pedidos ML reais da Vazzo). Snapshot antes/
+  // depois pra apagar TUDO que o reconcile criar (cleanup total, sem lixo real).
+  await call(token, 'PUT', '/fulfillment/settings', { auto_ingest_enabled: true, auto_ingest_sources: ['storefront'], default_warehouse_id: warehouseId }, 200)
+  const { data: beforeFo } = await admin.from('fulfillment_orders').select('id').eq('organization_id', ORG).eq('source_type', 'storefront')
+  const beforeIds = new Set((beforeFo ?? []).map((x) => x.id))
+  const { data: rsfo } = await admin.from('storefront_orders').insert({
+    organization_id: ORG, store_slug: 'smoke-f12-recon', customer: { name: 'Recon SF' },
+    items: [{ name: 'Item Recon', price: 5, qty: 1 }], subtotal: 5, total: 5, status: 'paid',
+  }).select('id').single()
+  const rec = await call(token, 'POST', '/fulfillment/reconcile', undefined, 201)
+  assert((rec.json.storefront ?? 0) >= 1, 'Reconciliação ingeriu pedido pago perdido')
+  // apaga TUDO que o reconcile criou (meu teste + qualquer real) → cleanup total
+  const { data: afterFo } = await admin.from('fulfillment_orders').select('id').eq('organization_id', ORG).eq('source_type', 'storefront')
+  const newIds = (afterFo ?? []).map((x) => x.id).filter((id) => !beforeIds.has(id))
+  for (const id of newIds) await admin.from('fulfillment_orders').delete().eq('id', id)
+  await admin.from('storefront_orders').delete().eq('id', rsfo.id)
+  await call(token, 'PUT', '/fulfillment/settings', { auto_ingest_enabled: false, auto_ingest_sources: ['marketplace', 'storefront'], default_warehouse_id: null }, 200) // restaura
+  ok(`Reconcile validado + limpo (${newIds.length} fo removido)`)
+
+  // ── 19. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
 
