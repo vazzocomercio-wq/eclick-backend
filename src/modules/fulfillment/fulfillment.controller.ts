@@ -7,6 +7,7 @@ import { FulfillmentService } from './fulfillment.service'
 import { FulfillmentReturnsService, type ReturnItemCondition } from './fulfillment-returns.service'
 import { FulfillmentWaveService } from './fulfillment-wave.service'
 import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-accounts.service'
+import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type InvoiceItem } from './fulfillment-invoices.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -23,6 +24,7 @@ export class FulfillmentController {
     private readonly returns: FulfillmentReturnsService,
     private readonly waves: FulfillmentWaveService,
     private readonly accounts: FulfillmentAccountsService,
+    private readonly invoices: FulfillmentInvoicesService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -66,6 +68,31 @@ export class FulfillmentController {
   @Get('collection')
   collection(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string, @Query('days') days?: string) {
     return this.svc.collectionQueue(this.org(u), warehouseId, days ? Number(days) : undefined)
+  }
+
+  // ── NF-e (Onda D — preparação + validação de conferência fiscal) ─────
+  @Get('orders/:foId/invoices')
+  listInvoices(@ReqUser() u: ReqUserPayload, @Param('foId') foId: string) {
+    return this.invoices.listForOrder(this.org(u), foId)
+  }
+
+  @Put('orders/:foId/invoices')
+  upsertInvoice(@ReqUser() u: ReqUserPayload, @Param('foId') foId: string, @Body() body: {
+    id?: string; companyId?: string | null; kind?: InvoiceKind; status?: InvoiceStatus
+    number?: string | null; series?: string | null; accessKey?: string | null
+    danfeUrl?: string | null; xmlUrl?: string | null; provider?: string | null; items?: InvoiceItem[]
+  }) {
+    return this.invoices.upsertForOrder(this.org(u), foId, body ?? {})
+  }
+
+  @Post('invoices/:id/validate')
+  validateInvoice(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.invoices.validate(this.org(u), id)
+  }
+
+  @Delete('invoices/:id')
+  removeInvoice(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.invoices.remove(this.org(u), id)
   }
 
   // ── Operadores + produtividade (Sprint 2) ────────────────────────────

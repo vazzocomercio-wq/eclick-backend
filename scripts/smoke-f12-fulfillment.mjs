@@ -363,6 +363,24 @@ async function main() {
   await admin.from('fulfillment_orders').delete().eq('id', cFo)
   ok('Onda C validada (aguardando coleta organizada) + limpa')
 
+  // ── 26. Onda D: NF-e (preparação) + validação de conferência fiscal ──────
+  const dSeed = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Fiscal Test' }, items: [{ sku: 'FISCAL-1', qty: 2 }] }, 201)
+  const dFo = dSeed.json.fulfillmentOrderId
+  await admin.from('pick_tasks').update({ picked_qty: 2, status: 'picked' }).eq('fulfillment_order_id', dFo) // separado
+  const inv = await call(token, 'PUT', `/fulfillment/orders/${dFo}/invoices`, { kind: 'venda' }, 200) // itens vêm do pedido
+  assert(inv.json.ok && !!inv.json.id, 'NF-e rascunho criada (itens herdados do pedido)')
+  const invId = inv.json.id
+  const v1 = await call(token, 'POST', `/fulfillment/invoices/${invId}/validate`, undefined, 201)
+  assert(v1.json.status === 'match', 'Validação fiscal: nota CONFERE com o separado (match)')
+  await call(token, 'PUT', `/fulfillment/orders/${dFo}/invoices`, { id: invId, items: [{ sku: 'FISCAL-1', qty: 5 }] }, 200) // força divergência
+  const v2 = await call(token, 'POST', `/fulfillment/invoices/${invId}/validate`, undefined, 201)
+  assert(v2.json.status === 'mismatch' && (v2.json.diff ?? []).some((d) => d.sku === 'FISCAL-1' && !d.ok), 'Validação DETECTA divergência (nota 5 × separado 2)')
+  const listInv = await call(token, 'GET', `/fulfillment/orders/${dFo}/invoices`)
+  assert(Array.isArray(listInv.json) && listInv.json.length === 1, 'Lista de NF-e do pedido')
+  await call(token, 'DELETE', `/fulfillment/invoices/${invId}`, undefined, 200)
+  await admin.from('fulfillment_orders').delete().eq('id', dFo)
+  ok('Onda D validada (NF-e preparação + validação fiscal) + limpa')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
