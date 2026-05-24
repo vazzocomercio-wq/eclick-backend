@@ -47,6 +47,7 @@ export interface FulfillmentSettings {
   auto_ingest_enabled:          boolean
   auto_ingest_sources:          string[]
   default_warehouse_id:         string | null
+  enforce_roles:                boolean
   settings:                     Record<string, unknown>
 }
 
@@ -60,5 +61,6 @@ export const DEFAULT_FULFILLMENT_SETTINGS: Omit<FulfillmentSettings, 'organizati
   auto_ingest_enabled:          false,
   auto_ingest_sources:          ['marketplace', 'storefront'],
   default_warehouse_id:         null,
+  enforce_roles:                false,
   settings:                     {},
 }

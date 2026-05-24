@@ -182,7 +182,37 @@ async function main() {
   await admin.from('fulfillment_orders').delete().eq('id', seed1.json.fulfillmentOrderId)
   await admin.from('storefront_orders').delete().eq('id', sfId)
 
-  // ── 14. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
+  // ── 14. Sprint 2: produtividade (lê as ações do fluxo acima) ─────────────
+  const prod = await call(token, 'GET', `/fulfillment/productivity?days=7&warehouse_id=${warehouseId}`)
+  assert(Array.isArray(prod.json.operators) && prod.json.operators.length >= 1 && prod.json.operators[0].items >= 1, 'Produtividade agrega ações do operador')
+
+  // ── 15. Sprint 2: operadores CRUD ────────────────────────────────────────
+  const mem = await call(token, 'GET', '/fulfillment/org-members')
+  const me = (mem.json ?? []).find((m) => (m.email ?? '').toLowerCase() === EMAIL.toLowerCase()) ?? (mem.json ?? [])[0]
+  assert(!!me?.user_id, 'org-members retornou membros')
+  const addOp = await call(token, 'POST', '/fulfillment/operators', { warehouseId, userId: me.user_id, role: 'packer' }, 201)
+  assert(addOp.json.ok, 'Operador adicionado (packer)')
+
+  // ── 16. Sprint 2: enforcement (packer barrado em separação) ──────────────
+  await call(token, 'PUT', '/fulfillment/settings', { enforce_roles: true }, 200)
+  const seedE = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Enforce Test' }, items: [{ sku: 'ENF-1', qty: 1 }] }, 201)
+  const qE = await call(token, 'GET', `/fulfillment/pick-tasks/queue?warehouse_id=${warehouseId}`)
+  const taskE = (qE.json ?? []).find((t) => t.fulfillment_order_id === seedE.json.fulfillmentOrderId)
+  const blocked = await call(token, 'POST', `/fulfillment/pick-tasks/${taskE.id}/scan-item`, { code: 'ENF-1' })
+  assert(blocked.status === 403, 'Enforcement: papel packer barrado na separação (403)')
+  // restaura: enforce off + remove operador + limpa pedido de teste
+  await call(token, 'PUT', '/fulfillment/settings', { enforce_roles: false }, 200)
+  await call(token, 'DELETE', `/fulfillment/operators/${addOp.json.id}`, undefined, 200)
+  await admin.from('fulfillment_orders').delete().eq('id', seedE.json.fulfillmentOrderId)
+  ok('Enforcement restaurado (off) + operador removido')
+
+  // ── 17. Sprint 2: fila inteligente não quebra a fila ─────────────────────
+  await call(token, 'PUT', '/fulfillment/settings', { ai_smart_queue_enabled: true }, 200)
+  const sq = await call(token, 'GET', `/fulfillment/pick-tasks/queue?warehouse_id=${warehouseId}`)
+  assert(Array.isArray(sq.json), 'Fila inteligente retorna lista ordenada')
+  await call(token, 'PUT', '/fulfillment/settings', { ai_smart_queue_enabled: false }, 200)
+
+  // ── 18. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
 

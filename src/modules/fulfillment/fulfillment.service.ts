@@ -1,11 +1,11 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { FulfillmentAiService } from './fulfillment-ai.service'
 import { FulfillmentLabelsService, FULFILLMENT_BUCKET } from './fulfillment-labels.service'
 import {
   DEFAULT_FULFILLMENT_SETTINGS,
   type ActionType, type FulfillmentSettings, type SeedItem, type SourceType,
-  type DamageSeverity, type DamageResolution,
+  type DamageSeverity, type DamageResolution, type OperatorRole,
 } from './fulfillment.types'
 
 /**
@@ -49,6 +49,7 @@ export class FulfillmentService {
       auto_ingest_enabled:          patch.auto_ingest_enabled,
       auto_ingest_sources:          patch.auto_ingest_sources,
       default_warehouse_id:         patch.default_warehouse_id,
+      enforce_roles:                patch.enforce_roles,
       updated_at:                   new Date().toISOString(),
     }
     Object.keys(row).forEach((k) => (row as Record<string, unknown>)[k] === undefined && delete (row as Record<string, unknown>)[k])
@@ -296,6 +297,139 @@ export class FulfillmentService {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  // OPERADORES + ENFORCEMENT DE PAPÉIS (Sprint 2)
+  // ════════════════════════════════════════════════════════════════════
+
+  private roleCan(role: string, need: 'pick' | 'pack' | 'supervise'): boolean {
+    if (role === 'supervisor' || role === 'admin') return true
+    if (need === 'pick') return role === 'picker'
+    if (need === 'pack') return role === 'packer'
+    return false
+  }
+
+  /** Enforcement OPT-IN: só barra se enforce_roles=true E o CD já tem operadores
+   *  cadastrados. Modo aberto (qualquer membro) caso contrário — não tranca ninguém
+   *  e permite bootstrapping (cadastrar o 1º operador). */
+  private async assertCan(orgId: string, userId: string, warehouseId: string, need: 'pick' | 'pack' | 'supervise'): Promise<void> {
+    const s = await this.getSettings(orgId)
+    if (!s.enforce_roles) return
+    const { data: ops } = await supabaseAdmin
+      .from('warehouse_operators').select('user_id, role')
+      .eq('organization_id', orgId).eq('warehouse_id', warehouseId).eq('is_active', true)
+    const list = (ops ?? []) as Array<{ user_id: string; role: string }>
+    if (list.length === 0) return
+    const mine = list.find((o) => o.user_id === userId)
+    if (!mine) throw new ForbiddenException('Você não é operador deste CD. Peça ao supervisor.')
+    if (!this.roleCan(mine.role, need)) throw new ForbiddenException(`Seu papel (${mine.role}) não permite esta ação.`)
+  }
+
+  /** Emails/nomes dos usuários (via GoTrue admin). Mapa id→{email,name}. */
+  private async userInfo(userIds: string[]): Promise<Map<string, { email: string | null; name: string | null }>> {
+    const map = new Map<string, { email: string | null; name: string | null }>()
+    const want = new Set(userIds.filter(Boolean))
+    if (want.size === 0) return map
+    try {
+      const { data } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 })
+      for (const u of data?.users ?? []) {
+        if (want.has(u.id)) {
+          const meta = (u.user_metadata ?? {}) as { name?: string; full_name?: string }
+          map.set(u.id, { email: u.email ?? null, name: meta.name ?? meta.full_name ?? null })
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`[operators] listUsers falhou: ${(e as Error).message}`)
+    }
+    return map
+  }
+
+  /** Membros da org (pra o supervisor escolher quem vira operador). */
+  async listOrgMembers(orgId: string) {
+    const { data } = await supabaseAdmin
+      .from('organization_members').select('user_id, role').eq('organization_id', orgId)
+    const members = (data ?? []) as Array<{ user_id: string; role: string }>
+    const info = await this.userInfo(members.map((m) => m.user_id))
+    return members.map((m) => ({ user_id: m.user_id, org_role: m.role, email: info.get(m.user_id)?.email ?? null, name: info.get(m.user_id)?.name ?? null }))
+  }
+
+  async listOperators(orgId: string, warehouseId?: string) {
+    let q = supabaseAdmin.from('warehouse_operators').select('*').eq('organization_id', orgId).order('created_at', { ascending: true })
+    if (warehouseId) q = q.eq('warehouse_id', warehouseId)
+    const { data } = await q
+    const ops = (data ?? []) as Array<Record<string, unknown>>
+    const info = await this.userInfo(ops.map((o) => o.user_id as string))
+    return ops.map((o) => ({ ...o, email: info.get(o.user_id as string)?.email ?? null, name: info.get(o.user_id as string)?.name ?? null }))
+  }
+
+  async addOperator(orgId: string, supervisorId: string, input: { warehouseId: string; userId: string; role: OperatorRole }) {
+    if (!input?.warehouseId || !input?.userId) throw new BadRequestException('warehouseId e userId obrigatórios.')
+    if (!['picker', 'packer', 'supervisor', 'admin'].includes(input.role)) throw new BadRequestException('Papel inválido.')
+    await this.assertCan(orgId, supervisorId, input.warehouseId, 'supervise')
+    const { data: mem } = await supabaseAdmin.from('organization_members').select('user_id').eq('organization_id', orgId).eq('user_id', input.userId).maybeSingle()
+    if (!mem) throw new BadRequestException('Usuário não é membro desta organização.')
+    const { data, error } = await supabaseAdmin.from('warehouse_operators')
+      .upsert({ organization_id: orgId, warehouse_id: input.warehouseId, user_id: input.userId, role: input.role, is_active: true }, { onConflict: 'warehouse_id,user_id' })
+      .select('id').maybeSingle()
+    if (error) throw new BadRequestException(`Erro ao adicionar operador: ${error.message}`)
+    return { ok: true, id: (data as { id: string } | null)?.id }
+  }
+
+  async updateOperator(orgId: string, supervisorId: string, id: string, patch: { role?: OperatorRole; is_active?: boolean }) {
+    const { data: op } = await supabaseAdmin.from('warehouse_operators').select('warehouse_id').eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (!op) throw new NotFoundException('Operador não encontrado.')
+    await this.assertCan(orgId, supervisorId, (op as { warehouse_id: string }).warehouse_id, 'supervise')
+    const row: Record<string, unknown> = {}
+    if (patch.role !== undefined) row.role = patch.role
+    if (patch.is_active !== undefined) row.is_active = patch.is_active
+    if (Object.keys(row).length > 0) await supabaseAdmin.from('warehouse_operators').update(row).eq('id', id).eq('organization_id', orgId)
+    return { ok: true }
+  }
+
+  async removeOperator(orgId: string, supervisorId: string, id: string) {
+    const { data: op } = await supabaseAdmin.from('warehouse_operators').select('warehouse_id').eq('id', id).eq('organization_id', orgId).maybeSingle()
+    if (!op) throw new NotFoundException('Operador não encontrado.')
+    await this.assertCan(orgId, supervisorId, (op as { warehouse_id: string }).warehouse_id, 'supervise')
+    await supabaseAdmin.from('warehouse_operators').delete().eq('id', id).eq('organization_id', orgId)
+    return { ok: true }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // PRODUTIVIDADE (Sprint 2) — agrega operator_actions por operador
+  // ════════════════════════════════════════════════════════════════════
+
+  async productivity(orgId: string, opts: { days?: number; warehouseId?: string } = {}) {
+    const days = Math.min(Math.max(opts.days ?? 7, 1), 90)
+    const since = new Date(Date.now() - days * 86400_000).toISOString()
+    let q = supabaseAdmin.from('operator_actions')
+      .select('user_id, action_type, created_at')
+      .eq('organization_id', orgId).gte('created_at', since)
+      .order('created_at', { ascending: true }).limit(10000)
+    if (opts.warehouseId) q = q.eq('warehouse_id', opts.warehouseId)
+    const { data } = await q
+    const rows = (data ?? []) as Array<{ user_id: string; action_type: string; created_at: string }>
+
+    const byUser = new Map<string, { items: number; packs: number; mismatches: number; first: number; last: number }>()
+    for (const r of rows) {
+      const u = byUser.get(r.user_id) ?? { items: 0, packs: 0, mismatches: 0, first: Infinity, last: 0 }
+      const t = new Date(r.created_at).getTime()
+      u.first = Math.min(u.first, t); u.last = Math.max(u.last, t)
+      if (r.action_type === 'pick_complete' || r.action_type === 'scan_item') u.items++
+      else if (r.action_type === 'pack_complete') u.packs++
+      else if (r.action_type === 'scan_mismatch') u.mismatches++
+      byUser.set(r.user_id, u)
+    }
+    const info = await this.userInfo([...byUser.keys()])
+    const operators = [...byUser.entries()].map(([userId, v]) => {
+      const hours = v.last > v.first ? (v.last - v.first) / 3600_000 : 0
+      return {
+        userId, name: info.get(userId)?.name ?? null, email: info.get(userId)?.email ?? null,
+        items: v.items, packs: v.packs, mismatches: v.mismatches,
+        itemsPerHour: hours > 0.05 ? Math.round(v.items / hours) : null,
+      }
+    }).sort((a, b) => b.items - a.items)
+    return { days, operators }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   // PICKING
   // ════════════════════════════════════════════════════════════════════
 
@@ -311,7 +445,10 @@ export class FulfillmentService {
       .limit(200)
     if (warehouseId) q = q.eq('warehouse_id', warehouseId)
     const { data } = await q
-    const tasks = (data ?? []) as Array<Record<string, unknown>>
+    let tasks = (data ?? []) as Array<Record<string, unknown>>
+    // Fila inteligente: reordena por urgência de SLA + agrupa mesmo SKU (batch picking)
+    const s = await this.getSettings(orgId)
+    if (s.ai_smart_queue_enabled) tasks = smartSortPickTasks(tasks)
     const foIds = [...new Set(tasks.map((t) => t.fulfillment_order_id as string))]
     const refs = await this.foRefs(orgId, foIds)
     return tasks.map((t) => ({ ...t, order: refs.get(t.fulfillment_order_id as string) ?? null }))
@@ -320,6 +457,7 @@ export class FulfillmentService {
   /** Bipagem do item: aceita SKU, EAN ou QR. Mismatch é bloqueado e logado. */
   async scanItem(orgId: string, userId: string, taskId: string, code: string): Promise<{ ok: boolean; matched: boolean; picked_qty: number; expected_qty: number; status: string }> {
     const task = await this.getPickTask(orgId, taskId)
+    await this.assertCan(orgId, userId, task.warehouse_id, 'pick')
     if (!['pending', 'in_progress'].includes(task.status)) {
       throw new BadRequestException(`Tarefa já está '${task.status}'.`)
     }
@@ -350,6 +488,7 @@ export class FulfillmentService {
 
   async pickComplete(orgId: string, userId: string, taskId: string) {
     const task = await this.getPickTask(orgId, taskId)
+    await this.assertCan(orgId, userId, task.warehouse_id, 'pick')
     await supabaseAdmin.from('pick_tasks')
       .update({ status: 'picked', picked_qty: task.expected_qty, picked_at: new Date().toISOString(), picked_by: userId })
       .eq('id', taskId).eq('organization_id', orgId)
@@ -359,6 +498,7 @@ export class FulfillmentService {
 
   async pickBlock(orgId: string, userId: string, taskId: string, reason: string) {
     const task = await this.getPickTask(orgId, taskId)
+    await this.assertCan(orgId, userId, task.warehouse_id, 'pick')
     await supabaseAdmin.from('pick_tasks').update({ status: 'blocked', block_reason: reason || 'sem motivo' }).eq('id', taskId).eq('organization_id', orgId)
     await supabaseAdmin.from('fulfillment_orders').update({ status: 'blocked', block_reason: reason || 'sem motivo' }).eq('id', task.fulfillment_order_id).eq('organization_id', orgId)
     await this.log(orgId, userId, 'block_pick', { warehouseId: task.warehouse_id, pickTaskId: taskId, fulfillmentOrderId: task.fulfillment_order_id, payload: { reason } })
@@ -393,6 +533,7 @@ export class FulfillmentService {
   /** Bipagem do pedido (libera a conferência). Aceita referência / id / QR. */
   async packScanOrder(orgId: string, userId: string, packId: string, code: string) {
     const pack = await this.getPackTask(orgId, packId)
+    await this.assertCan(orgId, userId, pack.warehouse_id, 'pack')
     if (pack.status === 'awaiting_pick') throw new BadRequestException('Separação ainda não concluída (aguarde os itens).')
     const fo = await this.getFo(orgId, pack.fulfillment_order_id)
     const matched = matchCode(code, [fo.reference, fo.source_id, fo.id, packId])
@@ -408,6 +549,7 @@ export class FulfillmentService {
   /** Foto do pacote (upload bucket privado). Opcional: roda IA de conferência. */
   async packPhoto(orgId: string, userId: string, packId: string, imageBase64: string, mimeType?: string) {
     const pack = await this.getPackTask(orgId, packId)
+    await this.assertCan(orgId, userId, pack.warehouse_id, 'pack')
     const { buffer, mime, ext } = decodeImage(imageBase64, mimeType)
     const path = `${orgId}/pack/${packId}/${Date.now()}.${ext}`
     const { error } = await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).upload(path, buffer, { contentType: mime, upsert: false })
@@ -434,6 +576,7 @@ export class FulfillmentService {
   /** Fecha a conferência. Exige bipagem do pedido + foto (se requires_photo). */
   async packComplete(orgId: string, userId: string, packId: string) {
     const pack = await this.getPackTask(orgId, packId)
+    await this.assertCan(orgId, userId, pack.warehouse_id, 'pack')
     if (!pack.scanned_order_at) throw new BadRequestException('Bipe o pedido antes de fechar a conferência.')
     if (pack.requires_photo && !pack.photo_url) throw new BadRequestException('Este pedido exige foto antes de fechar.')
     await supabaseAdmin.from('pack_tasks').update({ status: 'packed', packed_at: new Date().toISOString(), packed_by: userId }).eq('id', packId).eq('organization_id', orgId)
@@ -607,6 +750,31 @@ export class FulfillmentService {
   private async itemsByFoOne(orgId: string, foId: string): Promise<Array<{ sku: string; title: string | null; qty: number }>> {
     return (await this.itemsByFo(orgId, [foId])).get(foId) ?? []
   }
+}
+
+// ── fila inteligente (Sprint 2) ─────────────────────────────────────────
+// Ordena por urgência de SLA (bucket) e agrupa o mesmo SKU dentro do bucket
+// (batch picking: o separador pega vários do mesmo SKU de uma vez).
+function smartSortPickTasks(tasks: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const slaBucket = (t: Record<string, unknown>): number => {
+    const raw = t.sla_deadline as string | null
+    if (!raw) return 3
+    const h = (new Date(raw).getTime() - Date.now()) / 3_600_000
+    if (h < 2) return 0   // vencendo / atrasado
+    if (h < 24) return 1  // hoje
+    return 2              // depois
+  }
+  return [...tasks].sort((a, b) => {
+    const ba = slaBucket(a), bb = slaBucket(b)
+    if (ba !== bb) return ba - bb
+    const sa = String(a.sku ?? ''), sb = String(b.sku ?? '')
+    if (sa !== sb) return sa < sb ? -1 : 1
+    const pa = Number(a.priority ?? 100), pb = Number(b.priority ?? 100)
+    if (pa !== pb) return pa - pb
+    const ta = a.sla_deadline ? new Date(a.sla_deadline as string).getTime() : Infinity
+    const tb = b.sla_deadline ? new Date(b.sla_deadline as string).getTime() : Infinity
+    return ta - tb
+  })
 }
 
 // ── code matching (SKU / EAN / QR) ──────────────────────────────────────

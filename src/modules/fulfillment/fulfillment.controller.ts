@@ -1,10 +1,10 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Put, Patch, Delete, Body, Param, Query, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { FulfillmentService } from './fulfillment.service'
-import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution } from './fulfillment.types'
+import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -46,6 +46,37 @@ export class FulfillmentController {
   @Get('dashboard')
   dashboard(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
     return this.svc.dashboard(this.org(u), warehouseId)
+  }
+
+  // ── Operadores + produtividade (Sprint 2) ────────────────────────────
+  @Get('org-members')
+  orgMembers(@ReqUser() u: ReqUserPayload) {
+    return this.svc.listOrgMembers(this.org(u))
+  }
+
+  @Get('operators')
+  operators(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.svc.listOperators(this.org(u), warehouseId)
+  }
+
+  @Post('operators')
+  addOperator(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; userId: string; role: OperatorRole }) {
+    return this.svc.addOperator(this.org(u), u.id, body)
+  }
+
+  @Patch('operators/:id')
+  updateOperator(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { role?: OperatorRole; is_active?: boolean }) {
+    return this.svc.updateOperator(this.org(u), u.id, id, body ?? {})
+  }
+
+  @Delete('operators/:id')
+  removeOperator(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.svc.removeOperator(this.org(u), u.id, id)
+  }
+
+  @Get('productivity')
+  productivity(@ReqUser() u: ReqUserPayload, @Query('days') days?: string, @Query('warehouse_id') warehouseId?: string) {
+    return this.svc.productivity(this.org(u), { days: days ? Number(days) : undefined, warehouseId })
   }
 
   // ── Seed (ingestão de pedido → tarefas) ──────────────────────────────
