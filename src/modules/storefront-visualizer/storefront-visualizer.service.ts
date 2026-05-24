@@ -482,6 +482,148 @@ export class StorefrontVisualizerService {
     }
   }
 
+  /** Provador de cor/acabamento (PV2): recolore o produto numa cena JÁ
+   *  ambientada pela variante escolhida. Reusa a mesma cota, teto diário,
+   *  ledger e entrega do Ambientador. Parte da última cena gerada do cliente
+   *  pra esse produto base. */
+  async recolor(input: {
+    token:            string
+    baseProductId:    string
+    variantProductId: string
+  }): Promise<GenerationResult> {
+    const parsed = this.verifyCustomerToken(input.token)
+    if (!parsed) throw new ForbiddenException('Sessão inválida ou expirada. Refaça o cadastro.')
+    const { orgId, customerId } = parsed
+
+    const customer = await this.getCustomerById(orgId, customerId)
+    if (!customer) throw new NotFoundException('Cliente não encontrado.')
+    if (!customer.whatsapp_validated) throw new ForbiddenException('Valide seu WhatsApp primeiro.')
+    const left = customer.generations_allowed - customer.generations_used
+    if (left <= 0) throw new ForbiddenException('Você usou todas as suas ambientações. Faça uma compra pra ganhar mais!')
+    if (!input.baseProductId || !input.variantProductId) throw new BadRequestException('Produto/variante não informado.')
+
+    const store = await this.resolveStore(customer.store_slug)
+    const settings = store.visualizer_settings ?? {}
+
+    // Teto de custo diário (igual ao generate)
+    const cap = Number(settings.daily_cost_cap_usd ?? DEFAULT_DAILY_COST_CAP_USD)
+    if (Number.isFinite(cap) && cap > 0) {
+      const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
+      const { data: todays } = await supabaseAdmin
+        .from('storefront_visualizer_generations')
+        .select('cost_usd')
+        .eq('organization_id', orgId)
+        .gte('created_at', dayStart.toISOString())
+      const spent = (todays ?? []).reduce((s, r) => s + Number((r as { cost_usd: number | null }).cost_usd ?? 0), 0)
+      if (spent >= cap) throw new ForbiddenException('O limite diário de gerações desta loja foi atingido. Tente novamente amanhã.')
+    }
+
+    // Variante precisa estar vinculada ao produto base
+    const { data: link } = await supabaseAdmin
+      .from('storefront_product_variants')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('base_product_id', input.baseProductId)
+      .eq('variant_product_id', input.variantProductId)
+      .maybeSingle()
+    if (!link) throw new BadRequestException('Essa variante não está disponível para este produto.')
+
+    // Cena de origem = última geração concluída do cliente pra esse produto base
+    const { data: lastGen } = await supabaseAdmin
+      .from('storefront_visualizer_generations')
+      .select('scene_image_url, output_urls')
+      .eq('organization_id', orgId)
+      .eq('customer_id', customerId)
+      .eq('product_id', input.baseProductId)
+      .eq('status', 'done')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    const composed = ((lastGen as { output_urls?: string[] } | null)?.output_urls ?? [])[0]
+    const roomUrl  = (lastGen as { scene_image_url?: string } | null)?.scene_image_url ?? null
+    if (!composed) throw new BadRequestException('Gere a ambientação deste produto primeiro pra poder trocar a cor.')
+
+    // Referência da variante (imagem-modelo do criativo → fotos do anúncio)
+    const variant = await this.resolveProductRefs(orgId, input.variantProductId)
+    const variantName = (variant.name ?? 'a variante').trim()
+
+    // Reserva 1 crédito (otimista)
+    await supabaseAdmin
+      .from('storefront_visualizer_customers')
+      .update({ generations_used: customer.generations_used + 1 })
+      .eq('id', customerId)
+
+    const { data: genRow } = await supabaseAdmin
+      .from('storefront_visualizer_generations')
+      .insert({
+        organization_id:    orgId,
+        customer_id:        customerId,
+        store_slug:         customer.store_slug,
+        product_id:         input.baseProductId,
+        variant_product_id: input.variantProductId,
+        product_name:       variantName,
+        kind:               'recolor',
+        scene_image_url:    roomUrl ?? composed,
+        status:             'processing',
+      })
+      .select('id')
+      .maybeSingle()
+    const genId = (genRow as { id: string } | null)?.id ?? null
+
+    const prompt = buildRecolorPrompt(variantName, settings.prompt_extra)
+    try {
+      const out = await this.llm.generateImage({
+        orgId,
+        feature:         'storefront_room_recolor',
+        prompt,
+        sourceImageUrls: [composed, ...variant.refs].slice(0, 5),
+        format:          'square',
+        n:               IMAGES_PER_GEN,
+      })
+      const urls: string[] = []
+      for (const img of out.images) {
+        if (img.url && img.url.startsWith('http')) { urls.push(img.url); continue }
+        if (img.b64) {
+          const u = await this.uploadImage(orgId, 'out', Buffer.from(img.b64, 'base64'), 'image/png')
+          urls.push(u)
+        }
+      }
+      if (!urls.length) throw new Error('A IA não retornou imagens.')
+
+      if (genId) {
+        await supabaseAdmin
+          .from('storefront_visualizer_generations')
+          .update({ status: 'done', output_urls: urls, cost_usd: out.costUsd })
+          .eq('id', genId)
+      }
+
+      await this.deliverGeneration({
+        orgId, store, settings, customer,
+        generationId: genId, productId: input.variantProductId, productName: variantName,
+        sceneUrl: roomUrl ?? composed, images: urls,
+      }).catch(e => this.logger.warn(`[visualizer] entrega recolor falhou: ${(e as Error).message}`))
+
+      const updated = await this.getCustomerById(orgId, customerId)
+      const remaining = updated
+        ? Math.max(0, updated.generations_allowed - updated.generations_used)
+        : Math.max(0, left - 1)
+      return { ok: true, generationId: genId, images: urls, generationsLeft: remaining }
+    } catch (e) {
+      await supabaseAdmin
+        .from('storefront_visualizer_customers')
+        .update({ generations_used: customer.generations_used })
+        .eq('id', customerId)
+      if (genId) {
+        await supabaseAdmin
+          .from('storefront_visualizer_generations')
+          .update({ status: 'failed', error: (e as Error).message.slice(0, 300) })
+          .eq('id', genId)
+      }
+      this.logger.warn(`[visualizer] recolor falhou customer=${customerId}: ${(e as Error).message}`)
+      throw new BadRequestException('A IA não conseguiu trocar a cor agora. Seu crédito foi devolvido — tente de novo.')
+    }
+  }
+
   /** Entrega a ambientação: manda as imagens no WhatsApp do cliente (com
    *  link do produto + cupom) e abre um card no funil de atendimento da loja
    *  (cria o funil se preciso). Best-effort — nunca lança. */
@@ -824,6 +966,22 @@ function buildRoomPrompt(productName: string, extra?: string): string {
     `3. Posicione o produto em escala e perspectiva corretas para o ambiente, com sombras, reflexos e iluminação coerentes com a cena.`,
     `4. Melhore SUTILMENTE a qualidade da foto: se estiver escura, clareie; se houver ruído ou sujeira, limpe; se estiver torta, alinhe. Sem exageros e SEM mudar o conteúdo do ambiente.`,
     `5. Enquadramento proporcional ao ambiente original. Resultado realista de catálogo, sem texto, sem marca d'água, sem bordas, sem colagem artificial.`,
+  ]
+  if (extra && extra.trim()) base.push(`Contexto adicional do lojista: ${extra.trim()}`)
+  return base.join('\n')
+}
+
+/** Prompt do provador: troca SÓ a cor/acabamento do produto numa cena pronta,
+ *  mantendo ambiente + posição idênticos. */
+function buildRecolorPrompt(variantName: string, extra?: string): string {
+  const base = [
+    `A PRIMEIRA imagem é uma CENA PRONTA: o ambiente de um cliente com um produto já inserido. As imagens seguintes são a VARIANTE de cor/acabamento desejada do MESMO produto: "${variantName}".`,
+    `TAREFA: gerar a MESMA cena, trocando APENAS a cor/acabamento do produto pra bater fielmente com a referência da variante.`,
+    `REGRAS ESTRITAS:`,
+    `1. NÃO altere o ambiente: paredes, piso, móveis, objetos, perspectiva e iluminação EXATAMENTE iguais à primeira imagem.`,
+    `2. NÃO mova nem redimensione o produto: mesma posição, escala, ângulo e sombras.`,
+    `3. Mude SOMENTE a cor/material/acabamento do produto pra corresponder fielmente à variante de referência (textura e brilho coerentes).`,
+    `4. Resultado fotorrealista de catálogo, sem texto, sem marca d'água, sem bordas, sem colagem artificial.`,
   ]
   if (extra && extra.trim()) base.push(`Contexto adicional do lojista: ${extra.trim()}`)
   return base.join('\n')

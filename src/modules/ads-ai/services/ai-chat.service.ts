@@ -132,8 +132,8 @@ export class AiChatService {
     userMessage:    string,
   ): Promise<{ text: string; tokens_in: number; tokens_out: number; tool_calls: AnthropicContentBlock[] }> {
     const settings = await this.settings.getSettings(orgId)
-    const apiKey   = await this.credentials.getDecryptedKey(null, 'anthropic', 'ANTHROPIC_API_KEY').catch(() => null)
-    if (!apiKey) throw new Error('ANTHROPIC_API_KEY não configurada nas credenciais')
+    // BYOK: chave da org (own bloqueia com 402, platform usa matriz).
+    const apiKey   = await this.credentials.resolveAiKey(orgId, 'anthropic', 'ANTHROPIC_API_KEY')
 
     // Persist user message
     await supabaseAdmin.from('ads_ai_messages').insert({

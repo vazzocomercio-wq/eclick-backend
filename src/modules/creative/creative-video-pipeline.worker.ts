@@ -36,6 +36,14 @@ export class CreativeVideoPipelineWorker implements OnModuleInit, OnModuleDestro
       this.logger.warn('worker DESLIGADO (DISABLE_CREATIVE_VIDEO_WORKER=true)')
       return
     }
+    // Guard anti-corrida: um processo SEM as chaves do Kling (provider default)
+    // não deve rodar o worker — senão pega/pollea jobs e os derruba com
+    // "Kling não configurado", sobrescrevendo o worker que TEM a chave. Sem
+    // chave → não liga (deixa os jobs pra um processo com chave).
+    if (!process.env.KLING_ACCESS_KEY || !process.env.KLING_SECRET_KEY) {
+      this.logger.warn('worker DESLIGADO — sem KLING_ACCESS_KEY/KLING_SECRET_KEY neste processo')
+      return
+    }
     this.logger.log(`worker agendado — boot delay ${this.bootDelayMs / 1000}s, tick ${this.tickIntervalMs / 1000}s`)
     setTimeout(() => {
       void this.tick()

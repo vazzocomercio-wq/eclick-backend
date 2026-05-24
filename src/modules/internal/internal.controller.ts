@@ -1,11 +1,13 @@
 import {
-  Controller, Post, Get, Body, Query, UseGuards, BadRequestException, Logger,
+  Controller, Post, Get, Body, Query, Param, UseGuards, BadRequestException, Logger,
   HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { InternalKeyGuard } from './internal-key.guard'
 import { EventsGateway } from '../events/events.gateway'
 import { AlertResponseService } from '../intelligence-hub/delivery/alert-response.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
+import { SocialVideoBridgeService, StartReelDto } from './social-video-bridge.service'
 
 interface RealtimeBody {
   org_id: string
@@ -47,6 +49,8 @@ export class InternalController {
     private readonly events:        EventsGateway,
     private readonly alertResponse: AlertResponseService,
     private readonly mercadolivre:  MercadolivreService,
+    private readonly canva:         CanvaOauthService,
+    private readonly socialVideo:   SocialVideoBridgeService,
   ) {}
 
   @Post('realtime')
@@ -98,5 +102,86 @@ export class InternalController {
       token:          tokens[0].token,
       own_seller_ids: tokens.map(t => t.sellerId),
     }
+  }
+
+  /**
+   * Lista os designs do Canva da org — consumido pela ponte do Active Social
+   * AI Studio (usuário escolhe um design pra virar a imagem do post). Token +
+   * refresh ficam fonte única no SaaS; o Active só proxia via X-Internal-Key.
+   */
+  @Get('canva/designs')
+  async canvaDesigns(
+    @Query('org_id') orgId: string,
+    @Query('q') q?: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    const designs = await this.canva.listDesigns(orgId, q)
+    return { designs }
+  }
+
+  /**
+   * Exporta um design do Canva como PNG, sobe pro bucket público e devolve a
+   * URL https estável (o Instagram recusa imagens http / efêmeras).
+   */
+  @Post('canva/export')
+  @HttpCode(HttpStatus.OK)
+  async canvaExport(@Body() body: { org_id?: string; design_id?: string }) {
+    if (!body?.org_id || !body?.design_id) {
+      throw new BadRequestException('org_id e design_id obrigatórios')
+    }
+    return this.canva.exportDesignToPublicUrl(body.org_id, body.design_id)
+  }
+
+  /**
+   * Social AI Studio (Active) → gera um REEL a partir de um produto reusando
+   * o pipeline de vídeo do `creative`. Esconde creative_products/briefings/
+   * images. Assíncrono: devolve job_id; o Active faz poll no GET abaixo.
+   */
+  @Post('creative/social-video')
+  @HttpCode(HttpStatus.OK)
+  async startSocialVideo(
+    @Body() body: { org_id?: string; user_id?: string | null } & Partial<StartReelDto>,
+  ) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    if (!body?.product_photo_url) throw new BadRequestException('product_photo_url obrigatório')
+    if (!body?.prompt) throw new BadRequestException('prompt obrigatório')
+    return this.socialVideo.startReel(body.org_id, body.user_id ?? null, body as StartReelDto)
+  }
+
+  /** Status do job de reel; quando completed devolve a URL pública estável. */
+  @Get('creative/social-video/:jobId')
+  async getSocialVideo(
+    @Param('jobId') jobId: string,
+    @Query('org_id') orgId: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    return this.socialVideo.getReel(orgId, jobId)
+  }
+
+  /** E3 — Reel multi-cena: gera 1 clipe por foto; devolve job_ids. */
+  @Post('creative/social-video-multi')
+  @HttpCode(HttpStatus.OK)
+  async startSocialVideoMulti(
+    @Body() body: { org_id?: string; user_id?: string | null; photo_urls?: string[] } & Partial<StartReelDto>,
+  ) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    if (!body?.photo_urls?.length) throw new BadRequestException('photo_urls obrigatório')
+    if (!body?.prompt) throw new BadRequestException('prompt obrigatório')
+    return this.socialVideo.startMultiSceneReel(
+      body.org_id,
+      body.user_id ?? null,
+      body as StartReelDto & { photo_urls: string[] },
+    )
+  }
+
+  /** Status do multi-cena: job_ids separados por vírgula; concatena quando prontos. */
+  @Get('creative/social-video-multi')
+  async getSocialVideoMulti(
+    @Query('org_id') orgId: string,
+    @Query('job_ids') jobIds: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    const ids = (jobIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    return this.socialVideo.getMultiSceneReel(orgId, ids)
   }
 }

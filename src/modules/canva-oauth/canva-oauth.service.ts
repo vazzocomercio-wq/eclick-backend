@@ -557,6 +557,27 @@ export class CanvaOauthService {
     }
   }
 
+  /**
+   * Exporta um design do Canva como PNG e sobe pro bucket público
+   * `storefront-assets`, devolvendo a URL https estável.
+   *
+   * Usado pela ponte Active Social AI Studio: o usuário escolhe um design
+   * do Canva e ele vira a imagem do post (visual branded real, https — o que
+   * o Instagram exige). Mantém o token + refresh fonte única aqui no SaaS.
+   */
+  async exportDesignToPublicUrl(orgId: string, designId: string): Promise<{ url: string }> {
+    const base64 = await this.exportDesignAsBase64(orgId, designId)
+    const bytes = Buffer.from(base64, 'base64')
+    const safeId = designId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) || 'design'
+    const path = `social-canva/${orgId}/${safeId}-${Date.now()}.png`
+    const { error } = await supabaseAdmin.storage
+      .from('storefront-assets')
+      .upload(path, bytes, { contentType: 'image/png', upsert: true, cacheControl: '3600' })
+    if (error) throw new BadRequestException(`Erro ao subir imagem do Canva: ${error.message}`)
+    const url = supabaseAdmin.storage.from('storefront-assets').getPublicUrl(path).data.publicUrl
+    return { url }
+  }
+
   // ── Cron cleanup de oauth_state ─────────────────────────────────────────
 
   /** A cada 15min, deleta rows expirados ou consumidos há mais de 1h. */

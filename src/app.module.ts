@@ -70,6 +70,8 @@ import { StorefrontVisualizerModule } from './modules/storefront-visualizer/stor
 import { StorefrontAnalyticsModule } from './modules/storefront-analytics/storefront-analytics.module'
 import { StorefrontNotificationsModule } from './modules/storefront-notifications/storefront-notifications.module'
 import { StorefrontEventsModule } from './modules/storefront-events/storefront-events.module'
+import { StorefrontVariantsModule } from './modules/storefront-variants/storefront-variants.module'
+import { ProductTelemetryModule } from './modules/product-telemetry/product-telemetry.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
 import { FulfillmentModule } from './modules/fulfillment/fulfillment.module'
 import { PaymentsModule } from './modules/payments/payments.module'
@@ -158,6 +160,8 @@ import { RadarModule } from './modules/radar/radar.module'
     StorefrontAnalyticsModule,
     StorefrontNotificationsModule,
     StorefrontEventsModule,
+    StorefrontVariantsModule,
+    ProductTelemetryModule,
     BannerGeneratorModule,
     FulfillmentModule,
     PaymentsModule,

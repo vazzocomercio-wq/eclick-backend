@@ -314,12 +314,13 @@ export class AiResponderService {
     const systemPrompt = this.buildSystemPrompt(agent, productInfo, knowledge)
     const userPrompt   = this.buildUserPrompt(customerMessage, recentMessages)
 
-    // 7. Get API key from DB
+    // 7. Get API key — BYOK: chave da org (own bloqueia, platform usa matriz).
     const keyName = agent.model_provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'
-    const apiKey  = await this.credentials.getDecryptedKey(null, agent.model_provider, keyName)
-
-    if (!apiKey) {
-      this.logger.error(`[ai-responder] API key não encontrada para ${agent.model_provider}`)
+    let apiKey: string
+    try {
+      apiKey = await this.credentials.resolveAiKey(orgId, agent.model_provider, keyName)
+    } catch (e) {
+      this.logger.warn(`[ai-responder] sem chave de IA pra org ${orgId} (${agent.model_provider}): ${(e as Error).message}`)
       return
     }
 
@@ -577,11 +578,13 @@ export class AiResponderService {
     const systemPrompt = baseSystemPrompt + crossChannelContext
     const userPrompt   = this.buildUserPrompt(text, recentMessages)
 
-    // 6. API key
+    // 6. API key — BYOK: chave da org (own bloqueia, platform usa matriz).
     const keyName = agent.model_provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'
-    const apiKey  = await this.credentials.getDecryptedKey(null, agent.model_provider, keyName)
-    if (!apiKey) {
-      this.logger.error(`[ai.processMessage] sem API key pra ${agent.model_provider} — escalando`)
+    let apiKey: string
+    try {
+      apiKey = await this.credentials.resolveAiKey(orgId, agent.model_provider, keyName)
+    } catch (e) {
+      this.logger.warn(`[ai.processMessage] sem chave de IA pra org ${orgId} (${agent.model_provider}): ${(e as Error).message} — escalando`)
       await this.conversations.escalate(conversation_id, undefined, orgId)
       return { decision: 'escalate', response: '', confidence: 0 }
     }

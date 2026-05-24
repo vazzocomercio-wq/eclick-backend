@@ -287,23 +287,11 @@ export class FlowProvider implements VideoProvider {
    * no Railway se já estava gerando imagem com Gemini/Nano Banana.
    */
   private async resolveApiKey(orgId?: string): Promise<string> {
-    let key: string | null = null
-    if (orgId) {
-      key = await this.credentials.getDecryptedKey(orgId, 'google', GEMINI_KEY_NAME).catch(() => null)
-    }
-    if (!key) {
-      key = await this.credentials.getDecryptedKey(null, 'google', GEMINI_KEY_NAME).catch(() => null)
-    }
-    if (!key) {
-      key = process.env.GEMINI_API_KEY_DEFAULT ?? null
-    }
-    if (!key) {
-      throw new BadRequestException(
-        `${GEMINI_KEY_NAME} não configurada. Verifique api_credentials (provider=google) ou GEMINI_API_KEY_DEFAULT em env. ` +
-        `Mesma key que usa pra Nano Banana (imagens) — pegar em https://aistudio.google.com/apikey.`,
-      )
-    }
-    return key
+    // BYOK: chave da org → (platform: matriz → env GEMINI_API_KEY_DEFAULT) /
+    // (own: bloqueia com 402).
+    return this.credentials.resolveAiKey(orgId ?? null, 'google', GEMINI_KEY_NAME, {
+      platformEnvFallback: process.env.GEMINI_API_KEY_DEFAULT ?? null,
+    })
   }
 
   private async fetchImageBase64(url: string): Promise<{ data: string; mimeType: string }> {

@@ -1,12 +1,16 @@
 import { Module } from '@nestjs/common'
 import { InternalController } from './internal.controller'
 import { InternalKeyGuard } from './internal-key.guard'
+import { SocialVideoBridgeService } from './social-video-bridge.service'
 import { IntelligenceHubModule } from '../intelligence-hub/intelligence-hub.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+import { CanvaOauthModule } from '../canva-oauth/canva-oauth.module'
+import { CreativeModule } from '../creative/creative.module'
+import { AiModule } from '../ai/ai.module'
 
 @Module({
-  imports:     [IntelligenceHubModule, MercadolivreModule],
+  imports:     [IntelligenceHubModule, MercadolivreModule, CanvaOauthModule, CreativeModule, AiModule],
   controllers: [InternalController],
-  providers:   [InternalKeyGuard],
+  providers:   [InternalKeyGuard, SocialVideoBridgeService],
 })
 export class InternalModule {}

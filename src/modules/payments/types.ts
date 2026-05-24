@@ -8,6 +8,10 @@ export interface CheckoutItem {
   price:     number
   qty:       number
   imageUrl?: string
+  /** Se a linha veio de um kit ("Monte o ambiente"), o id do kit. O servidor
+   *  valida o kit ativo + aplica o preço autoritativo (não confia no preço
+   *  enviado pelo cliente). */
+  kitId?:    string
 }
 
 export interface CheckoutCustomer {

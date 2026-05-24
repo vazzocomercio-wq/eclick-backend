@@ -256,6 +256,20 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  storefront_room_recolor: {
+    label:       'Provador de cor/acabamento IA',
+    description: 'Recolore o produto numa cena já ambientada pra bater com a variante escolhida, mantendo cena e posição idênticas',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
+  // Telemetria — e-Click Insights (Fase 4). Analisa agregados de uso e gera
+  // insights estruturados pro founder. Sonnet pra qualidade analítica + jsonMode.
+  telemetry_insights: {
+    label:       'Insights de produto (Telemetria)',
+    description: 'Analisa agregados de uso (quedas, churn, abandono de tarefa, padrões saudáveis) e gera insights acionáveis pro founder',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

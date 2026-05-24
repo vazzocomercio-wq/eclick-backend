@@ -257,21 +257,10 @@ export class SoraProvider implements VideoProvider {
    * REUSA a mesma key já configurada pra imagens — zero setup adicional.
    */
   private async resolveApiKey(orgId?: string): Promise<string> {
-    let key: string | null = null
-    if (orgId) {
-      key = await this.credentials.getDecryptedKey(orgId, 'openai', OPENAI_KEY_NAME).catch(() => null)
-    }
-    if (!key) {
-      key = await this.credentials.getDecryptedKey(null, 'openai', OPENAI_KEY_NAME).catch(() => null)
-    }
-    if (!key) {
-      key = process.env.OPENAI_API_KEY_DEFAULT ?? process.env.OPENAI_API_KEY ?? null
-    }
-    if (!key) {
-      throw new BadRequestException(
-        `${OPENAI_KEY_NAME} não configurada. Verifique api_credentials (provider=openai) ou OPENAI_API_KEY_DEFAULT em env.`,
-      )
-    }
-    return key
+    // BYOK: chave da org → (platform: matriz → env OPENAI_API_KEY_DEFAULT) /
+    // (own: bloqueia com 402).
+    return this.credentials.resolveAiKey(orgId ?? null, 'openai', OPENAI_KEY_NAME, {
+      platformEnvFallback: process.env.OPENAI_API_KEY_DEFAULT ?? process.env.OPENAI_API_KEY ?? null,
+    })
   }
 }
