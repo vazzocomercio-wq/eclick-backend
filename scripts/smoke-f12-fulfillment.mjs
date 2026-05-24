@@ -350,6 +350,19 @@ async function main() {
   await admin.from('fulfillment_orders').delete().eq('id', bFo)
   ok('Onda B validada (painel tempo real) + limpa')
 
+  // ── 25. Onda C: aguardando coleta (staging por empresa → conta) ──────────
+  const cSeed = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Coleta Test' }, items: [{ sku: 'COLETA-1', qty: 1 }] }, 201)
+  const cFo = cSeed.json.fulfillmentOrderId
+  await admin.from('fulfillment_orders').update({ status: 'packed' }).eq('id', cFo) // pronto pra coleta
+  const coll = await call(token, 'GET', `/fulfillment/collection?warehouse_id=${warehouseId}`)
+  const allOrders = (coll.json.groups ?? []).flatMap((g) => (g.accounts ?? []).flatMap((a) => a.orders ?? []))
+  const found = allOrders.find((o) => o.id === cFo)
+  assert(!!found && found.status === 'packed', 'Coleta traz o pedido embalado')
+  assert((coll.json.groups ?? []).every((g) => typeof g.companyName === 'string' && Array.isArray(g.accounts)), 'Coleta agrupada por empresa → conta')
+  assert(typeof coll.json.total === 'number' && !!coll.json.generatedAt, 'Coleta devolve total + timestamp')
+  await admin.from('fulfillment_orders').delete().eq('id', cFo)
+  ok('Onda C validada (aguardando coleta organizada) + limpa')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')

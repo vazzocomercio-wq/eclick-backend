@@ -62,6 +62,12 @@ export class FulfillmentController {
     return this.svc.board(this.org(u), warehouseId)
   }
 
+  // Aguardando coleta — staging por empresa → conta (Onda C)
+  @Get('collection')
+  collection(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string, @Query('days') days?: string) {
+    return this.svc.collectionQueue(this.org(u), warehouseId, days ? Number(days) : undefined)
+  }
+
   // ── Operadores + produtividade (Sprint 2) ────────────────────────────
   @Get('org-members')
   orgMembers(@ReqUser() u: ReqUserPayload) {
