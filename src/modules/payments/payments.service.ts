@@ -8,6 +8,7 @@ import { LoyaltyService } from '../loyalty/loyalty.service'
 import { StorefrontNotificationsService } from '../storefront-notifications/storefront-notifications.service'
 import { AffiliateAttributionService } from '../affiliates/affiliate-attribution.service'
 import { CartRecoveryService } from '../cart-recovery/cart-recovery.service'
+import { FulfillmentService } from '../fulfillment/fulfillment.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -43,6 +44,7 @@ export class PaymentsService {
     private readonly notifications: StorefrontNotificationsService,
     private readonly affiliate:     AffiliateAttributionService,
     private readonly cartRecovery:  CartRecoveryService,
+    private readonly fulfillment:   FulfillmentService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -526,6 +528,7 @@ export class PaymentsService {
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
       await this.renewVisualizerCreditsOnPaid(orderId)
+      void this.fulfillment.autoIngestStorefrontOrder(orderId)
     }
   }
 
@@ -588,6 +591,7 @@ export class PaymentsService {
     if (status === 'paid') {
       await this.creditCashbackOnPaid(orderId)
       await this.renewVisualizerCreditsOnPaid(orderId)
+      void this.fulfillment.autoIngestStorefrontOrder(orderId)
     }
   }
 

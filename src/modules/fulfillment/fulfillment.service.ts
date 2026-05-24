@@ -46,6 +46,9 @@ export class FulfillmentService {
       photo_required_always:        patch.photo_required_always,
       photo_required_above_cents:   patch.photo_required_above_cents,
       photo_required_vip_channels:  patch.photo_required_vip_channels,
+      auto_ingest_enabled:          patch.auto_ingest_enabled,
+      auto_ingest_sources:          patch.auto_ingest_sources,
+      default_warehouse_id:         patch.default_warehouse_id,
       updated_at:                   new Date().toISOString(),
     }
     Object.keys(row).forEach((k) => (row as Record<string, unknown>)[k] === undefined && delete (row as Record<string, unknown>)[k])
@@ -78,6 +81,13 @@ export class FulfillmentService {
         .from('warehouses').select('id').eq('id', warehouseId).eq('organization_id', orgId).maybeSingle()
       if (!data) throw new NotFoundException('CD (warehouse) não encontrado nesta org.')
       return warehouseId
+    }
+    // CD padrão das configs (se válido p/ a org)
+    const settings = await this.getSettings(orgId)
+    if (settings.default_warehouse_id) {
+      const { data: def } = await supabaseAdmin
+        .from('warehouses').select('id').eq('id', settings.default_warehouse_id).eq('organization_id', orgId).maybeSingle()
+      if (def) return (def as { id: string }).id
     }
     const { data } = await supabaseAdmin
       .from('warehouses').select('id').eq('organization_id', orgId).eq('is_active', true)
@@ -138,7 +148,28 @@ export class FulfillmentService {
       channel = channel ?? 'loja'
       customer = order.customer ?? {}
       totalCents = order.total != null ? Math.round(Number(order.total) * 100) : null
-      items = (order.items ?? []).map((i) => ({ sku: String(i.productId ?? i.name ?? 'item'), title: i.name, qty: Number(i.qty) || 1, productId: i.productId }))
+      // Resolve SKU/EAN reais do catálogo quando o item tem productId (uuid).
+      // Itens sem productId válido (ex: item custom) caem pro nome, sem FK.
+      const isUuid = (v: unknown): v is string =>
+        typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+      const prodIds = [...new Set((order.items ?? []).map((i) => i.productId).filter(isUuid))]
+      const prodById = new Map<string, { sku: string | null; ean: string | null }>()
+      if (prodIds.length > 0) {
+        const { data: prods } = await supabaseAdmin
+          .from('products').select('id, sku, ean').eq('organization_id', orgId).in('id', prodIds)
+        for (const p of (prods ?? []) as Array<{ id: string; sku: string | null; ean: string | null }>) prodById.set(p.id, { sku: p.sku, ean: p.ean })
+      }
+      items = (order.items ?? []).map((i) => {
+        const pid = isUuid(i.productId) ? i.productId : undefined
+        const prod = pid ? prodById.get(pid) : undefined
+        return {
+          sku:      prod?.sku ?? i.name ?? 'item',
+          title:    i.name,
+          qty:      Number(i.qty) || 1,
+          productId: prod ? pid : undefined,   // só seta o FK se o produto existe na org
+          barcode:  prod?.ean ?? undefined,
+        }
+      })
     } else {
       // b2b — entrada manual
       if (!input.items?.length) throw new BadRequestException('Pedido B2B exige a lista de itens (items[]).')
@@ -228,6 +259,40 @@ export class FulfillmentService {
       if (r.ean) map.set(r.sku, r.ean)
     }
     return map
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // AUTO-INGESTÃO (Sprint 1) — pedido pago vira fila sozinho
+  //  Best-effort: NUNCA lança (é chamado em hooks de webhook). Gated por
+  //  auto_ingest_enabled + auto_ingest_sources. Reusa seed() (idempotente).
+  // ════════════════════════════════════════════════════════════════════
+
+  /** Loja Própria: pedido pago (webhook MP/Stripe) → fila de separação. */
+  async autoIngestStorefrontOrder(storefrontOrderId: string): Promise<void> {
+    try {
+      const { data: so } = await supabaseAdmin
+        .from('storefront_orders').select('organization_id').eq('id', storefrontOrderId).maybeSingle()
+      const orgId = (so as { organization_id: string } | null)?.organization_id
+      if (!orgId) return
+      const s = await this.getSettings(orgId)
+      if (!s.auto_ingest_enabled || !s.auto_ingest_sources.includes('storefront')) return
+      const r = await this.seed(orgId, { source: 'storefront', orderId: storefrontOrderId, warehouseId: s.default_warehouse_id ?? undefined })
+      this.logger.log(`[auto-ingest] storefront ${storefrontOrderId} → fo=${r.fulfillmentOrderId.slice(0, 8)} (created=${r.created})`)
+    } catch (e) {
+      this.logger.warn(`[auto-ingest] storefront ${storefrontOrderId} falhou (best-effort): ${(e as Error).message}`)
+    }
+  }
+
+  /** Mercado Livre: pedido pago (webhook orders_v2) → fila de separação. */
+  async autoIngestMarketplaceOrder(orgId: string, externalOrderId: string): Promise<void> {
+    try {
+      const s = await this.getSettings(orgId)
+      if (!s.auto_ingest_enabled || !s.auto_ingest_sources.includes('marketplace')) return
+      const r = await this.seed(orgId, { source: 'marketplace', externalOrderId, warehouseId: s.default_warehouse_id ?? undefined })
+      this.logger.log(`[auto-ingest] marketplace ${externalOrderId} → fo=${r.fulfillmentOrderId.slice(0, 8)} (created=${r.created})`)
+    } catch (e) {
+      this.logger.warn(`[auto-ingest] marketplace ${externalOrderId} falhou (best-effort): ${(e as Error).message}`)
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════
