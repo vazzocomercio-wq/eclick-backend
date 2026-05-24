@@ -401,6 +401,40 @@ async function main() {
   await call(token, 'DELETE', `/fulfillment/packaging/types/${ptId}`, undefined, 200)
   ok('Onda E validada (embalagens: tipos + kits + sugestão) + limpa')
 
+  // ── 28. Faturador F1: config fiscal por empresa + token cofre + % por conta ─
+  await admin.from('fulfillment_companies').delete().eq('organization_id', ORG).eq('cnpj', '11222333000144') // limpa órfão de run anterior
+  const fco = await call(token, 'POST', '/fulfillment/companies', { name: 'Fiscal Smoke', cnpj: '11.222.333/0001-44', role: 'matriz' }, 201)
+  const fCompanyId = fco.json.id
+  await call(token, 'PUT', `/fulfillment/fiscal/companies/${fCompanyId}`, { provider: 'nfeio', environment: 'homologacao', providerToken: 'tok_smoke_abc123', inscricaoEstadual: '123.456.789', regimeTributario: 'simples', invoiceSalePct: 100, invoicePurchasePct: 90, fiscalAddress: { city: 'São Paulo', uf: 'SP' } }, 200)
+  const fcfg = await call(token, 'GET', `/fulfillment/fiscal/companies/${fCompanyId}`)
+  assert(fcfg.json.provider === 'nfeio' && fcfg.json.has_provider_token === true && Number(fcfg.json.invoice_purchase_pct) === 90, 'Config fiscal salva (provider + token + % padrão)')
+  const { data: cred } = await admin.from('api_credentials').select('key_value').eq('organization_id', ORG).eq('provider', 'nfeio').eq('key_name', fCompanyId).maybeSingle()
+  assert(!!cred && cred.key_value.includes(':') && !cred.key_value.includes('tok_smoke_abc123'), 'Token do provedor guardado CRIPTOGRAFADO (não em texto puro)')
+  const rd1 = await call(token, 'GET', `/fulfillment/fiscal/companies/${fCompanyId}/readiness`)
+  assert(rd1.json.ready === false && (rd1.json.missing ?? []).some((m) => m.toLowerCase().includes('certificado')), 'Readiness aponta o que falta (certificado)')
+  await call(token, 'PUT', `/fulfillment/fiscal/companies/${fCompanyId}`, { certificateStatus: 'uploaded' }, 200)
+  const rd2 = await call(token, 'GET', `/fulfillment/fiscal/companies/${fCompanyId}/readiness`)
+  assert(rd2.json.ready === true, 'Readiness fica pronta com tudo preenchido')
+  // % de faturamento POR CONTA (override) na conta b2b
+  if (b2bAccount) {
+    await call(token, 'PATCH', `/fulfillment/accounts/${b2bAccount.id}`, { invoice_sale_pct: 10 }, 200)
+    const accs = await call(token, 'GET', '/fulfillment/accounts')
+    const acc = (accs.json ?? []).find((x) => x.id === b2bAccount.id)
+    assert(!!acc && Number(acc.invoice_sale_pct) === 10, 'Percentual de faturamento POR CONTA salvo (override 10%)')
+    await call(token, 'PATCH', `/fulfillment/accounts/${b2bAccount.id}`, { invoice_sale_pct: null }, 200) // reset
+  }
+  // dados fiscais de produto (se houver produto na org)
+  const { data: anyProd } = await admin.from('products').select('id').eq('organization_id', ORG).limit(1).maybeSingle()
+  if (anyProd) {
+    await call(token, 'PUT', `/fulfillment/fiscal/products/${anyProd.id}`, { ncm: '94051000', cfop_sale: '5102', origem: '0' }, 200)
+    const pf = await call(token, 'GET', '/fulfillment/fiscal/products')
+    assert((pf.json ?? []).some((p) => p.product_id === anyProd.id && p.ncm === '94051000'), 'Dados fiscais do produto salvos (NCM/CFOP)')
+    await admin.from('product_fiscal').delete().eq('product_id', anyProd.id).eq('organization_id', ORG)
+  }
+  await admin.from('fulfillment_companies').delete().eq('id', fCompanyId) // cascade: fiscal_company_config
+  await admin.from('api_credentials').delete().eq('organization_id', ORG).eq('provider', 'nfeio').eq('key_name', fCompanyId)
+  ok('Faturador F1 validado (config fiscal + token cofre + % por conta + produto) + limpo')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
