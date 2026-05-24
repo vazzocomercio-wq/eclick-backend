@@ -270,6 +270,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // F12 Onda E — sugestão da embalagem ideal. Heurística escolhe (volume × itens);
+  // o LLM só escreve um racional curto (best-effort). Haiku pra latência + custo baixo.
+  fulfillment_packaging_suggest: {
+    label:       'Sugestão de embalagem (Fulfillment)',
+    description: 'Justifica em 1 frase a embalagem ideal pro pedido (quantidade de itens × tamanho)',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
