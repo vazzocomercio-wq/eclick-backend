@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Get, Body, Query, UseGuards, BadRequestException, Logger,
+  Controller, Post, Get, Body, Query, Param, UseGuards, BadRequestException, Logger,
   HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { InternalKeyGuard } from './internal-key.guard'
@@ -7,6 +7,7 @@ import { EventsGateway } from '../events/events.gateway'
 import { AlertResponseService } from '../intelligence-hub/delivery/alert-response.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
+import { SocialVideoBridgeService, StartReelDto } from './social-video-bridge.service'
 
 interface RealtimeBody {
   org_id: string
@@ -49,6 +50,7 @@ export class InternalController {
     private readonly alertResponse: AlertResponseService,
     private readonly mercadolivre:  MercadolivreService,
     private readonly canva:         CanvaOauthService,
+    private readonly socialVideo:   SocialVideoBridgeService,
   ) {}
 
   @Post('realtime')
@@ -128,5 +130,31 @@ export class InternalController {
       throw new BadRequestException('org_id e design_id obrigatórios')
     }
     return this.canva.exportDesignToPublicUrl(body.org_id, body.design_id)
+  }
+
+  /**
+   * Social AI Studio (Active) → gera um REEL a partir de um produto reusando
+   * o pipeline de vídeo do `creative`. Esconde creative_products/briefings/
+   * images. Assíncrono: devolve job_id; o Active faz poll no GET abaixo.
+   */
+  @Post('creative/social-video')
+  @HttpCode(HttpStatus.OK)
+  async startSocialVideo(
+    @Body() body: { org_id?: string; user_id?: string | null } & Partial<StartReelDto>,
+  ) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    if (!body?.product_photo_url) throw new BadRequestException('product_photo_url obrigatório')
+    if (!body?.prompt) throw new BadRequestException('prompt obrigatório')
+    return this.socialVideo.startReel(body.org_id, body.user_id ?? null, body as StartReelDto)
+  }
+
+  /** Status do job de reel; quando completed devolve a URL pública estável. */
+  @Get('creative/social-video/:jobId')
+  async getSocialVideo(
+    @Param('jobId') jobId: string,
+    @Query('org_id') orgId: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    return this.socialVideo.getReel(orgId, jobId)
   }
 }
