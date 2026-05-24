@@ -682,6 +682,13 @@ export class FulfillmentService {
     const items = await this.itemsByFoOne(orgId, fulfillmentOrderId)
     const result = await this.labels.generate(orgId, fo, items)
 
+    // Mercado Envios Full: sem etiqueta do vendedor (ML gerencia). Não cria
+    // registro de etiqueta nem marca como expedido — não há ação de despacho.
+    if (result.format === 'NONE') {
+      await this.log(orgId, userId, 'label_printed', { fulfillmentOrderId, payload: { managed: true, note: result.note } })
+      return { ok: true, managed: true, format: 'NONE' as const, trackingCode: result.trackingCode, labelUrl: null, message: result.note ?? 'Envio gerenciado pelo Mercado Livre (Full).' }
+    }
+
     const { data, error } = await supabaseAdmin.from('shipment_labels').insert({
       organization_id: orgId, fulfillment_order_id: fulfillmentOrderId,
       marketplace: result.marketplace, tracking_code: result.trackingCode,
