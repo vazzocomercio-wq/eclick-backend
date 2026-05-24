@@ -2861,6 +2861,22 @@ const FULFILLMENT_ENTRIES: KbEntry[] = [
 
 Origens unificadas: marketplace (ML), Loja Própria e B2B caem todas na mesma fila.`,
   },
+  {
+    routes:   ['/fulfillment/waves'],
+    tags:     ['wave', 'onda', 'ondas', 'separação em ondas', 'wave picking', 'coleta consolidada', 'sorting', 'put-wall', 'lote', 'batch picking', 'wave ia'],
+    title:    'Wave IA — separação em ondas (W1)',
+    content: `**Separação em ondas** (em /fulfillment/waves): junta vários pedidos numa **coleta única** (uma volta pelo CD) e depois distribui o que coletou de volta em cada pedido (**sorting** / put-wall). Bem mais rápido que separar pedido a pedido quando há SKU repetido.
+
+**Como o supervisor monta a onda:**
+- Seleciona os pedidos pendentes (received/picking) e clica em montar. A **IA assistiva** sugere quais pedidos **adicionar** (SKU em comum, mesma transportadora/canal, SLA vencendo) e **avisa** sobre selecionados que destoam (origem diferente) — você decide, ela só recomenda.
+- **Liberar a onda** coloca os pedidos em separação e gera a **lista consolidada por SKU** (quanto coletar no total × por pedido).
+
+**Como o operador coleta:**
+- **Bipa cada item por SKU/EAN** uma vez por unidade; o sistema conta o coletado contra o total da onda. Código fora da onda é bloqueado.
+- Depois faz o **sorting**: marca cada pedido como concluído (os itens viram pack normal e seguem pra conferência/expedição). Quando todos os pedidos estão separados, a onda fecha sozinha.
+
+Estados da onda: aberta → coletando → sorting → concluída (ou cancelada). Tudo logado por operador.`,
+  },
 ]
 
 export const KB: KbEntry[] = [

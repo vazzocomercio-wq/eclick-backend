@@ -5,6 +5,7 @@ import { FulfillmentAiService } from './fulfillment-ai.service'
 import { FulfillmentLabelsService } from './fulfillment-labels.service'
 import { FulfillmentReconcileService } from './fulfillment-reconcile.service'
 import { FulfillmentReturnsService } from './fulfillment-returns.service'
+import { FulfillmentWaveService } from './fulfillment-wave.service'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { StockModule } from '../stock/stock.module'
@@ -12,7 +13,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, MercadolivreModule, StockModule],
   controllers: [FulfillmentController],
-  providers:   [FulfillmentService, FulfillmentAiService, FulfillmentLabelsService, FulfillmentReconcileService, FulfillmentReturnsService],
+  providers:   [FulfillmentService, FulfillmentAiService, FulfillmentLabelsService, FulfillmentReconcileService, FulfillmentReturnsService, FulfillmentWaveService],
   exports:     [FulfillmentService],
 })
 export class FulfillmentModule {}

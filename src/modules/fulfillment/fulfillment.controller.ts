@@ -5,6 +5,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { FulfillmentService } from './fulfillment.service'
 import { FulfillmentReturnsService, type ReturnItemCondition } from './fulfillment-returns.service'
+import { FulfillmentWaveService } from './fulfillment-wave.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -19,6 +20,7 @@ export class FulfillmentController {
   constructor(
     private readonly svc: FulfillmentService,
     private readonly returns: FulfillmentReturnsService,
+    private readonly waves: FulfillmentWaveService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -184,5 +186,50 @@ export class FulfillmentController {
   printLabel(@ReqUser() u: ReqUserPayload, @Body() body: { fulfillmentOrderId: string }) {
     if (!body?.fulfillmentOrderId) throw new BadRequestException('fulfillmentOrderId obrigatório.')
     return this.svc.printLabel(this.org(u), u.id, body.fulfillmentOrderId)
+  }
+
+  // ── Wave IA (separação em ondas — W1) ─────────────────────────────────
+  @Get('waves')
+  listWaves(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.waves.listWaves(this.org(u), warehouseId)
+  }
+
+  @Get('waves/:id')
+  getWave(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.waves.getWave(this.org(u), id)
+  }
+
+  @Post('waves')
+  createWave(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId?: string; name?: string; fulfillmentOrderIds?: string[] }) {
+    if (!Array.isArray(body?.fulfillmentOrderIds) || body.fulfillmentOrderIds.length === 0) {
+      throw new BadRequestException('Selecione ao menos 1 pedido pra montar a onda.')
+    }
+    return this.waves.createWave(this.org(u), u.id, { warehouseId: body.warehouseId, name: body.name, fulfillmentOrderIds: body.fulfillmentOrderIds })
+  }
+
+  @Post('waves/suggest')
+  suggestWave(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId?: string; selectedIds?: string[] }) {
+    return this.waves.suggestForWave(this.org(u), body?.warehouseId, body?.selectedIds ?? [])
+  }
+
+  @Post('waves/:id/release')
+  releaseWave(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.waves.releaseWave(this.org(u), u.id, id)
+  }
+
+  @Post('waves/:id/scan-item')
+  scanWaveItem(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { code: string }) {
+    if (!body?.code) throw new BadRequestException('Código bipado vazio.')
+    return this.waves.scanWaveItem(this.org(u), u.id, id, body.code)
+  }
+
+  @Post('waves/:id/orders/:foId/complete')
+  completeWaveOrder(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Param('foId') foId: string) {
+    return this.waves.completeOrderInWave(this.org(u), u.id, id, foId)
+  }
+
+  @Post('waves/:id/cancel')
+  cancelWave(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.waves.cancelWave(this.org(u), id)
   }
 }

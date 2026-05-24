@@ -247,6 +247,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    null,
   },
+  // F12 Wave IA — sugestão de montagem de onda de separação. Heurística faz o
+  // score (SKU em comum × transportadora × SLA); o LLM só escreve um racional
+  // curto em pt-BR (best-effort, não bloqueia). Haiku pra latência + custo baixo.
+  fulfillment_wave_suggest: {
+    label:       'Sugestão de onda (Separação)',
+    description: 'Justifica em 1-2 frases por que agrupar pedidos numa onda de separação é eficiente (SKU em comum, transportadora, prazo)',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
