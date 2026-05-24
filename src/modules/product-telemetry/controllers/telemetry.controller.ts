@@ -1,5 +1,6 @@
-import { Controller, Post, Body, Req } from '@nestjs/common'
+import { Controller, Post, Body, Req, UseGuards } from '@nestjs/common'
 import { Request } from 'express'
+import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { EventIngestionService, RawTelemetryEvent } from '../services/event-ingestion.service'
 import { SessionService } from '../services/session.service'
@@ -7,11 +8,13 @@ import { SessionService } from '../services/session.service'
 interface ReqUserPayload { id: string; orgId: string }
 
 /**
- * Ingestão de telemetria de produto. Autenticado pelo SupabaseAuthGuard
- * global — org_id e user_id vêm do JWT (@ReqUser), o client só manda o
- * session_id + os eventos. Nunca confiar em org/user vindos do body.
+ * Ingestão de telemetria de produto. SupabaseAuthGuard é aplicado por
+ * controller (o projeto NÃO tem guard global) — org_id e user_id vêm do JWT
+ * (@ReqUser); o client só manda session_id + eventos. Nunca confiar em
+ * org/user vindos do body.
  */
 @Controller('telemetry')
+@UseGuards(SupabaseAuthGuard)
 export class TelemetryController {
   constructor(
     private readonly ingestion: EventIngestionService,

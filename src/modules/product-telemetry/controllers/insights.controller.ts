@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common'
+import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { PlatformAdminGuard } from '../guards/platform-admin.guard'
 import { InsightsService } from '../services/insights.service'
 import { RollupService } from '../services/rollup.service'
@@ -11,10 +12,11 @@ const brtMinus = (days: number) =>
 
 /**
  * Leitura do dashboard /insights — visão de founder, cross-org.
- * SupabaseAuthGuard (global) autentica; PlatformAdminGuard restringe à equipe.
+ * SupabaseAuthGuard autentica (seta reqUser) e DEVE vir antes do
+ * PlatformAdminGuard, que restringe à equipe e-Click lendo reqUser.id.
  */
 @Controller('insights')
-@UseGuards(PlatformAdminGuard)
+@UseGuards(SupabaseAuthGuard, PlatformAdminGuard)
 export class InsightsController {
   constructor(
     private readonly insights:   InsightsService,
