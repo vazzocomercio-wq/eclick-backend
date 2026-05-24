@@ -318,6 +318,25 @@ async function main() {
   await admin.from('fulfillment_waves').delete().eq('id', waveId)
   ok('Wave IA validada + limpa (onda + 2 pedidos)')
 
+  // ── 23. Onda A: multiempresa/multiconta + auto-cadastro ──────────────────
+  // O pedido B2B inicial (foId) deve ter recebido account_id + company_id sozinho.
+  const { data: foDim } = await admin.from('fulfillment_orders').select('account_id, company_id').eq('id', foId).single()
+  assert(!!foDim.account_id && !!foDim.company_id, 'Pedido recebeu conta + empresa no auto-cadastro (account_id + company_id)')
+  const companies = await call(token, 'GET', '/fulfillment/companies')
+  assert(Array.isArray(companies.json) && companies.json.length >= 1 && companies.json.some((c) => c.is_default), 'Empresa padrão criada (GET /companies)')
+  const accounts = await call(token, 'GET', '/fulfillment/accounts')
+  const b2bAccount = (accounts.json ?? []).find((a) => a.platform === 'b2b')
+  assert(!!b2bAccount, 'Conta de canal b2b criada (GET /accounts)')
+  // cria uma empresa "matriz" e religa a conta b2b nela
+  const newCo = await call(token, 'POST', '/fulfillment/companies', { name: 'Matriz Smoke', cnpj: '12.345.678/0001-99', role: 'matriz' }, 201)
+  assert(newCo.json.ok && !!newCo.json.id, 'Empresa criada (POST /companies, CNPJ normalizado)')
+  const { data: coRow } = await admin.from('fulfillment_companies').select('cnpj, role').eq('id', newCo.json.id).single()
+  assert(coRow.cnpj === '12345678000199' && coRow.role === 'matriz', 'CNPJ salvo só com dígitos + papel matriz')
+  const relink = await call(token, 'PATCH', `/fulfillment/accounts/${b2bAccount.id}`, { company_id: newCo.json.id })
+  assert(relink.json.ok, 'Conta religada à outra empresa (PATCH /accounts/:id)')
+  await admin.from('fulfillment_companies').delete().eq('id', newCo.json.id) // cleanup (conta volta company_id null via ON DELETE SET NULL)
+  ok('Onda A validada (multiempresa/multiconta + auto-cadastro) + limpa')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
