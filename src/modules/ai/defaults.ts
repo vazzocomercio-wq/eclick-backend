@@ -232,6 +232,30 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  // F12 Fulfillment — triagem de avaria por foto (visão, exige anthropic).
+  // Best-effort: assistivo, não bloqueante. OFF por padrão (toggle por org).
+  fulfillment_damage_triage: {
+    label:       'Triagem de avaria por foto (Fulfillment)',
+    description: 'Vision: classifica severidade (minor/major/total_loss) + destino sugerido a partir da foto da avaria',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
+  // F12 Fulfillment — conferência do pacote por foto (visão, exige anthropic).
+  fulfillment_pack_verify: {
+    label:       'Conferência de pacote por foto (Fulfillment)',
+    description: 'Vision: confere se os itens esperados aparecem na foto do pacote antes de fechar a expedição',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    null,
+  },
+  // F12 Wave IA — sugestão de montagem de onda de separação. Heurística faz o
+  // score (SKU em comum × transportadora × SLA); o LLM só escreve um racional
+  // curto em pt-BR (best-effort, não bloqueia). Haiku pra latência + custo baixo.
+  fulfillment_wave_suggest: {
+    label:       'Sugestão de onda (Separação)',
+    description: 'Justifica em 1-2 frases por que agrupar pedidos numa onda de separação é eficiente (SKU em comum, transportadora, prazo)',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
   storefront_room_recolor: {
     label:       'Provador de cor/acabamento IA',
     description: 'Recolore o produto numa cena já ambientada pra bater com a variante escolhida, mantendo cena e posição idênticas',

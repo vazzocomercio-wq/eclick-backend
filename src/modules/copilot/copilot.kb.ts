@@ -2860,6 +2860,42 @@ Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) 
   },
 ]
 
+const FULFILLMENT_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/fulfillment', '/fulfillment/picking', '/fulfillment/packing'],
+    tags:     ['fulfillment', 'separação', 'conferência', 'cd', 'centro de distribuição', 'bipagem', 'picking', 'packing', 'expedição', 'operador', 'atrasado', 'sla'],
+    title:    'Fulfillment — separação e conferência do CD (F12)',
+    content: `**App do operador do centro de distribuição** (em /fulfillment, mobile-first/PWA). Elimina erro de envio com bipagem obrigatória + dupla checagem + log de tudo.
+
+**Fluxo:**
+- **Separar** (/fulfillment/picking): bipe cada item por **SKU, EAN ou QR**. Código errado é **bloqueado** (apito grave) e registrado. Conta a quantidade; quando completa, avança sozinho. Botões de **avaria** (foto) e **bloquear** por item.
+- **Conferir e expedir** (/fulfillment/packing): **bipe o pedido** pra liberar → confere os itens → **foto** (obrigatória se o ticket passar do limite ou canal VIP) → fecha → **imprime etiqueta** (Mercado Livre real, ou ZPL pra loja/B2B).
+- O pedido vira fila **automaticamente** quando é pago (ML + Loja Própria), se a auto-ingestão estiver ligada nas Configurações. Um cron reconcilia pagos que escaparam.
+
+**Configurações (engrenagem no hub):** auto-ingestão + CD padrão, toggles de IA (triagem de avaria por foto, conferência por foto, fila inteligente), regra de foto e **prazo de despacho (SLA)**. Pedidos além do SLA aparecem como **ATRASADOS**.
+
+**Equipe (ícone de pessoas):** cadastra operadores com papel (separador/conferente/supervisor), liga "exigir papel" e vê **produtividade** (itens/h, erros) por operador.
+
+Origens unificadas: marketplace (ML), Loja Própria e B2B caem todas na mesma fila.`,
+  },
+  {
+    routes:   ['/fulfillment/waves'],
+    tags:     ['wave', 'onda', 'ondas', 'separação em ondas', 'wave picking', 'coleta consolidada', 'sorting', 'put-wall', 'lote', 'batch picking', 'wave ia'],
+    title:    'Wave IA — separação em ondas (W1)',
+    content: `**Separação em ondas** (em /fulfillment/waves): junta vários pedidos numa **coleta única** (uma volta pelo CD) e depois distribui o que coletou de volta em cada pedido (**sorting** / put-wall). Bem mais rápido que separar pedido a pedido quando há SKU repetido.
+
+**Como o supervisor monta a onda:**
+- Seleciona os pedidos pendentes (received/picking) e clica em montar. A **IA assistiva** sugere quais pedidos **adicionar** (SKU em comum, mesma transportadora/canal, SLA vencendo) e **avisa** sobre selecionados que destoam (origem diferente) — você decide, ela só recomenda.
+- **Liberar a onda** coloca os pedidos em separação e gera a **lista consolidada por SKU** (quanto coletar no total × por pedido).
+
+**Como o operador coleta:**
+- **Bipa cada item por SKU/EAN** uma vez por unidade; o sistema conta o coletado contra o total da onda. Código fora da onda é bloqueado.
+- Depois faz o **sorting**: marca cada pedido como concluído (os itens viram pack normal e seguem pra conferência/expedição). Quando todos os pedidos estão separados, a onda fecha sozinha.
+
+Estados da onda: aberta → coletando → sorting → concluída (ou cancelada). Tudo logado por operador.`,
+  },
+]
+
 // ════════════════════════════════════════════════════════════════════════
 // Telemetria — e-Click Insights (founder, cross-org)
 // ════════════════════════════════════════════════════════════════════════
@@ -2886,6 +2922,7 @@ const TELEMETRY_ENTRIES: KbEntry[] = [
 ]
 
 export const KB: KbEntry[] = [
+  ...FULFILLMENT_ENTRIES,
   ...TELEMETRY_ENTRIES,
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,

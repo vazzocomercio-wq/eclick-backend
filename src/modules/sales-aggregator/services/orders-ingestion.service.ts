@@ -4,6 +4,7 @@ import { MercadoLivreClient, MlOrder } from '../clients/mercado-livre-client'
 import { MessagingService } from '../../messaging/messaging.service'
 import { NewSaleNotifierService } from './new-sale-notifier.service'
 import { StockService } from '../../stock/stock.service'
+import { FulfillmentService } from '../../fulfillment/fulfillment.service'
 
 interface ProductInfo {
   product_id: string
@@ -56,6 +57,7 @@ export class OrdersIngestionService {
     private readonly messaging:   MessagingService,
     private readonly newSaleNotifier: NewSaleNotifierService,
     private readonly stock:       StockService,
+    private readonly fulfillment: FulfillmentService,
   ) {}
 
   /** Public — surfaces the last sync result for /sync-stats. */
@@ -166,6 +168,8 @@ export class OrdersIngestionService {
     // Só pra pedidos pagos. Falha silenciosa se algum dado faltar.
     if (order.status === 'paid') {
       this.newSaleNotifier.fireAndForget(orgId, sellerId, externalOrderId)
+      // F12 Sprint 1 — auto-ingestão pro fulfillment (best-effort, gated por org)
+      void this.fulfillment.autoIngestMarketplaceOrder(orgId, String(externalOrderId))
     }
 
     // Baixa de estoque (Estoque Unificado F3): venda paga decrementa o
