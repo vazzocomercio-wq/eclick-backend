@@ -34,6 +34,10 @@ const VIDEO_NEGATIVE_PROMPT = [
   'unrealistic light beams', 'cgi effects', 'fantasy effects',
   'changing product shape', 'changing product color', 'modified product',
   'text overlay', 'watermark', 'logo overlay', 'caption',
+  // Kling (modelo chinês) tende a cravar texto/legenda chinesa — reforço:
+  'text', 'subtitles', 'captions', 'on-screen text', 'letters', 'words',
+  'chinese text', 'chinese characters', 'asian characters', 'kanji',
+  'typography', 'title card', 'lower third',
 ].join(', ')
 
 // ── Types ─────────────────────────────────────────────────────────────────

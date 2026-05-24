@@ -369,8 +369,11 @@ export class SocialVideoBridgeService {
    */
   private async normalizeSeed(buffer: Buffer): Promise<Buffer> {
     try {
+      // `cover`: preenche o quadro 9:16 inteiro (corta as sobras) — sem barras
+      // brancas. É o que dá o reel em tela cheia (vertical) que o IG/TikTok
+      // esperam. Produto fica centrado (`position: centre`).
       return await sharp(buffer)
-        .resize(1080, 1920, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+        .resize(1080, 1920, { fit: 'cover', position: 'centre' })
         .jpeg({ quality: 90 })
         .toBuffer()
     } catch (e) {
