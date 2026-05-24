@@ -13,6 +13,18 @@ interface DailyRow {
   events_count:  number
 }
 
+interface EngagementRow {
+  org_id:              string
+  user_id:             string
+  score:               number
+  status:              string
+  weekly_active_days:  number
+  weekly_module_count: number
+  weekly_time_minutes: number
+  trend:               string
+  last_seen_at:        string | null
+}
+
 /**
  * Camada de leitura do dashboard /insights (visão de founder, cross-org).
  * Agrega em JS (mesmo padrão do storefront-analytics) a partir de
@@ -21,6 +33,78 @@ interface DailyRow {
 @Injectable()
 export class InsightsService {
   private readonly logger = new Logger(InsightsService.name)
+
+  /** Health score / churn de todos os usuários (cross-org), agrupado por status. */
+  async engagement(statusFilter?: string) {
+    let q = supabaseAdmin
+      .from('telemetry_user_engagement')
+      .select('org_id, user_id, score, status, weekly_active_days, weekly_module_count, weekly_time_minutes, trend, last_seen_at')
+      .order('score', { ascending: false })
+      .limit(2000)
+    if (statusFilter) q = q.eq('status', statusFilter)
+    const { data, error } = await q
+    if (error) { this.logger.warn(`[insights] engagement: ${error.message}`); return { by_status: {}, users: [] } }
+
+    const emails = await this.emailMap()
+    const rows = (data ?? []) as EngagementRow[]
+    const users = rows.map((u) => ({
+      ...u,
+      email: emails.get(u.user_id) ?? null,
+      days_since_last_seen: u.last_seen_at ? Math.floor((Date.now() - new Date(u.last_seen_at).getTime()) / 86400000) : null,
+    }))
+    const byStatus: Record<string, number> = {}
+    for (const u of users) byStatus[u.status] = (byStatus[u.status] ?? 0) + 1
+    return { by_status: byStatus, users }
+  }
+
+  /** Funis de tarefa (cross-org) a partir dos eventos task.* dos últimos N dias. */
+  async funnels(periodDays: number) {
+    const fromIso = `${this.dateMinus(this.today(), periodDays - 1)}T00:00:00-03:00`
+    const out: Array<{ event_name: string; properties: { task_name?: string; step?: string } }> = []
+    let offset = 0
+    for (;;) {
+      const { data, error } = await supabaseAdmin
+        .from('telemetry_events')
+        .select('event_name, properties')
+        .in('event_name', ['task.started', 'task.completed', 'task.abandoned'])
+        .gte('created_at', fromIso)
+        .order('id', { ascending: true })
+        .range(offset, offset + 1000 - 1)
+      if (error) { this.logger.warn(`[insights] funnels: ${error.message}`); break }
+      const batch = (data ?? []) as typeof out
+      out.push(...batch)
+      if (batch.length < 1000) break
+      offset += 1000
+    }
+
+    const agg = new Map<string, { started: number; completed: number; abandoned: number; steps: Record<string, number> }>()
+    for (const r of out) {
+      const task = r.properties?.task_name ?? 'desconhecida'
+      let x = agg.get(task)
+      if (!x) { x = { started: 0, completed: 0, abandoned: 0, steps: {} }; agg.set(task, x) }
+      if (r.event_name === 'task.started') x.started++
+      else if (r.event_name === 'task.completed') x.completed++
+      else if (r.event_name === 'task.abandoned') {
+        x.abandoned++
+        const step = r.properties?.step ?? 'desconhecido'
+        x.steps[step] = (x.steps[step] ?? 0) + 1
+      }
+    }
+
+    return {
+      period_days: periodDays,
+      tasks: [...agg.entries()].map(([task, x]) => ({
+        task,
+        started: x.started,
+        completed: x.completed,
+        abandoned: x.abandoned,
+        completion_rate: x.started ? Math.round((x.completed / x.started) * 100) : 0,
+        abandon_rate:    x.started ? Math.round((x.abandoned / x.started) * 100) : 0,
+        top_abandon_step: Object.entries(x.steps).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+        abandon_steps: x.steps,
+      })).sort((a, b) => b.started - a.started),
+    }
+  }
 
   /** Insights gerados por IA (cross-org). resolved=undefined retorna todos. */
   async listAiInsights(resolved?: boolean) {

@@ -42,6 +42,18 @@ export class InsightsController {
     return this.insights.modulesRanking(clamp(Number(period) || 7, 1, 90))
   }
 
+  /** Health score / churn de todos os usuários (?status= filtra). */
+  @Get('engagement')
+  engagementHealth(@Query('status') status?: string) {
+    return this.insights.engagement(status || undefined)
+  }
+
+  /** Funis de tarefa (onde o usuário desiste). */
+  @Get('funnels')
+  funnels(@Query('period') period?: string) {
+    return this.insights.funnels(clamp(Number(period) || 30, 1, 90))
+  }
+
   @Get('usage-matrix')
   usageMatrix(@Query('period') period?: string) {
     return this.insights.usageMatrix(clamp(Number(period) || 7, 1, 90))
