@@ -8,6 +8,7 @@ import { FulfillmentReturnsService, type ReturnItemCondition } from './fulfillme
 import { FulfillmentWaveService } from './fulfillment-wave.service'
 import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-accounts.service'
 import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type InvoiceItem } from './fulfillment-invoices.service'
+import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -25,6 +26,7 @@ export class FulfillmentController {
     private readonly waves: FulfillmentWaveService,
     private readonly accounts: FulfillmentAccountsService,
     private readonly invoices: FulfillmentInvoicesService,
+    private readonly packaging: FulfillmentPackagingService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -93,6 +95,51 @@ export class FulfillmentController {
   @Delete('invoices/:id')
   removeInvoice(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.invoices.remove(this.org(u), id)
+  }
+
+  // ── Embalagens (Onda E — tipos + kits + sugestão) ────────────────────
+  @Get('packaging/types')
+  listPackagingTypes(@ReqUser() u: ReqUserPayload) {
+    return this.packaging.listTypes(this.org(u))
+  }
+  @Post('packaging/types')
+  createPackagingType(@ReqUser() u: ReqUserPayload, @Body() body: { name: string; kind?: PackagingKind; width_cm?: number | null; height_cm?: number | null; depth_cm?: number | null; weight_g?: number | null; cost_cents?: number | null; stock?: number | null }) {
+    return this.packaging.createType(this.org(u), body)
+  }
+  @Patch('packaging/types/:id')
+  updatePackagingType(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.packaging.updateType(this.org(u), id, body ?? {})
+  }
+  @Delete('packaging/types/:id')
+  removePackagingType(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.packaging.removeType(this.org(u), id)
+  }
+
+  @Get('packaging/kits')
+  listPackagingKits(@ReqUser() u: ReqUserPayload) {
+    return this.packaging.listKits(this.org(u))
+  }
+  @Post('packaging/kits')
+  createPackagingKit(@ReqUser() u: ReqUserPayload, @Body() body: { name: string; items?: PackagingKitItem[] }) {
+    return this.packaging.createKit(this.org(u), body)
+  }
+  @Patch('packaging/kits/:id')
+  updatePackagingKit(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { name?: string; items?: PackagingKitItem[]; is_active?: boolean }) {
+    return this.packaging.updateKit(this.org(u), id, body ?? {})
+  }
+  @Delete('packaging/kits/:id')
+  removePackagingKit(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.packaging.removeKit(this.org(u), id)
+  }
+
+  @Post('pack-tasks/:id/packaging')
+  setPackaging(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { packagingTypeId?: string | null; packagingKitId?: string | null }) {
+    return this.packaging.setPackaging(this.org(u), id, body ?? {})
+  }
+
+  @Get('orders/:foId/packaging-suggest')
+  suggestPackaging(@ReqUser() u: ReqUserPayload, @Param('foId') foId: string) {
+    return this.packaging.suggest(this.org(u), foId)
   }
 
   // ── Operadores + produtividade (Sprint 2) ────────────────────────────

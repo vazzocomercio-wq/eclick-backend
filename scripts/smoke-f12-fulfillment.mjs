@@ -381,6 +381,26 @@ async function main() {
   await admin.from('fulfillment_orders').delete().eq('id', dFo)
   ok('Onda D validada (NF-e preparação + validação fiscal) + limpa')
 
+  // ── 27. Onda E: controle de embalagens (tipos + kits + sugestão) ─────────
+  const pt = await call(token, 'POST', '/fulfillment/packaging/types', { name: 'SMOKE-Caixa P', kind: 'caixa', width_cm: 20, height_cm: 15, depth_cm: 10, cost_cents: 250, stock: 100 }, 201)
+  assert(pt.json.ok && !!pt.json.id, 'Tipo de embalagem criado')
+  const ptId = pt.json.id
+  await call(token, 'PATCH', `/fulfillment/packaging/types/${ptId}`, { cost_cents: 300 }, 200)
+  const types = await call(token, 'GET', '/fulfillment/packaging/types')
+  const mine = (types.json ?? []).find((t) => t.id === ptId)
+  assert(mine?.cost_cents === 300, 'Tipo atualizado (custo) + listado')
+  const kit = await call(token, 'POST', '/fulfillment/packaging/kits', { name: 'SMOKE-Kit Frágil', items: [{ packaging_type_id: ptId, qty: 2 }] }, 201)
+  assert(kit.json.ok && !!kit.json.id, 'Kit de embalagem criado (com itens)')
+  // sugestão de embalagem pra um pedido
+  const eSeed = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Embalagem Test' }, items: [{ sku: 'EMB-1', qty: 1 }] }, 201)
+  const eFo = eSeed.json.fulfillmentOrderId
+  const pkgSug = await call(token, 'GET', `/fulfillment/orders/${eFo}/packaging-suggest`)
+  assert(!!pkgSug.json.suggested && pkgSug.json.suggested.id === ptId, 'Sugestão de embalagem retorna a caixa cadastrada')
+  await admin.from('fulfillment_orders').delete().eq('id', eFo)
+  await call(token, 'DELETE', `/fulfillment/packaging/kits/${kit.json.id}`, undefined, 200)
+  await call(token, 'DELETE', `/fulfillment/packaging/types/${ptId}`, undefined, 200)
+  ok('Onda E validada (embalagens: tipos + kits + sugestão) + limpa')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
