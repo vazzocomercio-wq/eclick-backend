@@ -4,6 +4,8 @@ import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, CreateBriefingDto, CreativeProduct } from '../creative/creative.service'
 import { CreativeVideoPipelineService } from '../creative/creative-video-pipeline.service'
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const sharp = require('sharp') as typeof import('sharp')
 
 const CREATIVE_BUCKET = 'creative'
 const PUBLIC_BUCKET   = 'storefront-assets'
@@ -107,22 +109,32 @@ export class SocialVideoBridgeService {
 
   async getReel(orgId: string, jobId: string): Promise<ReelStatus> {
     const job = await this.videos.getJob(orgId, jobId)
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      return { status: 'failed', public_url: null, preview_url: null, error: job.error_message ?? `job ${job.status}` }
+    }
     if (job.status !== 'completed') {
-      return { status: job.status, public_url: null, preview_url: null, error: job.error_message ?? null }
+      return { status: job.status, public_url: null, preview_url: null, error: null }
     }
-    const vids   = await this.videos.listVideosByJob(orgId, jobId)
-    const master = vids.find(v => v.is_chain_master) ?? vids[vids.length - 1]
-    if (!master?.storage_path) {
-      return { status: 'completed', public_url: null, preview_url: null, error: 'vídeo final não encontrado' }
+    const vids = await this.videos.listVideosByJob(orgId, jobId)
+    // Reel final: master do chain; senão a parte ready/approved com vídeo.
+    const ready =
+      vids.find(v => v.is_chain_master && v.storage_path) ??
+      vids.find(v => v.storage_path && (v.status === 'ready' || v.status === 'approved')) ??
+      vids.find(v => v.storage_path)
+    if (!ready?.storage_path) {
+      // Job "completou" mas nenhuma parte gerou vídeo (ex: provider recusou a
+      // imagem). Surface o erro real da parte em vez de "completed" vazio.
+      const partErr = vids.find(v => v.error_message)?.error_message
+      return { status: 'failed', public_url: null, preview_url: null, error: partErr ?? 'vídeo não foi gerado' }
     }
-    const publicUrl = await this.mirrorToPublic(orgId, master.id, master.storage_path).catch(err => {
+    const publicUrl = await this.mirrorToPublic(orgId, ready.id, ready.storage_path).catch(err => {
       this.logger.warn(`[social-video] mirror falhou job=${jobId}: ${(err as Error).message}`)
       return null
     })
     return {
       status:      'completed',
       public_url:  publicUrl,
-      preview_url: master.signed_video_url ?? null,
+      preview_url: ready.signed_video_url ?? null,
       error:       null,
     }
   }
@@ -212,9 +224,10 @@ export class SocialVideoBridgeService {
 
     const imageId     = randomUUID()
     const storagePath = `${orgId}/${productId}/images/${imageId}.jpg`
+    const normalized  = await this.normalizeSeed(buffer)
     const { error: upErr } = await supabaseAdmin.storage
       .from(CREATIVE_BUCKET)
-      .upload(storagePath, buffer, { contentType: 'image/jpeg', upsert: true, cacheControl: '3600' })
+      .upload(storagePath, normalized, { contentType: 'image/jpeg', upsert: true, cacheControl: '3600' })
     if (upErr) throw new BadRequestException(`registerSourceImage.upload: ${upErr.message}`)
 
     const { error: insErr } = await supabaseAdmin
@@ -251,8 +264,28 @@ export class SocialVideoBridgeService {
     return supabaseAdmin.storage.from(PUBLIC_BUCKET).getPublicUrl(pubPath).data.publicUrl
   }
 
+  /**
+   * Normaliza a foto-semente pra um quadro 9:16 1080x1920 (fundo branco).
+   * Fotos de dropship vêm pequenas/quadradas e o Kling recusa com
+   * "Image pixel is invalid" — isso garante resolução + proporção aceitas
+   * e deixa o produto centrado.
+   */
+  private async normalizeSeed(buffer: Buffer): Promise<Buffer> {
+    try {
+      return await sharp(buffer)
+        .resize(1080, 1920, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+        .jpeg({ quality: 90 })
+        .toBuffer()
+    } catch (e) {
+      this.logger.warn(`[social-video] normalizeSeed falhou, usa original: ${(e as Error).message}`)
+      return buffer
+    }
+  }
+
   private async downloadImage(url: string): Promise<Buffer> {
-    const res = await fetch(url)
+    // Fotos de dropship às vezes têm espaço na URL → encode (sem re-encodar %xx).
+    const safe = /%[0-9a-f]{2}/i.test(url) ? url : url.replace(/ /g, '%20')
+    const res = await fetch(safe)
     if (!res.ok) throw new BadRequestException(`download imagem falhou (HTTP ${res.status})`)
     return Buffer.from(await res.arrayBuffer())
   }
