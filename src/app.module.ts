@@ -71,6 +71,7 @@ import { StorefrontAnalyticsModule } from './modules/storefront-analytics/storef
 import { StorefrontNotificationsModule } from './modules/storefront-notifications/storefront-notifications.module'
 import { StorefrontEventsModule } from './modules/storefront-events/storefront-events.module'
 import { StorefrontVariantsModule } from './modules/storefront-variants/storefront-variants.module'
+import { ProductTelemetryModule } from './modules/product-telemetry/product-telemetry.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
@@ -159,6 +160,7 @@ import { RadarModule } from './modules/radar/radar.module'
     StorefrontNotificationsModule,
     StorefrontEventsModule,
     StorefrontVariantsModule,
+    ProductTelemetryModule,
     BannerGeneratorModule,
     PaymentsModule,
     MlAiCoreModule,
