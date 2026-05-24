@@ -25,6 +25,10 @@ export class AiKeyRequiredException extends HttpException {
 export class CredentialsService {
   private readonly logger = new Logger(CredentialsService.name)
 
+  /** Org matriz (e-Click / Vazzo) — dona das chaves de IA da plataforma.
+   *  Orgs em modo 'platform' sem chave própria caem nas chaves desta org. */
+  private static readonly PLATFORM_ORG_ID = '4ef1aabd-c209-40b0-b034-ef69dcb66833'
+
   private get encryptionKey(): Buffer {
     const key = process.env.ENCRYPTION_KEY
     if (!key || key.length !== 32) {
@@ -148,7 +152,12 @@ export class CredentialsService {
    * fazia TODA org cair na chave global da plataforma (= dono pagando pelos
    * clientes).
    */
-  async resolveAiKey(orgId: string | null, provider: string, keyName?: string): Promise<string> {
+  async resolveAiKey(
+    orgId: string | null,
+    provider: string,
+    keyName?: string,
+    opts?: { platformEnvFallback?: string | null },
+  ): Promise<string> {
     if (orgId) {
       const own = await this.getDecryptedKey(orgId, provider, keyName)
       if (own) return own
@@ -158,7 +167,8 @@ export class CredentialsService {
     if (mode === 'platform') {
       const platform = await this.getPlatformKey(provider, keyName)
       if (platform) return platform
-      // Plataforma sem a chave global cadastrada — erro de config nosso.
+      // Google/vídeo: a chave da plataforma vive em env var, não no DB.
+      if (opts?.platformEnvFallback) return opts.platformEnvFallback
       throw new HttpException(`Chave ${provider} da plataforma não configurada`, 500)
     }
 
@@ -176,7 +186,9 @@ export class CredentialsService {
     return data?.ai_keys_mode === 'platform' ? 'platform' : 'own'
   }
 
-  /** Chave GLOBAL da plataforma (organization_id IS NULL) — só a matriz usa. */
+  /** Chave da plataforma: 1) linha global (organization_id IS NULL) se houver;
+   *  2) senão, a chave da org MATRIZ (Vazzo) — que é, de fato, a "conta da
+   *  plataforma" (não existe linha global hoje; as chaves vivem na org matriz). */
   private async getPlatformKey(provider: string, keyName?: string): Promise<string | null> {
     let q = supabaseAdmin
       .from('api_credentials')
@@ -187,13 +199,15 @@ export class CredentialsService {
     if (keyName) q = q.eq('key_name', keyName)
 
     const { data } = await q.maybeSingle()
-    if (!data) return null
-    try {
-      return this.decrypt(data.key_value)
-    } catch (e) {
-      this.logger.warn(`[getPlatformKey] decrypt falhou provider=${provider}: ${(e as Error).message}`)
-      return null
+    if (data) {
+      try {
+        return this.decrypt(data.key_value)
+      } catch (e) {
+        this.logger.warn(`[getPlatformKey] decrypt global falhou provider=${provider}: ${(e as Error).message}`)
+      }
     }
+    // Fallback: chave da org matriz.
+    return this.getDecryptedKey(CredentialsService.PLATFORM_ORG_ID, provider, keyName)
   }
 
   // ── Test ──────────────────────────────────────────────────────────────────

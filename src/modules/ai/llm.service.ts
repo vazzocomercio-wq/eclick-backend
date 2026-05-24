@@ -208,10 +208,8 @@ export class LlmService {
     jsonMode:     boolean
   }): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
     const keyName = args.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'
-    // Try org-scoped key first, then null (global) fallback
-    const key = await this.credentials.getDecryptedKey(args.orgId, args.provider, keyName).catch(() => null)
-      ?? await this.credentials.getDecryptedKey(null, args.provider, keyName).catch(() => null)
-    if (!key) throw new BadRequestException(`${keyName} não configurada`)
+    // BYOK: chave da org → (platform: matriz) / (own: bloqueia com 402).
+    const key = await this.credentials.resolveAiKey(args.orgId, args.provider, keyName)
 
     if (args.provider === 'anthropic') {
       return this.callAnthropic(key, args.model, args.systemPrompt, args.userPrompt, args.maxTokens, args.temperature)
@@ -455,9 +453,8 @@ export class LlmService {
     maxTokens:    number
   }): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
     const keyName = 'ANTHROPIC_API_KEY'
-    const apiKey = await this.credentials.getDecryptedKey(args.orgId, 'anthropic', keyName).catch(() => null)
-      ?? await this.credentials.getDecryptedKey(null, 'anthropic', keyName).catch(() => null)
-    if (!apiKey) throw new BadRequestException(`${keyName} não configurada`)
+    // BYOK: chave da org → (platform: matriz) / (own: bloqueia com 402).
+    const apiKey = await this.credentials.resolveAiKey(args.orgId, 'anthropic', keyName)
 
     const imageBlock = args.imageUrl
       ? { type: 'image', source: { type: 'url', url: args.imageUrl } }
@@ -607,9 +604,8 @@ export class LlmService {
     t0:              number
   }): Promise<GenerateImageOutput> {
     const keyName = 'OPENAI_API_KEY'
-    const key = await this.credentials.getDecryptedKey(args.orgId, 'openai', keyName).catch(() => null)
-      ?? await this.credentials.getDecryptedKey(null, 'openai', keyName).catch(() => null)
-    if (!key) throw new BadRequestException(`${keyName} não configurada`)
+    // BYOK: chave da org → (platform: matriz) / (own: bloqueia com 402).
+    const key = await this.credentials.resolveAiKey(args.orgId, 'openai', keyName)
 
     const size = args.format === 'custom'
       ? `${args.customSize?.width ?? 1024}x${args.customSize?.height ?? 1024}`
@@ -728,17 +724,11 @@ export class LlmService {
     t0:              number
   }): Promise<GenerateImageOutput> {
     const keyName = 'GEMINI_API_KEY'
-    // 1) Tenta credentials per-org → 2) global service-account → 3) env fallback
-    const key =
-      (await this.credentials.getDecryptedKey(args.orgId, 'google', keyName).catch(() => null))
-      ?? (await this.credentials.getDecryptedKey(null, 'google', keyName).catch(() => null))
-      ?? process.env.GEMINI_API_KEY_DEFAULT
-      ?? null
-    if (!key) {
-      throw new BadRequestException(
-        `${keyName} não configurada (verificar credentials_service ou GEMINI_API_KEY_DEFAULT em env)`,
-      )
-    }
+    // BYOK: chave da org → (platform: matriz → env GEMINI_API_KEY_DEFAULT) /
+    // (own: bloqueia com 402).
+    const key = await this.credentials.resolveAiKey(args.orgId, 'google', keyName, {
+      platformEnvFallback: process.env.GEMINI_API_KEY_DEFAULT ?? null,
+    })
 
     // Pre-processa refs em paralelo (mesma normalização do OpenAI:
     // resize 1024 inside + removeAlpha + JPEG quality 85)
