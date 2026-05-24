@@ -4,6 +4,7 @@ import { PlatformAdminGuard } from '../guards/platform-admin.guard'
 import { InsightsService } from '../services/insights.service'
 import { RollupService } from '../services/rollup.service'
 import { EngagementService } from '../services/engagement.service'
+import { InsightsAiService } from '../services/insights-ai.service'
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 const brtToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
@@ -22,7 +23,14 @@ export class InsightsController {
     private readonly insights:   InsightsService,
     private readonly rollup:     RollupService,
     private readonly engagement: EngagementService,
+    private readonly aiInsights: InsightsAiService,
   ) {}
+
+  /** Insights gerados por IA (lista; ?resolved=true|false filtra). */
+  @Get('ai-insights')
+  aiList(@Query('resolved') resolved?: string) {
+    return this.insights.listAiInsights(resolved === 'true' ? true : resolved === 'false' ? false : undefined)
+  }
 
   @Get('overview')
   overview(@Query('from') from?: string, @Query('to') to?: string) {
@@ -49,5 +57,11 @@ export class InsightsController {
   @Post('run-engagement')
   runEngagement() {
     return this.engagement.runEngagement()
+  }
+
+  /** Força a geração de insights por IA agora (todas as orgs com uso relevante). */
+  @Post('run-ai-insights')
+  runAiInsights() {
+    return this.aiInsights.generateAll()
   }
 }

@@ -22,6 +22,19 @@ interface DailyRow {
 export class InsightsService {
   private readonly logger = new Logger(InsightsService.name)
 
+  /** Insights gerados por IA (cross-org). resolved=undefined retorna todos. */
+  async listAiInsights(resolved?: boolean) {
+    let q = supabaseAdmin
+      .from('telemetry_ai_insights')
+      .select('id, org_id, period_start, period_end, type, severity, title, body, evidence, recommendation, resolved, created_at')
+      .order('created_at', { ascending: false })
+      .limit(200)
+    if (typeof resolved === 'boolean') q = q.eq('resolved', resolved)
+    const { data, error } = await q
+    if (error) { this.logger.warn(`[insights] ai-insights: ${error.message}`); return { insights: [] } }
+    return { insights: data ?? [] }
+  }
+
   /** Visão geral: ativos, sessões, tempo médio, eventos — com delta vs período anterior. */
   async overview(fromDate: string, toDate: string) {
     const lenDays = this.daysBetween(fromDate, toDate)
