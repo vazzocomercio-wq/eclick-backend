@@ -8,6 +8,10 @@ import { AlertResponseService } from '../intelligence-hub/delivery/alert-respons
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
 import { SocialVideoBridgeService, StartReelDto } from './social-video-bridge.service'
+import {
+  InternalProductsSignalsService,
+  CandidateStrategy,
+} from './internal-products-signals.service'
 
 interface RealtimeBody {
   org_id: string
@@ -51,6 +55,7 @@ export class InternalController {
     private readonly mercadolivre:  MercadolivreService,
     private readonly canva:         CanvaOauthService,
     private readonly socialVideo:   SocialVideoBridgeService,
+    private readonly signals:       InternalProductsSignalsService,
   ) {}
 
   @Post('realtime')
@@ -183,5 +188,29 @@ export class InternalController {
     if (!orgId) throw new BadRequestException('org_id obrigatório')
     const ids = (jobIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
     return this.socialVideo.getMultiSceneReel(orgId, ids)
+  }
+
+  // ─── Sinais comerciais (Social Commerce AI Fase 2) ──────────────────────
+
+  /** Sinais comerciais (margem/estoque/overstock/demanda) de produtos. */
+  @Post('products/commercial-signals')
+  @HttpCode(HttpStatus.OK)
+  async commercialSignals(@Body() body: { org_id?: string; product_ids?: string[] }) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    return { signals: await this.signals.signals(body.org_id, body.product_ids ?? []) }
+  }
+
+  /** Produtos candidatos a campanha, rankeados por estratégia comercial. */
+  @Get('products/campaign-candidates')
+  async campaignCandidates(
+    @Query('org_id') orgId: string,
+    @Query('strategy') strategy?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    const strat = (['high_margin', 'overstock', 'radar', 'mixed'].includes(strategy ?? '')
+      ? strategy
+      : 'mixed') as CandidateStrategy
+    return { candidates: await this.signals.candidates(orgId, strat, Number(limit) || 5) }
   }
 }
