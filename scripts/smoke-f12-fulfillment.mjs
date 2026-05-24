@@ -247,7 +247,24 @@ async function main() {
   await call(token, 'PUT', '/fulfillment/settings', { default_sla_hours: beforeSla }, 200) // restaura
   ok('SLA validado + limpo')
 
-  // ── 20. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
+  // ── 20. Sprint 5: devoluções (registrar → conferir/resolver) ─────────────
+  // SKU fictício (product_id null) → valida orquestração + status sem mutar
+  // estoque real da Vazzo. O reestoque-no-ledger é validado em produto de teste.
+  const regRet = await call(token, 'POST', '/fulfillment/returns', {
+    warehouseId, reference: 'SMOKE-RMA-1', reason: 'teste', customer: { name: 'Devolve Smoke' },
+    items: [{ sku: 'SMOKE-RET-A', qty: 1 }, { sku: 'SMOKE-RET-B', qty: 2 }],
+  }, 201)
+  assert(regRet.json.ok && !!regRet.json.id, 'Devolução registrada')
+  const resRet = await call(token, 'POST', `/fulfillment/returns/${regRet.json.id}/resolve`, {
+    resolutions: [{ sku: 'SMOKE-RET-A', condition: 'restock' }, { sku: 'SMOKE-RET-B', condition: 'damaged' }],
+  }, 201)
+  assert(resRet.json.ok, 'Devolução conferida (resolve)')
+  const { data: retRow } = await admin.from('fulfillment_returns').select('status, items').eq('id', regRet.json.id).single()
+  assert(retRow.status === 'resolved' && retRow.items.every((i) => i.condition !== 'pending'), 'Devolução resolvida + condições por item gravadas')
+  await admin.from('fulfillment_returns').delete().eq('id', regRet.json.id)
+  ok('Devolução validada + limpa')
+
+  // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
 
