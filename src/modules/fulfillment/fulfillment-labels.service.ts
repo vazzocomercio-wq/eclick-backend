@@ -17,6 +17,25 @@ interface FulfillmentOrderRow {
   customer: Record<string, unknown>
 }
 
+export interface LabelResult {
+  format: 'ZPL' | 'PDF' | 'PNG' | 'NONE'
+  storagePath: string
+  trackingCode: string | null
+  marketplace: string
+  managed?: boolean        // true = envio gerenciado pelo ML (Full) — sem etiqueta
+  note?: string
+  logisticType?: string
+}
+
+/** Pedido Mercado Envios Full: o ML cuida do envio, sem etiqueta do vendedor. */
+class MlFullManagedError extends Error {
+  trackingCode: string | null
+  constructor(message: string, trackingCode: string | null) {
+    super(message)
+    this.trackingCode = trackingCode
+  }
+}
+
 /**
  * Geração/impressão de etiqueta de envio.
  *  • Marketplace ML → busca a etiqueta real na API do Mercado Livre (PDF) via
@@ -30,28 +49,27 @@ export class FulfillmentLabelsService {
 
   constructor(private readonly mercadolivre: MercadolivreService) {}
 
-  /** Gera/recupera a etiqueta de um pedido e devolve { format, signedUrl, trackingCode }. */
-  async generate(orgId: string, fo: FulfillmentOrderRow, items: Array<{ sku: string; title?: string | null; qty: number }>): Promise<{
-    format: 'ZPL' | 'PDF' | 'PNG'
-    storagePath: string
-    trackingCode: string | null
-    marketplace: string
-  }> {
+  /** Gera/recupera a etiqueta de um pedido. Para ML busca a etiqueta REAL;
+   *  pra loja/B2B gera ZPL simples. Pedido ML Full devolve format 'NONE'
+   *  (envio gerenciado pelo ML — sem etiqueta do vendedor). */
+  async generate(orgId: string, fo: FulfillmentOrderRow, items: Array<{ sku: string; title?: string | null; qty: number }>): Promise<LabelResult> {
     if (fo.source_type === 'marketplace' && (fo.channel ?? '') === 'mercadolivre') {
       try {
         return await this.generateMlLabel(orgId, fo)
       } catch (e) {
-        this.logger.warn(`[labels] etiqueta ML falhou (fallback ZPL): ${(e as Error).message}`)
-        // cai pro fallback ZPL abaixo
+        if (e instanceof MlFullManagedError) {
+          return { format: 'NONE', storagePath: '', trackingCode: e.trackingCode, marketplace: 'mercadolivre', managed: true, note: e.message }
+        }
+        // Pedido ML NÃO cai pra ZPL — uma etiqueta ZPL genérica não é válida no
+        // Mercado Livre. Propaga o erro com mensagem clara pro operador.
+        throw e
       }
     }
     return this.generateZplLabel(orgId, fo, items)
   }
 
   // ── Mercado Livre ──────────────────────────────────────────────────────
-  private async generateMlLabel(orgId: string, fo: FulfillmentOrderRow): Promise<{
-    format: 'PDF'; storagePath: string; trackingCode: string | null; marketplace: string
-  }> {
+  private async generateMlLabel(orgId: string, fo: FulfillmentOrderRow): Promise<LabelResult> {
     const externalId = fo.source_id
     if (!externalId) throw new BadRequestException('Pedido ML sem external_order_id.')
 
@@ -76,20 +94,36 @@ export class FulfillmentLabelsService {
     const shipmentId = orderRes.data?.shipping?.id
     if (!shipmentId) throw new BadRequestException('Pedido ML sem shipment (sem etiqueta disponível).')
 
-    // 2. tracking (best-effort)
+    // 2. shipment: logistic_type + substatus + tracking (1 chamada)
+    let logisticType: string | null = null
+    let substatus: string | null = null
     let trackingCode: string | null = null
     try {
       const shipRes = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
+      logisticType = shipRes.data?.logistic_type ?? null
+      substatus    = shipRes.data?.substatus ?? null
       trackingCode = shipRes.data?.tracking_number ?? null
-    } catch { /* tracking é opcional */ }
+    } catch { /* best-effort */ }
 
-    // 3. baixa a etiqueta PDF
-    const labelRes = await axios.get(
-      `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shipmentId}&response_type=pdf`,
-      { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer' },
-    )
+    // GUARD: Mercado Envios Full — o ML cuida do envio, NÃO há etiqueta pro
+    // vendedor. (Módulo dedicado no roadmap F13.) Não tenta buscar etiqueta.
+    if (logisticType === 'fulfillment') {
+      throw new MlFullManagedError('Pedido Mercado Envios Full — envio gerenciado pelo ML, sem etiqueta pra imprimir.', trackingCode)
+    }
+
+    // 3. baixa a etiqueta PDF (Flex/Coletas/XD/Drop-off têm etiqueta do vendedor)
+    let labelRes
+    try {
+      labelRes = await axios.get(
+        `https://api.mercadolibre.com/shipment_labels?shipment_ids=${shipmentId}&response_type=pdf`,
+        { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer' },
+      )
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status
+      throw new BadRequestException(`Etiqueta ML indisponível${substatus ? ` (status do envio: ${substatus})` : ''}${status ? ` [HTTP ${status}]` : ''}. Confirme que o envio está pronto para impressão.`)
+    }
     const buffer = Buffer.from(labelRes.data)
     const storagePath = `${orgId}/labels/${randomUUID()}.pdf`
     const { error } = await supabaseAdmin.storage
@@ -97,7 +131,7 @@ export class FulfillmentLabelsService {
       .upload(storagePath, buffer, { contentType: 'application/pdf', upsert: false })
     if (error) throw new BadRequestException(`Falha ao salvar etiqueta: ${error.message}`)
 
-    return { format: 'PDF', storagePath, trackingCode, marketplace: 'mercadolivre' }
+    return { format: 'PDF', storagePath, trackingCode, marketplace: 'mercadolivre', logisticType: logisticType ?? undefined }
   }
 
   // ── Fallback ZPL (loja própria / b2b / erro ML) ─────────────────────────
