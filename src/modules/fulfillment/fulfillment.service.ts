@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenEx
 import { supabaseAdmin } from '../../common/supabase'
 import { FulfillmentAiService } from './fulfillment-ai.service'
 import { FulfillmentLabelsService, FULFILLMENT_BUCKET } from './fulfillment-labels.service'
+import { FulfillmentAccountsService, type PlatformTiming } from './fulfillment-accounts.service'
 import {
   DEFAULT_FULFILLMENT_SETTINGS,
   type ActionType, type FulfillmentSettings, type SeedItem, type SourceType,
@@ -24,6 +25,7 @@ export class FulfillmentService {
   constructor(
     private readonly ai: FulfillmentAiService,
     private readonly labels: FulfillmentLabelsService,
+    private readonly accounts: FulfillmentAccountsService,
   ) {}
 
   // ════════════════════════════════════════════════════════════════════
@@ -121,6 +123,8 @@ export class FulfillmentService {
     let items: SeedItem[] = []
     let sourceOrderIds: string[] = []
     let totalCents: number | null = null
+    let sellerId: number | null = null     // conta ML (Onda A)
+    let storeSlug: string | null = null    // conta loja própria (Onda A)
 
     if (input.source === 'marketplace') {
       const externalId = input.externalOrderId
@@ -128,9 +132,9 @@ export class FulfillmentService {
       if (!externalId) throw new BadRequestException('Informe externalOrderId ou orderId do pedido de marketplace.')
       const { data: rows } = await supabaseAdmin
         .from('orders')
-        .select('id, sku, product_title, quantity, sale_price, buyer_name, platform')
+        .select('id, sku, product_title, quantity, sale_price, buyer_name, platform, seller_id')
         .eq('organization_id', orgId).eq('external_order_id', externalId)
-      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; platform: string | null }>
+      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; platform: string | null; seller_id: number | null }>
       if (orderRows.length === 0) throw new NotFoundException('Pedido de marketplace não encontrado.')
       sourceId = externalId
       reference = externalId
@@ -139,15 +143,17 @@ export class FulfillmentService {
       sourceOrderIds = orderRows.map((r) => r.id)
       totalCents = Math.round(orderRows.reduce((s, r) => s + (Number(r.sale_price) || 0), 0) * 100) || null
       items = orderRows.map((r) => ({ sku: r.sku, title: r.product_title ?? undefined, qty: r.quantity || 1 }))
+      sellerId = orderRows[0].seller_id != null ? Number(orderRows[0].seller_id) : null
     } else if (input.source === 'storefront') {
       if (!input.orderId) throw new BadRequestException('Informe orderId (storefront_orders.id).')
       const { data: so } = await supabaseAdmin
         .from('storefront_orders').select('*').eq('id', input.orderId).eq('organization_id', orgId).maybeSingle()
       if (!so) throw new NotFoundException('Pedido da loja própria não encontrado.')
-      const order = so as { id: string; customer: Record<string, unknown>; items: Array<{ productId?: string; name?: string; price?: number; qty?: number }>; total: number | null }
+      const order = so as { id: string; customer: Record<string, unknown>; items: Array<{ productId?: string; name?: string; price?: number; qty?: number }>; total: number | null; store_slug?: string | null }
       sourceId = order.id
       reference = order.id.slice(0, 8)
       channel = channel ?? 'loja'
+      storeSlug = order.store_slug ?? null
       customer = order.customer ?? {}
       totalCents = order.total != null ? Math.round(Number(order.total) * 100) : null
       // Resolve SKU/EAN reais do catálogo quando o item tem productId (uuid).
@@ -199,9 +205,30 @@ export class FulfillmentService {
       || (totalCents != null && totalCents > settings.photo_required_above_cents)
       || (channel != null && settings.photo_required_vip_channels.includes(channel))
 
-    // Prazo de despacho (SLA): now + default_sla_hours da org
+    // Prazo de despacho (SLA): now + default_sla_hours da org (reserva)
     const slaHours = settings.default_sla_hours ?? 24
     const slaDeadline = slaHours > 0 ? new Date(Date.now() + slaHours * 3_600_000).toISOString() : null
+
+    // Onda A — conta/empresa + timing REAL da plataforma
+    const platform = (channel ?? input.source).toLowerCase()
+    let externalAccountId: string | null = null
+    let accountLabel: string | null = null
+    if (input.source === 'marketplace' && sellerId != null) {
+      externalAccountId = String(sellerId)
+      accountLabel = await this.accounts.mlNicknameForSeller(orgId, sellerId)
+    } else if (input.source === 'storefront') {
+      externalAccountId = storeSlug ?? 'loja'
+    } else if (input.source === 'b2b') {
+      externalAccountId = 'b2b'
+    }
+    const { accountId, companyId } = await this.accounts.resolveAccount(orgId, { platform, externalAccountId, label: accountLabel })
+
+    // Prazo REAL do ML (lead_time do shipment) — usa o de despacho como prazo efetivo
+    let timing: PlatformTiming | null = null
+    if (input.source === 'marketplace' && sourceId) {
+      timing = await this.accounts.fetchMlTiming(orgId, sourceId, sellerId ?? undefined)
+    }
+    const effectiveDeadline = timing?.handlingDeadline ?? slaDeadline
 
     // Cria o fulfillment_order
     const { data: foRow, error: foErr } = await supabaseAdmin
@@ -217,7 +244,15 @@ export class FulfillmentService {
         customer,
         items_count:     items.length,
         total_cents:     totalCents,
-        sla_deadline:    slaDeadline,
+        sla_deadline:    effectiveDeadline,
+        account_id:      accountId,
+        company_id:      companyId,
+        platform_handling_deadline: timing?.handlingDeadline ?? null,
+        platform_delivery_deadline: timing?.deliveryDeadline ?? null,
+        logistic_type:   timing?.logisticType ?? null,
+        shipment_id:     timing?.shipmentId ?? null,
+        scheduled_pickup_from: timing?.scheduledFrom ?? null,
+        scheduled_pickup_to:   timing?.scheduledTo ?? null,
         status:          'received',
       })
       .select('id').maybeSingle()
@@ -236,7 +271,7 @@ export class FulfillmentService {
       title:                it.title ?? null,
       expected_qty:         it.qty,
       expected_barcode:     it.barcode ?? eanBySku.get(it.sku) ?? null,
-      sla_deadline:         slaDeadline,
+      sla_deadline:         effectiveDeadline,
       status:               'pending',
     }))
     const { error: pErr } = await supabaseAdmin.from('pick_tasks').insert(pickRows)

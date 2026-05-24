@@ -6,6 +6,7 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import { FulfillmentService } from './fulfillment.service'
 import { FulfillmentReturnsService, type ReturnItemCondition } from './fulfillment-returns.service'
 import { FulfillmentWaveService } from './fulfillment-wave.service'
+import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-accounts.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -21,6 +22,7 @@ export class FulfillmentController {
     private readonly svc: FulfillmentService,
     private readonly returns: FulfillmentReturnsService,
     private readonly waves: FulfillmentWaveService,
+    private readonly accounts: FulfillmentAccountsService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -186,6 +188,33 @@ export class FulfillmentController {
   printLabel(@ReqUser() u: ReqUserPayload, @Body() body: { fulfillmentOrderId: string }) {
     if (!body?.fulfillmentOrderId) throw new BadRequestException('fulfillmentOrderId obrigatório.')
     return this.svc.printLabel(this.org(u), u.id, body.fulfillmentOrderId)
+  }
+
+  // ── Empresas & Contas (Onda A — multi-CNPJ / multiconta) ─────────────
+  @Get('companies')
+  listCompanies(@ReqUser() u: ReqUserPayload) {
+    return this.accounts.listCompanies(this.org(u))
+  }
+
+  @Post('companies')
+  createCompany(@ReqUser() u: ReqUserPayload, @Body() body: { name: string; cnpj?: string | null; role?: CompanyRole }) {
+    if (!body?.name?.trim()) throw new BadRequestException('Informe o nome da empresa.')
+    return this.accounts.createCompany(this.org(u), body)
+  }
+
+  @Patch('companies/:id')
+  updateCompany(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { name?: string; cnpj?: string | null; role?: CompanyRole; is_active?: boolean }) {
+    return this.accounts.updateCompany(this.org(u), id, body ?? {})
+  }
+
+  @Get('accounts')
+  listAccounts(@ReqUser() u: ReqUserPayload) {
+    return this.accounts.listAccounts(this.org(u))
+  }
+
+  @Patch('accounts/:id')
+  updateAccount(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { company_id?: string | null; label?: string; is_active?: boolean }) {
+    return this.accounts.updateAccount(this.org(u), id, body ?? {})
   }
 
   // ── Wave IA (separação em ondas — W1) ─────────────────────────────────
