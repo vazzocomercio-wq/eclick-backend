@@ -264,6 +264,60 @@ async function main() {
   await admin.from('fulfillment_returns').delete().eq('id', regRet.json.id)
   ok('Devolução validada + limpa')
 
+  // ── 22. Wave IA: monta onda c/ 2 pedidos → coleta consolidada → sorting ───
+  // Pedido 1: WAVE-X×2 + WAVE-Y×1 ; Pedido 2: WAVE-X×1  → consolidado: X=3, Y=1
+  const w1 = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Onda P1' }, items: [{ sku: 'WAVE-X', qty: 2, barcode: '7899990000017' }, { sku: 'WAVE-Y', qty: 1 }] }, 201)
+  const w2 = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Onda P2' }, items: [{ sku: 'WAVE-X', qty: 1, barcode: '7899990000017' }] }, 201)
+  const fo1 = w1.json.fulfillmentOrderId, fo2 = w2.json.fulfillmentOrderId
+
+  // IA assistiva: sugestão não quebra (rationale best-effort)
+  const sug = await call(token, 'POST', '/fulfillment/waves/suggest', { warehouseId, selectedIds: [fo1] }, 201)
+  assert(Array.isArray(sug.json.suggestions) && Array.isArray(sug.json.warnings), 'IA sugere onda (suggestions + warnings)')
+
+  const wave = await call(token, 'POST', '/fulfillment/waves', { warehouseId, name: 'Onda Smoke', fulfillmentOrderIds: [fo1, fo2] }, 201)
+  const waveId = wave.json.id
+  assert(wave.json.ok && wave.json.orders === 2, `Onda criada com 2 pedidos (wave=${waveId?.slice(0, 8)})`)
+
+  const detail = await call(token, 'GET', `/fulfillment/waves/${waveId}`)
+  const consX = (detail.json.consolidated ?? []).find((c) => c.sku === 'WAVE-X')
+  const consY = (detail.json.consolidated ?? []).find((c) => c.sku === 'WAVE-Y')
+  assert(!!consX && consX.totalQty === 3 && !!consY && consY.totalQty === 1, 'Lista consolidada agrupa SKU (X=3 de 2 pedidos, Y=1)')
+
+  const rel = await call(token, 'POST', `/fulfillment/waves/${waveId}/release`, undefined, 201)
+  assert(rel.json.status === 'collecting', 'Onda liberada → coletando')
+
+  // bipa fora da onda → bloqueia
+  const wrongW = await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: 'NAO-EXISTE-NA-ONDA' })
+  assert(wrongW.status === 400, 'Bipagem fora da onda BLOQUEADA (400)')
+
+  // coleta consolidada: X×3 (1 por EAN, 2 por SKU) + Y×1
+  await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: '7899990000017' }, 201)
+  await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: 'WAVE-X' }, 201)
+  const x3 = await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: 'wave-x' }, 201)
+  assert(x3.json.collected === 3 && x3.json.total === 3, 'WAVE-X coletado 3/3 (EAN + SKU, case-insensitive)')
+  const overX = await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: 'WAVE-X' })
+  assert(overX.status === 400, 'Coleta além do total BLOQUEADA (400)')
+  const yDone = await call(token, 'POST', `/fulfillment/waves/${waveId}/scan-item`, { code: 'WAVE-Y' }, 201)
+  assert(yDone.json.allCollected === true, 'Onda toda coletada (allCollected)')
+
+  // sorting: conclui cada pedido → vira pack ; ao concluir o 2º, onda fecha
+  const s1 = await call(token, 'POST', `/fulfillment/waves/${waveId}/orders/${fo1}/complete`, undefined, 201)
+  assert(s1.json.ok && s1.json.allSorted !== true, 'Pedido 1 separado (sorting) — onda segue aberta')
+  const s2 = await call(token, 'POST', `/fulfillment/waves/${waveId}/orders/${fo2}/complete`, undefined, 201)
+  assert(s2.json.allSorted === true, 'Pedido 2 separado → onda CONCLUÍDA')
+  const { data: waveRow } = await admin.from('fulfillment_waves').select('status').eq('id', waveId).single()
+  assert(waveRow.status === 'done', 'Onda marcada done no banco')
+
+  // pedidos da onda promovidos pro pack (trigger pick→pack)
+  const packW = await call(token, 'GET', `/fulfillment/pack-tasks/queue?warehouse_id=${warehouseId}`)
+  const promoted = (packW.json ?? []).filter((p) => p.fulfillment_order_id === fo1 || p.fulfillment_order_id === fo2).length
+  assert(promoted === 2, 'Os 2 pedidos da onda foram promovidos pra conferência')
+
+  // limpeza da onda (cascade dos wave_orders ao apagar os FOs; apaga a onda à parte)
+  await admin.from('fulfillment_orders').delete().in('id', [fo1, fo2])
+  await admin.from('fulfillment_waves').delete().eq('id', waveId)
+  ok('Wave IA validada + limpa (onda + 2 pedidos)')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
