@@ -44,6 +44,9 @@ export interface FulfillmentSettings {
   photo_required_always:        boolean
   photo_required_above_cents:   number
   photo_required_vip_channels:  string[]
+  auto_ingest_enabled:          boolean
+  auto_ingest_sources:          string[]
+  default_warehouse_id:         string | null
   settings:                     Record<string, unknown>
 }
 
@@ -54,5 +57,8 @@ export const DEFAULT_FULFILLMENT_SETTINGS: Omit<FulfillmentSettings, 'organizati
   photo_required_always:        false,
   photo_required_above_cents:   15000,
   photo_required_vip_channels:  [],
+  auto_ingest_enabled:          false,
+  auto_ingest_sources:          ['marketplace', 'storefront'],
+  default_warehouse_id:         null,
   settings:                     {},
 }

@@ -3,6 +3,7 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { MessagingModule } from '../messaging/messaging.module'
 import { IntelligenceHubModule } from '../intelligence-hub/intelligence-hub.module'
 import { StockModule } from '../stock/stock.module'
+import { FulfillmentModule } from '../fulfillment/fulfillment.module'
 import { MercadoLivreClient } from './clients/mercado-livre-client'
 import { OrdersIngestionService } from './services/orders-ingestion.service'
 import { SnapshotsAggregationService } from './services/snapshots-aggregation.service'
@@ -16,6 +17,7 @@ import { SalesAggregatorController } from './sales-aggregator.controller'
     MessagingModule,        // auto-trigger pós-upsert
     IntelligenceHubModule,  // alert_signals emit pra toast de venda nova
     StockModule,            // baixa de estoque na venda (Estoque Unificado F3)
+    FulfillmentModule,      // F12 Sprint 1 — auto-ingestão de pedido pago
   ],
   controllers: [SalesAggregatorController],
   providers:   [MercadoLivreClient, OrdersIngestionService, SnapshotsAggregationService, BackfillService, NewSaleNotifierService],
