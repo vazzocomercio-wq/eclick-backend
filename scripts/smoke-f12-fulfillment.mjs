@@ -232,7 +232,22 @@ async function main() {
   await call(token, 'PUT', '/fulfillment/settings', { auto_ingest_enabled: false, auto_ingest_sources: ['marketplace', 'storefront'], default_warehouse_id: null }, 200) // restaura
   ok(`Reconcile validado + limpo (${newIds.length} fo removido)`)
 
-  // ── 19. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
+  // ── 19. Sprint 4: SLA configurável + atrasados ──────────────────────────
+  const beforeSla = (await call(token, 'GET', '/fulfillment/settings')).json.default_sla_hours
+  await call(token, 'PUT', '/fulfillment/settings', { default_sla_hours: 12 }, 200)
+  const afterSla = await call(token, 'GET', '/fulfillment/settings')
+  assert(afterSla.json.default_sla_hours === 12, 'SLA configurável salvo (default_sla_hours)')
+  const seedSla = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'SLA Test' }, items: [{ sku: 'SLA-1', qty: 1 }] }, 201)
+  const { data: foSla } = await admin.from('fulfillment_orders').select('sla_deadline').eq('id', seedSla.json.fulfillmentOrderId).single()
+  assert(!!foSla.sla_deadline, 'Seed preencheu sla_deadline')
+  await admin.from('fulfillment_orders').update({ sla_deadline: new Date(Date.now() - 3_600_000).toISOString() }).eq('id', seedSla.json.fulfillmentOrderId)
+  const dashL = await call(token, 'GET', `/fulfillment/dashboard?warehouse_id=${warehouseId}`)
+  assert((dashL.json.lateCount ?? 0) >= 1, 'Dashboard conta pedidos atrasados (lateCount)')
+  await admin.from('fulfillment_orders').delete().eq('id', seedSla.json.fulfillmentOrderId)
+  await call(token, 'PUT', '/fulfillment/settings', { default_sla_hours: beforeSla }, 200) // restaura
+  ok('SLA validado + limpo')
+
+  // ── 20. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
 
