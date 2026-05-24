@@ -79,6 +79,11 @@ export class FulfillmentController {
     return this.svc.productivity(this.org(u), { days: days ? Number(days) : undefined, warehouseId })
   }
 
+  @Post('reconcile')
+  reconcile(@ReqUser() u: ReqUserPayload) {
+    return this.svc.reconcileOrg(this.org(u))
+  }
+
   // ── Seed (ingestão de pedido → tarefas) ──────────────────────────────
   @Post('pick-tasks/seed')
   seed(@ReqUser() u: ReqUserPayload, @Body() body: {

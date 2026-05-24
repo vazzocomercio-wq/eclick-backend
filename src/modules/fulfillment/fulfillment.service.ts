@@ -296,6 +296,45 @@ export class FulfillmentService {
     }
   }
 
+  /** Reconciliação (Sprint 3): pega pedidos PAGOS recentes (loja + ML) que
+   *  NÃO viraram fila (webhook perdido) e ingere. Rede de segurança. Gated por
+   *  auto_ingest. Idempotente (autoIngest* reusam seed com UNIQUE). */
+  async reconcileOrg(orgId: string, sinceDays = 3): Promise<{ storefront: number; marketplace: number; skipped?: boolean }> {
+    const s = await this.getSettings(orgId)
+    if (!s.auto_ingest_enabled) return { storefront: 0, marketplace: 0, skipped: true }
+    const since = new Date(Date.now() - Math.min(Math.max(sinceDays, 1), 30) * 86400_000).toISOString()
+
+    const { data: existing } = await supabaseAdmin
+      .from('fulfillment_orders').select('source_type, source_id')
+      .eq('organization_id', orgId).not('source_id', 'is', null)
+    const haveSf = new Set<string>(), haveMk = new Set<string>()
+    for (const e of (existing ?? []) as Array<{ source_type: string; source_id: string }>) {
+      if (e.source_type === 'storefront') haveSf.add(e.source_id)
+      else if (e.source_type === 'marketplace') haveMk.add(e.source_id)
+    }
+
+    let storefront = 0, marketplace = 0
+    if (s.auto_ingest_sources.includes('storefront')) {
+      const { data: orders } = await supabaseAdmin
+        .from('storefront_orders').select('id')
+        .eq('organization_id', orgId).eq('status', 'paid').gte('created_at', since).limit(500)
+      for (const o of (orders ?? []) as Array<{ id: string }>) {
+        if (!haveSf.has(o.id)) { await this.autoIngestStorefrontOrder(o.id); storefront++ }
+      }
+    }
+    if (s.auto_ingest_sources.includes('marketplace')) {
+      const { data: orows } = await supabaseAdmin
+        .from('orders').select('external_order_id')
+        .eq('organization_id', orgId).eq('status', 'paid').gte('created_at', since).not('external_order_id', 'is', null).limit(2000)
+      const exts = [...new Set((orows ?? []).map((r) => (r as { external_order_id: string }).external_order_id))]
+      for (const ext of exts) {
+        if (!haveMk.has(ext)) { await this.autoIngestMarketplaceOrder(orgId, ext); marketplace++ }
+      }
+    }
+    if (storefront + marketplace > 0) this.logger.log(`[reconcile] org=${orgId.slice(0, 8)} storefront=${storefront} marketplace=${marketplace}`)
+    return { storefront, marketplace }
+  }
+
   // ════════════════════════════════════════════════════════════════════
   // OPERADORES + ENFORCEMENT DE PAPÉIS (Sprint 2)
   // ════════════════════════════════════════════════════════════════════
