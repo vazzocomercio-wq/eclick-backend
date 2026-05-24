@@ -31,6 +31,7 @@ const SVC_KEY  = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE
 const ANON_KEY = process.env.SUPABASE_PUBLISHABLE_KEY ?? process.env.SUPABASE_ANON_KEY
 const BACKEND  = process.env.SMOKE_BACKEND ?? process.argv[2] ?? 'http://localhost:3001'
 const EMAIL    = process.env.SMOKE_EMAIL ?? 'vazzocomercio@gmail.com'
+const ORG      = process.env.SMOKE_ORG ?? '4ef1aabd-c209-40b0-b034-ef69dcb66833' // Vazzo
 
 if (!SUPA_URL || !SVC_KEY || !ANON_KEY) {
   console.error('[smoke-f12] FATAL: SUPABASE_URL + service key + anon/publishable key são obrigatórios no .env')
@@ -158,10 +159,32 @@ async function main() {
   const dash = await call(token, 'GET', `/fulfillment/dashboard?warehouse_id=${warehouseId}`)
   assert((dash.json.mismatch24h ?? 0) >= 1, 'Dashboard registrou o erro de bipagem (mismatch24h ≥ 1)')
 
-  // ── 12. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   const admin = createClient(SUPA_URL, SVC_KEY, { auth: { persistSession: false } })
+
+  // ── 12. Sprint 1: settings de auto-ingestão (PUT/GET) ────────────────────
+  const before = await call(token, 'GET', '/fulfillment/settings')
+  const origEnabled = before.json.auto_ingest_enabled
+  await call(token, 'PUT', '/fulfillment/settings', { auto_ingest_enabled: true, default_warehouse_id: warehouseId }, 200)
+  const afterS = await call(token, 'GET', '/fulfillment/settings')
+  assert(afterS.json.auto_ingest_enabled === true && afterS.json.default_warehouse_id === warehouseId, 'Settings de auto-ingestão salvas (PUT/GET)')
+  await call(token, 'PUT', '/fulfillment/settings', { auto_ingest_enabled: origEnabled, default_warehouse_id: null }, 200) // restaura
+
+  // ── 13. Sprint 1: idempotência da ingestão (re-seed do mesmo pedido) ─────
+  const { data: sfo } = await admin.from('storefront_orders').insert({
+    organization_id: ORG, store_slug: 'smoke-f12', customer: { name: 'Smoke SF' },
+    items: [{ productId: 'SMOKE-SF-1', name: 'Item SF', price: 10, qty: 1 }],
+    subtotal: 10, total: 10, status: 'paid',
+  }).select('id').single()
+  const sfId = sfo.id
+  const seed1 = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'storefront', orderId: sfId, warehouseId }, 201)
+  const seed2 = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'storefront', orderId: sfId, warehouseId }, 201)
+  assert(seed1.json.created === true && seed2.json.created === false && seed1.json.fulfillmentOrderId === seed2.json.fulfillmentOrderId, 'Ingestão idempotente (re-seed não duplica)')
+  await admin.from('fulfillment_orders').delete().eq('id', seed1.json.fulfillmentOrderId)
+  await admin.from('storefront_orders').delete().eq('id', sfId)
+
+  // ── 14. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
-  ok('Dados de teste limpos (fulfillment_order removido — cascade)')
+  ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')
 
   // ── Resultado ────────────────────────────────────────────────────────────
   console.log(`\n  ${fail === 0 ? '\x1b[32m' : '\x1b[31m'}${pass} passaram, ${fail} falharam\x1b[0m\n`)
