@@ -2843,7 +2843,28 @@ Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) 
   },
 ]
 
+const FULFILLMENT_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/fulfillment', '/fulfillment/picking', '/fulfillment/packing'],
+    tags:     ['fulfillment', 'separação', 'conferência', 'cd', 'centro de distribuição', 'bipagem', 'picking', 'packing', 'expedição', 'operador', 'atrasado', 'sla'],
+    title:    'Fulfillment — separação e conferência do CD (F12)',
+    content: `**App do operador do centro de distribuição** (em /fulfillment, mobile-first/PWA). Elimina erro de envio com bipagem obrigatória + dupla checagem + log de tudo.
+
+**Fluxo:**
+- **Separar** (/fulfillment/picking): bipe cada item por **SKU, EAN ou QR**. Código errado é **bloqueado** (apito grave) e registrado. Conta a quantidade; quando completa, avança sozinho. Botões de **avaria** (foto) e **bloquear** por item.
+- **Conferir e expedir** (/fulfillment/packing): **bipe o pedido** pra liberar → confere os itens → **foto** (obrigatória se o ticket passar do limite ou canal VIP) → fecha → **imprime etiqueta** (Mercado Livre real, ou ZPL pra loja/B2B).
+- O pedido vira fila **automaticamente** quando é pago (ML + Loja Própria), se a auto-ingestão estiver ligada nas Configurações. Um cron reconcilia pagos que escaparam.
+
+**Configurações (engrenagem no hub):** auto-ingestão + CD padrão, toggles de IA (triagem de avaria por foto, conferência por foto, fila inteligente), regra de foto e **prazo de despacho (SLA)**. Pedidos além do SLA aparecem como **ATRASADOS**.
+
+**Equipe (ícone de pessoas):** cadastra operadores com papel (separador/conferente/supervisor), liga "exigir papel" e vê **produtividade** (itens/h, erros) por operador.
+
+Origens unificadas: marketplace (ML), Loja Própria e B2B caem todas na mesma fila.`,
+  },
+]
+
 export const KB: KbEntry[] = [
+  ...FULFILLMENT_ENTRIES,
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,
   ...CATALOG_ENTRIES,

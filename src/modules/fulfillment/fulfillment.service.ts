@@ -50,6 +50,7 @@ export class FulfillmentService {
       auto_ingest_sources:          patch.auto_ingest_sources,
       default_warehouse_id:         patch.default_warehouse_id,
       enforce_roles:                patch.enforce_roles,
+      default_sla_hours:            patch.default_sla_hours,
       updated_at:                   new Date().toISOString(),
     }
     Object.keys(row).forEach((k) => (row as Record<string, unknown>)[k] === undefined && delete (row as Record<string, unknown>)[k])
@@ -198,6 +199,10 @@ export class FulfillmentService {
       || (totalCents != null && totalCents > settings.photo_required_above_cents)
       || (channel != null && settings.photo_required_vip_channels.includes(channel))
 
+    // Prazo de despacho (SLA): now + default_sla_hours da org
+    const slaHours = settings.default_sla_hours ?? 24
+    const slaDeadline = slaHours > 0 ? new Date(Date.now() + slaHours * 3_600_000).toISOString() : null
+
     // Cria o fulfillment_order
     const { data: foRow, error: foErr } = await supabaseAdmin
       .from('fulfillment_orders')
@@ -212,6 +217,7 @@ export class FulfillmentService {
         customer,
         items_count:     items.length,
         total_cents:     totalCents,
+        sla_deadline:    slaDeadline,
         status:          'received',
       })
       .select('id').maybeSingle()
@@ -230,6 +236,7 @@ export class FulfillmentService {
       title:                it.title ?? null,
       expected_qty:         it.qty,
       expected_barcode:     it.barcode ?? eanBySku.get(it.sku) ?? null,
+      sla_deadline:         slaDeadline,
       status:               'pending',
     }))
     const { error: pErr } = await supabaseAdmin.from('pick_tasks').insert(pickRows)
@@ -713,11 +720,25 @@ export class FulfillmentService {
       .from('operator_actions').select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId).eq('action_type', 'scan_mismatch').gte('created_at', since)
 
+    // Atrasados: pedidos com SLA vencido ainda não despachados
+    const nowIso = new Date().toISOString()
+    const soonIso = new Date(Date.now() + 2 * 3600 * 1000).toISOString()
+    const lateQ = supabaseAdmin.from('fulfillment_orders').select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId).in('status', ['received', 'picking', 'packing'])
+      .not('sla_deadline', 'is', null).lt('sla_deadline', nowIso)
+    const dueSoonQ = supabaseAdmin.from('fulfillment_orders').select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId).in('status', ['received', 'picking', 'packing'])
+      .not('sla_deadline', 'is', null).gte('sla_deadline', nowIso).lt('sla_deadline', soonIso)
+    if (warehouseId) { lateQ.eq('warehouse_id', warehouseId); dueSoonQ.eq('warehouse_id', warehouseId) }
+    const [{ count: lateCount }, { count: dueSoonCount }] = await Promise.all([lateQ, dueSoonQ])
+
     return {
       pickQueue: pickQueue ?? 0,
       packQueue: packQueue ?? 0,
       damagesToday: damagesToday ?? 0,
       mismatch24h: mismatch24h ?? 0,
+      lateCount: lateCount ?? 0,
+      dueSoonCount: dueSoonCount ?? 0,
       recentActions: actions ?? [],
     }
   }
