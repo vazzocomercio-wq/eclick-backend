@@ -6,6 +6,7 @@ import { InternalKeyGuard } from './internal-key.guard'
 import { EventsGateway } from '../events/events.gateway'
 import { AlertResponseService } from '../intelligence-hub/delivery/alert-response.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { CanvaOauthService } from '../canva-oauth/canva-oauth.service'
 
 interface RealtimeBody {
   org_id: string
@@ -47,6 +48,7 @@ export class InternalController {
     private readonly events:        EventsGateway,
     private readonly alertResponse: AlertResponseService,
     private readonly mercadolivre:  MercadolivreService,
+    private readonly canva:         CanvaOauthService,
   ) {}
 
   @Post('realtime')
@@ -98,5 +100,33 @@ export class InternalController {
       token:          tokens[0].token,
       own_seller_ids: tokens.map(t => t.sellerId),
     }
+  }
+
+  /**
+   * Lista os designs do Canva da org — consumido pela ponte do Active Social
+   * AI Studio (usuário escolhe um design pra virar a imagem do post). Token +
+   * refresh ficam fonte única no SaaS; o Active só proxia via X-Internal-Key.
+   */
+  @Get('canva/designs')
+  async canvaDesigns(
+    @Query('org_id') orgId: string,
+    @Query('q') q?: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    const designs = await this.canva.listDesigns(orgId, q)
+    return { designs }
+  }
+
+  /**
+   * Exporta um design do Canva como PNG, sobe pro bucket público e devolve a
+   * URL https estável (o Instagram recusa imagens http / efêmeras).
+   */
+  @Post('canva/export')
+  @HttpCode(HttpStatus.OK)
+  async canvaExport(@Body() body: { org_id?: string; design_id?: string }) {
+    if (!body?.org_id || !body?.design_id) {
+      throw new BadRequestException('org_id e design_id obrigatórios')
+    }
+    return this.canva.exportDesignToPublicUrl(body.org_id, body.design_id)
   }
 }
