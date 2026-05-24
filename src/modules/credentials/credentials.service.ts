@@ -175,6 +175,16 @@ export class CredentialsService {
         return { ok: false, message: (err as { error?: { message?: string } }).error?.message ?? `Erro HTTP ${res.status}` }
       }
 
+      if (provider === 'google') {
+        // Lista modelos do Gemini — valida a chave sem gastar tokens.
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
+        )
+        if (res.ok) return { ok: true, message: 'Gemini conectado ✅' }
+        const err = await res.json().catch(() => ({}))
+        return { ok: false, message: (err as { error?: { message?: string } }).error?.message ?? `Erro HTTP ${res.status}` }
+      }
+
       return { ok: true, message: 'Chave salva (sem teste disponível para este provedor)' }
     } catch (e) {
       return { ok: false, message: (e as Error).message }
