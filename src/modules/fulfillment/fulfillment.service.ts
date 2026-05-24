@@ -866,6 +866,79 @@ export class FulfillmentService {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  // AGUARDANDO COLETA (Onda C) — staging organizado por empresa → conta
+  //  Pedidos embalados (packed) + etiquetados recentes (shipped) prontos pra
+  //  o transportador buscar, agrupados por EMPRESA (CNPJ) → CONTA (plataforma).
+  // ════════════════════════════════════════════════════════════════════
+  async collectionQueue(orgId: string, warehouseId?: string, sinceDays = 3) {
+    const since = new Date(Date.now() - Math.min(Math.max(sinceDays, 1), 30) * 86400_000).toISOString()
+    let q = supabaseAdmin
+      .from('fulfillment_orders')
+      .select('id, reference, channel, status, items_count, sla_deadline, platform_handling_deadline, logistic_type, shipment_id, scheduled_pickup_from, scheduled_pickup_to, account_id, company_id, customer, updated_at')
+      .eq('organization_id', orgId)
+      .in('status', ['packed', 'shipped'])
+      .order('updated_at', { ascending: false })
+      .limit(500)
+    if (warehouseId) q = q.eq('warehouse_id', warehouseId)
+    const { data } = await q
+    const orders = ((data ?? []) as Array<{
+      id: string; reference: string | null; channel: string | null; status: string; items_count: number
+      sla_deadline: string | null; platform_handling_deadline: string | null; logistic_type: string | null
+      shipment_id: string | null; scheduled_pickup_from: string | null; scheduled_pickup_to: string | null
+      account_id: string | null; company_id: string | null; customer: { name?: string } | null; updated_at: string
+    }>)
+      // shipped só conta como "aguardando coleta" se foi recente (senão é histórico)
+      .filter((o) => o.status === 'packed' || o.updated_at >= since)
+
+    // labels conta/empresa + tracking
+    const accIds = [...new Set(orders.map((o) => o.account_id).filter((x): x is string => !!x))]
+    const compIds = [...new Set(orders.map((o) => o.company_id).filter((x): x is string => !!x))]
+    const foIds = orders.map((o) => o.id)
+    const accMap = new Map<string, { label: string | null; platform: string }>()
+    const compMap = new Map<string, string>()
+    const trackMap = new Map<string, string>()
+    if (accIds.length) {
+      const { data: a } = await supabaseAdmin.from('fulfillment_accounts').select('id, label, platform').in('id', accIds)
+      for (const r of (a ?? []) as Array<{ id: string; label: string | null; platform: string }>) accMap.set(r.id, { label: r.label, platform: r.platform })
+    }
+    if (compIds.length) {
+      const { data: c } = await supabaseAdmin.from('fulfillment_companies').select('id, name').in('id', compIds)
+      for (const r of (c ?? []) as Array<{ id: string; name: string }>) compMap.set(r.id, r.name)
+    }
+    if (foIds.length) {
+      const { data: l } = await supabaseAdmin.from('shipment_labels').select('fulfillment_order_id, tracking_code').in('fulfillment_order_id', foIds)
+      for (const r of (l ?? []) as Array<{ fulfillment_order_id: string; tracking_code: string | null }>) if (r.tracking_code) trackMap.set(r.fulfillment_order_id, r.tracking_code)
+    }
+
+    // agrupa company → account
+    type Row = { id: string; reference: string; status: string; channel: string | null; platform: string | null; logisticType: string | null; tracking: string | null; shipmentId: string | null; scheduledFrom: string | null; scheduledTo: string | null; deadline: string | null; itemsCount: number; customerName: string | null }
+    const compGroups = new Map<string, { companyId: string | null; companyName: string; accounts: Map<string, { accountId: string | null; label: string; platform: string; orders: Row[] }> }>()
+    for (const o of orders) {
+      const compKey = o.company_id ?? '__none__'
+      const compName = o.company_id ? compMap.get(o.company_id) ?? 'Empresa' : 'Sem empresa'
+      const acc = o.account_id ? accMap.get(o.account_id) : null
+      const accKey = o.account_id ?? (o.channel ?? '__none__')
+      const accLabel = acc?.label ?? o.channel ?? '—'
+      const platform = acc?.platform ?? o.channel ?? '—'
+      if (!compGroups.has(compKey)) compGroups.set(compKey, { companyId: o.company_id, companyName: compName, accounts: new Map() })
+      const cg = compGroups.get(compKey)!
+      if (!cg.accounts.has(accKey)) cg.accounts.set(accKey, { accountId: o.account_id, label: accLabel, platform, orders: [] })
+      cg.accounts.get(accKey)!.orders.push({
+        id: o.id, reference: o.reference ?? o.id.slice(0, 8), status: o.status, channel: o.channel, platform,
+        logisticType: o.logistic_type, tracking: trackMap.get(o.id) ?? null, shipmentId: o.shipment_id,
+        scheduledFrom: o.scheduled_pickup_from, scheduledTo: o.scheduled_pickup_to,
+        deadline: o.platform_handling_deadline ?? o.sla_deadline, itemsCount: o.items_count, customerName: o.customer?.name ?? null,
+      })
+    }
+    const groups = [...compGroups.values()].map((cg) => {
+      const accounts = [...cg.accounts.values()].map((a) => ({ ...a, count: a.orders.length }))
+      return { companyId: cg.companyId, companyName: cg.companyName, accounts, count: accounts.reduce((s, a) => s + a.count, 0) }
+    }).sort((a, b) => b.count - a.count)
+
+    return { groups, total: orders.length, generatedAt: new Date().toISOString() }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   // HELPERS
   // ════════════════════════════════════════════════════════════════════
 
