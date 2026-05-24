@@ -2860,7 +2860,33 @@ Cada banner gerado em qualquer lugar (Designer, modal de seção, esta página) 
   },
 ]
 
+// ════════════════════════════════════════════════════════════════════════
+// Telemetria — e-Click Insights (founder, cross-org)
+// ════════════════════════════════════════════════════════════════════════
+
+const TELEMETRY_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/insights'],
+    category: 'insights',
+    title:    'e-Click Insights — telemetria de produto (founder)',
+    content: `**Dashboard interno de uso do produto** (só equipe e-Click; visão cross-org de todas as organizações). Mostra o que está sendo usado de verdade pra você priorizar features com dado, não achismo.
+
+**Responde em 1 clique:**
+- **Quantos usuários ativos** tem hoje/na semana (+ delta vs período anterior) — cards de KPI no topo.
+- **Quais módulos** são mais usados — ranking + **heatmap usuário × módulo** (cor = intensidade).
+- **Quem está em risco de churn** — seção *Engajamento*: cada usuário tem score 0-100, status (power_user / engaged / casual / at_risk / inactive), tendência (subindo/caindo) e há quantos dias sumiu.
+- **Onde o usuário desiste** numa tarefa — seção *Funis* (ex: criar campanha): taxa de conclusão/abandono + o passo onde mais abandona.
+- **Por que o uso caiu** — seção *Insights da IA*: a IA lê os agregados e escreve análises (quedas >30%, churn, abandono >40%, padrões saudáveis) com recomendação.
+
+**Controles:** seletor **7/30 dias**, botão **Atualizar** (recalcula rollup + engajamento na hora) e **Gerar agora** (roda a IA sob demanda — senão roda sozinha todo dia às 6h).
+
+**De onde vem o dado:** o frontend dispara eventos de uso (page_view, módulos, tarefas) que o backend agrega em \`telemetry_events_daily\` + score de engajamento. Nada de PII no evento. Alerta no WhatsApp quando a IA detecta algo de **alta severidade** (se \`TELEMETRY_ALERT_PHONE\` estiver configurado).`,
+    tags: ['insights', 'telemetria', 'analytics', 'churn', 'engajamento', 'funil', 'uso', 'founder', 'product analytics', 'ia'],
+  },
+]
+
 export const KB: KbEntry[] = [
+  ...TELEMETRY_ENTRIES,
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,
   ...CATALOG_ENTRIES,
