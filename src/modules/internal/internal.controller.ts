@@ -12,6 +12,7 @@ import {
   InternalProductsSignalsService,
   CandidateStrategy,
 } from './internal-products-signals.service'
+import { DidAvatarService, StartAvatarDto } from './did-avatar.service'
 
 interface RealtimeBody {
   org_id: string
@@ -56,6 +57,7 @@ export class InternalController {
     private readonly canva:         CanvaOauthService,
     private readonly socialVideo:   SocialVideoBridgeService,
     private readonly signals:       InternalProductsSignalsService,
+    private readonly didAvatar:     DidAvatarService,
   ) {}
 
   @Post('realtime')
@@ -212,5 +214,31 @@ export class InternalController {
       ? strategy
       : 'mixed') as CandidateStrategy
     return { candidates: await this.signals.candidates(orgId, strat, Number(limit) || 5) }
+  }
+
+  // ─── Avatar D-ID (Influenciador IA — Fase 3) ────────────────────────────
+
+  /** Valida a chave do D-ID + diz se está configurado. */
+  @Get('creative/avatar/ping')
+  avatarPing() {
+    return this.didAvatar.ping()
+  }
+
+  /** Cria um vídeo de avatar falante (D-ID). Devolve job_id. */
+  @Post('creative/avatar-video')
+  @HttpCode(HttpStatus.OK)
+  async startAvatarVideo(@Body() body: { org_id?: string } & StartAvatarDto) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    return this.didAvatar.startAvatarVideo(body)
+  }
+
+  /** Status do vídeo de avatar; espelha o mp4 pro bucket público quando pronto. */
+  @Get('creative/avatar-video/:jobId')
+  async getAvatarVideo(
+    @Param('jobId') jobId: string,
+    @Query('org_id') orgId: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    return this.didAvatar.getAvatarVideo(orgId, jobId)
   }
 }
