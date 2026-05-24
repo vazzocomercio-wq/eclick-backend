@@ -337,6 +337,19 @@ async function main() {
   await admin.from('fulfillment_companies').delete().eq('id', newCo.json.id) // cleanup (conta volta company_id null via ON DELETE SET NULL)
   ok('Onda A validada (multiempresa/multiconta + auto-cadastro) + limpa')
 
+  // ── 24. Onda B: painel tempo real (board) ────────────────────────────────
+  const bSeed = await call(token, 'POST', '/fulfillment/pick-tasks/seed', { source: 'b2b', warehouseId, channel: 'b2b', customer: { name: 'Board Test' }, items: [{ sku: 'BOARD-1', qty: 1 }] }, 201)
+  const bFo = bSeed.json.fulfillmentOrderId
+  // deixa "atrasado" pra validar urgência
+  await admin.from('fulfillment_orders').update({ sla_deadline: new Date(Date.now() - 3600_000).toISOString(), platform_handling_deadline: null }).eq('id', bFo)
+  const board = await call(token, 'GET', `/fulfillment/board?warehouse_id=${warehouseId}`)
+  const inReceived = (board.json.lanes?.received ?? []).find((c) => c.id === bFo)
+  assert(!!inReceived, 'Board traz o pedido na coluna "Recebido"')
+  assert(inReceived?.urgency === 'late' && (board.json.counts?.late ?? 0) >= 1, 'Board marca urgência "late" pelo prazo vencido + conta atrasados')
+  assert(!!board.json.generatedAt && typeof board.json.counts?.picking === 'number', 'Board devolve counts por etapa + timestamp')
+  await admin.from('fulfillment_orders').delete().eq('id', bFo)
+  ok('Onda B validada (painel tempo real) + limpa')
+
   // ── 21. Limpeza: apaga o fulfillment_order de teste (cascade) ────────────
   await admin.from('fulfillment_orders').delete().eq('id', foId)
   ok('Dados de teste limpos (fulfillment_orders + storefront_order removidos)')

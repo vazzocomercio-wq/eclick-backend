@@ -6,7 +6,7 @@ import { FulfillmentAccountsService, type PlatformTiming } from './fulfillment-a
 import {
   DEFAULT_FULFILLMENT_SETTINGS,
   type ActionType, type FulfillmentSettings, type SeedItem, type SourceType,
-  type DamageSeverity, type DamageResolution, type OperatorRole,
+  type DamageSeverity, type DamageResolution, type OperatorRole, type BoardCard,
 } from './fulfillment.types'
 
 /**
@@ -782,6 +782,86 @@ export class FulfillmentService {
       lateCount: lateCount ?? 0,
       dueSoonCount: dueSoonCount ?? 0,
       recentActions: actions ?? [],
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // BOARD (Onda B) — painel tempo real estilo "McDonald's" (KDS)
+  //  Pedidos ativos por etapa + urgência (verde/amarelo/vermelho) pelo prazo
+  //  REAL da plataforma (platform_handling_deadline ?? sla_deadline).
+  // ════════════════════════════════════════════════════════════════════
+  async board(orgId: string, warehouseId?: string) {
+    let q = supabaseAdmin
+      .from('fulfillment_orders')
+      .select('id, reference, channel, status, items_count, sla_deadline, platform_handling_deadline, logistic_type, account_id, company_id, customer, created_at')
+      .eq('organization_id', orgId)
+      .in('status', ['received', 'picking', 'packing', 'packed', 'blocked'])
+      .order('sla_deadline', { ascending: true, nullsFirst: false })
+      .limit(500)
+    if (warehouseId) q = q.eq('warehouse_id', warehouseId)
+    const { data } = await q
+    const orders = (data ?? []) as Array<{
+      id: string; reference: string | null; channel: string | null; status: string; items_count: number
+      sla_deadline: string | null; platform_handling_deadline: string | null; logistic_type: string | null
+      account_id: string | null; company_id: string | null; customer: { name?: string } | null; created_at: string
+    }>
+
+    // labels de conta/empresa (1 lookup cada)
+    const accIds = [...new Set(orders.map((o) => o.account_id).filter((x): x is string => !!x))]
+    const compIds = [...new Set(orders.map((o) => o.company_id).filter((x): x is string => !!x))]
+    const accMap = new Map<string, { label: string | null; platform: string }>()
+    const compMap = new Map<string, string>()
+    if (accIds.length) {
+      const { data: a } = await supabaseAdmin.from('fulfillment_accounts').select('id, label, platform').in('id', accIds)
+      for (const r of (a ?? []) as Array<{ id: string; label: string | null; platform: string }>) accMap.set(r.id, { label: r.label, platform: r.platform })
+    }
+    if (compIds.length) {
+      const { data: c } = await supabaseAdmin.from('fulfillment_companies').select('id, name').in('id', compIds)
+      for (const r of (c ?? []) as Array<{ id: string; name: string }>) compMap.set(r.id, r.name)
+    }
+
+    const now = Date.now()
+    const soon = now + 2 * 3600_000
+    const lanes: Record<'received' | 'picking' | 'packing' | 'awaiting_pickup', BoardCard[]> = { received: [], picking: [], packing: [], awaiting_pickup: [] }
+    const blocked: BoardCard[] = []
+    let late = 0, dueSoon = 0
+    for (const o of orders) {
+      const deadline = o.platform_handling_deadline ?? o.sla_deadline
+      const dl = deadline ? new Date(deadline).getTime() : null
+      const urgency: BoardCard['urgency'] = dl == null ? 'none' : dl < now ? 'late' : dl < soon ? 'soon' : 'ok'
+      if (urgency === 'late') late++; else if (urgency === 'soon') dueSoon++
+      const card: BoardCard = {
+        id: o.id,
+        reference: o.reference ?? o.id.slice(0, 8),
+        channel: o.channel,
+        platform: o.account_id ? accMap.get(o.account_id)?.platform ?? null : null,
+        accountLabel: o.account_id ? accMap.get(o.account_id)?.label ?? null : null,
+        companyName: o.company_id ? compMap.get(o.company_id) ?? null : null,
+        itemsCount: o.items_count,
+        deadline,
+        urgency,
+        logisticType: o.logistic_type,
+        customerName: o.customer?.name ?? null,
+        status: o.status,
+      }
+      if (o.status === 'blocked') blocked.push(card)
+      else if (o.status === 'received') lanes.received.push(card)
+      else if (o.status === 'picking') lanes.picking.push(card)
+      else if (o.status === 'packing') lanes.packing.push(card)
+      else if (o.status === 'packed') lanes.awaiting_pickup.push(card)
+    }
+    return {
+      lanes,
+      blocked,
+      counts: {
+        received: lanes.received.length,
+        picking: lanes.picking.length,
+        packing: lanes.packing.length,
+        awaiting_pickup: lanes.awaiting_pickup.length,
+        blocked: blocked.length,
+        late, dueSoon,
+      },
+      generatedAt: new Date().toISOString(),
     }
   }
 

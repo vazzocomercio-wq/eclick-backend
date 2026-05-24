@@ -56,6 +56,12 @@ export class FulfillmentController {
     return this.svc.dashboard(this.org(u), warehouseId)
   }
 
+  // Painel tempo real "McDonald's" (Onda B)
+  @Get('board')
+  board(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.svc.board(this.org(u), warehouseId)
+  }
+
   // ── Operadores + produtividade (Sprint 2) ────────────────────────────
   @Get('org-members')
   orgMembers(@ReqUser() u: ReqUserPayload) {

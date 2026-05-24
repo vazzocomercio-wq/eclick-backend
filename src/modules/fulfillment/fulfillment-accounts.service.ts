@@ -133,7 +133,11 @@ export class FulfillmentAccountsService {
         .eq('organization_id', orgId).eq('platform', platform).eq('external_account_id', key).maybeSingle()
       if (found) {
         const f = found as { id: string; company_id: string | null }
-        return { accountId: f.id, companyId: f.company_id }
+        if (f.company_id) return { accountId: f.id, companyId: f.company_id }
+        // conta órfã (empresa foi removida → company_id null) → religa à empresa padrão
+        const defId = await this.ensureDefaultCompany(orgId)
+        await supabaseAdmin.from('fulfillment_accounts').update({ company_id: defId }).eq('id', f.id).eq('organization_id', orgId)
+        return { accountId: f.id, companyId: defId }
       }
       const companyId = await this.ensureDefaultCompany(orgId)
       const { data: created, error } = await supabaseAdmin
