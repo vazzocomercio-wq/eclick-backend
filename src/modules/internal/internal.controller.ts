@@ -157,4 +157,31 @@ export class InternalController {
     if (!orgId) throw new BadRequestException('org_id obrigatório')
     return this.socialVideo.getReel(orgId, jobId)
   }
+
+  /** E3 — Reel multi-cena: gera 1 clipe por foto; devolve job_ids. */
+  @Post('creative/social-video-multi')
+  @HttpCode(HttpStatus.OK)
+  async startSocialVideoMulti(
+    @Body() body: { org_id?: string; user_id?: string | null; photo_urls?: string[] } & Partial<StartReelDto>,
+  ) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    if (!body?.photo_urls?.length) throw new BadRequestException('photo_urls obrigatório')
+    if (!body?.prompt) throw new BadRequestException('prompt obrigatório')
+    return this.socialVideo.startMultiSceneReel(
+      body.org_id,
+      body.user_id ?? null,
+      body as StartReelDto & { photo_urls: string[] },
+    )
+  }
+
+  /** Status do multi-cena: job_ids separados por vírgula; concatena quando prontos. */
+  @Get('creative/social-video-multi')
+  async getSocialVideoMulti(
+    @Query('org_id') orgId: string,
+    @Query('job_ids') jobIds: string,
+  ) {
+    if (!orgId) throw new BadRequestException('org_id obrigatório')
+    const ids = (jobIds ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    return this.socialVideo.getMultiSceneReel(orgId, ids)
+  }
 }

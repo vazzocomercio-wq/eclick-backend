@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, CreateBriefingDto, CreativeProduct } from '../creative/creative.service'
 import { CreativeVideoPipelineService } from '../creative/creative-video-pipeline.service'
+import { concatVideos } from '../../common/ffmpeg'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const sharp = require('sharp') as typeof import('sharp')
 
@@ -137,6 +138,102 @@ export class SocialVideoBridgeService {
       preview_url: ready.signed_video_url ?? null,
       error:       null,
     }
+  }
+
+  // ── E3: Reel multi-cena (várias fotos → 1 vídeo concatenado) ──────────────
+
+  /** Gera 1 clipe por foto escolhida (2-4) e devolve os job_ids; o Active faz
+   *  poll de todos e, quando prontos, getMultiSceneReel concatena num reel só. */
+  async startMultiSceneReel(
+    orgId: string,
+    userId: string | null,
+    dto: StartReelDto & { photo_urls: string[] },
+  ): Promise<{ job_ids: string[] }> {
+    const photos = (dto.photo_urls ?? []).filter(u => u?.trim()).slice(0, 4)
+    if (photos.length < 2) throw new BadRequestException('multi-cena precisa de 2+ fotos')
+    if (!dto.prompt?.trim()) throw new BadRequestException('prompt obrigatório')
+    const uid = userId ?? null
+
+    const product = await this.ensureCreativeProduct(orgId, uid, { ...dto, product_photo_url: photos[0] })
+    const briefing = await this.creative.createBriefing(orgId, product.id, {
+      target_marketplace: 'mercado_livre',
+      image_format:       '1200x1500',
+      video_prompts:      [dto.prompt.trim()],
+    } as CreateBriefingDto)
+
+    const perScene = Math.max(5, Math.min(10, dto.duration_seconds ?? 5))
+    const jobIds: string[] = []
+    for (let i = 0; i < photos.length; i++) {
+      const buffer = await this.downloadImage(photos[i])
+      const sourceImageId = await this.registerSourceImage(orgId, product.id, briefing.id, buffer, `Cena ${i + 1} (Social AI)`)
+      const job = await this.videos.createChainedJobFromImage(orgId, (uid ?? null) as unknown as string, {
+        product_id:              product.id,
+        briefing_id:             briefing.id,
+        source_image_id:         sourceImageId,
+        target_duration_seconds: perScene,
+        aspect_ratio:            dto.aspect_ratio ?? '9:16',
+        model_name:              dto.model_name ?? 'kling-v2-6',
+        camera_motion:           dto.camera_motion ?? 'dolly-in',
+        prompt:                  dto.prompt.trim(),
+        max_cost_usd:            dto.max_cost_usd,
+      })
+      jobIds.push(job.id)
+    }
+    this.logger.log(`[social-video] multi-cena ${jobIds.length} jobs (org=${orgId} product=${product.id})`)
+    return { job_ids: jobIds }
+  }
+
+  /** Status do multi-cena: quando TODOS os jobs completam, baixa os clipes e
+   *  concatena (ffmpeg) num reel único → URL pública. */
+  async getMultiSceneReel(orgId: string, jobIds: string[]): Promise<ReelStatus> {
+    if (!jobIds.length) return { status: 'failed', public_url: null, preview_url: null, error: 'sem jobs' }
+    const readyPaths: string[] = []
+    for (const jobId of jobIds) {
+      const job = await this.videos.getJob(orgId, jobId)
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        return { status: 'failed', public_url: null, preview_url: null, error: job.error_message ?? `job ${job.status}` }
+      }
+      if (job.status !== 'completed') {
+        return { status: job.status, public_url: null, preview_url: null, error: null }
+      }
+      const path = await this.findReadyStoragePath(orgId, jobId)
+      if (!path) {
+        const vids = await this.videos.listVideosByJob(orgId, jobId)
+        const partErr = vids.find(v => v.error_message)?.error_message
+        return { status: 'failed', public_url: null, preview_url: null, error: partErr ?? 'cena sem vídeo' }
+      }
+      readyPaths.push(path)
+    }
+    // Todos prontos → baixa cada clipe e concatena
+    try {
+      const buffers: Buffer[] = []
+      for (const p of readyPaths) {
+        const { data: blob, error } = await supabaseAdmin.storage.from(CREATIVE_BUCKET).download(p)
+        if (error || !blob) throw new Error(`download cena: ${error?.message}`)
+        buffers.push(Buffer.from(await blob.arrayBuffer()))
+      }
+      const masterBuffer = await concatVideos(buffers)
+      const pubPath = `${orgId}/reels/multi-${jobIds[0]}.mp4`
+      const { error: upErr } = await supabaseAdmin.storage
+        .from(PUBLIC_BUCKET)
+        .upload(pubPath, masterBuffer, { contentType: 'video/mp4', upsert: true, cacheControl: '3600' })
+      if (upErr) throw new Error(`upload concat: ${upErr.message}`)
+      const publicUrl = supabaseAdmin.storage.from(PUBLIC_BUCKET).getPublicUrl(pubPath).data.publicUrl
+      return { status: 'completed', public_url: publicUrl, preview_url: null, error: null }
+    } catch (e) {
+      this.logger.warn(`[social-video] concat multi falhou: ${(e as Error).message}`)
+      return { status: 'failed', public_url: null, preview_url: null, error: `falha ao juntar cenas: ${(e as Error).message}` }
+    }
+  }
+
+  /** storage_path do vídeo final de um job (master do chain ou parte ready). */
+  private async findReadyStoragePath(orgId: string, jobId: string): Promise<string | null> {
+    const vids = await this.videos.listVideosByJob(orgId, jobId)
+    const ready =
+      vids.find(v => v.is_chain_master && v.storage_path) ??
+      vids.find(v => v.storage_path && (v.status === 'ready' || v.status === 'approved')) ??
+      vids.find(v => v.storage_path)
+    return ready?.storage_path ?? null
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
