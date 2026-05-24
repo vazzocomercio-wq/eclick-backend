@@ -1,8 +1,25 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, HttpException } from '@nestjs/common'
 import * as crypto from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
 
 const IV_LENGTH = 16
+
+/** Org em modo BYOK ('own') tentou usar IA sem chave própria configurada.
+ *  HTTP 402 (Payment Required) + payload estruturado pro frontend detectar
+ *  e mostrar o CTA "Conectar chave de IA". */
+export class AiKeyRequiredException extends HttpException {
+  constructor(provider: string) {
+    super(
+      {
+        statusCode: 402,
+        error:      'ai_key_required',
+        provider,
+        message:    `Conecte sua chave de ${provider} em Configurações > IA pra usar este recurso.`,
+      },
+      402,
+    )
+  }
+}
 
 @Injectable()
 export class CredentialsService {
@@ -114,6 +131,67 @@ export class CredentialsService {
         `[getDecryptedKey] decrypt falhou orgId=${orgId ?? 'global'} ` +
         `provider=${provider} keyName=${keyName ?? '(any)'}: ${(e as Error).message}`
       )
+      return null
+    }
+  }
+
+  // ── BYOK resolution ─────────────────────────────────────────────────────────
+
+  /**
+   * Resolve a chave de IA respeitando o modo BYOK da org (Fase A passo 2).
+   *
+   *   1. org com chave própria        → usa ela (cliente paga com o crédito dele).
+   *   2. org modo 'platform' sem chave → chave global da plataforma (só a matriz Vazzo).
+   *   3. org modo 'own' sem chave      → lança AiKeyRequiredException (402).
+   *
+   * Substitui o padrão `getDecryptedKey(org) ?? getDecryptedKey(null)` que
+   * fazia TODA org cair na chave global da plataforma (= dono pagando pelos
+   * clientes).
+   */
+  async resolveAiKey(orgId: string | null, provider: string, keyName?: string): Promise<string> {
+    if (orgId) {
+      const own = await this.getDecryptedKey(orgId, provider, keyName)
+      if (own) return own
+    }
+
+    const mode = orgId ? await this.getOrgAiKeysMode(orgId) : 'platform'
+    if (mode === 'platform') {
+      const platform = await this.getPlatformKey(provider, keyName)
+      if (platform) return platform
+      // Plataforma sem a chave global cadastrada — erro de config nosso.
+      throw new HttpException(`Chave ${provider} da plataforma não configurada`, 500)
+    }
+
+    // Modo 'own' sem chave própria → BYOK obrigatório.
+    throw new AiKeyRequiredException(provider)
+  }
+
+  /** Modo de chaves de IA da org. Default 'own' (BYOK) pra qualquer org sem o flag. */
+  async getOrgAiKeysMode(orgId: string): Promise<'platform' | 'own'> {
+    const { data } = await supabaseAdmin
+      .from('organizations')
+      .select('ai_keys_mode')
+      .eq('id', orgId)
+      .maybeSingle()
+    return data?.ai_keys_mode === 'platform' ? 'platform' : 'own'
+  }
+
+  /** Chave GLOBAL da plataforma (organization_id IS NULL) — só a matriz usa. */
+  private async getPlatformKey(provider: string, keyName?: string): Promise<string | null> {
+    let q = supabaseAdmin
+      .from('api_credentials')
+      .select('key_value')
+      .eq('provider', provider)
+      .eq('is_active', true)
+      .is('organization_id', null)
+    if (keyName) q = q.eq('key_name', keyName)
+
+    const { data } = await q.maybeSingle()
+    if (!data) return null
+    try {
+      return this.decrypt(data.key_value)
+    } catch (e) {
+      this.logger.warn(`[getPlatformKey] decrypt falhou provider=${provider}: ${(e as Error).message}`)
       return null
     }
   }
