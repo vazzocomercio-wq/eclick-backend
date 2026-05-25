@@ -3,6 +3,7 @@ import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { MercadolivreService } from '../../../mercadolivre/mercadolivre.service'
 import { MarketplacePlatform, ScrapedListing } from '../../shared/types'
+import { GeoSkipError } from '../../shared/skip-error'
 
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -76,10 +77,21 @@ export class ListingScraperService {
       }
     }
     if (!item) {
-      if (lastStatus === 401 || lastStatus === 403) {
+      // Determinísticos → pular (sem retry).
+      if (lastStatus === 403) throw new GeoSkipError('blocked_by_marketplace', `ML 403 em ${id}`)
+      if (lastStatus === 404) throw new GeoSkipError('product_not_found', `ML 404 em ${id}`)
+      // 401 = token realmente inválido em todas as contas (config) → erro real, retry.
+      if (lastStatus === 401) {
         throw new BadRequestException('Token Mercado Livre inválido/expirado em todas as contas. Reconecte em Configurações > Integrações.')
       }
-      throw new BadRequestException(`Anúncio ${id} não retornou dados (status ${lastStatus ?? '?'}) — pode estar pausado, removido ou de outra conta.`)
+      throw new BadRequestException(`Anúncio ${id} não retornou dados (status ${lastStatus ?? '?'}).`)
+    }
+
+    // Anúncio indisponível (esgotado/pausado/finalizado) → pular (sem retry).
+    const mlStatus = String(item.status ?? '')
+    const availQty = Number(item.available_quantity ?? -1)
+    if (mlStatus === 'paused' || mlStatus === 'closed' || availQty === 0) {
+      throw new GeoSkipError('product_unavailable', `ML status=${mlStatus} qty=${availQty}`)
     }
 
     const attrsRaw = Array.isArray(item.attributes) ? item.attributes as Array<Record<string, unknown>> : []
@@ -160,7 +172,7 @@ export class ListingScraperService {
         { headers: { ...HEADERS, Referer: 'https://shopee.com.br/', 'X-Requested-With': 'XMLHttpRequest' }, timeout: 15_000 },
       )
       const item = res?.data?.item
-      if (!item) throw new BadRequestException('Item Shopee não encontrado.')
+      if (!item) throw new GeoSkipError('product_not_found', `Shopee item null ${shopId}.${itemId}`)
       const imageHashes = Array.isArray(item.images) ? item.images as string[] : []
       return {
         url,
@@ -179,7 +191,10 @@ export class ListingScraperService {
         category:      null,
       }
     } catch (e) {
-      if (e instanceof BadRequestException) throw e
+      if (e instanceof BadRequestException || e instanceof GeoSkipError) throw e
+      const st = (e as { response?: { status?: number } }).response?.status
+      if (st === 403) throw new GeoSkipError('blocked_by_marketplace', `Shopee 403 ${shopId}.${itemId}`)
+      if (st === 404) throw new GeoSkipError('product_not_found', `Shopee 404 ${shopId}.${itemId}`)
       throw new BadRequestException('Shopee bloqueou a leitura do item (anti-bot). Tente novamente mais tarde.')
     }
   }
@@ -191,7 +206,10 @@ export class ListingScraperService {
     try {
       const res = await axios.get(url, { headers: HEADERS, timeout: 20_000, maxContentLength: 5_000_000 })
       html = res.data as string
-    } catch {
+    } catch (e) {
+      const st = (e as { response?: { status?: number } }).response?.status
+      if (st === 403) throw new GeoSkipError('blocked_by_marketplace', `403 em ${url}`)
+      if (st === 404) throw new GeoSkipError('product_not_found', `404 em ${url}`)
       throw new BadRequestException('Não consegui carregar a página (timeout ou bloqueio).')
     }
     const $ = cheerio.load(html)

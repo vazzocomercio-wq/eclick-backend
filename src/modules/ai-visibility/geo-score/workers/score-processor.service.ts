@@ -5,6 +5,7 @@ import { ListingScraperService } from '../services/listing-scraper.service'
 import { GeoScoreCalculatorService } from '../services/geo-score-calculator.service'
 import { GeoRecommendationsService } from '../services/geo-recommendations.service'
 import { GeoTelemetryService } from '../services/geo-telemetry.service'
+import { GeoSkipError } from '../../shared/skip-error'
 
 const CONCURRENCY = 3
 const BACKOFFS_MS = [30_000, 120_000, 600_000] // 30s, 2min, 10min
@@ -131,8 +132,28 @@ export class ScoreProcessorService {
       })
       this.logger.log(`[geo-worker] job ${job.id} OK score=${score.geoScore} custo=$${costUsd} ${durationMs}ms`)
     } catch (e) {
+      // Skip determinístico (esgotado/bloqueado/inexistente) → NÃO retry.
+      if (e instanceof GeoSkipError) { await this.markSkipped(job, e.skipReason); return }
       await this.handleFailure(job, attempt, (e as Error).message)
     }
+  }
+
+  /** Anúncio que não dá pra auditar (esgotado/403/404): score=null + skip_reason, sem retry. */
+  private async markSkipped(job: JobRow, skipReason: string): Promise<void> {
+    await supabaseAdmin.from('ai_audit_results').delete().eq('job_id', job.id)
+    await supabaseAdmin.from('ai_audit_results').insert({
+      job_id: job.id, org_id: job.org_id, geo_score: null,
+      breakdown_json: [], recommendations_json: [], skip_reason: skipReason,
+    })
+    await supabaseAdmin.from('ai_audit_jobs').update({
+      status: 'completed', completed_at: new Date().toISOString(), cost_usd: 0, last_error: null,
+    }).eq('id', job.id)
+    await this.telemetry.emit({
+      orgId: job.org_id, userId: job.requested_by ?? '', jobId: job.id,
+      eventName: 'geo_score.audit_skipped',
+      properties: { skip_reason: skipReason, url: job.url },
+    })
+    this.logger.log(`[geo-worker] job ${job.id} PULADO (${skipReason})`)
   }
 
   private async handleFailure(job: JobRow, attempt: number, errMsg: string): Promise<void> {

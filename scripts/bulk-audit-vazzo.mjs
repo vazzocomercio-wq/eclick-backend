@@ -171,34 +171,43 @@ async function main() {
   // 3. CSV (ordenado por geo_score ASC — piores primeiro).
   const rows = jobs.map(j => {
     const d = results.get(j.jobId) ?? {}
+    const skipped = !!d.skip_reason
     const wd = worstDims(d.breakdown)
     const recs = Array.isArray(d.recommendations) ? d.recommendations : []
     return {
       sku: j.sku, listing_id: j.listing_id, platform: j.platform, title: j.title, url: j.url,
-      geo_score: typeof d.score === 'number' ? d.score : '',
+      geo_score: skipped ? 'N/A' : (typeof d.score === 'number' ? d.score : ''),
+      skip_reason: d.skip_reason ?? '',
       wd1: wd[0], wd2: wd[1], wd3: wd[2],
       r1s: recs[0]?.severity ?? '', r1t: recs[0]?.title ?? '',
       r2s: recs[1]?.severity ?? '', r2t: recs[1]?.title ?? '',
       cost: typeof d.cost_usd === 'number' ? d.cost_usd : 0,
     }
-  }).sort((a, b) => (a.geo_score === '' ? 999 : a.geo_score) - (b.geo_score === '' ? 999 : b.geo_score))
+  }).sort((a, b) => (typeof a.geo_score === 'number' ? a.geo_score : 999) - (typeof b.geo_score === 'number' ? b.geo_score : 999))
 
-  const head = ['sku', 'listing_id', 'platform', 'title', 'url', 'geo_score', 'worst_dimension_1', 'worst_dimension_2', 'worst_dimension_3', 'recommendation_1_severity', 'recommendation_1_title', 'recommendation_2_severity', 'recommendation_2_title']
+  const head = ['sku', 'listing_id', 'platform', 'title', 'url', 'geo_score', 'skip_reason', 'worst_dimension_1', 'worst_dimension_2', 'worst_dimension_3', 'recommendation_1_severity', 'recommendation_1_title', 'recommendation_2_severity', 'recommendation_2_title']
   const lines = [head.join(',')]
-  for (const r of rows) lines.push([r.sku, r.listing_id, r.platform, r.title, r.url, r.geo_score, r.wd1, r.wd2, r.wd3, r.r1s, r1clean(r.r1t), r.r2s, r1clean(r.r2t)].map(csvCell).join(','))
+  for (const r of rows) lines.push([r.sku, r.listing_id, r.platform, r.title, r.url, r.geo_score, r.skip_reason, r.wd1, r.wd2, r.wd3, r.r1s, r1clean(r.r1t), r.r2s, r1clean(r.r2t)].map(csvCell).join(','))
   const date = new Date().toISOString().slice(0, 10)
   const csvPath = path.join(os.tmpdir(), `vazzo-audit-${date}.csv`)
   fs.writeFileSync(csvPath, lines.join('\n'), 'utf8')
 
-  // 4. Resumo.
+  // 4. Resumo. Pulados (esgotado/403/404) NÃO entram na média/distribuição.
   const scored = rows.filter(r => typeof r.geo_score === 'number')
+  const skippedRows = rows.filter(r => r.skip_reason)
+  const failed = jobs.length - scored.length - skippedRows.length
   const avg = scored.length ? (scored.reduce((s, r) => s + r.geo_score, 0) / scored.length).toFixed(1) : '—'
   const band = (lo, hi) => scored.filter(r => r.geo_score >= lo && r.geo_score <= hi).length
   const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0)
-  const failed = jobs.length - scored.length
 
   console.log(`\n=== RESUMO ===`)
-  console.log(`Analisados: ${scored.length}/${jobs.length}${failed ? ` (${failed} sem score/falha)` : ''}`)
+  console.log(`Analisados: ${scored.length}/${jobs.length}`)
+  if (skippedRows.length) {
+    const byReason = {}
+    skippedRows.forEach(r => { byReason[r.skip_reason] = (byReason[r.skip_reason] || 0) + 1 })
+    console.log(`Pulados (não contam na média): ${skippedRows.length} — ${Object.entries(byReason).map(([k, v]) => `${k}:${v}`).join(', ')}`)
+  }
+  if (failed) console.log(`Falhas reais: ${failed}`)
   console.log(`Média GEO Score: ${avg}`)
   console.log(`  0-30 (crítico):  ${band(0, 30)} (${pct(band(0, 30), scored.length)}%)`)
   console.log(`  31-60:           ${band(31, 60)} (${pct(band(31, 60), scored.length)}%)`)

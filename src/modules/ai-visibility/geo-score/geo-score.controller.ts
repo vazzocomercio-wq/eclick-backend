@@ -103,7 +103,7 @@ export class GeoScoreController {
 
     const { data: result } = await supabaseAdmin
       .from('ai_audit_results')
-      .select('geo_score, breakdown_json, recommendations_json')
+      .select('geo_score, breakdown_json, recommendations_json, skip_reason')
       .eq('job_id', jobId)
       .maybeSingle()
 
@@ -117,6 +117,7 @@ export class GeoScoreController {
       score:           r?.geo_score ?? null,
       breakdown:       r?.breakdown_json ?? null,
       recommendations: r?.recommendations_json ?? null,
+      skip_reason:     r?.skip_reason ?? null,
       cost_usd:        j.cost_usd,
       error:           j.last_error ?? null,
       created_at:      j.created_at,
@@ -140,7 +141,7 @@ export class GeoScoreController {
 
     let q = supabaseAdmin
       .from('ai_audit_jobs')
-      .select('id, url, platform, status, cost_usd, created_at, completed_at, ai_audit_results(geo_score)', { count: 'exact' })
+      .select('id, url, platform, status, cost_usd, created_at, completed_at, ai_audit_results(geo_score, skip_reason)', { count: 'exact' })
       .eq('org_id', user.orgId)
       .is('deleted_at', null)
     if (filterPlatform) q = q.eq('platform', filterPlatform)
