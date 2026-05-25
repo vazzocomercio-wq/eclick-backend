@@ -36,7 +36,7 @@ export class FulfillmentSefazService {
 
     const { Tools } = await loadSpedNfe('node-sped-nfe')
     return new Tools(
-      { mod: '55', xmllint: '', UF: uf, tpAmb, CSC: '', CSCid: '', versao: '4.00', timeout: 30000, openssl: null, CPF: '', CNPJ: cnpj },
+      { mod: '55', xmllint: 'xmllint', UF: uf, tpAmb, CSC: '', CSCid: '', versao: '4.00', timeout: 30000, openssl: null, CPF: '', CNPJ: cnpj },
       { pfx: cert.pfxBase64, senha: cert.password },
     )
   }
