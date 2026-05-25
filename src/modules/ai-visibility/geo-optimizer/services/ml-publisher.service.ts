@@ -113,8 +113,12 @@ export class MlPublisherService {
 
     const { token } = await this.ownerToken(input.orgId, v.listing_id)
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    // Mesma trava: só reverte o título se for mudável (sem venda) E tiver mudado.
+    const { title: curTitle, soldQty } = await this.currentItem(v.listing_id, headers)
     try {
-      await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}`, { title: v.title_old }, { headers, timeout: 15_000 })
+      if (soldQty === 0 && v.title_old && v.title_old !== curTitle) {
+        await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}`, { title: v.title_old }, { headers, timeout: 15_000 })
+      }
       await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}/description`, { plain_text: v.description_old ?? '' }, { headers, timeout: 15_000 })
     } catch (e) {
       const ax = e as { response?: { status?: number }; message?: string }
