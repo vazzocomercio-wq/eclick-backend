@@ -34,6 +34,60 @@ export class BaselineService {
     }
   }
 
+  /**
+   * Captura métricas de uma JANELA explícita [from..to] (base do ImpactTracker,
+   * Dia 14 — o "depois" do piloto, medido no wash period D+3..D+16). Mesma forma
+   * do baseline (visitas/unidades/receita/conversão), mas por intervalo de datas.
+   */
+  async capturePostWindow(input: {
+    orgId: string; listingId: string; productId?: string | null; token?: string
+    fromDate: string; toDate: string // 'YYYY-MM-DD'
+  }): Promise<{ visits: number; units: number; revenue: number; conversion: number | null }> {
+    const [visits, sales] = await Promise.all([
+      this.visitsBetween(input.listingId, input.fromDate, input.toDate, input.token),
+      this.salesBetween(input.orgId, input.productId, input.fromDate, input.toDate),
+    ])
+    return {
+      visits,
+      units:      sales.units,
+      revenue:    sales.revenue,
+      conversion: visits > 0 ? +(sales.units / visits).toFixed(4) : null,
+    }
+  }
+
+  /** Visitas num intervalo de datas via API ML (`/visits?date_from&date_to`).
+   *  Retorna 0 sem token ou em erro (ML guarda ~150d, nossa janela cabe). */
+  private async visitsBetween(mlItemId: string, fromDate: string, toDate: string, token?: string): Promise<number> {
+    if (!token) return 0
+    try {
+      const from = `${fromDate}T00:00:00.000Z`
+      const to   = `${toDate}T23:59:59.999Z`
+      const { data } = await axios.get(
+        `https://api.mercadolibre.com/items/${mlItemId}/visits?date_from=${encodeURIComponent(from)}&date_to=${encodeURIComponent(to)}`,
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 },
+      )
+      const total = Number((data as { total_visits?: number }).total_visits)
+      return Number.isFinite(total) ? total : 0
+    } catch { return 0 }
+  }
+
+  /** Unidades/receita de product_sales_snapshots entre duas datas (inclusive). */
+  private async salesBetween(orgId: string, productId: string | null | undefined, fromDate: string, toDate: string): Promise<{ units: number; revenue: number }> {
+    if (!productId) return { units: 0, revenue: 0 }
+    try {
+      const { data } = await supabaseAdmin
+        .from('product_sales_snapshots')
+        .select('units_sold, revenue')
+        .eq('organization_id', orgId).eq('product_id', productId)
+        .gte('snapshot_date', fromDate).lte('snapshot_date', toDate)
+      const rows = Array.isArray(data) ? data as Array<{ units_sold?: number; revenue?: number }> : []
+      return {
+        units:   rows.reduce((s, r) => s + (Number(r.units_sold) || 0), 0),
+        revenue: +rows.reduce((s, r) => s + (Number(r.revenue) || 0), 0).toFixed(2),
+      }
+    } catch { return { units: 0, revenue: 0 } }
+  }
+
   /** Visitas 14d: preferir API ML ao vivo (a tabela ml_item_visits_period é
    *  esparsa); cai pra tabela se não houver token. */
   private async visits14d(orgId: string, mlItemId: string, token?: string): Promise<number> {

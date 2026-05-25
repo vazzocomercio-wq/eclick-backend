@@ -9,6 +9,7 @@ import { GeoSkipError } from '../shared/skip-error'
 import { TitleRewriterService } from './services/title-rewriter.service'
 import { DescriptionBuilderService } from './services/description-builder.service'
 import { MlPublisherService } from './services/ml-publisher.service'
+import { ImpactTrackerService } from './services/impact-tracker.service'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -25,6 +26,7 @@ export class GeoOptimizerController {
     private readonly titles:       TitleRewriterService,
     private readonly descriptions: DescriptionBuilderService,
     private readonly publisher:    MlPublisherService,
+    private readonly impact:       ImpactTrackerService,
     private readonly telemetry:    GeoTelemetryService,
   ) {}
 
@@ -93,6 +95,16 @@ export class GeoOptimizerController {
       description_new:  desc.description,
       cost_usd:         costUsd,
     }
+  }
+
+  /**
+   * GET /ai-visibility/optimize/impact — relatório de impacto do piloto
+   * (Risco 2). Rota ESTÁTICA declarada ANTES de :optimizerId (senão o Nest
+   * captura 'impact' como id). Read-only.
+   */
+  @Get('optimize/impact')
+  async impactReport(@ReqUser() user: ReqUserPayload) {
+    return this.impact.report(user.orgId, user.id)
   }
 
   /** GET /ai-visibility/optimize/:optimizerId — rascunho + status. */

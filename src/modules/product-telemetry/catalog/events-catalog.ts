@@ -77,6 +77,7 @@ export const TELEMETRY_EVENTS = {
   GEO_OPTIMIZER_VARIATION_SELECTED:   'geo_optimizer.variation_selected',
   GEO_OPTIMIZER_APPLIED:              'geo_optimizer.applied_to_marketplace',
   GEO_OPTIMIZER_ROLLED_BACK:          'geo_optimizer.rolled_back',
+  GEO_OPTIMIZER_IMPACT_MEASURED:      'geo_optimizer.impact_measured',
 } as const
 
 export const MODULES = {
