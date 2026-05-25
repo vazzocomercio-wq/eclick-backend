@@ -88,6 +88,7 @@ import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/vi
 import { EOtimizerModule } from './modules/e-otimizer/e-otimizer.module'
 import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-integration.module'
 import { RadarModule } from './modules/radar/radar.module'
+import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module'
 
 @Module({
   imports: [
@@ -178,6 +179,7 @@ import { RadarModule } from './modules/radar/radar.module'
     EOtimizerModule,
     IcarusIntegrationModule,
     RadarModule,
+    AiVisibilityModule,
   ],
   controllers: [AppController],
   providers: [AppService],
