@@ -16,8 +16,8 @@ export const AI_PLATFORMS: AiPlatform[] = [
   'copilot',
 ]
 
-/** Estado de um job de auditoria. */
-export type AuditStatus = 'pending' | 'running' | 'completed' | 'failed'
+/** Estado de um job de auditoria (fila via DB, sem Redis). */
+export type AuditStatus = 'pending' | 'processing' | 'retry' | 'completed' | 'failed'
 
 /** Uma dimensão da rubrica de pontuação (geo_score). */
 export interface ScoreDimension {
@@ -72,4 +72,15 @@ export interface GeoScoreResult {
   geoScore:   number             // 0-100 (normalizado pelos pesos)
   dimensions: GeoDimensionResult[]
   costUsd:    number             // soma das chamadas LLM
+}
+
+/** Uma recomendação acionável (fix) gerada pra uma dimensão fraca. */
+export interface GeoRecommendation {
+  dimension:        GeoDimensionName
+  severity:         'high' | 'medium' | 'low'
+  title:            string
+  description:      string
+  example_before:   string
+  example_after:    string
+  estimated_impact: string        // ex: "+8 pontos se aplicar"
 }

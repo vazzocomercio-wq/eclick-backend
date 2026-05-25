@@ -288,6 +288,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // AI Visibility OS — recomendações do GEO Score (Sprint 2 Parte 2). 1 chamada
+  // batched gera até 5 fixes acionáveis (antes/depois) pras dimensões fracas.
+  ai_visibility_geo_recommendations: {
+    label:       'Recomendações GEO (AI Visibility)',
+    description: 'Gera os top fixes acionáveis (severidade + antes/depois) pras dimensões com nota baixa do GEO Score',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

@@ -60,6 +60,13 @@ export const TELEMETRY_EVENTS = {
   TASK_STARTED:            'task.started',
   TASK_COMPLETED:          'task.completed',
   TASK_ABANDONED:          'task.abandoned',
+
+  // ===== AI Visibility — GEO Score (ciclo de auditoria, emitidos pelo backend) =====
+  GEO_SCORE_AUDIT_QUEUED:        'geo_score.audit_queued',
+  GEO_SCORE_PROCESSING_STARTED:  'geo_score.processing_started',
+  GEO_SCORE_PROCESSING_COMPLETED:'geo_score.processing_completed',
+  GEO_SCORE_PROCESSING_FAILED:   'geo_score.processing_failed',
+  GEO_SCORE_RETRY_SCHEDULED:     'geo_score.retry_scheduled',
 } as const
 
 export const MODULES = {
