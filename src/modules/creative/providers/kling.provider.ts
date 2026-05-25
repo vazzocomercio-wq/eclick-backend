@@ -8,10 +8,11 @@
  *   - Camera motion mapeada pra camera_control type+config nativos
  */
 
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import {
   KlingClient,
   KLING_MODEL_OPTIONS,
+  coerceKlingModel,
   type KlingModel,
   type KlingDuration,
   type KlingAspectRatio,
@@ -29,6 +30,7 @@ import type {
 @Injectable()
 export class KlingProvider implements VideoProvider {
   readonly key = 'kling' as const
+  private readonly logger = new Logger(KlingProvider.name)
 
   constructor(private readonly client: KlingClient) {}
 
@@ -51,13 +53,21 @@ export class KlingProvider implements VideoProvider {
     if (input.duration !== 5 && input.duration !== 10) {
       throw new Error(`Kling só suporta duration 5 ou 10s, recebido ${input.duration}`)
     }
+    // Coage model_name inválido/descontinuado (ex: 'kling-v2-5' antigo) pro
+    // default válido — sem isso a API rejeita com code 1201 e o job falha inteiro.
+    const modelName = coerceKlingModel(input.modelId)
+    if (modelName !== input.modelId) {
+      this.logger.warn(
+        `[kling.submit] model_name '${input.modelId}' inválido/descontinuado — usando '${modelName}' no lugar.`,
+      )
+    }
     return this.client.submitImage2Video({
       imageUrl:       input.imageUrl,
       prompt:         input.prompt,
       negativePrompt: input.negativePrompt,
       duration:       String(input.duration) as KlingDuration,
       aspectRatio:    input.aspectRatio as KlingAspectRatio,
-      modelName:      input.modelId as KlingModel,
+      modelName,
       cfgScale:       input.cfgScale,
       cameraControl:  mapCameraMotion(input.cameraMotion),
     })
@@ -82,7 +92,7 @@ export class KlingProvider implements VideoProvider {
 
   estimateCost(modelId: string, duration: number): number {
     if (duration !== 5 && duration !== 10) return 0
-    return this.client.estimateCost(modelId as KlingModel, String(duration) as KlingDuration)
+    return this.client.estimateCost(coerceKlingModel(modelId), String(duration) as KlingDuration)
   }
 
   isConfigured(): boolean {
@@ -95,7 +105,7 @@ export class KlingProvider implements VideoProvider {
     switch (id) {
       case 'kling-v2-6':        return 'audio-native'
       case 'kling-v2-1-master': return 'premium'
-      case 'kling-v2-5':        return 'standard'
+      case 'kling-v2-5-turbo':  return 'standard'
       case 'kling-v2-1':        return 'standard'
       case 'kling-v1-6':        return 'economy'
     }

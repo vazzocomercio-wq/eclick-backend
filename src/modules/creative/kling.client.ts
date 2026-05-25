@@ -16,18 +16,22 @@ import { retryWithBackoff } from '../../common/retry'
  *
  * Endpoint regional: api-singapore.klingai.com (default global).
  *
- * Models válidos + pricing API real (fonte: console.kling.com — confirmado 2026-05-13):
+ * Models válidos + pricing API real (verificado contra a API ao vivo 2026-05-25):
  *   kling-v2-1         5s  → $0.49    10s  → $0.98   (Pro)
  *   kling-v2-1-master  5s  → $1.40    10s  → $2.80   (Mestre — premium caro!)
- *   kling-v2-5         5s  → $0.35    10s  → $0.70   (Pro Turbo)
+ *   kling-v2-5-turbo   5s  → $0.35    10s  → $0.70   (Pro Turbo — mais barato)
  *   kling-v2-6         5s  → $0.70    10s  → $1.40   (Pro c/áudio nativo — default)
  *   kling-v1-6         5s  → $0.49    10s  → $0.98   (Pro c/camera_control included)
  *
  * Pricing antigo (subestimado) usava preços do site web/subscription —
  * a carteira da API é separada e cobra valores acima.
  *
- * Models antigos kling-v1-6-std / kling-v1-6-pro / kling-v2-master foram
- * descontinuados pela Kling em 2026 e retornam erro "model_name is invalid".
+ * ⚠️ Models que a API rejeita HOJE com code 1201 "model_name is invalid":
+ *   kling-v1-6-std / kling-v1-6-pro / kling-v2-master / kling-v2 /
+ *   kling-v2-5 (foi RENOMEADO pra kling-v2-5-turbo — o nome antigo morreu).
+ * A API valida o model_name ANTES do saldo: nome inválido = code 1201;
+ * nome válido sem crédito = code 1102 "Account balance not enough".
+ * Use scripts/kling-probe.mjs pra reconferir o conjunto válido.
  */
 
 const KLING_BASE = process.env.KLING_API_BASE ?? 'https://api-singapore.klingai.com'
@@ -36,7 +40,7 @@ const KLING_JWT_TTL_SECONDS = 30 * 60
 export type KlingModel =
   | 'kling-v2-1'
   | 'kling-v2-1-master'
-  | 'kling-v2-5'
+  | 'kling-v2-5-turbo'
   | 'kling-v2-6'
   | 'kling-v1-6'
 export type KlingDuration = '5' | '10'
@@ -50,7 +54,7 @@ export const KLING_DEFAULT_DURATION: KlingDuration = '10'
 const PRICING: Record<KlingModel, Record<KlingDuration, number>> = {
   'kling-v2-1':        { '5': 0.49, '10': 0.98 },
   'kling-v2-1-master': { '5': 1.40, '10': 2.80 },
-  'kling-v2-5':        { '5': 0.35, '10': 0.70 },
+  'kling-v2-5-turbo':  { '5': 0.35, '10': 0.70 },
   'kling-v2-6':        { '5': 0.70, '10': 1.40 },
   'kling-v1-6':        { '5': 0.49, '10': 0.98 },
 }
@@ -79,10 +83,26 @@ export const KLING_MODEL_OPTIONS: Array<{
 }> = [
   { value: 'kling-v2-6',        label: 'Kling v2.6',        badge: 'Novo · com áudio', hasAudio: true,  supportsCameraControl: false, pricing: PRICING['kling-v2-6'] },
   { value: 'kling-v2-1-master', label: 'Kling v2.1 Master', badge: 'Premium',          hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-1-master'] },
-  { value: 'kling-v2-5',        label: 'Kling v2.5',                                   hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-5'] },
+  { value: 'kling-v2-5-turbo',  label: 'Kling v2.5 Turbo',  badge: 'Mais barato',      hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-5-turbo'] },
   { value: 'kling-v2-1',        label: 'Kling v2.1',        badge: 'Padrão',           hasAudio: false, supportsCameraControl: false, pricing: PRICING['kling-v2-1'] },
   { value: 'kling-v1-6',        label: 'Kling v1.6',        badge: 'Econômico',        hasAudio: false, supportsCameraControl: true,  pricing: PRICING['kling-v1-6'] },
 ]
+
+/** Conjunto de model_name que a API aceita hoje (derivado das opções públicas). */
+const KLING_VALID_MODELS: ReadonlySet<string> = new Set(KLING_MODEL_OPTIONS.map(m => m.value))
+
+export function isValidKlingModel(model: string): model is KlingModel {
+  return KLING_VALID_MODELS.has(model)
+}
+
+/**
+ * Coage qualquer model_name pra um KlingModel válido. Modelos desconhecidos
+ * ou descontinuados (ex: 'kling-v2-5', renomeado pra 'kling-v2-5-turbo')
+ * caem no default em vez de derrubar o job inteiro com code 1201 da API.
+ */
+export function coerceKlingModel(model: string | undefined | null): KlingModel {
+  return model && isValidKlingModel(model) ? model : KLING_DEFAULT_MODEL
+}
 
 /** Controle de câmera — pra "câmera em direção ao produto" usar zoom positivo (zoom_in). */
 export interface KlingCameraControl {
