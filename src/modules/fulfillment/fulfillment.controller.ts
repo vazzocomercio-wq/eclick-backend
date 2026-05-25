@@ -9,6 +9,7 @@ import { FulfillmentWaveService } from './fulfillment-wave.service'
 import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-accounts.service'
 import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type InvoiceItem } from './fulfillment-invoices.service'
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
+import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -27,6 +28,7 @@ export class FulfillmentController {
     private readonly accounts: FulfillmentAccountsService,
     private readonly invoices: FulfillmentInvoicesService,
     private readonly packaging: FulfillmentPackagingService,
+    private readonly fiscal: FulfillmentFiscalService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -140,6 +142,42 @@ export class FulfillmentController {
   @Get('orders/:foId/packaging-suggest')
   suggestPackaging(@ReqUser() u: ReqUserPayload, @Param('foId') foId: string) {
     return this.packaging.suggest(this.org(u), foId)
+  }
+
+  // ── Fiscal / Faturador F1 — config de NF-e por empresa + produto ─────
+  @Get('fiscal/companies/:companyId')
+  getCompanyFiscal(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
+    return this.fiscal.getCompanyFiscal(this.org(u), companyId)
+  }
+
+  @Put('fiscal/companies/:companyId')
+  upsertCompanyFiscal(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string, @Body() body: {
+    provider?: FiscalProvider | null; environment?: FiscalEnvironment; providerToken?: string | null
+    providerCompanyRef?: string | null; inscricaoEstadual?: string | null; regimeTributario?: RegimeTributario | null
+    cnae?: string | null; fiscalAddress?: Record<string, unknown>
+    invoiceSalePct?: number; invoicePurchasePct?: number
+    certificateStatus?: 'pending' | 'uploaded' | 'expired'; certificateExpiresAt?: string | null
+  }) {
+    return this.fiscal.upsertCompanyFiscal(this.org(u), u.id, companyId, body ?? {})
+  }
+
+  @Get('fiscal/companies/:companyId/readiness')
+  fiscalReadiness(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
+    return this.fiscal.readiness(this.org(u), companyId)
+  }
+
+  @Get('fiscal/products')
+  listProductFiscal(@ReqUser() u: ReqUserPayload) {
+    return this.fiscal.listProductFiscal(this.org(u))
+  }
+
+  @Put('fiscal/products/:productId')
+  upsertProductFiscal(@ReqUser() u: ReqUserPayload, @Param('productId') productId: string, @Body() body: {
+    ncm?: string | null; cest?: string | null; origem?: string | null
+    cfop_sale?: string | null; cfop_transfer?: string | null; cst_csosn?: string | null
+    unit?: string | null; tax_rate?: number | null
+  }) {
+    return this.fiscal.upsertProductFiscal(this.org(u), productId, body ?? {})
   }
 
   // ── Operadores + produtividade (Sprint 2) ────────────────────────────
@@ -299,7 +337,7 @@ export class FulfillmentController {
   }
 
   @Patch('accounts/:id')
-  updateAccount(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { company_id?: string | null; label?: string; is_active?: boolean }) {
+  updateAccount(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { company_id?: string | null; label?: string; is_active?: boolean; invoice_sale_pct?: number | null; invoice_purchase_pct?: number | null }) {
     return this.accounts.updateAccount(this.org(u), id, body ?? {})
   }
 

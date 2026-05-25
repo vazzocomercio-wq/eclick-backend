@@ -23,6 +23,8 @@ export interface FulfillmentAccount {
   external_account_id: string
   label: string | null
   is_active: boolean
+  invoice_sale_pct: number | null      // % de faturamento por conta (null = usa o padrão da empresa)
+  invoice_purchase_pct: number | null
 }
 
 /** Timing real do envio na plataforma (ML lead_time). Tudo opcional/best-effort. */
@@ -109,11 +111,13 @@ export class FulfillmentAccountsService {
     return (data ?? []) as FulfillmentAccount[]
   }
 
-  async updateAccount(orgId: string, id: string, patch: { company_id?: string | null; label?: string; is_active?: boolean }): Promise<{ ok: true }> {
+  async updateAccount(orgId: string, id: string, patch: { company_id?: string | null; label?: string; is_active?: boolean; invoice_sale_pct?: number | null; invoice_purchase_pct?: number | null }): Promise<{ ok: true }> {
     const row: Record<string, unknown> = {}
     if (patch.company_id !== undefined) row.company_id = patch.company_id
     if (patch.label !== undefined) row.label = patch.label
     if (patch.is_active !== undefined) row.is_active = patch.is_active
+    if (patch.invoice_sale_pct !== undefined) row.invoice_sale_pct = patch.invoice_sale_pct === null ? null : clampPct(patch.invoice_sale_pct)
+    if (patch.invoice_purchase_pct !== undefined) row.invoice_purchase_pct = patch.invoice_purchase_pct === null ? null : clampPct(patch.invoice_purchase_pct)
     if (Object.keys(row).length > 0) {
       const { error } = await supabaseAdmin.from('fulfillment_accounts').update(row).eq('id', id).eq('organization_id', orgId)
       if (error) throw new BadRequestException(`Erro ao atualizar conta: ${error.message}`)
@@ -201,4 +205,10 @@ function normalizeCnpj(cnpj: string | null | undefined): string | null {
   if (!cnpj) return null
   const digits = String(cnpj).replace(/\D/g, '')
   return digits.length > 0 ? digits : null
+}
+
+function clampPct(v: number): number {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 100
+  return Math.min(Math.max(n, 0), 100)
 }
