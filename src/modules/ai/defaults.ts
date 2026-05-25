@@ -278,6 +278,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // AI Visibility OS — GEO Score (Sprint 2). Audita UMA dimensão do listing e dá
+  // nota 0-10 com reasoning + evidence (jsonMode). 7 dimensões via LLM por
+  // auditoria (a 8ª, crawler_access, é determinística via robots.txt). Sonnet
+  // pra qualidade analítica; fallback OpenAI mini.
+  ai_visibility_geo_score: {
+    label:       'GEO Score (AI Visibility)',
+    description: 'Audita dimensões do listing (título, descrição, atributos, reviews, FAQ, etc) e dá nota 0-10 pra visibilidade nos motores de IA',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
