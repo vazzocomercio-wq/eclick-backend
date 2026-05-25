@@ -140,7 +140,7 @@ export class GeoScoreController {
 
     let q = supabaseAdmin
       .from('ai_audit_jobs')
-      .select('id, url, platform, status, cost_usd, created_at, completed_at', { count: 'exact' })
+      .select('id, url, platform, status, cost_usd, created_at, completed_at, ai_audit_results(geo_score)', { count: 'exact' })
       .eq('org_id', user.orgId)
       .is('deleted_at', null)
     if (filterPlatform) q = q.eq('platform', filterPlatform)
