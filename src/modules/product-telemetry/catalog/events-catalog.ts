@@ -67,6 +67,8 @@ export const TELEMETRY_EVENTS = {
   GEO_SCORE_PROCESSING_COMPLETED:'geo_score.processing_completed',
   GEO_SCORE_PROCESSING_FAILED:   'geo_score.processing_failed',
   GEO_SCORE_RETRY_SCHEDULED:     'geo_score.retry_scheduled',
+  GEO_SCORE_CACHE_HIT:           'geo_score.cache_hit',
+  GEO_SCORE_CACHE_BYPASSED:      'geo_score.cache_bypassed',
 } as const
 
 export const MODULES = {

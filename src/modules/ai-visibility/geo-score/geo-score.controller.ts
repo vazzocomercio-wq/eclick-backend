@@ -29,12 +29,40 @@ export class GeoScoreController {
   async createScore(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { url?: string },
-  ): Promise<{ jobId: string; status: string }> {
+    @Query('force') force?: string,
+  ): Promise<{ jobId: string; status: string; cached: boolean }> {
     const url = (body?.url ?? '').trim()
     if (!/^https?:\/\//i.test(url)) {
       throw new BadRequestException('Informe uma URL válida (começando com http/https).')
     }
     const platform = this.scraper.detectPlatform(url)
+    const forceNew = force === 'true' || force === '1'
+
+    // Cache 24h: reusa uma auditoria completed recente da mesma URL/org —
+    // não cria job novo nem gasta tokens. ?force=true ignora o cache.
+    if (!forceNew) {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+      const { data: hit } = await supabaseAdmin
+        .from('ai_audit_jobs')
+        .select('id')
+        .eq('org_id', user.orgId)
+        .eq('url', url)
+        .eq('status', 'completed')
+        .is('deleted_at', null)
+        .gte('completed_at', since)
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (hit) {
+        const cachedId = (hit as { id: string }).id
+        await this.telemetry.emit({
+          orgId: user.orgId, userId: user.id, jobId: cachedId,
+          eventName: 'geo_score.cache_hit',
+          properties: { url, original_job_id: cachedId },
+        })
+        return { jobId: cachedId, status: 'completed', cached: true }
+      }
+    }
 
     const { data, error } = await supabaseAdmin
       .from('ai_audit_jobs')
@@ -44,14 +72,21 @@ export class GeoScoreController {
     if (error || !data) throw new BadRequestException(`Falha ao criar auditoria: ${error?.message ?? 'erro'}`)
 
     const jobId = (data as { id: string }).id
+    if (forceNew) {
+      await this.telemetry.emit({
+        orgId: user.orgId, userId: user.id, jobId,
+        eventName: 'geo_score.cache_bypassed',
+        properties: { url, platform },
+      })
+    }
     await this.telemetry.emit({
       orgId: user.orgId, userId: user.id, jobId,
       eventName: 'geo_score.audit_queued',
-      properties: { url, platform, source: 'api' },
+      properties: { url, platform, source: 'api', cached: false },
     })
     this.processor.kick(jobId) // começa na hora; o cron é a rede de segurança
 
-    return { jobId, status: 'pending' }
+    return { jobId, status: 'pending', cached: false }
   }
 
   /** GET /ai-visibility/score/:jobId — status + resultado. */
