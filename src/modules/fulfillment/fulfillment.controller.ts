@@ -185,6 +185,12 @@ export class FulfillmentController {
     return this.sefaz.statusServico(this.org(u), companyId)
   }
 
+  // Faturador F2b — emite uma NF-e de TESTE (homologação) pra validar a emissão
+  @Post('fiscal/companies/:companyId/test-emit')
+  testEmit(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
+    return this.sefaz.emitTest(this.org(u), companyId)
+  }
+
   @Get('fiscal/products')
   listProductFiscal(@ReqUser() u: ReqUserPayload) {
     return this.fiscal.listProductFiscal(this.org(u))

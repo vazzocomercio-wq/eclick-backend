@@ -146,13 +146,20 @@ export class FulfillmentFiscalService {
       .from('fulfillment_companies').select('cnpj').eq('id', companyId).eq('organization_id', orgId).maybeSingle()
     const missing: string[] = []
     if (!(company as { cnpj: string | null } | null)?.cnpj) missing.push('CNPJ da empresa')
-    if (!cfg?.provider) missing.push('Provedor de NF-e')
-    if (!cfg?.has_provider_token) missing.push('Token do provedor')
     if (!cfg?.inscricao_estadual) missing.push('Inscrição Estadual')
     if (!cfg?.regime_tributario) missing.push('Regime tributário')
-    if (cfg?.certificate_status !== 'uploaded') missing.push('Certificado A1 (enviar no painel do provedor)')
+    if (cfg?.certificate_status !== 'uploaded') missing.push('Certificado A1')
     const addr = (cfg?.fiscal_address ?? {}) as Record<string, unknown>
     if (!addr.uf || !addr.city) missing.push('Endereço fiscal (cidade/UF)')
+    if (!addr.logradouro || !addr.numero || !addr.bairro) missing.push('Endereço completo (logradouro/nº/bairro)')
+    if (!addr.cMun || String(addr.cMun).replace(/\D/g, '').length !== 7) missing.push('Código IBGE do município')
+    // Modo DIRETO (tem certificado) não usa provedor/token. Modo provedor (sem
+    // cert) exige provedor + token.
+    const directMode = cfg?.certificate_status === 'uploaded'
+    if (!directMode) {
+      if (!cfg?.provider) missing.push('Provedor de NF-e')
+      if (!cfg?.has_provider_token) missing.push('Token do provedor')
+    }
     return { ready: missing.length === 0, missing }
   }
 
