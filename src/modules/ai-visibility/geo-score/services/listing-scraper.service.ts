@@ -48,25 +48,38 @@ export class ListingScraperService {
     const id = this.extractMlId(url)
     if (!id) throw new BadRequestException('URL ML inválida — esperado MLB-1234567.')
 
-    let token: string
+    // Multi-conta: a org pode ter várias contas ML e o anúncio pode ser de
+    // qualquer uma. getTokenForOrg pega só 1 conta (a mais recente) → ler item
+    // de OUTRA conta dá 403. Por isso tentamos /items/{id} com o token de CADA
+    // conta da org até um retornar 200 (conta dona do anúncio).
+    let tokens: Array<{ token: string; sellerId: number }>
     try {
-      token = (await this.mercadolivre.getTokenForOrg(orgId)).token
+      tokens = await this.mercadolivre.getAllTokensForOrg(orgId)
     } catch (e) {
-      this.logger.warn(`[geo-scrape] getTokenForOrg(${orgId}) falhou: ${(e as Error).message}`)
+      this.logger.warn(`[geo-scrape] getAllTokensForOrg(${orgId}) falhou: ${(e as Error).message}`)
       throw new BadRequestException('Conecte sua conta Mercado Livre em Configurações > Integrações.')
     }
-    const headers = { ...HEADERS, Accept: 'application/json', Authorization: `Bearer ${token}` }
 
-    let item: Record<string, unknown>
-    try {
-      const { data } = await axios.get(`https://api.mercadolibre.com/items/${id}`, { headers, timeout: 15_000 })
-      item = data as Record<string, unknown>
-    } catch (e) {
-      const status = (e as { response?: { status?: number } }).response?.status
-      if (status === 401 || status === 403) {
-        throw new BadRequestException('Token Mercado Livre inválido/expirado. Reconecte em Configurações > Integrações.')
+    let item: Record<string, unknown> | null = null
+    let headers: Record<string, string> = { ...HEADERS, Accept: 'application/json' }
+    let lastStatus: number | undefined
+    for (const { token } of tokens) {
+      const h = { ...HEADERS, Accept: 'application/json', Authorization: `Bearer ${token}` }
+      try {
+        const { data } = await axios.get(`https://api.mercadolibre.com/items/${id}`, { headers: h, timeout: 15_000 })
+        item = data as Record<string, unknown>
+        headers = h
+        break
+      } catch (e) {
+        lastStatus = (e as { response?: { status?: number } }).response?.status
+        // 401/403/404 → tenta a próxima conta (anúncio pode ser de outra)
       }
-      throw new BadRequestException(`Anúncio ${id} não retornou dados (status ${status ?? '?'}) — pode estar pausado ou removido.`)
+    }
+    if (!item) {
+      if (lastStatus === 401 || lastStatus === 403) {
+        throw new BadRequestException('Token Mercado Livre inválido/expirado em todas as contas. Reconecte em Configurações > Integrações.')
+      }
+      throw new BadRequestException(`Anúncio ${id} não retornou dados (status ${lastStatus ?? '?'}) — pode estar pausado, removido ou de outra conta.`)
     }
 
     const attrsRaw = Array.isArray(item.attributes) ? item.attributes as Array<Record<string, unknown>> : []
