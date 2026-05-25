@@ -10,6 +10,7 @@ import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-acco
 import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type InvoiceItem } from './fulfillment-invoices.service'
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
+import { FulfillmentSefazService } from './fulfillment-sefaz.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -29,6 +30,7 @@ export class FulfillmentController {
     private readonly invoices: FulfillmentInvoicesService,
     private readonly packaging: FulfillmentPackagingService,
     private readonly fiscal: FulfillmentFiscalService,
+    private readonly sefaz: FulfillmentSefazService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -175,6 +177,12 @@ export class FulfillmentController {
   @Get('fiscal/companies/:companyId/certificate')
   certificateInfo(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
     return this.fiscal.getCertificateInfo(this.org(u), companyId)
+  }
+
+  // Faturador F2b — testa a conexão com a SEFAZ (status do serviço) usando o cert
+  @Get('fiscal/companies/:companyId/sefaz-status')
+  sefazStatus(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
+    return this.sefaz.statusServico(this.org(u), companyId)
   }
 
   @Get('fiscal/products')
