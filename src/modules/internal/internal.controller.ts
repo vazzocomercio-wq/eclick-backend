@@ -192,6 +192,31 @@ export class InternalController {
     return this.socialVideo.getMultiSceneReel(orgId, ids)
   }
 
+  /** UGC com avatar: compõe produto (fundo) + avatar D-ID (PiP) num reel só. */
+  @Post('creative/social-video-compose')
+  @HttpCode(HttpStatus.OK)
+  async composeOverlay(
+    @Body()
+    body: {
+      org_id?: string
+      product_url?: string
+      avatar_url?: string
+      corner?: 'br' | 'bl' | 'tr' | 'tl'
+      size_pct?: number
+    },
+  ) {
+    if (!body?.org_id) throw new BadRequestException('org_id obrigatório')
+    if (!body?.product_url || !body?.avatar_url) {
+      throw new BadRequestException('product_url e avatar_url obrigatórios')
+    }
+    return this.socialVideo.composeOverlayReel(body.org_id, {
+      product_url: body.product_url,
+      avatar_url:  body.avatar_url,
+      corner:      body.corner,
+      size_pct:    body.size_pct,
+    })
+  }
+
   // ─── Sinais comerciais (Social Commerce AI Fase 2) ──────────────────────
 
   /** Sinais comerciais (margem/estoque/overstock/demanda) de produtos. */

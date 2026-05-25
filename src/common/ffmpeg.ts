@@ -102,6 +102,79 @@ export async function concatVideos(videoBuffers: Buffer[]): Promise<Buffer> {
   }
 }
 
+/**
+ * Compõe um vídeo "picture-in-picture": o vídeo do produto em tela cheia (9:16)
+ * como fundo + o vídeo do avatar (falante, com áudio) pequeno num canto.
+ *
+ *   - Canvas 1080x1920. Fundo = produto em cover+crop (sem barras).
+ *   - Avatar escalado pra `sizePct`% da largura (default 30, clamp 18-40), com
+ *     borda branca fina, posicionado no canto (default inferior-direito) c/ margem.
+ *   - Áudio = a voz do avatar. Duração = a fala do avatar (o produto faz loop
+ *     pra cobrir, e -shortest encerra quando o avatar termina).
+ */
+export async function composePictureInPicture(
+  productBuffer: Buffer,
+  avatarBuffer: Buffer,
+  opts: { corner?: 'br' | 'bl' | 'tr' | 'tl'; sizePct?: number } = {},
+): Promise<Buffer> {
+  const corner = opts.corner ?? 'br'
+  const pct = Math.max(18, Math.min(40, opts.sizePct ?? 30))
+  const W = 1080
+  const H = 1920
+  const ovW = Math.round((W * pct) / 100)
+  const margin = Math.round(W * 0.05) // ~54px
+
+  const posByCorner: Record<string, string> = {
+    br: `x=W-w-${margin}:y=H-h-${margin}`,
+    bl: `x=${margin}:y=H-h-${margin}`,
+    tr: `x=W-w-${margin}:y=${margin}`,
+    tl: `x=${margin}:y=${margin}`,
+  }
+  const overlayXY = posByCorner[corner] ?? posByCorner.br
+
+  const tmp = await mkdtemp(join(tmpdir(), 'eclick-pip-'))
+  const productPath = join(tmp, 'product.mp4')
+  const avatarPath = join(tmp, 'avatar.mp4')
+  const outPath = join(tmp, 'out.mp4')
+
+  try {
+    await writeFile(productPath, productBuffer)
+    await writeFile(avatarPath, avatarBuffer)
+
+    // [0]=produto (loop infinito), [1]=avatar. Fundo cobre 1080x1920; avatar
+    // escalado com borda branca de 4px (pad); overlay no canto; áudio do avatar.
+    const filter =
+      `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[bg];` +
+      `[1:v]scale=${ovW}:-2,pad=iw+8:ih+8:4:4:white[ov];` +
+      `[bg][ov]overlay=${overlayXY}:format=auto[outv]`
+
+    await runFfmpeg(
+      [
+        '-y',
+        '-stream_loop', '-1', '-i', productPath,
+        '-i', avatarPath,
+        '-filter_complex', filter,
+        '-map', '[outv]',
+        '-map', '1:a:0?',
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        '-shortest',
+        outPath,
+      ],
+      { timeoutMs: 180_000 },
+    )
+
+    return await readFile(outPath)
+  } finally {
+    await cleanupTmp(tmp, [productPath, avatarPath, outPath])
+  }
+}
+
 /** Detecta se ffmpeg está disponível no PATH (usar no boot pra log). */
 export function ffmpegAvailable(): Promise<boolean> {
   return new Promise(resolve => {

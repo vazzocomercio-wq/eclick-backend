@@ -4,7 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, CreateBriefingDto, CreativeProduct } from '../creative/creative.service'
 import { CreativeVideoPipelineService } from '../creative/creative-video-pipeline.service'
-import { concatVideos } from '../../common/ffmpeg'
+import { concatVideos, composePictureInPicture } from '../../common/ffmpeg'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const sharp = require('sharp') as typeof import('sharp')
 
@@ -234,6 +234,40 @@ export class SocialVideoBridgeService {
       vids.find(v => v.storage_path && (v.status === 'ready' || v.status === 'approved')) ??
       vids.find(v => v.storage_path)
     return ready?.storage_path ?? null
+  }
+
+  // ── UGC com avatar PiP (produto no fundo + avatar pequeno falando) ─────────
+
+  /** Compõe o reel final "picture-in-picture": baixa o mp4 do produto e o do
+   *  avatar (D-ID), faz o overlay (FFmpeg) e sobe pro bucket público. Os 2 mp4
+   *  já vêm prontos (URLs públicas) — esse passo é só a composição. */
+  async composeOverlayReel(
+    orgId: string,
+    dto: { product_url: string; avatar_url: string; corner?: 'br' | 'bl' | 'tr' | 'tl'; size_pct?: number },
+  ): Promise<{ public_url: string }> {
+    if (!dto.product_url?.trim() || !dto.avatar_url?.trim()) {
+      throw new BadRequestException('product_url e avatar_url obrigatórios')
+    }
+    const [productBuf, avatarBuf] = await Promise.all([
+      this.downloadVideo(dto.product_url),
+      this.downloadVideo(dto.avatar_url),
+    ])
+    const composed = await composePictureInPicture(productBuf, avatarBuf, {
+      corner:  dto.corner,
+      sizePct: dto.size_pct,
+    })
+    const pubPath = `${orgId}/reels/pip-${randomUUID()}.mp4`
+    const { error: upErr } = await supabaseAdmin.storage
+      .from(PUBLIC_BUCKET)
+      .upload(pubPath, composed, { contentType: 'video/mp4', upsert: true, cacheControl: '3600' })
+    if (upErr) throw new BadRequestException(`upload PiP: ${upErr.message}`)
+    return { public_url: supabaseAdmin.storage.from(PUBLIC_BUCKET).getPublicUrl(pubPath).data.publicUrl }
+  }
+
+  private async downloadVideo(url: string): Promise<Buffer> {
+    const res = await fetch(url)
+    if (!res.ok) throw new BadRequestException(`download vídeo falhou (HTTP ${res.status})`)
+    return Buffer.from(await res.arrayBuffer())
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
