@@ -84,3 +84,20 @@ export interface GeoRecommendation {
   example_after:    string
   estimated_impact: string        // ex: "+8 pontos se aplicar"
 }
+
+// ── geo-optimizer (Sprint 2) ──────────────────────────────────────────────
+
+export type TitleVariant = 'A' | 'B' | 'C'
+export type TitleVariantType = 'transacional' | 'comparativa' | 'informacional'
+
+/** Uma variação de título gerada pelo optimizer. */
+export interface TitleVariation {
+  variant:            TitleVariant
+  type:               TitleVariantType
+  title:              string
+  reasoning:          string
+  target_query:       string
+  estimated_geo_lift: number   // pontos estimados no title_geo (0-10)
+}
+
+export type OptimizerStatus = 'draft' | 'approved' | 'applied' | 'rolled_back'

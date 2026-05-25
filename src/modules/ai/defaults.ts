@@ -296,6 +296,20 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // AI Visibility — geo-optimizer (Sprint 2). Reescreve título/descrição pra
+  // melhorar a visibilidade em IA. Sonnet pra qualidade de copy + estrutura.
+  ai_visibility_title_rewrite: {
+    label:       'Reescrita de título (AI Visibility)',
+    description: 'Gera 3 variações de título (transacional/comparativa/informacional) otimizadas pra motores de IA',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  ai_visibility_description: {
+    label:       'Reescrita de descrição (AI Visibility)',
+    description: 'Reescreve a descrição em estrutura data-dense (resumo, specs, para quem serve/não serve, comparativo, CTA)',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
