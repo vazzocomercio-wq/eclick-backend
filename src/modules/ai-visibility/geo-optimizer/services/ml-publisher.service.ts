@@ -62,21 +62,31 @@ export class MlPublisherService {
     // Estado atual (pra rollback) + regra de título do ML.
     const { title: titleOld, soldQty } = await this.currentItem(itemId, headers)
     const descOld  = await this.currentDescription(itemId, headers)
-    // ⚠️ ML trava o título de anúncios COM vendas (erro 374). Nesses, só descrição.
-    const canChangeTitle = soldQty === 0
-    let appliedTitle = false
+
+    // DESCRIÇÃO primeiro = mudança principal, sempre permitida. Se falhar,
+    // nada foi alterado (atômico) → erro.
     try {
-      if (canChangeTitle && titleNew && titleNew !== titleOld) {
-        await axios.put(`https://api.mercadolibre.com/items/${itemId}`, { title: titleNew }, { headers, timeout: 15_000 })
-        appliedTitle = true
-      }
       await axios.put(`https://api.mercadolibre.com/items/${itemId}/description`, { plain_text: descNew }, { headers, timeout: 15_000 })
     } catch (e) {
       const ax = e as { response?: { status?: number; data?: unknown }; message?: string }
-      this.logger.error(`[ml-publisher] APPLY FALHOU item=${itemId} status=${ax.response?.status} body=${JSON.stringify(ax.response?.data ?? null)} msg=${ax.message}`)
-      throw new BadRequestException(`Falha ao publicar no ML (${ax.response?.status ?? '?'}). Confira o anúncio.`)
+      this.logger.error(`[ml-publisher] DESC FALHOU item=${itemId} status=${ax.response?.status} body=${JSON.stringify(ax.response?.data ?? null)} msg=${ax.message}`)
+      throw new BadRequestException(`Falha ao publicar a descrição no ML (${ax.response?.status ?? '?'}). Nada foi alterado.`)
     }
-    const effectiveTitleNew = appliedTitle ? titleNew : titleOld // título não muda se travado
+
+    // TÍTULO best-effort: ML trava título de item COM vendas (374) e recusa
+    // em outros casos. Se recusar, seguimos só com a descrição (não falha).
+    const canChangeTitle = soldQty === 0
+    let appliedTitle = false
+    if (canChangeTitle && titleNew && titleNew !== titleOld) {
+      try {
+        await axios.put(`https://api.mercadolibre.com/items/${itemId}`, { title: titleNew }, { headers, timeout: 15_000 })
+        appliedTitle = true
+      } catch (e) {
+        const ax = e as { response?: { status?: number } }
+        this.logger.warn(`[ml-publisher] título NÃO aplicado item=${itemId} (ML recusou ${ax.response?.status ?? '?'}) — descrição aplicada mesmo assim`)
+      }
+    }
+    const effectiveTitleNew = appliedTitle ? titleNew : titleOld
 
     const versionId = await this.recordVersion({
       orgId: input.orgId, optimizerId: input.optimizerId, listingId: itemId, platform: opt.platform,
@@ -113,17 +123,19 @@ export class MlPublisherService {
 
     const { token } = await this.ownerToken(input.orgId, v.listing_id)
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-    // Mesma trava: só reverte o título se for mudável (sem venda) E tiver mudado.
     const { title: curTitle, soldQty } = await this.currentItem(v.listing_id, headers)
+    // Descrição primeiro (obrigatória).
     try {
-      if (soldQty === 0 && v.title_old && v.title_old !== curTitle) {
-        await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}`, { title: v.title_old }, { headers, timeout: 15_000 })
-      }
       await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}/description`, { plain_text: v.description_old ?? '' }, { headers, timeout: 15_000 })
     } catch (e) {
       const ax = e as { response?: { status?: number }; message?: string }
-      this.logger.error(`[ml-publisher] ROLLBACK FALHOU item=${v.listing_id} status=${ax.response?.status} msg=${ax.message}`)
-      throw new BadRequestException(`Falha no rollback (${ax.response?.status ?? '?'}). Confira o anúncio manualmente.`)
+      this.logger.error(`[ml-publisher] ROLLBACK desc FALHOU item=${v.listing_id} status=${ax.response?.status} msg=${ax.message}`)
+      throw new BadRequestException(`Falha no rollback da descrição (${ax.response?.status ?? '?'}). Confira o anúncio.`)
+    }
+    // Título best-effort (só se mudável e tiver mudado).
+    if (soldQty === 0 && v.title_old && v.title_old !== curTitle) {
+      try { await axios.put(`https://api.mercadolibre.com/items/${v.listing_id}`, { title: v.title_old }, { headers, timeout: 15_000 }) }
+      catch { this.logger.warn(`[ml-publisher] rollback título não aplicado item=${v.listing_id}`) }
     }
 
     await this.recordVersion({
