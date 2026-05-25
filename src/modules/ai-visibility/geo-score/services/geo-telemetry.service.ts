@@ -21,6 +21,7 @@ export class GeoTelemetryService {
     eventName:  string
     properties?: Record<string, unknown>
     durationMs?: number
+    feature?:   string
   }): Promise<void> {
     try {
       if (!isValidEventName(input.eventName)) {
@@ -34,7 +35,7 @@ export class GeoTelemetryService {
         event_name:  input.eventName,
         event_type:  'action',
         module:      'ai_visibility',
-        feature:     'geo_score',
+        feature:     input.feature ?? 'geo_score',
         duration_ms: Number.isFinite(input.durationMs) ? Math.round(input.durationMs as number) : null,
         properties:  input.properties ?? {},
       })

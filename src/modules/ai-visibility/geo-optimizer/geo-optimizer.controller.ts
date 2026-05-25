@@ -1,12 +1,14 @@
-import { Controller, Post, Body, BadRequestException, UseGuards } from '@nestjs/common'
+import { Controller, Post, Get, Body, Param, Query, BadRequestException, NotFoundException, UseGuards } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../../common/supabase'
 import { ListingScraperService } from '../geo-score/services/listing-scraper.service'
+import { GeoTelemetryService } from '../geo-score/services/geo-telemetry.service'
 import { GeoDimensionResult } from '../shared/types'
 import { GeoSkipError } from '../shared/skip-error'
 import { TitleRewriterService } from './services/title-rewriter.service'
 import { DescriptionBuilderService } from './services/description-builder.service'
+import { MlPublisherService } from './services/ml-publisher.service'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -22,6 +24,8 @@ export class GeoOptimizerController {
     private readonly scraper:      ListingScraperService,
     private readonly titles:       TitleRewriterService,
     private readonly descriptions: DescriptionBuilderService,
+    private readonly publisher:    MlPublisherService,
+    private readonly telemetry:    GeoTelemetryService,
   ) {}
 
   /** POST /ai-visibility/optimize — gera o rascunho de otimização. */
@@ -74,14 +78,65 @@ export class GeoOptimizerController {
       .select('id')
       .single()
     if (error || !data) throw new BadRequestException(`Falha ao salvar otimização: ${error?.message ?? 'erro'}`)
+    const optimizerId = (data as { id: string }).id
+
+    await this.telemetry.emit({
+      orgId: user.orgId, userId: user.id, jobId: optimizerId, feature: 'geo_optimizer',
+      eventName: 'geo_optimizer.generation_requested', properties: { url, platform: scraped.platform },
+    })
 
     return {
-      optimizerId:      (data as { id: string }).id,
+      optimizerId,
       status:           'draft',
       title_variations: titles.variations,
       description_old:  scraped.description,
       description_new:  desc.description,
       cost_usd:         costUsd,
     }
+  }
+
+  /** GET /ai-visibility/optimize/:optimizerId — rascunho + status. */
+  @Get('optimize/:optimizerId')
+  async getOptimization(@ReqUser() user: ReqUserPayload, @Param('optimizerId') optimizerId: string) {
+    const { data } = await supabaseAdmin
+      .from('ai_optimizer_results')
+      .select('id, url, platform, title_variations, description_old, description_new, faq_generated, schema_jsonld, status, cost_usd, applied_at, rolled_back_at, created_at')
+      .eq('id', optimizerId).eq('org_id', user.orgId).maybeSingle()
+    if (!data) throw new NotFoundException('Otimização não encontrada.')
+    return data
+  }
+
+  /**
+   * POST /ai-visibility/optimize/:optimizerId/apply — PUBLICA no marketplace.
+   * ALTO RISCO. Salvaguardas no MlPublisherService (cap diário, versão, baseline).
+   * ?confirm_batch_expansion=true libera além do cap de 5/dia.
+   */
+  @Post('optimize/:optimizerId/apply')
+  async apply(
+    @ReqUser() user: ReqUserPayload,
+    @Param('optimizerId') optimizerId: string,
+    @Body() body: { variant?: 'A' | 'B' | 'C' },
+    @Query('confirm_batch_expansion') confirmBatch?: string,
+  ) {
+    const variant = body?.variant
+    if (!['A', 'B', 'C'].includes(variant ?? '')) throw new BadRequestException('Escolha a variação A, B ou C.')
+    await this.telemetry.emit({
+      orgId: user.orgId, userId: user.id, jobId: optimizerId, feature: 'geo_optimizer',
+      eventName: 'geo_optimizer.variation_selected', properties: { optimizer_id: optimizerId, variant },
+    })
+    return this.publisher.apply({
+      orgId: user.orgId, userId: user.id, optimizerId, variant: variant as 'A' | 'B' | 'C',
+      confirmBatchExpansion: confirmBatch === 'true' || confirmBatch === '1',
+    })
+  }
+
+  /** POST /ai-visibility/optimize/:optimizerId/rollback — volta o anúncio ao original. */
+  @Post('optimize/:optimizerId/rollback')
+  async rollback(
+    @ReqUser() user: ReqUserPayload,
+    @Param('optimizerId') optimizerId: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.publisher.rollback({ orgId: user.orgId, userId: user.id, optimizerId, reason: body?.reason })
   }
 }

@@ -71,6 +71,12 @@ export const TELEMETRY_EVENTS = {
   GEO_SCORE_CACHE_BYPASSED:      'geo_score.cache_bypassed',
   GEO_SCORE_RECOMMENDATION_CLICKED: 'geo_score.recommendation_clicked',
   GEO_SCORE_AUDIT_SKIPPED:          'geo_score.audit_skipped',
+
+  // ===== AI Visibility — geo-optimizer =====
+  GEO_OPTIMIZER_GENERATION_REQUESTED: 'geo_optimizer.generation_requested',
+  GEO_OPTIMIZER_VARIATION_SELECTED:   'geo_optimizer.variation_selected',
+  GEO_OPTIMIZER_APPLIED:              'geo_optimizer.applied_to_marketplace',
+  GEO_OPTIMIZER_ROLLED_BACK:          'geo_optimizer.rolled_back',
 } as const
 
 export const MODULES = {

@@ -18,6 +18,6 @@ import { ScoreProcessorService } from './workers/score-processor.service'
     GeoTelemetryService,
     ScoreProcessorService,
   ],
-  exports:     [ListingScraperService, GeoScoreCalculatorService, GeoRecommendationsService],
+  exports:     [ListingScraperService, GeoScoreCalculatorService, GeoRecommendationsService, GeoTelemetryService],
 })
 export class GeoScoreModule {}
