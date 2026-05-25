@@ -4,6 +4,7 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { EventIngestionService, RawTelemetryEvent } from '../services/event-ingestion.service'
 import { SessionService } from '../services/session.service'
+import { TaskAttemptsService } from '../services/task-attempts.service'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -17,8 +18,9 @@ interface ReqUserPayload { id: string; orgId: string }
 @UseGuards(SupabaseAuthGuard)
 export class TelemetryController {
   constructor(
-    private readonly ingestion: EventIngestionService,
-    private readonly sessions:   SessionService,
+    private readonly ingestion:    EventIngestionService,
+    private readonly sessions:     SessionService,
+    private readonly taskAttempts: TaskAttemptsService,
   ) {}
 
   /** POST /telemetry/events — batch de eventos do dashboard. */
@@ -50,5 +52,32 @@ export class TelemetryController {
     @Body() body: { session_id?: string },
   ): Promise<{ ended: boolean }> {
     return this.sessions.end({ orgId: user.orgId, userId: user.id, sessionId: body?.session_id ?? '' })
+  }
+
+  /**
+   * POST /telemetry/task-attempts — upsert do snapshot de uma tentativa de
+   * funil (telemetry_task_attempts tem GRANT só service_role). O client manda
+   * o estado completo; org/user vêm do JWT.
+   */
+  @Post('task-attempts')
+  async upsertTaskAttempt(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: {
+      attempt_id?: string; task_name?: string; started_at?: string; steps_completed?: string[]
+      completed_at?: string; abandoned_at?: string; abandoned_step?: string; outcome?: string
+    },
+  ): Promise<{ ok: boolean }> {
+    return this.taskAttempts.upsert({
+      orgId:         user.orgId,
+      userId:        user.id,
+      attemptId:     body?.attempt_id ?? '',
+      taskName:      body?.task_name ?? '',
+      startedAt:     body?.started_at,
+      steps:         body?.steps_completed,
+      completedAt:   body?.completed_at ?? null,
+      abandonedAt:   body?.abandoned_at ?? null,
+      abandonedStep: body?.abandoned_step ?? null,
+      outcome:       body?.outcome ?? null,
+    })
   }
 }
