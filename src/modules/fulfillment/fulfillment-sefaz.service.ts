@@ -1,4 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import { randomUUID } from 'crypto'
 import type { Tools } from 'node-sped-nfe'
 import { supabaseAdmin } from '../../common/supabase'
 import { FulfillmentFiscalService } from './fulfillment-fiscal.service'
@@ -22,7 +26,10 @@ export class FulfillmentSefazService {
 
   constructor(private readonly fiscal: FulfillmentFiscalService) {}
 
-  private async toolsFor(orgId: string, companyId: string): Promise<Tools> {
+  /** Monta o Tools da node-sped-nfe. O .pfx é gravado num ARQUIVO temporário e
+   *  passamos o CAMINHO (a lib/pem fazem `openssl pkcs12 -in <path>`; passar o
+   *  base64 dá "File name too long"). Devolve cleanup pra apagar o temp. */
+  private async toolsFor(orgId: string, companyId: string): Promise<{ tools: Tools; cleanup: () => void }> {
     const cfg = await this.fiscal.getCompanyFiscal(orgId, companyId)
     const cert = await this.fiscal.loadCertificate(orgId, companyId)
     if (!cert?.pfxBase64) throw new BadRequestException('Suba o certificado A1 da empresa antes de testar a conexão.')
@@ -34,11 +41,16 @@ export class FulfillmentSefazService {
     const uf = (addr.uf || 'SP').toUpperCase()
     const tpAmb = cfg?.environment === 'producao' ? 1 : 2
 
+    const pfxPath = path.join(os.tmpdir(), `eclick-cert-${randomUUID()}.pfx`)
+    fs.writeFileSync(pfxPath, Buffer.from(cert.pfxBase64, 'base64'), { mode: 0o600 })
+    const cleanup = () => { try { fs.unlinkSync(pfxPath) } catch { /* noop */ } }
+
     const { Tools } = await loadSpedNfe('node-sped-nfe')
-    return new Tools(
+    const tools = new Tools(
       { mod: '55', xmllint: 'xmllint', UF: uf, tpAmb, CSC: '', CSCid: '', versao: '4.00', timeout: 30000, openssl: null, CPF: '', CNPJ: cnpj },
-      { pfx: cert.pfxBase64, senha: cert.password },
+      { pfx: pfxPath, senha: cert.password },
     )
+    return { tools, cleanup }
   }
 
   /** Status do Serviço na SEFAZ da UF da empresa. cStat 107 = serviço em operação. */
@@ -46,9 +58,11 @@ export class FulfillmentSefazService {
     const cfg = await this.fiscal.getCompanyFiscal(orgId, companyId)
     const uf = ((cfg?.fiscal_address as Record<string, string> | undefined)?.uf || 'SP').toUpperCase()
     const ambiente = cfg?.environment === 'producao' ? 'produção' : 'homologação'
+    let cleanup: (() => void) | null = null
     try {
-      const tools = await this.toolsFor(orgId, companyId)
-      const xml = await tools.sefazStatus()
+      const t = await this.toolsFor(orgId, companyId)
+      cleanup = t.cleanup
+      const xml = await t.tools.sefazStatus()
       const cStat = /<cStat>(\d+)<\/cStat>/.exec(xml)?.[1] ?? null
       const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(xml)?.[1] ?? null
       return { ok: cStat === '107', cStat, xMotivo, uf, ambiente }
@@ -56,6 +70,8 @@ export class FulfillmentSefazService {
       const msg = (e as Error).message || 'falha desconhecida'
       this.logger.warn(`[sefaz-status] org=${orgId} company=${companyId}: ${msg}`)
       throw new BadRequestException(`Não consegui falar com a SEFAZ-${uf} (${ambiente}): ${msg}`)
+    } finally {
+      if (cleanup) cleanup()
     }
   }
 }
