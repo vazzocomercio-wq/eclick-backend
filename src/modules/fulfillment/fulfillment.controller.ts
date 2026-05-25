@@ -166,6 +166,17 @@ export class FulfillmentController {
     return this.fiscal.readiness(this.org(u), companyId)
   }
 
+  @Post('fiscal/companies/:companyId/certificate')
+  uploadCertificate(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string, @Body() body: { pfxBase64: string; password: string }) {
+    if (!body?.pfxBase64) throw new BadRequestException('Envie o arquivo do certificado (.pfx).')
+    return this.fiscal.uploadCertificate(this.org(u), u.id, companyId, { pfxBase64: body.pfxBase64, password: body.password ?? '' })
+  }
+
+  @Get('fiscal/companies/:companyId/certificate')
+  certificateInfo(@ReqUser() u: ReqUserPayload, @Param('companyId') companyId: string) {
+    return this.fiscal.getCertificateInfo(this.org(u), companyId)
+  }
+
   @Get('fiscal/products')
   listProductFiscal(@ReqUser() u: ReqUserPayload) {
     return this.fiscal.listProductFiscal(this.org(u))
