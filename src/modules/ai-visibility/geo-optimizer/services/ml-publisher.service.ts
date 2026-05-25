@@ -33,7 +33,7 @@ export class MlPublisherService {
   /** Aplica a variação escolhida no ML. Não aplica se o cap diário estourar. */
   async apply(input: {
     orgId: string; userId: string; optimizerId: string; variant: 'A' | 'B' | 'C'; confirmBatchExpansion?: boolean
-  }): Promise<{ ok: true; versionId: string; listingId: string }> {
+  }): Promise<{ ok: true; versionId: string; listingId: string; titleApplied: boolean; titleLocked: boolean }> {
     const opt = await this.loadOptimizer(input.orgId, input.optimizerId)
     if (opt.status === 'applied') throw new BadRequestException('Esta otimização já foi aplicada.')
 
@@ -59,21 +59,28 @@ export class MlPublisherService {
     const { token } = await this.ownerToken(input.orgId, itemId)
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
-    // Estado atual (pra rollback) + aplica.
-    const titleOld = await this.currentTitle(itemId, headers)
+    // Estado atual (pra rollback) + regra de título do ML.
+    const { title: titleOld, soldQty } = await this.currentItem(itemId, headers)
     const descOld  = await this.currentDescription(itemId, headers)
+    // ⚠️ ML trava o título de anúncios COM vendas (erro 374). Nesses, só descrição.
+    const canChangeTitle = soldQty === 0
+    let appliedTitle = false
     try {
-      await axios.put(`https://api.mercadolibre.com/items/${itemId}`, { title: titleNew }, { headers, timeout: 15_000 })
+      if (canChangeTitle && titleNew && titleNew !== titleOld) {
+        await axios.put(`https://api.mercadolibre.com/items/${itemId}`, { title: titleNew }, { headers, timeout: 15_000 })
+        appliedTitle = true
+      }
       await axios.put(`https://api.mercadolibre.com/items/${itemId}/description`, { plain_text: descNew }, { headers, timeout: 15_000 })
     } catch (e) {
       const ax = e as { response?: { status?: number; data?: unknown }; message?: string }
       this.logger.error(`[ml-publisher] APPLY FALHOU item=${itemId} status=${ax.response?.status} body=${JSON.stringify(ax.response?.data ?? null)} msg=${ax.message}`)
-      throw new BadRequestException(`Falha ao publicar no ML (${ax.response?.status ?? '?'}). Nada foi alterado de forma parcial verificável — confira o anúncio.`)
+      throw new BadRequestException(`Falha ao publicar no ML (${ax.response?.status ?? '?'}). Confira o anúncio.`)
     }
+    const effectiveTitleNew = appliedTitle ? titleNew : titleOld // título não muda se travado
 
     const versionId = await this.recordVersion({
       orgId: input.orgId, optimizerId: input.optimizerId, listingId: itemId, platform: opt.platform,
-      titleOld, titleNew, descOld, descNew, userId: input.userId, wasRollback: false,
+      titleOld, titleNew: effectiveTitleNew, descOld, descNew, userId: input.userId, wasRollback: false,
     })
 
     // Baseline (base do ImpactTracker).
@@ -88,10 +95,10 @@ export class MlPublisherService {
     await this.telemetry.emit({
       orgId: input.orgId, userId: input.userId, jobId: input.optimizerId, feature: 'geo_optimizer',
       eventName: 'geo_optimizer.applied_to_marketplace',
-      properties: { listing_id: itemId, platform: opt.platform, variant: input.variant, score_before: opt.geo_score, version_id: versionId, baseline_snapshot_id: (bl as { id?: string } | null)?.id ?? null },
+      properties: { listing_id: itemId, platform: opt.platform, variant: input.variant, score_before: opt.geo_score, version_id: versionId, baseline_snapshot_id: (bl as { id?: string } | null)?.id ?? null, title_applied: appliedTitle, title_locked: !canChangeTitle },
     })
-    this.logger.log(`[ml-publisher] APLICADO item=${itemId} variante=${input.variant} version=${versionId}`)
-    return { ok: true, versionId, listingId: itemId }
+    this.logger.log(`[ml-publisher] APLICADO item=${itemId} variante=${input.variant} título=${appliedTitle ? 'mudou' : 'TRAVADO(vendas)'} version=${versionId}`)
+    return { ok: true, versionId, listingId: itemId, titleApplied: appliedTitle, titleLocked: !canChangeTitle }
   }
 
   /** Volta o anúncio pro título/descrição anteriores ao último apply. */
@@ -172,8 +179,12 @@ export class MlPublisherService {
     throw new BadRequestException('Não consegui resolver a conta dona do anúncio (reconecte o Mercado Livre).')
   }
 
-  private async currentTitle(itemId: string, headers: Record<string, string>): Promise<string> {
-    try { const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}?attributes=title`, { headers, timeout: 10_000 }); return String((data as { title?: string }).title ?? '') } catch { return '' }
+  private async currentItem(itemId: string, headers: Record<string, string>): Promise<{ title: string; soldQty: number }> {
+    try {
+      const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}?attributes=title,sold_quantity`, { headers, timeout: 10_000 })
+      const d = data as { title?: string; sold_quantity?: number }
+      return { title: String(d.title ?? ''), soldQty: Number(d.sold_quantity ?? 0) || 0 }
+    } catch { return { title: '', soldQty: 0 } }
   }
   private async currentDescription(itemId: string, headers: Record<string, string>): Promise<string> {
     try { const { data } = await axios.get(`https://api.mercadolibre.com/items/${itemId}/description`, { headers, timeout: 10_000 }); return String((data as { plain_text?: string }).plain_text ?? '') } catch { return '' }
