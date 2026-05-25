@@ -2921,9 +2921,49 @@ const TELEMETRY_ENTRIES: KbEntry[] = [
   },
 ]
 
+const AI_VISIBILITY_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/ai-visibility', '/dashboard/ai-visibility/score', '/dashboard/ai-visibility/scores'],
+    category: 'ai-visibility',
+    title:    'AI Visibility OS — GEO Score (visibilidade nos motores de IA)',
+    content: `**AI Visibility OS** mede e melhora o quanto seus produtos **aparecem e são citados pelas IAs** (ChatGPT, Perplexity, Gemini). É o "SEO da era da IA" — canal de descoberta novo que ninguém mede ainda.
+
+**GEO Score (0-100):** cole a URL de um anúncio (Mercado Livre/Shopee) em **GEO Score** → a IA avalia **8 dimensões** e dá uma nota:
+- Título otimizado pra IA, profundidade da descrição, cobertura de entidades, densidade semântica, dados estruturados, arquitetura de avaliações, presença de FAQ, acesso de bots de IA (robots.txt).
+- Nota alta = mais provável que ChatGPT/Perplexity/Gemini citem e recomendem o seu produto.
+- Faixas: ≤30 crítico (vermelho) · ≤60 precisa atenção · ≤80 bom · >80 excelente.
+- Vem com **recomendações acionáveis** (antes/depois + impacto estimado em pontos).
+
+**Histórico** (\`/scores\`): tabela de todas as auditorias, filtros por plataforma/nota/período, abre o detalhe de cada uma. Auditorias de anúncio esgotado/pausado/inexistente aparecem como **N/A** (não entram na média).
+
+**Cache 24h por URL** — re-auditar a mesma URL no mesmo dia não gasta de novo (\`?force=true\` ignora). Custo ~$0.06/anúncio. **Diagnóstico Vazzo:** 649 anúncios auditados, média 35.4, ~99% abaixo de 60 → catálogo inteiro mal-otimizado pra IA (oportunidade grande).`,
+    tags: ['ai-visibility', 'geo', 'geo-score', 'chatgpt', 'perplexity', 'gemini', 'ia', 'visibilidade', 'seo'],
+  },
+  {
+    routes:   ['/dashboard/ai-visibility/optimizer'],
+    category: 'ai-visibility',
+    title:    'GEO Optimizer — IA reescreve, publica no ML e mede impacto',
+    content: `**GEO Optimizer** pega um anúncio e a IA **reescreve título e descrição** pra serem citados pelos motores de IA — e **publica direto no Mercado Livre**.
+
+**Fluxo (aba "Otimizar"):**
+1. Cole a URL (ou venha do botão **"Otimizar com IA"** do GEO Score, que já preenche).
+2. **Gerar otimização** → a IA devolve **3 variações de título** (A/B/C: transacional, comparativa, informacional, cada uma ≤60 chars) + uma **descrição estruturada** nova. Mostra lado-a-lado: descrição atual × otimizada.
+3. Escolha a variação de título e clique **Aplicar no anúncio** → confirma → publica ao vivo.
+4. Dá pra **Reverter para o original** a qualquer momento (1 clique).
+
+**Trava de título do ML:** anúncio **com vendas** (\`sold_quantity>0\`) **não deixa mudar o título** — nesses casos só a **descrição** é publicada (o sistema avisa "título mantido"). Título novo só entra em anúncio sem vendas.
+
+**Salvaguardas:** máximo 5 publicações/dia por org (cap no código); cada apply guarda **versão** (pra reverter) + **baseline** de métricas (visitas/unidades/receita) ANTES de mexer.
+
+**Aba "Impacto do piloto":** mostra o veredito **GO / NO-GO** — compara as métricas de cada anúncio otimizado na janela **D+3 a D+16** (14 dias) contra o baseline. "Win" = +20% em ≥1 métrica (visitas, unidades ou receita); **≥3 de 5 = GO** (prova que melhorar o GEO Score melhora venda). Enquanto a janela não fecha, mostra contagem regressiva.`,
+    tags: ['ai-visibility', 'geo-optimizer', 'otimizar', 'reescrever', 'titulo', 'descricao', 'publicar', 'rollback', 'impacto', 'piloto', 'ia'],
+  },
+]
+
 export const KB: KbEntry[] = [
   ...FULFILLMENT_ENTRIES,
   ...TELEMETRY_ENTRIES,
+  ...AI_VISIBILITY_ENTRIES,
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,
   ...CATALOG_ENTRIES,
