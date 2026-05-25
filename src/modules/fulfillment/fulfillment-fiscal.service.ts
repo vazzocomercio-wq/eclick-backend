@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import * as forge from 'node-forge'
 import { supabaseAdmin } from '../../common/supabase'
 import { CredentialsService } from '../credentials/credentials.service'
 
@@ -84,6 +85,58 @@ export class FulfillmentFiscalService {
       .from('fiscal_company_config').upsert(row, { onConflict: 'organization_id,company_id' })
     if (error) throw new BadRequestException(`Erro ao salvar config fiscal: ${error.message}`)
     return { ok: true }
+  }
+
+  // ── Certificado A1 (emissão DIRETA — nós assinamos, então guardamos o cert) ──
+  /** Sobe o A1 (.pfx base64 + senha): valida abrindo o PKCS#12, lê validade/CN,
+   *  e guarda CRIPTOGRAFADO no cofre (CredentialsService, provider 'sefaz_a1'). */
+  async uploadCertificate(orgId: string, userId: string, companyId: string, input: { pfxBase64: string; password: string }): Promise<{ ok: true; expiresAt: string | null; subject: string | null }> {
+    const { data: company } = await supabaseAdmin.from('fulfillment_companies').select('id').eq('id', companyId).eq('organization_id', orgId).maybeSingle()
+    if (!company) throw new NotFoundException('Empresa não encontrada.')
+    const b64 = (input.pfxBase64 ?? '').replace(/^data:[^;]*;base64,/, '').trim()
+    if (!b64) throw new BadRequestException('Arquivo do certificado (.pfx) ausente.')
+
+    let expiresAt: string | null = null
+    let subject: string | null = null
+    try {
+      const der = forge.util.decode64(b64)
+      const asn1 = forge.asn1.fromDer(der)
+      const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, input.password ?? '')   // lança se a senha estiver errada
+      const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? []
+      const cert = certBags.map((b) => b.cert).find((c): c is forge.pki.Certificate => !!c)
+      if (cert) {
+        expiresAt = cert.validity?.notAfter ? new Date(cert.validity.notAfter).toISOString() : null
+        const cn = cert.subject?.getField('CN') as { value?: string } | null
+        subject = cn?.value ?? null
+      }
+    } catch {
+      throw new BadRequestException('Não consegui abrir o certificado. Confirme que é um A1 (.pfx/.p12) válido e que a senha está correta.')
+    }
+
+    await this.credentials.saveCredential(orgId, userId, 'sefaz_a1', companyId, JSON.stringify({ pfxBase64: b64, password: input.password ?? '' }))
+    const expired = expiresAt ? new Date(expiresAt).getTime() < Date.now() : false
+    const { error } = await supabaseAdmin.from('fiscal_company_config').upsert(
+      { organization_id: orgId, company_id: companyId, certificate_status: expired ? 'expired' : 'uploaded', certificate_expires_at: expiresAt },
+      { onConflict: 'organization_id,company_id' },
+    )
+    if (error) throw new BadRequestException(`Erro ao salvar status do certificado: ${error.message}`)
+    return { ok: true, expiresAt, subject }
+  }
+
+  /** Info do certificado pra UI (sem expor o arquivo/senha). */
+  async getCertificateInfo(orgId: string, companyId: string): Promise<{ status: string; expiresAt: string | null; daysToExpire: number | null; hasFile: boolean }> {
+    const cfg = await this.getCompanyFiscal(orgId, companyId)
+    const expiresAt = cfg?.certificate_expires_at ?? null
+    const days = expiresAt ? Math.floor((new Date(expiresAt).getTime() - Date.now()) / 86400_000) : null
+    const hasFile = !!(await this.credentials.getDecryptedKey(orgId, 'sefaz_a1', companyId))
+    return { status: cfg?.certificate_status ?? 'pending', expiresAt, daysToExpire: days, hasFile }
+  }
+
+  /** Carrega o certificado descriptografado pra emissão (F2). Best-effort. */
+  async loadCertificate(orgId: string, companyId: string): Promise<{ pfxBase64: string; password: string } | null> {
+    const raw = await this.credentials.getDecryptedKey(orgId, 'sefaz_a1', companyId)
+    if (!raw) return null
+    try { return JSON.parse(raw) as { pfxBase64: string; password: string } } catch { return null }
   }
 
   /** O que falta pra empresa poder emitir (usado pela UI + trava futura). */

@@ -22,6 +22,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from 'dotenv'
 import { createClient } from '@supabase/supabase-js'
+import forge from 'node-forge'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 config({ path: path.resolve(here, '..', '.env') })
@@ -431,6 +432,30 @@ async function main() {
     assert((pf.json ?? []).some((p) => p.product_id === anyProd.id && p.ncm === '94051000'), 'Dados fiscais do produto salvos (NCM/CFOP)')
     await admin.from('product_fiscal').delete().eq('product_id', anyProd.id).eq('organization_id', ORG)
   }
+  // ── 29. Faturador F2a: cofre do certificado A1 (upload/parse/criptografa) ───
+  const keys = forge.pki.rsa.generateKeyPair(1024)
+  const tcert = forge.pki.createCertificate()
+  tcert.publicKey = keys.publicKey
+  tcert.serialNumber = '01'
+  tcert.validity.notBefore = new Date()
+  tcert.validity.notAfter = new Date(Date.now() + 365 * 86400_000)
+  const cattrs = [{ name: 'commonName', value: 'VAZZO SMOKE:11222333000144' }]
+  tcert.setSubject(cattrs); tcert.setIssuer(cattrs); tcert.sign(keys.privateKey)
+  const p12Der = forge.asn1.toDer(forge.pkcs12.toPkcs12Asn1(keys.privateKey, [tcert], 'smokepfx123', { algorithm: '3des' })).getBytes()
+  const pfxB64 = forge.util.encode64(p12Der)
+  // senha errada → 400
+  const certWrong = await call(token, 'POST', `/fulfillment/fiscal/companies/${fCompanyId}/certificate`, { pfxBase64: pfxB64, password: 'errada' })
+  assert(certWrong.status === 400, 'Certificado com senha errada é rejeitado (400)')
+  // senha certa → ok + lê validade
+  const certUp = await call(token, 'POST', `/fulfillment/fiscal/companies/${fCompanyId}/certificate`, { pfxBase64: pfxB64, password: 'smokepfx123' }, 201)
+  assert(certUp.json.ok && !!certUp.json.expiresAt, 'Certificado A1 aceito + validade lida do .pfx')
+  const certInfo = await call(token, 'GET', `/fulfillment/fiscal/companies/${fCompanyId}/certificate`)
+  assert(certInfo.json.status === 'uploaded' && certInfo.json.hasFile === true && certInfo.json.daysToExpire > 300, 'Info do certificado: enviado + guardado + ~365 dias')
+  const { data: certCred } = await admin.from('api_credentials').select('key_value').eq('organization_id', ORG).eq('provider', 'sefaz_a1').eq('key_name', fCompanyId).maybeSingle()
+  assert(!!certCred && certCred.key_value.includes(':') && !certCred.key_value.includes(pfxB64.slice(0, 40)), 'Certificado guardado CRIPTOGRAFADO (não em texto puro)')
+  await admin.from('api_credentials').delete().eq('organization_id', ORG).eq('provider', 'sefaz_a1').eq('key_name', fCompanyId)
+  ok('Faturador F2a validado (cofre do certificado A1) + limpo')
+
   await admin.from('fulfillment_companies').delete().eq('id', fCompanyId) // cascade: fiscal_company_config
   await admin.from('api_credentials').delete().eq('organization_id', ORG).eq('provider', 'nfeio').eq('key_name', fCompanyId)
   ok('Faturador F1 validado (config fiscal + token cofre + % por conta + produto) + limpo')
