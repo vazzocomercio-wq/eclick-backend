@@ -76,6 +76,7 @@ export const MODULES = {
   ENRICHMENT:  'enrichment',
   PRICING:     'pricing',
   SETTINGS:    'settings',
+  AI_VISIBILITY: 'ai_visibility',
 } as const
 
 export const TRACKED_TASKS = {
