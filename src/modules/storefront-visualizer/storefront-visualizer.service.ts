@@ -94,10 +94,11 @@ export class StorefrontVisualizerService {
   // ── Helpers de identidade ──────────────────────────────────────────────
 
   private secret(): string {
-    return process.env.STOREFRONT_VISUALIZER_SECRET
-      ?? process.env.STOREFRONT_JWT_SECRET
-      ?? process.env.SUPABASE_JWT_SECRET
-      ?? 'eclick-visualizer-dev-secret'
+    // Sem fallback hardcoded: o segredo público permitia forjar token de
+    // cliente + bypassar OTP. Falha alto se não configurado.
+    const s = process.env.STOREFRONT_VISUALIZER_SECRET ?? process.env.STOREFRONT_JWT_SECRET
+    if (!s) throw new HttpException('STOREFRONT_VISUALIZER_SECRET não configurado.', HttpStatus.SERVICE_UNAVAILABLE)
+    return s
   }
 
   /** Token leve (HMAC) que identifica o cliente validado nas chamadas

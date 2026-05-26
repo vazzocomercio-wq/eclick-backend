@@ -38,7 +38,10 @@ export interface Address {
   is_default:   boolean
 }
 
-const SECRET = process.env.STOREFRONT_JWT_SECRET ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? 'INSECURE-FALLBACK'
+// Sem fallback inseguro (literal público / reuso da service-role key): permitia
+// forjar sessão de qualquer cliente. Exige o segredo dedicado; falha no boot se faltar.
+const SECRET = process.env.STOREFRONT_JWT_SECRET
+if (!SECRET) throw new Error('STOREFRONT_JWT_SECRET não configurado — defina no ambiente (assina o token de cliente da loja).')
 const JWT_TTL_SECONDS = 60 * 60 * 24 * 30  // 30 dias
 
 const normalizeEmail = (raw: string): string => raw.trim().toLowerCase()
