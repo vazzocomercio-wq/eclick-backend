@@ -32,10 +32,11 @@ export class AnalyticsOverviewService {
   constructor(private readonly accounts: AnalyticsAccountsService) {}
 
   async getOverview(orgId: string) {
-    const [accounts, organic, geo] = await Promise.all([
+    const [accounts, organic, geo, geoRadar] = await Promise.all([
       this.accounts.listAccounts(orgId),
       this.organicSummary(orgId),
       this.geoSummary(orgId),
+      this.geoRadarSummary(orgId),
     ])
 
     const byNetwork: Record<string, number> = {}
@@ -45,8 +46,38 @@ export class AnalyticsOverviewService {
       accounts: { total: accounts.length, by_network: byNetwork, list: accounts },
       organic,
       geo,
+      geo_radar: geoRadar,
       paid: { connected: false, note: 'Nenhuma conta de anúncios conectada' },
       generated_at: new Date().toISOString(),
+    }
+  }
+
+  // ── GEO Radar: share-of-voice em IA (última medição) ──────────────────────
+  private async geoRadarSummary(orgId: string) {
+    const { data } = await supabaseAdmin
+      .from('analytics_geo_radar_runs')
+      .select('engine, date, mentioned')
+      .eq('organization_id', orgId)
+      .order('date', { ascending: false })
+      .limit(300)
+    const rows = (data ?? []) as { engine: string; date: string; mentioned: boolean }[]
+    const latest = rows[0]?.date ?? null
+    const latestRows = rows.filter((r) => r.date === latest)
+    const byEngine: Record<string, { runs: number; mentioned: number; mention_rate: number }> = {}
+    for (const r of latestRows) {
+      const b = (byEngine[r.engine] ??= { runs: 0, mentioned: 0, mention_rate: 0 })
+      b.runs++
+      if (r.mentioned) b.mentioned++
+    }
+    for (const e of Object.keys(byEngine)) byEngine[e].mention_rate = byEngine[e].runs ? byEngine[e].mentioned / byEngine[e].runs : 0
+    const totalRuns = latestRows.length
+    const totalMentioned = latestRows.filter((r) => r.mentioned).length
+    const engineCount = Math.max(Object.keys(byEngine).length, 1)
+    return {
+      latest_date: latest,
+      queries_measured: Math.round(totalRuns / engineCount),
+      share_of_voice: totalRuns ? totalMentioned / totalRuns : 0,
+      by_engine: byEngine,
     }
   }
 

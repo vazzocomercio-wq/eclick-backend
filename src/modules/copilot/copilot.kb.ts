@@ -2979,10 +2979,34 @@ const AI_VISIBILITY_ENTRIES: KbEntry[] = [
   },
 ]
 
+const ANALYTICS_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/analytics'],
+    category: 'analytics',
+    title:    'Analytics — painel unificado (orgânico + GEO + marketplace + pago)',
+    content: `**Analytics** junta a performance de **todas as suas redes e contas** num painel só — sem trocar de tela.
+
+**O que mostra:**
+- **Contas conectadas** (multi-rede, multi-conta): Mercado Livre (todos os sellers), Instagram, Facebook, WhatsApp.
+- **Orgânico (Instagram):** alcance, visualizações, engajamento e taxa média de TODO o feed (posts/reels — nativos e publicados pelo e-Click), + **top conteúdo** por alcance e os números da conta (seguidores, alcance, visitas ao perfil).
+- **Visibilidade em IA (GEO):** nota média dos seus anúncios + distribuição (crítico/fraco/bom/ótimo).
+- **GEO Radar (share-of-voice em IA):** quanto a sua marca **é citada** nas respostas do ChatGPT/Gemini/Claude para buscas de comprador — por motor.
+- **Pago:** placeholder até conectar uma conta de anúncios.
+
+**Como usar** (\`/dashboard/analytics\`):
+- O painel carrega sozinho. Botão **"Atualizar dados"** dispara a coleta orgânica na hora e recarrega.
+- A coleta orgânica roda **sozinha a cada 6h**; o **GEO Radar roda semanalmente** (cada rodada do radar consome créditos de IA, por isso é semanal).
+
+**Origem dos dados:** o orgânico é coletado direto pelo SaaS com o token do Instagram (precisa do escopo de insights — reconecte em Social Shop se o alcance vier zerado). GEO e marketplace já vivem no SaaS.`,
+    tags: ['analytics', 'painel', 'dashboard', 'organico', 'instagram', 'alcance', 'engajamento', 'seguidores', 'geo', 'radar', 'share of voice', 'visibilidade', 'ia', 'marketplace', 'unificado', 'multi-conta', 'multi-rede'],
+  },
+]
+
 export const KB: KbEntry[] = [
   ...FULFILLMENT_ENTRIES,
   ...TELEMETRY_ENTRIES,
   ...AI_VISIBILITY_ENTRIES,
+  ...ANALYTICS_ENTRIES,
   ...GENERAL_ENTRIES,
   ...CADASTRO_OPS_ENTRIES,
   ...CATALOG_ENTRIES,
