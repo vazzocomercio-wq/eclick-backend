@@ -154,11 +154,17 @@ export class ListingScraperService {
   }
 
   private extractMlId(url: string): string | null {
-    // Anúncio (MLB-N), ignorando catálogo (MLBU/MLBA/MLBB).
+    // 1) PRIORIDADE: item_id no query — páginas de catálogo (/p/MLB...) trazem o
+    //    anúncio real aqui (ex: .../p/MLB61260378?...item_id:MLB5857078832...).
+    //    Sem isso, a gente pegaria o id de CATÁLOGO, que não existe em /items/ → 404.
+    const itemId = url.match(/item_id[:=]MLB-?(\d{6,})/i)
+    if (itemId) return `MLB${itemId[1]}`
+    // 2) Anúncio no path (produto.mercadolivre.com.br/MLB-N), ignorando catálogo:
+    //    /p/MLB... (PDP de catálogo) e MLBU/MLBA/MLBB. Catálogo sem item_id não é
+    //    um anúncio auditável → null (UI orienta a colar o link do anúncio).
+    const isCatalog = /\/p\/MLB-?\d{6,}/i.test(url)
     const m = url.match(/MLB-?(\d{6,})(?![\w])/i)
-    if (m && !/MLB[UAB]/i.test(m[0])) return `MLB${m[1]}`
-    const pdp = url.match(/item_id[:=]MLB-?(\d{6,})/i)
-    if (pdp) return `MLB${pdp[1]}`
+    if (m && !/MLB[UAB]/i.test(m[0]) && !isCatalog) return `MLB${m[1]}`
     return null
   }
 
