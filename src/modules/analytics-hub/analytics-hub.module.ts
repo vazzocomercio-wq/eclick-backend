@@ -4,6 +4,8 @@ import { AnalyticsAccountsService } from './accounts/analytics-accounts.service'
 import { OrganicCollectorController } from './organic/organic-collector.controller'
 import { OrganicCollectorService } from './organic/organic-collector.service'
 import { OrganicCollectorWorker } from './organic/organic-collector.worker'
+import { AnalyticsOverviewController } from './overview/analytics-overview.controller'
+import { AnalyticsOverviewService } from './overview/analytics-overview.service'
 
 /**
  * Analytics Hub — visão unificada de performance da org cruzando TODAS as
@@ -17,8 +19,8 @@ import { OrganicCollectorWorker } from './organic/organic-collector.worker'
  * - aggregator/— agregação cross-source (F4)
  */
 @Module({
-  controllers: [AnalyticsAccountsController, OrganicCollectorController],
-  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker],
+  controllers: [AnalyticsAccountsController, OrganicCollectorController, AnalyticsOverviewController],
+  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker, AnalyticsOverviewService],
   exports:     [AnalyticsAccountsService, OrganicCollectorService],
 })
 export class AnalyticsHubModule {}
