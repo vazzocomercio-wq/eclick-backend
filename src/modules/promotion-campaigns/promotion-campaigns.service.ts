@@ -156,8 +156,20 @@ export class PromotionCampaignsService {
     await this.assertOwned(orgId, campaignId)
     if (productIds.length === 0) return { added: 0 }
 
+    // Só aceita productIds que pertencem à org (apply/get já são org-scoped,
+    // então um id de fora não causa dano — mas evita linha órfã no join e
+    // segue a regra preventiva multi-tenant: validar org em toda escrita).
+    const { data: owned } = await supabaseAdmin
+      .from('products')
+      .select('id')
+      .eq('organization_id', orgId)
+      .in('id', productIds)
+    const ownedIds = new Set(((owned ?? []) as Array<{ id: string }>).map(r => r.id))
+    const validIds = productIds.filter(pid => ownedIds.has(pid))
+    if (validIds.length === 0) return { added: 0 }
+
     // INSERT com ON CONFLICT DO NOTHING (UNIQUE no schema previne duplicados)
-    const rows = productIds.map(pid => ({ campaign_id: campaignId, product_id: pid }))
+    const rows = validIds.map(pid => ({ campaign_id: campaignId, product_id: pid }))
     const { error, count } = await supabaseAdmin
       .from('promotion_campaign_products')
       .upsert(rows, { onConflict: 'campaign_id,product_id', ignoreDuplicates: true, count: 'exact' })

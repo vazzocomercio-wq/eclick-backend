@@ -164,6 +164,10 @@ export class BonusService {
   // ── Helpers privados ───────────────────────────────────────────────
 
   private applyRule(rule: BonusRule, lines: CartLineForEval[], subtotalCents: number): AppliedBonus | null {
+    // Guarda defensiva p/ regras já salvas com gift_qty inválido (0/negativo/
+    // ausente): sem isso o BOGO calcularia `times * gift_qty` ≤ 0 (inócuo) ou
+    // negativo (linha grátis negativa no checkout). Toda regra dá ≥ 1 brinde.
+    if (!Number.isFinite(rule.gift_qty) || (rule.gift_qty ?? 0) < 1) return null
     switch (rule.type) {
       case 'bogo': {
         if (!rule.trigger_product_id) return null
@@ -209,6 +213,10 @@ export class BonusService {
   }
 
   private validateRule(dto: Partial<BonusRule>): void {
+    // Todo tipo entrega brinde — se gift_qty vier no payload, tem que ser ≥ 1
+    // (a checagem faltava e deixava passar 0/negativo, que viraria linha grátis
+    // inválida). Omitido = ok (create usa default 1; update mantém o atual).
+    if (dto.gift_qty != null && dto.gift_qty < 1) throw new BadRequestException('gift_qty >= 1')
     switch (dto.type) {
       case 'bogo':
         if (!dto.trigger_product_id) throw new BadRequestException('BOGO precisa trigger_product_id')
