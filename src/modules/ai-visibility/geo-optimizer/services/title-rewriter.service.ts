@@ -7,9 +7,14 @@ function maxTitleChars(platform: string): number {
   return platform === 'mercadolivre' ? 60 : 100 // ML 60; Shopee/Amazon/site 100
 }
 
+// Levers comprovados (ver [[geo-papers]]): alinhamento à intenção de busca, 1 diferencial
+// concreto/quantitativo, linguagem natural. Keyword stuffing NÃO funciona em IA.
 const SYSTEM_PROMPT =
   'Você é especialista em GEO (Generative Engine Optimization) e copy de marketplace. ' +
   'Reescreve títulos pra serem encontrados e citados por IAs generativas (ChatGPT, Perplexity, Gemini). ' +
+  'Cada título deve: começar pelo termo mais relevante à busca do comprador, incluir 1 diferencial ' +
+  'concreto (spec/medida/material) quando couber, soar natural (como a pessoa pede pra uma IA), e ' +
+  'NUNCA empilhar palavras-chave repetidas (keyword stuffing não funciona em IA). Mantenha factual. ' +
   'Gera 3 variações com ângulos distintos. Responda somente JSON.'
 
 @Injectable()
