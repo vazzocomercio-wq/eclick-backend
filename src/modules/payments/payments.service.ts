@@ -561,23 +561,32 @@ export class PaymentsService {
     if (!orderId) { this.logger.warn(`[mp.webhook] payment ${paymentId} sem external_reference`); return }
 
     const status = mapMpStatus(payment.status)
-    await supabaseAdmin
-      .from('storefront_orders')
-      .update({
-        status,
-        gateway_payment_id: paymentId,
-        raw_callback:       payment.raw,
-      })
-      .eq('id', orderId)
-
-    this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> ${status}`)
-
+    const upd = { gateway_payment_id: paymentId, raw_callback: payment.raw }
     if (status === 'paid') {
-      await this.creditCashbackOnPaid(orderId)
-      await this.renewVisualizerCreditsOnPaid(orderId)
-      await this.bumpKitStatsOnPaid(orderId)
-      void this.fulfillment.autoIngestStorefrontOrder(orderId)
+      // Gate de transição: hooks de pago rodam SÓ na 1ª vez. MP reentrega o
+      // webhook N vezes — sem isso, fidelidade/stats de kit dobravam.
+      const { data: transitioned } = await supabaseAdmin
+        .from('storefront_orders')
+        .update({ status, ...upd })
+        .eq('id', orderId)
+        .neq('status', 'paid')
+        .select('id')
+      const first = (transitioned?.length ?? 0) > 0
+      this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> paid (1a transicao=${first})`)
+      if (first) await this.runPaidHooks(orderId)
+    } else {
+      await supabaseAdmin.from('storefront_orders').update({ status, ...upd }).eq('id', orderId)
+      this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> ${status}`)
     }
+  }
+
+  /** Hooks que rodam UMA vez quando o pedido vira 'paid'. Chamado só na
+   *  transição (gate via UPDATE condicional) pra ser idempotente em reentrega. */
+  private async runPaidHooks(orderId: string): Promise<void> {
+    await this.creditCashbackOnPaid(orderId)
+    await this.renewVisualizerCreditsOnPaid(orderId)
+    await this.bumpKitStatsOnPaid(orderId)
+    void this.fulfillment.autoIngestStorefrontOrder(orderId)
   }
 
   /** Stripe webhook — payload no body (raw), signature em header. */
@@ -624,23 +633,27 @@ export class PaymentsService {
       return
     }
 
-    await supabaseAdmin
-      .from('storefront_orders')
-      .update({
-        status,
-        gateway_payment_id: paymentId ?? undefined,
-        raw_callback:       event,
-      })
-      .eq('id', orderId)
-      .eq('organization_id', orgId)
-
-    this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> ${status}`)
-
+    const upd = { gateway_payment_id: paymentId ?? undefined, raw_callback: event }
     if (status === 'paid') {
-      await this.creditCashbackOnPaid(orderId)
-      await this.renewVisualizerCreditsOnPaid(orderId)
-      await this.bumpKitStatsOnPaid(orderId)
-      void this.fulfillment.autoIngestStorefrontOrder(orderId)
+      // Gate de transição: hooks de pago rodam SÓ na 1ª vez (idempotente em
+      // reentrega de webhook — sem isso fidelidade/stats dobravam).
+      const { data: transitioned } = await supabaseAdmin
+        .from('storefront_orders')
+        .update({ status, ...upd })
+        .eq('id', orderId)
+        .eq('organization_id', orgId)
+        .neq('status', 'paid')
+        .select('id')
+      const first = (transitioned?.length ?? 0) > 0
+      this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> paid (1a transicao=${first})`)
+      if (first) await this.runPaidHooks(orderId)
+    } else {
+      await supabaseAdmin
+        .from('storefront_orders')
+        .update({ status, ...upd })
+        .eq('id', orderId)
+        .eq('organization_id', orgId)
+      this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> ${status}`)
     }
   }
 
