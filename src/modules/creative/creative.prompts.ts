@@ -108,6 +108,20 @@ export const HARD_RULES_FORBIDDEN = [
   'prometer prazos, garantias ou condições não informadas',
 ] as const
 
+/**
+ * Levers de GEO (Generative Engine Optimization) comprovados pela literatura
+ * (ver memória [[geo-papers]]: Aggarwal KDD'24 + E-GEO 2025). Mesmos princípios
+ * do geo-optimizer (description-builder/title-rewriter): o que faz ChatGPT/
+ * Perplexity/Gemini CITAREM e recomendarem o produto. NÃO altera o formato JSON
+ * nem o caminho de atributos/publicação do ML.
+ */
+export const GEO_DIRECTIVES = `## COMO ESCREVER PRA SER CITADO POR IA (GEO — baseado em evidência)
+Motores de IA (ChatGPT, Perplexity, Gemini) recomendam produtos pelo conteúdo. Aplique:
+- DESCRIÇÃO data-dense, nesta lógica: (1) resumo em 2 linhas com o benefício e a INTENÇÃO de uso; (2) especificações com NÚMEROS/medidas concretas (dado quantitativo pesa mais que adjetivo); (3) para quem serve e para quem NÃO serve; (4) diferenciais vs alternativas da categoria (factual, sem citar concorrente por nome); (5) evidência (avaliações/certificações) SOMENTE se informada. Fluente e escaneável.
+- TÍTULO: comece pelo termo que o comprador buscaria + 1 diferencial concreto; soe natural (como a pessoa pede a uma IA). Respeite o limite de caracteres do marketplace.
+- FAQ: perguntas REAIS de compra/uso/compatibilidade, respondidas só com os fatos disponíveis (se faltar um dado, oriente honestamente — nunca invente).
+- NÃO repita a mesma palavra-chave pra "encher" (keyword stuffing NÃO funciona em IA) — use vocabulário variado e sinônimos naturais.`
+
 export function buildListingPrompt(input: ListingPromptInput): string {
   const rules = getMarketplaceRules(input.briefing.target_marketplace)
   const p = input.product
@@ -155,6 +169,7 @@ ${r ? `
 - Keywords marcadas "use_if_true": só use SE o produto tem essa característica de verdade (ex: "LED" só se for LED)
 - Keywords marcadas "avoid": ignore — são ruído da cauda
 ` : ''}
+${GEO_DIRECTIVES}
 ${input.refinement ? `\n## AJUSTE SOLICITADO\n${input.refinement}` : ''}
 
 Retorne APENAS um JSON válido (sem markdown, sem texto fora do JSON):

@@ -11,6 +11,7 @@ import { DescriptionBuilderService } from './services/description-builder.servic
 import { MlPublisherService } from './services/ml-publisher.service'
 import { ImpactTrackerService } from './services/impact-tracker.service'
 import { RankSimulatorService } from './services/rank-simulator.service'
+import { DraftGeoService } from './services/draft-geo.service'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -29,6 +30,7 @@ export class GeoOptimizerController {
     private readonly publisher:    MlPublisherService,
     private readonly impact:       ImpactTrackerService,
     private readonly simulator:    RankSimulatorService,
+    private readonly draftGeo:     DraftGeoService,
     private readonly telemetry:    GeoTelemetryService,
   ) {}
 
@@ -119,6 +121,22 @@ export class GeoOptimizerController {
     const url = (body?.url ?? '').trim()
     if (!/^https?:\/\//i.test(url)) throw new BadRequestException('Informe uma URL válida (http/https).')
     return this.simulator.simulate(user.orgId, url, user.id)
+  }
+
+  /**
+   * Ponte com o Criador de anúncios (Creative): pontua/ranqueia o RASCUNHO
+   * (creative_listings) antes de publicar. NÃO toca em atributos/publicação ML.
+   */
+  @Post('optimize/score-draft')
+  async scoreDraft(@ReqUser() user: ReqUserPayload, @Body() body: { listingId?: string }) {
+    if (!body?.listingId) throw new BadRequestException('Informe o listingId do rascunho.')
+    return this.draftGeo.score(user.orgId, body.listingId)
+  }
+
+  @Post('optimize/simulate-draft')
+  async simulateDraft(@ReqUser() user: ReqUserPayload, @Body() body: { listingId?: string }) {
+    if (!body?.listingId) throw new BadRequestException('Informe o listingId do rascunho.')
+    return this.draftGeo.simulate(user.orgId, body.listingId, user.id)
   }
 
   /** GET /ai-visibility/optimize/:optimizerId — rascunho + status. */

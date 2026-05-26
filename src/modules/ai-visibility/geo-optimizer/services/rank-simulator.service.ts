@@ -37,6 +37,17 @@ export interface RankSimReport {
   note:             string | null
 }
 
+/** Relatório simplificado pro RASCUNHO (criador de anúncios): posição atual. */
+export interface DraftSimReport {
+  title:            string
+  category:         string | null
+  candidate_count:  number
+  candidate_source: CandidateSource | null
+  avg_rank:         number | null
+  queries:          Array<{ query: string; rank: number | null }>
+  note:             string | null
+}
+
 interface ProductRow {
   id: string; name: string | null; category: string | null
   description: string | null; ai_short_description: string | null; ai_long_description: string | null
@@ -126,6 +137,44 @@ export class RankSimulatorService {
     }).catch(() => {})
     this.logger.log(`[rank-sim] org=${orgId} prod=${target.id} fonte=${source} antes=${avgB} depois=${avgA} delta=${delta} (n=${candidates.length + 1})`)
     return report
+  }
+
+  /**
+   * Variante pro RASCUNHO do criador de anúncios (creative_listings, ainda não
+   * publicado): ranqueia o conteúdo atual do rascunho vs concorrentes (posição
+   * atual, sem antes/depois). Resolve a categoria pelo product_id.
+   */
+  async simulateDraft(orgId: string, input: { productId: string | null; title: string; description: string }, userId?: string): Promise<DraftSimReport> {
+    const empty = (note: string): DraftSimReport => ({ title: input.title, category: null, candidate_count: 0, candidate_source: null, avg_rank: null, queries: [], note })
+    if (!input.productId) return empty('no_product')
+    const { data: prod } = await supabaseAdmin
+      .from('products')
+      .select('id, name, category, description, ai_short_description, ai_long_description, price, review_count, review_avg, attributes')
+      .eq('organization_id', orgId).eq('id', input.productId).maybeSingle()
+    const pr = prod as ProductRow | null
+    if (!pr?.category) return empty('no_category')
+
+    const targetProxy: ProductRow = { ...pr, name: input.title || pr.name }
+    const { candidates, source } = await this.loadCandidates(orgId, targetProxy)
+    if (candidates.length < 1) return empty('insufficient_candidates')
+    const queries = await this.genQueries(orgId, targetProxy)
+    if (queries.length === 0) return empty('query_gen_failed')
+
+    const desc = (input.description || shortDesc(pr, 600) || input.title).slice(0, 600)
+    const results: Array<{ query: string; rank: number | null }> = []
+    for (const q of queries) {
+      const rank = await this.rankTarget(orgId, q, input.title || pr.name || '', desc, candidates)
+      results.push({ query: q, rank })
+    }
+    const ranks = results.map(r => r.rank).filter((n): n is number => n != null)
+    const avg = ranks.length ? +(ranks.reduce((s, n) => s + n, 0) / ranks.length).toFixed(2) : null
+    await this.telemetry.emit({
+      orgId, userId: userId ?? '', jobId: 'rank_sim_draft', feature: 'geo_optimizer',
+      eventName: 'geo_optimizer.rank_simulated',
+      properties: { draft: true, product_id: input.productId, source, candidates: candidates.length + 1, avg_rank: avg },
+    }).catch(() => {})
+    this.logger.log(`[rank-sim] DRAFT org=${orgId} prod=${input.productId} fonte=${source} pos=${avg} (n=${candidates.length + 1})`)
+    return { title: input.title || pr.name || '', category: pr.category, candidate_count: candidates.length + 1, candidate_source: source, avg_rank: avg, queries: results, note: null }
   }
 
   // ── resolução de alvo ──────────────────────────────────────────────────────
