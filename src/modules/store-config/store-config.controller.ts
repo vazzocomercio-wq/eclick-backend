@@ -171,18 +171,33 @@ export class StorePublicController {
   @Public()
   async products(
     @Param('slug') slug: string,
-    @Query('limit')    limitRaw?:  string,
-    @Query('offset')   offsetRaw?: string,
-    @Query('category') category?:  string,
+    @Query('limit')      limitRaw?:    string,
+    @Query('offset')     offsetRaw?:   string,
+    @Query('category')   category?:    string,
+    @Query('categoryMlId') categoryMlIdRaw?: string,  // 1 folha ou várias (csv) — filtro por categoria ML
   ) {
     const config = await this.svc.getPublicBySlugOrDomain({ slug })
     if (!config) return { config: null, products: [] }
+    const categoryMlIds = categoryMlIdRaw
+      ? categoryMlIdRaw.split(',').map(s => s.trim()).filter(Boolean)
+      : undefined
     const products = await this.svc.listPublicProducts(config.organization_id, {
       limit:  limitRaw  ? parseInt(limitRaw, 10)  : undefined,
       offset: offsetRaw ? parseInt(offsetRaw, 10) : undefined,
       category,
+      categoryMlIds,
     })
     return { config, products }
+  }
+
+  /** Cat-2 — categorias da vitrine (só as que têm produto; vazia = oculta).
+   *  Resolve nome/caminho contra o espelho ml_categories. SÓ LEITURA. */
+  @Get(':slug/categories')
+  @Public()
+  async categories(@Param('slug') slug: string) {
+    const config = await this.svc.getPublicBySlugOrDomain({ slug })
+    if (!config) return { groups: [] }
+    return this.svc.listPublicCategories(config.organization_id)
   }
 
   @Get(':slug/product/:productId')

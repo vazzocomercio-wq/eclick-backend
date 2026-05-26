@@ -315,7 +315,7 @@ export class StoreConfigService {
    *  Retorna dados ricos pro frontend renderizar cards completos sem fazer
    *  fetch detalhado por item (marca, atributos basicos, descricao curta,
    *  estoque pra badge "esgotando", created_at pra badge "novidade", etc). */
-  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string } = {}): Promise<Array<Record<string, unknown>>> {
+  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string; categoryMlIds?: string[] } = {}): Promise<Array<Record<string, unknown>>> {
     const limit  = Math.min(opts.limit  ?? 24, 60)
     const offset = Math.max(opts.offset ?? 0, 0)
     let q = supabaseAdmin
@@ -326,7 +326,7 @@ export class StoreConfigService {
         // Promoções por produto (migration 20260604)
         'sale_price', 'sale_start_at', 'sale_end_at', 'sale_badge_text',
         'photo_urls', 'images',
-        'category', 'brand', 'condition',
+        'category', 'category_ml_id', 'brand', 'condition',
         'stock', 'weight_kg',
         'gtin',
         'ai_score', 'ai_short_description', 'ai_long_description', 'ai_keywords',
@@ -344,6 +344,8 @@ export class StoreConfigService {
       .order('ai_score', { ascending: false })
       .range(offset, offset + limit - 1)
     if (opts.category) q = q.eq('category', opts.category)
+    // Filtro por categoria do ML (uma folha ou várias — clique numa categoria/grupo da vitrine)
+    if (opts.categoryMlIds && opts.categoryMlIds.length > 0) q = q.in('category_ml_id', opts.categoryMlIds)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
@@ -351,6 +353,70 @@ export class StoreConfigService {
     // pra vitrine renderizar sem repetir lógica.
     const now = Date.now()
     return rows.map(r => enrichWithPromotionFields(r, now))
+  }
+
+  /** Cat-2 — categorias da vitrine. Agrupa as categorias do ML que TÊM produto
+   *  visível em estoque (vazia = oculta), resolvendo nome + caminho no espelho
+   *  `ml_categories`. SÓ LEITURA — não toca em products nem em category_ml_id.
+   *  Retorna grupos (top-level do ML) com suas folhas (onde o produto está) + contagem. */
+  async listPublicCategories(orgId: string): Promise<{
+    groups: Array<{ id: string; name: string; count: number; children: Array<{ id: string; name: string; count: number }> }>
+  }> {
+    // 1. category_ml_id (+ free text de fallback) dos produtos visíveis em estoque
+    const { data: prods } = await supabaseAdmin
+      .from('products')
+      .select('category_ml_id, category')
+      .eq('organization_id', orgId)
+      .eq('storefront_visible', true)
+      .gt('stock', 0)
+      .limit(10000)
+    const rows = (prods ?? []) as Array<{ category_ml_id: string | null; category: string | null }>
+
+    const counts = new Map<string, { count: number; fallback: string | null }>()
+    for (const r of rows) {
+      const id = (r.category_ml_id ?? '').trim()
+      if (!id) continue
+      const cur = counts.get(id) ?? { count: 0, fallback: r.category ?? null }
+      cur.count++
+      counts.set(id, cur)
+    }
+    if (counts.size === 0) return { groups: [] }
+
+    // 2. resolve nome + path_from_root no espelho do ML
+    const ids = [...counts.keys()]
+    const { data: cats } = await supabaseAdmin
+      .from('ml_categories')
+      .select('id, name, path_from_root')
+      .in('id', ids)
+    const catMap = new Map<string, { name: string; path: Array<{ id: string; name: string }> }>()
+    for (const c of (cats ?? []) as Array<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> | null }>) {
+      catMap.set(c.id, { name: c.name, path: Array.isArray(c.path_from_root) ? c.path_from_root : [] })
+    }
+
+    // 3. monta grupos pelo top-level do ML (path_from_root[0]); folha = onde o produto está
+    type Grp = { id: string; name: string; count: number; children: Map<string, { id: string; name: string; count: number }> }
+    const groups = new Map<string, Grp>()
+    for (const [mlId, info] of counts) {
+      const resolved = catMap.get(mlId)
+      const path = resolved?.path ?? []
+      const leafName = resolved?.name ?? info.fallback ?? mlId
+      const top = path[0] ?? { id: mlId, name: leafName }  // sem path no espelho = trata a própria como topo
+      let g = groups.get(top.id)
+      if (!g) { g = { id: top.id, name: top.name, count: 0, children: new Map() }; groups.set(top.id, g) }
+      g.count += info.count
+      if (top.id !== mlId) {
+        const ch = g.children.get(mlId) ?? { id: mlId, name: leafName, count: 0 }
+        ch.count += info.count
+        g.children.set(mlId, ch)
+      }
+    }
+
+    const sortByCountName = <T extends { count: number; name: string }>(a: T, b: T) =>
+      b.count - a.count || a.name.localeCompare(b.name, 'pt-BR')
+    const out = [...groups.values()]
+      .map(g => ({ id: g.id, name: g.name, count: g.count, children: [...g.children.values()].sort(sortByCountName) }))
+      .sort(sortByCountName)
+    return { groups: out }
   }
 
   /** Detalhe de produto público. */
