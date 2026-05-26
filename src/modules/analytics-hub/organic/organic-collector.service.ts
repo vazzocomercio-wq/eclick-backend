@@ -29,6 +29,7 @@ export interface CollectSummary {
   posts: number
   with_insights: number
   without_insights: number
+  account_metrics: number
   errors: string[]
 }
 
@@ -59,7 +60,7 @@ export class OrganicCollectorService {
 
   /** Coleta o feed de todas as contas IG conectadas da org. */
   async collectForOrg(orgId: string): Promise<CollectSummary> {
-    const summary: CollectSummary = { accounts: 0, posts: 0, with_insights: 0, without_insights: 0, errors: [] }
+    const summary: CollectSummary = { accounts: 0, posts: 0, with_insights: 0, without_insights: 0, account_metrics: 0, errors: [] }
 
     const { data, error } = await supabaseAdmin
       .from('social_commerce_channels')
@@ -84,6 +85,13 @@ export class OrganicCollectorService {
         await this.collectAccount(orgId, igUserId, token, summary)
       } catch (err) {
         summary.errors.push(`conta ${igUserId}: ${String(err)}`)
+      }
+      // insights de CONTA (totais + alcance/visitas + demografia)
+      try {
+        const ok = await this.collectAccountMetrics(orgId, igUserId, token)
+        if (ok) summary.account_metrics++
+      } catch (err) {
+        summary.errors.push(`conta-metrics ${igUserId}: ${String(err)}`)
       }
     }
     return summary
@@ -216,10 +224,10 @@ export class OrganicCollectorService {
       video_views: 0, total_interactions: 0, available: false, raw: {},
     }
 
+    // 'views' é válido pra FEED e REELS (substitui o impressions descontinuado).
     const isReel = productType === 'REELS'
-    const metrics = isReel
-      ? ['reach', 'saved', 'shares', 'total_interactions', 'views']
-      : ['reach', 'saved', 'shares', 'total_interactions']
+    void isReel
+    const metrics = ['reach', 'saved', 'shares', 'total_interactions', 'views']
 
     const url =
       `${GRAPH_BASE}/${mediaId}/insights?metric=${metrics.join(',')}&access_token=${encodeURIComponent(token)}`
@@ -251,6 +259,116 @@ export class OrganicCollectorService {
     } catch {
       return empty
     }
+  }
+
+  /**
+   * Coleta insights de CONTA (não de post): totais (seguidores/seguindo/posts)
+   * + alcance/visitas/engajamento do dia + demografia da audiência. Grava 1
+   * linha por (conta, dia). Retorna true se gravou.
+   */
+  private async collectAccountMetrics(orgId: string, igUserId: string, token: string): Promise<boolean> {
+    const today = new Date().toISOString().slice(0, 10)
+
+    // Totais do nó da conta (disponível com instagram_basic)
+    const totals = { followers_count: 0, follows_count: 0, media_count: 0 }
+    try {
+      const r = await fetch(
+        `${GRAPH_BASE}/${igUserId}?fields=followers_count,follows_count,media_count&access_token=${encodeURIComponent(token)}`,
+      )
+      if (r.ok) {
+        const j = (await r.json()) as Record<string, number>
+        totals.followers_count = j.followers_count ?? 0
+        totals.follows_count = j.follows_count ?? 0
+        totals.media_count = j.media_count ?? 0
+      }
+    } catch { /* ignora — totais ficam 0 */ }
+
+    const acct = await this.fetchAccountInsights(igUserId, token)
+    const demographics = await this.fetchDemographics(igUserId, token)
+
+    const { error } = await supabaseAdmin
+      .from('analytics_account_metrics_daily')
+      .upsert(
+        {
+          organization_id: orgId,
+          network: 'instagram',
+          account_external_id: igUserId,
+          date: today,
+          followers_count: totals.followers_count,
+          follows_count: totals.follows_count,
+          media_count: totals.media_count,
+          reach: acct.reach,
+          profile_views: acct.profile_views,
+          website_clicks: acct.website_clicks,
+          accounts_engaged: acct.accounts_engaged,
+          demographics,
+          raw_metrics: acct.raw,
+          insights_available: acct.available,
+          fetched_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'organization_id,account_external_id,date' },
+      )
+    if (error) {
+      this.logger.warn(`[organic] account-metrics ${igUserId}: ${error.message}`)
+      return false
+    }
+    return true
+  }
+
+  /** Insights de conta do dia. metric_type=total_value → lê total_value.value
+   *  (formato diferente do insights de mídia, que vem em values[0].value). */
+  private async fetchAccountInsights(igUserId: string, token: string): Promise<{
+    reach: number; profile_views: number; website_clicks: number
+    accounts_engaged: number; available: boolean; raw: Record<string, unknown>
+  }> {
+    const empty = {
+      reach: 0, profile_views: 0, website_clicks: 0, accounts_engaged: 0,
+      available: false, raw: {} as Record<string, unknown>,
+    }
+    const metrics = ['reach', 'profile_views', 'website_clicks', 'accounts_engaged']
+    const url =
+      `${GRAPH_BASE}/${igUserId}/insights?metric=${metrics.join(',')}&period=day&metric_type=total_value&access_token=${encodeURIComponent(token)}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) return empty
+      const body = (await res.json()) as { data?: { name: string; total_value?: { value?: number } }[] }
+      const rows = body.data ?? []
+      const get = (name: string): number => {
+        const r = rows.find((x) => x.name === name)
+        const v = r?.total_value?.value
+        return typeof v === 'number' ? v : 0
+      }
+      return {
+        reach: get('reach'),
+        profile_views: get('profile_views'),
+        website_clicks: get('website_clicks'),
+        accounts_engaged: get('accounts_engaged'),
+        available: rows.length > 0,
+        raw: { data: rows, fetched_at: new Date().toISOString() },
+      }
+    } catch {
+      return empty
+    }
+  }
+
+  /** Demografia da audiência (follower_demographics) por breakdown. Best-effort:
+   *  Meta exige ≥100 seguidores; abaixo disso volta vazio. Guarda o total_value
+   *  cru por breakdown pra UI formatar depois. */
+  private async fetchDemographics(igUserId: string, token: string): Promise<Record<string, unknown>> {
+    const out: Record<string, unknown> = {}
+    for (const breakdown of ['age', 'gender', 'country']) {
+      try {
+        const url =
+          `${GRAPH_BASE}/${igUserId}/insights?metric=follower_demographics&period=lifetime&metric_type=total_value&breakdown=${breakdown}&access_token=${encodeURIComponent(token)}`
+        const res = await fetch(url)
+        if (!res.ok) continue
+        const body = (await res.json()) as { data?: { total_value?: unknown }[] }
+        const tv = body.data?.[0]?.total_value
+        if (tv) out[breakdown] = tv
+      } catch { /* ignora esse breakdown */ }
+    }
+    return out
   }
 
   /** Enumera todas as orgs com canal IG conectado (pro worker cross-org). */

@@ -49,4 +49,30 @@ export class OrganicCollectorController {
     if (error) return { posts: [], total: 0 }
     return { posts: data ?? [], total: count ?? 0 }
   }
+
+  /** GET /analytics/organic/account-metrics — série diária de insights de conta
+   *  (seguidores/alcance/visitas/engajamento + demografia). */
+  @Get('account-metrics')
+  async accountMetrics(
+    @ReqUser() user: ReqUserPayload,
+    @Query('account') account?: string,
+    @Query('days') days?: string,
+  ): Promise<{ metrics: unknown[] }> {
+    const lookback = Math.min(Math.max(parseInt(days ?? '90', 10) || 90, 1), 365)
+    const since = new Date(Date.now() - lookback * 86400000).toISOString().slice(0, 10)
+
+    let q = supabaseAdmin
+      .from('analytics_account_metrics_daily')
+      .select(
+        'network, account_external_id, date, followers_count, follows_count, media_count, reach, profile_views, website_clicks, accounts_engaged, demographics, insights_available, fetched_at',
+      )
+      .eq('organization_id', user.orgId)
+      .gte('date', since)
+      .order('date', { ascending: false })
+    if (account) q = q.eq('account_external_id', account)
+
+    const { data, error } = await q
+    if (error) return { metrics: [] }
+    return { metrics: data ?? [] }
+  }
 }
