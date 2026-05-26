@@ -39,6 +39,7 @@ export class PaymentsController {
     cashbackToUse?:  number   // centavos — opt-in
     customerId?:     string   // FK opcional (cliente logado)
     affiliateCode?:  string   // code do afiliado vindo do cookie ?ref=
+    couponCode?:     string   // cupom aplicado no checkout (validado server-side)
   }) {
     if (!body?.slug)     throw new BadRequestException('slug obrigatório')
     if (!body?.items)    throw new BadRequestException('items obrigatório')
@@ -54,6 +55,7 @@ export class PaymentsController {
                         : undefined,
       customerId:     body.customerId,
       affiliateCode:  body.affiliateCode,
+      couponCode:     body.couponCode?.trim() || undefined,
     })
   }
 
