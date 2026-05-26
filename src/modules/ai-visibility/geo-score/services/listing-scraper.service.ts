@@ -218,44 +218,106 @@ export class ListingScraperService {
       || $('h1').first().text().trim()
       || $('title').text().trim()
       || null
-    let description = $('meta[property="og:description"]').attr('content')
+    const metaDesc = $('meta[property="og:description"]').attr('content')
       || $('meta[name="description"]').attr('content')
       || null
     const attributes: Array<{ name: string; value: string }> = []
     let price: number | null = null
+    let category: string | null = null
+    let reviews_count: number | null = null
+    let rating: number | null = null
+    let jsonLdDesc: string | null = null
+    let faqText = ''
     const images: string[] = []
 
-    // JSON-LD (schema.org Product) — fonte mais rica quando existe.
+    // JSON-LD: lê TODOS os blocos (inclui @graph) — Product/Offer/AggregateRating/
+    // FAQPage/BreadcrumbList. É o que torna o GEO Score capaz de "ver" páginas
+    // de site próprio tão bem quanto um anúncio de marketplace.
+    const nodes: Array<Record<string, unknown>> = []
     $('script[type="application/ld+json"]').each((_i, el) => {
       try {
         const json = JSON.parse($(el).html() ?? '')
-        const node = Array.isArray(json) ? json.find(j => /product/i.test(j?.['@type'] ?? '')) : json
-        if (!node) return
-        if (!title && node.name) title = String(node.name)
-        if (!description && node.description) description = String(node.description)
-        if (node.offers?.price) price = parseFloat(node.offers.price)
-        if (node.brand) attributes.push({ name: 'Marca', value: String(node.brand?.name ?? node.brand) })
-        if (node.image) {
-          const imgs = Array.isArray(node.image) ? node.image : [node.image]
-          imgs.forEach((u: unknown) => { if (typeof u === 'string') images.push(u) })
-        }
-      } catch { /* ignore */ }
+        const graph = (json && typeof json === 'object' && Array.isArray((json as Record<string, unknown>)['@graph']))
+          ? (json as Record<string, unknown>)['@graph'] as unknown[]
+          : (Array.isArray(json) ? json : [json])
+        for (const n of graph) if (n && typeof n === 'object') nodes.push(n as Record<string, unknown>)
+      } catch { /* ignore bloco inválido */ }
     })
+    const typesOf = (n: Record<string, unknown>): string[] => {
+      const t = n['@type']
+      return (Array.isArray(t) ? t : [t]).map(x => String(x ?? ''))
+    }
+    const product   = nodes.find(n => typesOf(n).some(t => /product/i.test(t)))
+    const faqPage   = nodes.find(n => typesOf(n).some(t => /faqpage/i.test(t)))
+    const breadcrumb = nodes.find(n => typesOf(n).some(t => /breadcrumblist/i.test(t)))
+
+    if (product) {
+      const p = product as Record<string, any>
+      if (!title && p.name) title = String(p.name)
+      if (p.description) jsonLdDesc = String(p.description)
+      if (p.brand) attributes.push({ name: 'Marca', value: String(p.brand?.name ?? p.brand) })
+      if (p.sku) attributes.push({ name: 'SKU', value: String(p.sku) })
+      if (p.gtin13 ?? p.gtin) attributes.push({ name: 'GTIN', value: String(p.gtin13 ?? p.gtin) })
+      if (p.category) category = String(p.category)
+      const offer = Array.isArray(p.offers) ? p.offers[0] : p.offers
+      if (offer?.price) price = parseFloat(String(offer.price))
+      if (offer?.availability) attributes.push({ name: 'Disponibilidade', value: String(offer.availability).replace(/.*\//, '') })
+      if (offer?.itemCondition) attributes.push({ name: 'Condição', value: String(offer.itemCondition).replace(/.*\//, '') })
+      const agg = p.aggregateRating
+      if (agg) {
+        rating = Number(agg.ratingValue) || null
+        reviews_count = Number(agg.reviewCount ?? agg.ratingCount) || null
+      }
+      if (p.image) {
+        const imgs = Array.isArray(p.image) ? p.image : [p.image]
+        imgs.forEach((u: unknown) => { if (typeof u === 'string') images.push(u) })
+      }
+    }
+
+    // FAQPage → texto de FAQ (alimenta a dimensão faq_presence).
+    if (faqPage) {
+      const ents = (faqPage as Record<string, any>).mainEntity
+      const arr = Array.isArray(ents) ? ents : (ents ? [ents] : [])
+      const qas = arr.map((q: any) => {
+        const ans = q?.acceptedAnswer?.text ?? q?.acceptedAnswer ?? ''
+        return q?.name ? `P: ${String(q.name)}\nR: ${typeof ans === 'string' ? ans : String(ans?.text ?? '')}` : ''
+      }).filter(Boolean)
+      if (qas.length) faqText = `Perguntas frequentes:\n${qas.join('\n')}`
+    }
+
+    // BreadcrumbList → categoria (penúltimo item).
+    if (!category && breadcrumb) {
+      const els = (breadcrumb as Record<string, any>).itemListElement
+      const arr = Array.isArray(els) ? els : []
+      const names = arr.map((e: any) => e?.name).filter(Boolean).map(String)
+      if (names.length >= 2) category = names[names.length - 2]
+    }
 
     if (!title) throw new BadRequestException('Página sem título reconhecível — não parece um produto.')
+
+    // Texto visível da página (sem scripts/estilos/chrome) — complementa quando o
+    // JSON-LD é raso, pra refletir o que uma IA leria de fato na página.
+    $('script, style, noscript, svg, nav, footer, header').remove()
+    const bodyText = (($('main').text() || $('body').text() || '').replace(/\s+/g, ' ').trim())
+
+    // Descrição composta: estruturado primeiro (Product + FAQ), depois texto visível.
+    const parts = [jsonLdDesc, metaDesc, faqText].filter(Boolean) as string[]
+    let description = parts.join('\n\n').trim()
+    if (description.length < 800 && bodyText) description = `${description}\n\n${bodyText}`.trim()
+    description = description.slice(0, 6000)
 
     return {
       url,
       platform,
       listingId:     null,
       title,
-      description:   description?.trim() || null,
+      description:   description || null,
       attributes,
       price,
       images:        [...new Set(images)].slice(0, 12),
-      reviews_count: null,
-      rating:        null,
-      category:      null,
+      reviews_count,
+      rating,
+      category,
       rawHtmlSnippet: html.slice(0, 2000),
     }
   }
