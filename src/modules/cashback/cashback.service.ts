@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { allocateFifo } from './cashback.fifo'
 
 /** Cashback inteligente para Loja Própria.
  *
@@ -164,6 +165,7 @@ export class CashbackService {
         customer_identifier:  email,
         type:                 'earn',
         amount_cents:         args.amountCents,
+        remaining_cents:      args.amountCents,  // lote FIFO nasce 100% disponível
         reason:               args.reason ?? null,
         source_kind:          args.sourceKind ?? null,
         source_id:            args.sourceId ?? null,
@@ -229,6 +231,10 @@ export class CashbackService {
       throw new BadRequestException(`Erro: ${mvErr.message}`)
     }
 
+    // Consome os lotes FIFO (vence-antes-sai-antes) — mantém remaining_cents
+    // alinhado pra que a expiração tire só o que ainda não foi gasto.
+    await this.consumeLotsFifo(args.orgId, email, args.amountCents)
+
     const updated = await this.upsertBalance(args.orgId, email, -args.amountCents, 0, args.amountCents)
     this.logger.log(`[cashback.redeem] -${args.amountCents}c em ${email} (org=${args.orgId})`)
     return { redeemed: true, balance: updated }
@@ -260,36 +266,35 @@ export class CashbackService {
 
   // ── Expiração de saldos ────────────────────────────────────────────
 
-  /** Cron diário: detecta earns expirados e cria expire movements.
+  /** Cron diário: detecta lotes (earns) expirados e cria expire movements.
    *  Idempotente — source_id=earn_movement_id previne re-expiração.
    *
-   *  Lógica:
-   *   1. Busca movements type='earn' com expires_at <= now()
-   *   2. Pra cada um, verifica se já existe movement type='expire' com
-   *      source_id apontando pra ele (idempotência)
-   *   3. Se não, cria expire movement (-amount) + atualiza balance row
+   *  FIFO: expira só o `remaining_cents` do lote (o que ainda NÃO foi gasto),
+   *  não o valor cheio do earn. Isso corrige a punição dupla (antes expirava
+   *  o valor original mesmo que o cliente já tivesse resgatado). Lotes legados
+   *  (remaining_cents NULL, pré-backfill) caem no fallback do valor cheio —
+   *  comportamento antigo, sem regressão até o backfill rodar.
    *
-   *  Conservativo: só expira earns que JÁ FORAM creditados (a coluna
-   *  expires_at vem setada no INSERT do credit). Não toca em valores
-   *  que vieram de redeem/adjustment. */
+   *  Conservativo: só expira earns com expires_at setado. */
   async expireOldEarns(now = new Date()): Promise<{
     expiredCount: number
     expiredCents: number
   }> {
     const nowIso = now.toISOString()
-    // Pega earns expirados (com expires_at não-NULL e passado)
+    // Pega lotes expirados com saldo a expirar (remaining > 0) OU legado (NULL).
     const { data: expired } = await supabaseAdmin
       .from('customer_cashback_movements')
-      .select('id, organization_id, customer_identifier, amount_cents, expires_at')
+      .select('id, organization_id, customer_identifier, amount_cents, remaining_cents, expires_at')
       .eq('type', 'earn')
       .not('expires_at', 'is', null)
       .lte('expires_at', nowIso)
+      .or('remaining_cents.gt.0,remaining_cents.is.null')
       .order('created_at', { ascending: true })
       .limit(5000)
 
     const rows = (expired ?? []) as Array<{
       id: string; organization_id: string; customer_identifier: string;
-      amount_cents: number; expires_at: string;
+      amount_cents: number; remaining_cents: number | null; expires_at: string;
     }>
 
     if (rows.length === 0) return { expiredCount: 0, expiredCents: 0 }
@@ -309,16 +314,29 @@ export class CashbackService {
     if (toExpire.length === 0) return { expiredCount: 0, expiredCents: 0 }
 
     let totalCents = 0
+    let expiredLots = 0
     for (const earn of toExpire) {
       try {
-        // Cria expire movement
+        // Valor a expirar = saldo remanescente do lote (legado NULL → valor cheio).
+        const expireAmount = earn.remaining_cents == null
+          ? Number(earn.amount_cents)
+          : Number(earn.remaining_cents)
+
+        if (expireAmount <= 0) {
+          // Lote já 100% gasto — nada a expirar. Zera remaining pra sair do scan.
+          await supabaseAdmin.from('customer_cashback_movements')
+            .update({ remaining_cents: 0 }).eq('id', earn.id)
+          continue
+        }
+
+        // Cria expire movement do valor remanescente
         const { error: mvErr } = await supabaseAdmin
           .from('customer_cashback_movements')
           .insert({
             organization_id:      earn.organization_id,
             customer_identifier:  earn.customer_identifier,
             type:                 'expire',
-            amount_cents:         -Number(earn.amount_cents),
+            amount_cents:         -expireAmount,
             reason:               `Expirado em ${earn.expires_at.slice(0, 10)}`,
             source_kind:          'cron_expire',
             source_id:            earn.id,
@@ -330,6 +348,10 @@ export class CashbackService {
           continue
         }
 
+        // Zera o remaining do lote (não pode mais ser resgatado nem re-expirar)
+        await supabaseAdmin.from('customer_cashback_movements')
+          .update({ remaining_cents: 0 }).eq('id', earn.id)
+
         // Decrementa o balance — pode zerar mas não negativar
         const { data: bal } = await supabaseAdmin
           .from('customer_cashback_balances')
@@ -338,21 +360,95 @@ export class CashbackService {
           .eq('customer_identifier', earn.customer_identifier)
           .maybeSingle()
         if (bal) {
-          const newBalance = Math.max(0, Number((bal as { balance_cents: number }).balance_cents) - Number(earn.amount_cents))
+          const newBalance = Math.max(0, Number((bal as { balance_cents: number }).balance_cents) - expireAmount)
           await supabaseAdmin
             .from('customer_cashback_balances')
             .update({ balance_cents: newBalance, last_movement_at: nowIso })
             .eq('organization_id', earn.organization_id)
             .eq('customer_identifier', earn.customer_identifier)
         }
-        totalCents += Number(earn.amount_cents)
+        totalCents += expireAmount
+        expiredLots++
       } catch (err) {
         this.logger.warn(`[cashback.expire] earn=${earn.id} falhou: ${(err as Error).message}`)
       }
     }
 
-    this.logger.log(`[cashback.expire] expirou ${toExpire.length} earns (${totalCents}c)`)
-    return { expiredCount: toExpire.length, expiredCents: totalCents }
+    this.logger.log(`[cashback.expire] expirou ${expiredLots} lotes (${totalCents}c)`)
+    return { expiredCount: expiredLots, expiredCents: totalCents }
+  }
+
+  /** Consome lotes FIFO ao resgatar/ajustar pra baixo: vence-antes-sai-antes
+   *  (expires_at ASC, NULL por último), depois mais-antigo-primeiro. Mantém
+   *  `remaining_cents` alinhado com o que foi gasto. `leftover` > 0 indica lote
+   *  legado sem remaining (pré-backfill) ou drift — não é fatal pro saldo
+   *  (balance_cents é a verdade do resgate), mas vira warning pro reconcile. */
+  private async consumeLotsFifo(orgId: string, email: string, amountCents: number): Promise<void> {
+    if (amountCents <= 0) return
+    const { data: lots } = await supabaseAdmin
+      .from('customer_cashback_movements')
+      .select('id, remaining_cents')
+      .eq('organization_id', orgId)
+      .eq('customer_identifier', email)
+      .eq('type', 'earn')
+      .gt('remaining_cents', 0)
+      .order('expires_at', { ascending: true, nullsFirst: false })
+      .order('created_at', { ascending: true })
+      .limit(2000)
+
+    const ordered = ((lots ?? []) as Array<{ id: string; remaining_cents: number }>)
+      .map(l => ({ id: l.id, remaining: Number(l.remaining_cents) }))
+    const { takes, leftover } = allocateFifo(ordered, amountCents)
+    for (const t of takes) {
+      const lot = ordered.find(l => l.id === t.id)
+      if (!lot) continue
+      await supabaseAdmin
+        .from('customer_cashback_movements')
+        .update({ remaining_cents: lot.remaining - t.take })
+        .eq('id', t.id)
+        .eq('organization_id', orgId)
+    }
+    if (leftover > 0) {
+      this.logger.warn(`[cashback.fifo] consumo incompleto org=${orgId} cust=${email} faltou=${leftover}c (lote legado sem remaining? rode o backfill)`)
+    }
+  }
+
+  /** F4 — reconciliação: pra cada (org, cliente) confere se
+   *  Σ remaining(lotes ativos) == balance_cents. Só reporta (não corrige —
+   *  balance_cents é a verdade). Use o backfill p/ corrigir divergências. */
+  async reconcileLots(orgId?: string, now = new Date()): Promise<{
+    checked: number
+    mismatches: Array<{ orgId: string; customer: string; balance: number; lotsSum: number; diff: number }>
+  }> {
+    const nowIso = now.toISOString()
+    let balQ = supabaseAdmin
+      .from('customer_cashback_balances')
+      .select('organization_id, customer_identifier, balance_cents')
+    if (orgId) balQ = balQ.eq('organization_id', orgId)
+    const { data: balances } = await balQ
+    const rows = (balances ?? []) as Array<{ organization_id: string; customer_identifier: string; balance_cents: number }>
+
+    const mismatches: Array<{ orgId: string; customer: string; balance: number; lotsSum: number; diff: number }> = []
+    for (const b of rows) {
+      const { data: lots } = await supabaseAdmin
+        .from('customer_cashback_movements')
+        .select('remaining_cents')
+        .eq('organization_id', b.organization_id)
+        .eq('customer_identifier', b.customer_identifier)
+        .eq('type', 'earn')
+        .gt('remaining_cents', 0)
+        .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
+      const lotsSum = ((lots ?? []) as Array<{ remaining_cents: number }>)
+        .reduce((s, l) => s + Number(l.remaining_cents), 0)
+      const balance = Number(b.balance_cents)
+      if (lotsSum !== balance) {
+        mismatches.push({ orgId: b.organization_id, customer: b.customer_identifier, balance, lotsSum, diff: balance - lotsSum })
+      }
+    }
+    if (mismatches.length > 0) {
+      this.logger.warn(`[cashback.reconcile] ${mismatches.length}/${rows.length} clientes com divergência lote↔saldo`)
+    }
+    return { checked: rows.length, mismatches }
   }
 
   // ── Earns adiados (delayed credit) ─────────────────────────────────
