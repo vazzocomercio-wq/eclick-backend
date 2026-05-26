@@ -11,14 +11,16 @@ interface DimensionDef {
 }
 
 // Σpesos = 9.0 → nota = Σ(score×peso) / 90 × 100 (0-100).
+// Critérios refinados com base na literatura GEO (ver [[geo-papers]]):
+// dados/estatísticas e evidência externa pesam mais; keyword stuffing NÃO pontua.
 const DIMENSIONS: DimensionDef[] = [
-  { name: 'title_geo',           weight: 1.5, criteria: 'O título responde a uma pergunta/busca natural? Contém a keyword principal, formato natural, menciona caso de uso, e tem tamanho adequado.' },
-  { name: 'description_depth',   weight: 1.5, criteria: 'A descrição tem profundidade (idealmente 1500+ caracteres) com especificações técnicas e boa estrutura?' },
-  { name: 'entity_coverage',     weight: 1.0, criteria: 'A marca está explícita, a categoria preenchida e há 5+ atributos preenchidos?' },
-  { name: 'semantic_density',    weight: 1.0, criteria: 'Há variedade de termos, sinônimos e contextos — vocabulário rico que a IA consegue relacionar a várias buscas?' },
-  { name: 'structured_data',     weight: 1.0, criteria: 'Os dados estruturados estão completos (schema.org se for site; todos os atributos do marketplace preenchidos)?' },
-  { name: 'review_architecture', weight: 1.5, criteria: 'Há reviews em quantidade, longas e categorizadas, com boa distribuição de estrelas?' },
-  { name: 'faq_presence',        weight: 1.0, criteria: 'Existe FAQ ou perguntas reais respondidas no listing?' },
+  { name: 'title_geo',           weight: 1.5, criteria: 'O título alinha com a INTENÇÃO de busca do comprador e inclui o termo mais relevante (por relevância, NÃO por empilhamento de keywords) + 1 diferencial concreto, em linguagem natural e tamanho adequado?' },
+  { name: 'description_depth',   weight: 1.5, criteria: 'A descrição traz DADOS e NÚMEROS concretos (estatísticas, medidas, specs quantitativas — não só adjetivos), bem estruturada e fácil de a IA extrair/citar? Conteúdo data-dense vale mais que tamanho puro.' },
+  { name: 'entity_coverage',     weight: 1.0, criteria: 'A marca está explícita, a categoria preenchida e há 5+ atributos concretos (entidades que a IA relaciona à busca)?' },
+  { name: 'semantic_density',    weight: 1.0, criteria: 'Há VARIEDADE de vocabulário, sinônimos e contextos que a IA relaciona a várias buscas? IMPORTANTE: repetir a mesma palavra-chave pra "encher" (keyword stuffing) NÃO pontua e pode indicar spam.' },
+  { name: 'structured_data',     weight: 1.0, criteria: 'Os dados estruturados estão completos (schema.org Product/Offer/AggregateRating/FAQPage se for site; todos os atributos do marketplace preenchidos)?' },
+  { name: 'review_architecture', weight: 1.5, criteria: 'Há evidência de credibilidade que a IA cita como confiança — avaliações (quantidade, profundidade, distribuição de estrelas) e/ou prova externa (certificações, dados de terceiros)?' },
+  { name: 'faq_presence',        weight: 1.0, criteria: 'Existe FAQ ou perguntas reais de compra respondidas com fatos no listing?' },
   { name: 'crawler_access',      weight: 0.5, criteria: 'O robots.txt permite os bots de IA (OAI-SearchBot, ClaudeBot, PerplexityBot)?', deterministic: true },
 ]
 
