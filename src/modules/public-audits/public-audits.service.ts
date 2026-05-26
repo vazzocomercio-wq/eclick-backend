@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } fr
 import { createHash } from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { PublicAuditProcessorService } from './public-audit-processor.service'
 
 /**
  * AI Visibility OS — Landing pública "Auditoria GEO Grátis" (Sprint 1).
@@ -58,7 +59,10 @@ export interface PublicAuditStatus {
 export class PublicAuditsService {
   private readonly logger = new Logger(PublicAuditsService.name)
 
-  constructor(private readonly bridge: ActiveBridgeClient) {}
+  constructor(
+    private readonly bridge: ActiveBridgeClient,
+    private readonly processor: PublicAuditProcessorService,
+  ) {}
 
   async start(input: StartAuditInput, ip: string, userAgent?: string): Promise<StartAuditResult> {
     // 2. Honeypot — bot preencheu campo invisível. Descarta sem persistir nem
@@ -124,7 +128,10 @@ export class PublicAuditsService {
     }
     const auditId = (row as { id: string }).id
 
-    // 5. Push best-effort pro Active (nunca bloqueia o submit)
+    // 5. Dispara a análise na hora (worker; o @Cron é só rede de segurança)
+    this.processor.kick(auditId)
+
+    // 6. Push best-effort pro Active (nunca bloqueia o submit)
     void this.pushToActive(auditId, { name, email, whatsapp, url, category, platform })
 
     return { audit_id: auditId, polling_url: `/public/audits/${auditId}`, status: 'running' }

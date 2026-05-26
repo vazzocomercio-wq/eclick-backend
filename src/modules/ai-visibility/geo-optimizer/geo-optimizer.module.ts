@@ -17,6 +17,6 @@ import { DraftGeoService } from './services/draft-geo.service'
   imports:     [AiModule, GeoScoreModule, MercadolivreModule],
   controllers: [GeoOptimizerController],
   providers:   [TitleRewriterService, DescriptionBuilderService, BaselineService, MlPublisherService, ImpactTrackerService, RankSimulatorService, DraftGeoService],
-  exports:     [TitleRewriterService, DescriptionBuilderService],
+  exports:     [TitleRewriterService, DescriptionBuilderService, RankSimulatorService],
 })
 export class GeoOptimizerModule {}
