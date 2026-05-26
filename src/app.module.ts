@@ -89,6 +89,7 @@ import { EOtimizerModule } from './modules/e-otimizer/e-otimizer.module'
 import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-integration.module'
 import { RadarModule } from './modules/radar/radar.module'
 import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module'
+import { PublicAuditsModule } from './modules/public-audits/public-audits.module'
 
 @Module({
   imports: [
@@ -180,6 +181,7 @@ import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module
     IcarusIntegrationModule,
     RadarModule,
     AiVisibilityModule,
+    PublicAuditsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
