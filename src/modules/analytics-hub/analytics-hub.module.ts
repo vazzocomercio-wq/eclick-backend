@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common'
 import { AnalyticsAccountsController } from './accounts/analytics-accounts.controller'
 import { AnalyticsAccountsService } from './accounts/analytics-accounts.service'
+import { OrganicCollectorController } from './organic/organic-collector.controller'
+import { OrganicCollectorService } from './organic/organic-collector.service'
+import { OrganicCollectorWorker } from './organic/organic-collector.worker'
 
 /**
  * Analytics Hub — visão unificada de performance da org cruzando TODAS as
@@ -14,8 +17,8 @@ import { AnalyticsAccountsService } from './accounts/analytics-accounts.service'
  * - aggregator/— agregação cross-source (F4)
  */
 @Module({
-  controllers: [AnalyticsAccountsController],
-  providers:   [AnalyticsAccountsService],
-  exports:     [AnalyticsAccountsService],
+  controllers: [AnalyticsAccountsController, OrganicCollectorController],
+  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker],
+  exports:     [AnalyticsAccountsService, OrganicCollectorService],
 })
 export class AnalyticsHubModule {}
