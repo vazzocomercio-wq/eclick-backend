@@ -362,7 +362,11 @@ export class PaymentsService {
     couponCode?: string | null
     couponDiscountCents?: number
   }): Promise<StorefrontOrder> {
-    const subtotal = args.items.reduce((s, i) => s + i.price * i.qty, 0)
+    // subtotal = só linhas POSITIVAS (a linha negativa de cashback é injetada
+    // em `items` antes daqui pro gateway). Somar tudo aqui descontaria o
+    // cashback no subtotal e o `- cashbackUsedReais` abaixo descontaria de
+    // novo (bug de dupla subtração → total e earn de cashback subestimados).
+    const subtotal = args.items.reduce((s, i) => s + Math.max(0, i.price) * i.qty, 0)
     const cashbackUsedReais = (args.cashbackUsedCents ?? 0) / 100
     const total = Math.max(0, subtotal - cashbackUsedReais) // sem frete configurado nesta fase
     const { data, error } = await supabaseAdmin
@@ -600,10 +604,44 @@ export class PaymentsService {
         .select('id')
       const first = (transitioned?.length ?? 0) > 0
       this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> paid (1a transicao=${first})`)
-      if (first) await this.runPaidHooks(orderId)
+      if (first) {
+        await this.verifyPaidAmount(orderId, 'mercadopago', payment.transactionAmount)
+        await this.runPaidHooks(orderId)
+      }
     } else {
       await supabaseAdmin.from('storefront_orders').update({ status, ...upd }).eq('id', orderId)
       this.logger.log(`[mp.webhook] order=${orderId} payment=${paymentId} -> ${status}`)
+    }
+  }
+
+  /** C4 — confere o valor efetivamente pago vs `storefront_orders.total`.
+   *  Os valores são fixados server-side na criação da preferência (MP) /
+   *  sessão (Stripe) — o cliente não consegue alterar — então isto é
+   *  DETECÇÃO de drift/subpagamento, NÃO bloqueio: loga discrepância material
+   *  mas não derruba o webhook (um falso-positivo aqui = pedido pago que nunca
+   *  vira 'paid' = outage). O raw_callback guarda o payload pra auditoria. */
+  private async verifyPaidAmount(orderId: string, gateway: Gateway, paidReais: number | null): Promise<void> {
+    try {
+      if (paidReais == null || !Number.isFinite(paidReais)) {
+        this.logger.warn(`[pay.verify] order=${orderId} gateway=${gateway} sem valor no payload — verificação pulada`)
+        return
+      }
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('total')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order) return
+      const total = Number((order as { total: number }).total ?? 0)
+      const diff  = paidReais - total
+      const tol   = Math.max(0.02, total * 0.01) // 1% ou R$0,02
+      if (diff < -tol) {
+        this.logger.error(`[pay.verify] SUBPAGAMENTO order=${orderId} gateway=${gateway} pago=R$${paidReais.toFixed(2)} total=R$${total.toFixed(2)} diff=R$${diff.toFixed(2)} — revisar manualmente`)
+      } else if (diff > tol) {
+        this.logger.warn(`[pay.verify] order=${orderId} gateway=${gateway} pago MAIOR que total (frete/ajuste?) pago=R$${paidReais.toFixed(2)} total=R$${total.toFixed(2)}`)
+      }
+    } catch (e) {
+      this.logger.warn(`[pay.verify] order=${orderId} falhou: ${(e as Error).message}`)
     }
   }
 
@@ -660,14 +698,18 @@ export class PaymentsService {
 
     let status: StorefrontOrder['status'] | null = null
     let paymentId: string | null = null
+    let paidReais: number | null = null
 
     if (event.type === 'checkout.session.completed') {
       const ps = obj.payment_status as string | undefined
       status   = ps === 'paid' ? 'paid' : ps === 'unpaid' ? 'awaiting_payment' : 'pending'
       paymentId = (obj.payment_intent as string | null) ?? null
+      if (typeof obj.amount_total === 'number') paidReais = obj.amount_total / 100
     } else if (event.type === 'payment_intent.succeeded') {
       status   = 'paid'
       paymentId = (obj.id as string | null) ?? null
+      const cents = (obj.amount_received ?? obj.amount) as number | undefined
+      if (typeof cents === 'number') paidReais = cents / 100
     } else if (event.type === 'payment_intent.payment_failed') {
       status = 'failed'
     } else if (event.type === 'charge.refunded') {
@@ -692,7 +734,10 @@ export class PaymentsService {
         .select('id')
       const first = (transitioned?.length ?? 0) > 0
       this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> paid (1a transicao=${first})`)
-      if (first) await this.runPaidHooks(orderId)
+      if (first) {
+        await this.verifyPaidAmount(orderId, 'stripe', paidReais)
+        await this.runPaidHooks(orderId)
+      }
     } else {
       await supabaseAdmin
         .from('storefront_orders')

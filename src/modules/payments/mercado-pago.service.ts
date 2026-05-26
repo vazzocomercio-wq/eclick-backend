@@ -99,6 +99,7 @@ export class MercadoPagoService {
     status:             string
     statusDetail:       string | null
     externalReference:  string | null
+    transactionAmount:  number | null
     raw:                Record<string, unknown>
   }> {
     const token = await this.getAccessToken(orgId)
@@ -108,10 +109,14 @@ export class MercadoPagoService {
         { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 },
       )
       const d = res.data
+      const amt = typeof d.transaction_amount === 'number'
+        ? d.transaction_amount
+        : Number(d.transaction_amount ?? NaN)
       return {
         status:             String(d.status ?? 'unknown'),
         statusDetail:       (d.status_detail as string | null) ?? null,
         externalReference:  (d.external_reference as string | null) ?? null,
+        transactionAmount:  Number.isFinite(amt) ? amt : null,
         raw:                d,
       }
     } catch (e) {
