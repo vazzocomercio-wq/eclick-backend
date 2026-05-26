@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common'
+import { AiModule } from '../ai/ai.module'
+import { CredentialsModule } from '../credentials/credentials.module'
 import { AnalyticsAccountsController } from './accounts/analytics-accounts.controller'
 import { AnalyticsAccountsService } from './accounts/analytics-accounts.service'
 import { OrganicCollectorController } from './organic/organic-collector.controller'
@@ -6,6 +8,9 @@ import { OrganicCollectorService } from './organic/organic-collector.service'
 import { OrganicCollectorWorker } from './organic/organic-collector.worker'
 import { AnalyticsOverviewController } from './overview/analytics-overview.controller'
 import { AnalyticsOverviewService } from './overview/analytics-overview.service'
+import { GeoRadarController } from './geo-radar/geo-radar.controller'
+import { GeoRadarService } from './geo-radar/geo-radar.service'
+import { GeoRadarWorker } from './geo-radar/geo-radar.worker'
 
 /**
  * Analytics Hub — visão unificada de performance da org cruzando TODAS as
@@ -19,8 +24,9 @@ import { AnalyticsOverviewService } from './overview/analytics-overview.service'
  * - aggregator/— agregação cross-source (F4)
  */
 @Module({
-  controllers: [AnalyticsAccountsController, OrganicCollectorController, AnalyticsOverviewController],
-  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker, AnalyticsOverviewService],
+  imports:     [AiModule, CredentialsModule],
+  controllers: [AnalyticsAccountsController, OrganicCollectorController, AnalyticsOverviewController, GeoRadarController],
+  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker, AnalyticsOverviewService, GeoRadarService, GeoRadarWorker],
   exports:     [AnalyticsAccountsService, OrganicCollectorService],
 })
 export class AnalyticsHubModule {}
