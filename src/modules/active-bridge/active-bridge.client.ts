@@ -65,6 +65,22 @@ export interface CreateLeadResult {
   skipped_no_bridge?: boolean
 }
 
+export interface RequestSchedulingInput {
+  organization_id: string
+  phone:           string
+  name?:           string
+  specialty?:      string | null
+  intro_message?:  string | null
+  origin_message?: string | null
+}
+
+export interface RequestSchedulingResult {
+  ok?:                true
+  proposed?:          boolean
+  reason?:            string
+  skipped_no_bridge?: boolean
+}
+
 export interface UpsertContactInput {
   organization_id: string
   name?:           string
@@ -385,6 +401,34 @@ export class ActiveBridgeClient {
     } catch (e) {
       this.logger.error(`[active-bridge] createLead falhou: ${(e as Error).message}`)
       throw e
+    }
+  }
+
+  /** Pede ao Concierge do Active pra propor 3 horários de demo pra um lead
+   *  (Auditoria GEO pública). Acha/cria contato + conversa WhatsApp e dispara
+   *  o fluxo de slots. No-op se bridge não configurado / endpoint ausente. */
+  async requestScheduling(input: RequestSchedulingInput): Promise<RequestSchedulingResult> {
+    if (!this.isConfigured()) return { skipped_no_bridge: true }
+    const { url, secret } = this.getEnv()
+    try {
+      const res = await fetch(`${url}/commerce/automation-bridge/request-scheduling`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Automation-Bridge-Token': secret },
+        body: JSON.stringify(input),
+      })
+      if (res.status === 404) {
+        this.logger.warn('[active-bridge] requestScheduling skipped — endpoint não existe no Active')
+        return { skipped_no_bridge: true }
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        this.logger.warn(`[active-bridge] requestScheduling HTTP ${res.status}: ${body.slice(0, 200)}`)
+        return { skipped_no_bridge: true, reason: `${res.status}` }
+      }
+      return await res.json() as RequestSchedulingResult
+    } catch (e) {
+      this.logger.warn(`[active-bridge] requestScheduling falhou: ${(e as Error).message}`)
+      return { skipped_no_bridge: true, reason: (e as Error).message }
     }
   }
 

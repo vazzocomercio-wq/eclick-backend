@@ -178,6 +178,41 @@ export class PublicAuditsService {
     return { ok: true, optedOut: true }
   }
 
+  /** Lead pede demo no resultado → dispara o agendador (Concierge) do Active:
+   *  propõe 3 horários no WhatsApp; quando o lead responde, agenda sozinho. */
+  async requestDemo(auditId: string): Promise<{ ok: true; proposed: boolean; reason?: string }> {
+    if (!isUuid(auditId)) throw new BadRequestException('Id inválido.')
+    const { data } = await supabaseAdmin
+      .from('public_audits')
+      .select('name, whatsapp, opted_out')
+      .eq('id', auditId)
+      .maybeSingle()
+    const a = data as { name: string; whatsapp: string | null; opted_out: boolean } | null
+    if (!a) throw new HttpException('Auditoria não encontrada.', HttpStatus.NOT_FOUND)
+    if (a.opted_out) return { ok: true, proposed: false, reason: 'opted_out' }
+    if (!a.whatsapp) return { ok: true, proposed: false, reason: 'no_whatsapp' }
+
+    const orgId = platformOrgId()
+    try {
+      const r = await this.bridge.requestScheduling({
+        organization_id: orgId,
+        phone: a.whatsapp,
+        name: a.name,
+        intro_message: 'Que bom que você quer conhecer o e-Click de perto! Tenho esses horários pra uma demo:',
+        origin_message: `Demo solicitada via Auditoria GEO (${auditId})`,
+      })
+      // Best-effort: avança o card do funil pra "Demo agendada".
+      void this.bridge.moveCard({
+        organization_id: orgId, dedup_key: `public_audit:${auditId}`, to_stage_name: 'Demo agendada',
+      }).catch(() => undefined)
+      if (r.skipped_no_bridge) return { ok: true, proposed: false, reason: 'bridge_off' }
+      return { ok: true, proposed: r.proposed ?? false, reason: r.reason }
+    } catch (e) {
+      this.logger.warn(`[public-audit] request-demo falhou audit=${auditId}: ${(e as Error).message}`)
+      return { ok: true, proposed: false, reason: 'error' }
+    }
+  }
+
   // ── internals ──────────────────────────────────────────────────────
 
   private async enforceRateLimit(ipHash: string): Promise<void> {
