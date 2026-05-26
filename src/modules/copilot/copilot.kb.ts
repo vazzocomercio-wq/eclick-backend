@@ -30,6 +30,23 @@ export interface KbEntry {
 
 const CATALOG_ENTRIES: KbEntry[] = [
   {
+    routes:   ['/dashboard/produtos/categorias'],
+    category: 'catalogo',
+    title:    'Vínculos de Categoria (categoria do produto por marketplace)',
+    content: `**Vínculos de Categoria** mapeiam a categoria do **Mercado Livre** (a categoria que seus produtos já têm, vinda da API do ML) para a **categoria equivalente em cada outro marketplace** — Instagram/Meta, Shopee, TikTok, Amazon.
+
+**Por que existe:** cada marketplace tem sua própria árvore de categorias. O produto é o centro; cada canal (incluindo a Loja Própria) é um destino. Em vez de mapear produto por produto, você mapeia **por categoria**: vincula "Arandelas (ML)" → a categoria certa do Meta uma vez, e **todos os produtos** daquela categoria herdam.
+
+**Como usar** (\`/dashboard/produtos/categorias\`):
+1. Escolha o marketplace de destino no topo (hoje **Instagram/Meta** ativo; Shopee/TikTok/Amazon liberam quando o app conectar).
+2. A tabela lista as categorias do ML que sua loja usa (com nº de produtos) e o vínculo atual.
+3. Clique **Vincular** → no painel: **"Sugerir com IA"** (a IA acha a categoria equivalente no destino) ou **busque manualmente** na árvore do marketplace.
+4. Confirme. Pronto — o publish naquele marketplace passa a usar essa categoria.
+
+**Importante:** o vínculo **não altera** a categoria do ML do produto (\`category_ml_id\` fica intacto) — ele só diz "neste outro canal, use esta categoria". A Loja Própria não precisa de vínculo: ela usa a categoria do ML direto.`,
+    tags: ['categoria', 'categorias', 'vinculo', 'vínculo', 'marketplace', 'meta', 'instagram', 'shopee', 'tiktok', 'amazon', 'mercado livre', 'catalogo', 'mapear', 'ia'],
+  },
+  {
     routes:   ['/dashboard/produtos', '/dashboard/produtos/[id]/editar'],
     category: 'catalogo',
     title:    'Lista de produtos do catálogo',
