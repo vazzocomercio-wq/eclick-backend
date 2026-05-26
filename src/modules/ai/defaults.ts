@@ -310,6 +310,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Rank Simulator (método E-GEO): gera queries de shopper + re-ranqueia o produto
+  // contra concorrentes, simulando o motor de IA. Mede posição antes×depois.
+  ai_visibility_rank_simulator: {
+    label:       'Simulador de Ranking GEO (AI Visibility)',
+    description: 'Gera queries realistas de comprador e simula o re-ranking do produto vs concorrentes num motor de IA, medindo a posição',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

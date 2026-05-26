@@ -8,13 +8,14 @@ import { DescriptionBuilderService } from './services/description-builder.servic
 import { BaselineService } from './services/baseline.service'
 import { MlPublisherService } from './services/ml-publisher.service'
 import { ImpactTrackerService } from './services/impact-tracker.service'
+import { RankSimulatorService } from './services/rank-simulator.service'
 
 @Module({
   // GeoScoreModule exporta ListingScraperService + GeoTelemetryService;
   // MercadolivreModule pro token do dono do anúncio (publish/rollback).
   imports:     [AiModule, GeoScoreModule, MercadolivreModule],
   controllers: [GeoOptimizerController],
-  providers:   [TitleRewriterService, DescriptionBuilderService, BaselineService, MlPublisherService, ImpactTrackerService],
+  providers:   [TitleRewriterService, DescriptionBuilderService, BaselineService, MlPublisherService, ImpactTrackerService, RankSimulatorService],
   exports:     [TitleRewriterService, DescriptionBuilderService],
 })
 export class GeoOptimizerModule {}

@@ -10,6 +10,7 @@ import { TitleRewriterService } from './services/title-rewriter.service'
 import { DescriptionBuilderService } from './services/description-builder.service'
 import { MlPublisherService } from './services/ml-publisher.service'
 import { ImpactTrackerService } from './services/impact-tracker.service'
+import { RankSimulatorService } from './services/rank-simulator.service'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -27,6 +28,7 @@ export class GeoOptimizerController {
     private readonly descriptions: DescriptionBuilderService,
     private readonly publisher:    MlPublisherService,
     private readonly impact:       ImpactTrackerService,
+    private readonly simulator:    RankSimulatorService,
     private readonly telemetry:    GeoTelemetryService,
   ) {}
 
@@ -105,6 +107,18 @@ export class GeoOptimizerController {
   @Get('optimize/impact')
   async impactReport(@ReqUser() user: ReqUserPayload) {
     return this.impact.report(user.orgId, user.id)
+  }
+
+  /**
+   * POST /ai-visibility/optimize/simulate — Rank Simulator (método E-GEO).
+   * Simula o motor de IA ranqueando o produto vs concorrentes da categoria,
+   * com descrição atual × otimizada. Rota ESTÁTICA antes de :optimizerId.
+   */
+  @Post('optimize/simulate')
+  async simulate(@ReqUser() user: ReqUserPayload, @Body() body: { url?: string }) {
+    const url = (body?.url ?? '').trim()
+    if (!/^https?:\/\//i.test(url)) throw new BadRequestException('Informe uma URL válida (http/https).')
+    return this.simulator.simulate(user.orgId, url, user.id)
   }
 
   /** GET /ai-visibility/optimize/:optimizerId — rascunho + status. */
