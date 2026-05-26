@@ -728,6 +728,22 @@ export class MercadolivreService {
   }
 
   async getCategory(id: string) {
+    // Mirror-first: resolve do espelho local public.ml_categories (instantâneo,
+    // sem chamar a API do ML por produto / sem rate-limit). Cai na API só se
+    // a categoria não estiver no espelho (ainda não crawleada). NÃO escreve em
+    // products nem altera category_ml_id — só leitura de referência.
+    try {
+      const { data: mirror } = await supabaseAdmin
+        .from('ml_categories')
+        .select('id, name, path_from_root')
+        .eq('id', id)
+        .maybeSingle()
+      if (mirror) {
+        const m = mirror as { id: string; name: string; path_from_root: Array<{ id: string; name: string }> | null }
+        return { id: m.id, name: m.name, path_from_root: Array.isArray(m.path_from_root) ? m.path_from_root : [] }
+      }
+    } catch { /* fallback pra API abaixo */ }
+
     try {
       const { data } = await axios.get<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> }>(
         `${ML_BASE}/categories/${id}`,
