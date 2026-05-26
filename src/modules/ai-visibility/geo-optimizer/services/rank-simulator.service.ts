@@ -8,21 +8,27 @@ import { ScrapedListing } from '../../shared/types'
 /**
  * GEO Rank Simulator (método do E-GEO, arXiv 2511.20867 — ver [[geo-papers]]).
  * Simula o motor de IA como RE-RANKER: gera queries realistas de comprador,
- * monta um páreo (produto-alvo + concorrentes da mesma categoria) e pede a um
- * LLM pra ranquear — medindo a POSIÇÃO do produto. Roda com a descrição ATUAL
- * e com a OTIMIZADA → delta de posição. Métrica direta de visibilidade em IA,
- * sem depender de crawl real. 100% leitura do catálogo (não publica nada).
+ * monta um páreo (produto-alvo + CONCORRENTES) e pede a um LLM pra ranquear —
+ * medindo a POSIÇÃO do produto. Roda com a descrição ATUAL e com a OTIMIZADA
+ * → delta de posição. Métrica direta de visibilidade em IA, sem crawl real.
+ *
+ * Páreo em camadas (v2): (1) concorrentes REAIS do Radar (radar_competitor_links);
+ * (2) concorrentes "típicos de mercado" gerados por IA quando não há Radar;
+ * (3) fallback: irmãos de categoria do próprio catálogo. 100% leitura.
  */
 
 const N_QUERIES = 4
 const MAX_PEERS = 6
+const MIN_CANDIDATES = 3
 
+export type CandidateSource = 'radar' | 'synthetic' | 'catalog'
 export interface SimQueryResult { query: string; rank_before: number | null; rank_after: number | null }
 export interface RankSimReport {
   product_id:       string | null
   title:            string
   category:         string | null
   candidate_count:  number
+  candidate_source: CandidateSource | null
   queries:          SimQueryResult[]
   avg_rank_before:  number | null
   avg_rank_after:   number | null
@@ -36,6 +42,7 @@ interface ProductRow {
   description: string | null; ai_short_description: string | null; ai_long_description: string | null
   price: number | null; review_count: number | null; review_avg: number | null; attributes: unknown
 }
+interface Candidate { title: string; desc: string }
 
 function extractMlId(url: string): string | null {
   const m = url.match(/MLB-?(\d{6,})(?![\w])/i)
@@ -70,14 +77,17 @@ export class RankSimulatorService {
     const target = await this.resolveTarget(orgId, url)
     if (!target) throw new BadRequestException('Produto não encontrado no catálogo pra esta URL.')
 
-    const empty = (note: string): RankSimReport => ({
+    const base = {
       product_id: target.id, title: target.name ?? '(sem título)', category: target.category,
-      candidate_count: 0, queries: [], avg_rank_before: null, avg_rank_after: null, rank_delta: null, optimized: false, note,
+    }
+    const empty = (note: string): RankSimReport => ({
+      ...base, candidate_count: 0, candidate_source: null, queries: [],
+      avg_rank_before: null, avg_rank_after: null, rank_delta: null, optimized: false, note,
     })
     if (!target.category) return empty('no_category')
 
-    const peers = await this.loadPeers(orgId, target)
-    if (peers.length < 1) return empty('insufficient_peers')
+    const { candidates, source } = await this.loadCandidates(orgId, target)
+    if (candidates.length < 1) return empty('insufficient_candidates')
 
     // 1) Queries realistas de comprador + 2) descrição otimizada (em paralelo).
     const [queries, optimized] = await Promise.all([
@@ -86,14 +96,15 @@ export class RankSimulatorService {
     ])
     if (queries.length === 0) return empty('query_gen_failed')
 
-    const beforeDesc = shortDesc(target, 600) || target.name || ''
+    const targetTitle = target.name ?? ''
+    const beforeDesc = shortDesc(target, 600) || targetTitle
     const afterDesc  = (optimized || beforeDesc).slice(0, 600)
 
     const results: SimQueryResult[] = []
     for (const q of queries) {
       const [rb, ra] = await Promise.all([
-        this.rankTarget(orgId, q, target, beforeDesc, peers),
-        this.rankTarget(orgId, q, target, afterDesc, peers),
+        this.rankTarget(orgId, q, targetTitle, beforeDesc, candidates),
+        this.rankTarget(orgId, q, targetTitle, afterDesc, candidates),
       ])
       results.push({ query: q, rank_before: rb, rank_after: ra })
     }
@@ -105,20 +116,19 @@ export class RankSimulatorService {
     const delta = (avgB != null && avgA != null) ? +(avgB - avgA).toFixed(2) : null
 
     const report: RankSimReport = {
-      product_id: target.id, title: target.name ?? '(sem título)', category: target.category,
-      candidate_count: peers.length + 1, queries: results,
+      ...base, candidate_count: candidates.length + 1, candidate_source: source, queries: results,
       avg_rank_before: avgB, avg_rank_after: avgA, rank_delta: delta, optimized: !!optimized, note: null,
     }
     await this.telemetry.emit({
       orgId, userId: userId ?? '', jobId: 'rank_sim', feature: 'geo_optimizer',
       eventName: 'geo_optimizer.rank_simulated',
-      properties: { product_id: target.id, candidates: peers.length + 1, avg_before: avgB, avg_after: avgA, delta },
+      properties: { product_id: target.id, source, candidates: candidates.length + 1, avg_before: avgB, avg_after: avgA, delta },
     }).catch(() => {})
-    this.logger.log(`[rank-sim] org=${orgId} prod=${target.id} antes=${avgB} depois=${avgA} delta=${delta} (n=${peers.length + 1})`)
+    this.logger.log(`[rank-sim] org=${orgId} prod=${target.id} fonte=${source} antes=${avgB} depois=${avgA} delta=${delta} (n=${candidates.length + 1})`)
     return report
   }
 
-  // ── resolução de alvo + peers ─────────────────────────────────────────────
+  // ── resolução de alvo ──────────────────────────────────────────────────────
 
   private async resolveTarget(orgId: string, url: string): Promise<ProductRow | null> {
     const sel = 'id, name, category, description, ai_short_description, ai_long_description, price, review_count, review_avg, attributes'
@@ -139,26 +149,73 @@ export class RankSimulatorService {
     return null
   }
 
-  private async loadPeers(orgId: string, target: ProductRow): Promise<ProductRow[]> {
+  // ── páreo em camadas: radar real → sintético → catálogo ────────────────────
+
+  private async loadCandidates(orgId: string, target: ProductRow): Promise<{ candidates: Candidate[]; source: CandidateSource }> {
+    // (1) Concorrentes REAIS do Radar (vínculos manuais por produto).
+    const radar = await this.radarCompetitors(orgId, target.id)
+    if (radar.length >= 2) return { candidates: radar.slice(0, MAX_PEERS), source: 'radar' }
+
+    // (2) Concorrentes "típicos de mercado" gerados por IA.
+    const synth = await this.syntheticCompetitors(orgId, target)
+    if (synth.length >= MIN_CANDIDATES) return { candidates: [...radar, ...synth].slice(0, MAX_PEERS), source: 'synthetic' }
+
+    // (3) Fallback: irmãos de categoria do próprio catálogo.
+    const peers = await this.catalogPeers(orgId, target)
+    return { candidates: [...radar, ...peers].slice(0, MAX_PEERS), source: peers.length ? 'catalog' : 'synthetic' }
+  }
+
+  private async radarCompetitors(orgId: string, productId: string): Promise<Candidate[]> {
+    try {
+      const { data } = await supabaseAdmin
+        .from('radar_competitor_links')
+        .select('competitor_title, current_price, status')
+        .eq('organization_id', orgId).eq('product_id', productId)
+        .not('competitor_title', 'is', null).limit(MAX_PEERS)
+      return (data as Array<{ competitor_title?: string; current_price?: number; status?: string }> | null ?? [])
+        .filter(r => (r.status ?? 'active') !== 'removed' && r.competitor_title)
+        .map(r => ({ title: String(r.competitor_title), desc: `${r.competitor_title}${r.current_price ? ` — R$ ${r.current_price}` : ''}` }))
+    } catch { return [] }
+  }
+
+  private async syntheticCompetitors(orgId: string, target: ProductRow): Promise<Candidate[]> {
+    try {
+      const out = await this.llm.generateText({
+        orgId, feature: 'ai_visibility_rank_simulator',
+        systemPrompt: 'Você modela o cenário competitivo de e-commerce. Gera descrições curtas de produtos CONCORRENTES TÍPICOS (de outras marcas, genéricos) que disputariam o mesmo comprador. Responda só JSON.',
+        userPrompt: `Produto de referência: ${target.name}\nCategoria: ${target.category}\nAtributos: ${this.attrsText(target.attributes)}\n\n` +
+          `Gere 5 concorrentes TÍPICOS de mercado pra essa categoria (outras marcas, NÃO use "Vazzo"). ` +
+          `Varie o posicionamento: alguns básicos/baratos, alguns premium, alguns com descrição fraca e outros com descrição rica. ` +
+          `Cada um: título curto + 1-2 frases de descrição realista. Responda JSON: {"competitors":[{"title":"...","desc":"..."}]}`,
+        jsonMode: true, maxTokens: 700, temperature: 0.8,
+      })
+      const obj = JSON.parse(out.text.replace(/```json/gi, '').replace(/```/g, '').trim()) as { competitors?: unknown }
+      const arr = Array.isArray(obj.competitors) ? obj.competitors : []
+      return arr.map((c: Record<string, unknown>) => ({ title: String(c.title ?? '').trim(), desc: String(c.desc ?? '').trim() }))
+        .filter(c => c.title).slice(0, MAX_PEERS)
+    } catch (e) {
+      this.logger.warn(`[rank-sim] syntheticCompetitors falhou: ${(e as Error).message}`)
+      return []
+    }
+  }
+
+  private async catalogPeers(orgId: string, target: ProductRow): Promise<Candidate[]> {
     const { data } = await supabaseAdmin
       .from('products')
       .select('id, name, category, description, ai_short_description, ai_long_description, price, review_count, review_avg, attributes')
       .eq('organization_id', orgId).eq('category', target.category).neq('id', target.id)
-      .not('name', 'is', null)
-      .order('review_count', { ascending: false, nullsFirst: false })
-      .limit(MAX_PEERS)
-    return (data as ProductRow[] | null ?? [])
+      .not('name', 'is', null).order('review_count', { ascending: false, nullsFirst: false }).limit(MAX_PEERS)
+    return (data as ProductRow[] | null ?? []).map(p => ({ title: p.name ?? '', desc: shortDesc(p) }))
   }
 
   // ── geração de queries + descrição otimizada ──────────────────────────────
 
   private async genQueries(orgId: string, target: ProductRow): Promise<string[]> {
-    const attrs = this.attrsText(target.attributes)
     try {
       const out = await this.llm.generateText({
         orgId, feature: 'ai_visibility_rank_simulator',
         systemPrompt: 'Você gera perguntas realistas que um comprador faria a um assistente de IA (ChatGPT/Perplexity) ao procurar este tipo de produto. Linguagem natural, com intenção/contexto. Responda só JSON.',
-        userPrompt: `Produto: ${target.name}\nCategoria: ${target.category}\nAtributos: ${attrs}\n\n` +
+        userPrompt: `Produto: ${target.name}\nCategoria: ${target.category}\nAtributos: ${this.attrsText(target.attributes)}\n\n` +
           `Gere ${N_QUERIES} perguntas DISTINTAS, naturais, que levariam a IA a recomendar este TIPO de produto (não cite a marca). ` +
           `Varie a intenção (uso, melhor-para, comparação, necessidade específica). Responda JSON: {"queries":["...","..."]}`,
         jsonMode: true, maxTokens: 400, temperature: 0.7,
@@ -173,19 +230,17 @@ export class RankSimulatorService {
   }
 
   private async optimizedDescription(orgId: string, target: ProductRow): Promise<string | null> {
-    const listing = this.toListing(target)
     try {
-      const { description } = await this.descriptions.build(orgId, listing, null)
+      const { description } = await this.descriptions.build(orgId, this.toListing(target), null)
       return description || null
     } catch { return null }
   }
 
   // ── re-ranker (o "motor de IA") ───────────────────────────────────────────
 
-  private async rankTarget(orgId: string, query: string, target: ProductRow, targetDesc: string, peers: ProductRow[]): Promise<number | null> {
-    // Monta o páreo embaralhado, marcando o índice do alvo.
-    const pool = shuffle([{ isTarget: true, title: target.name ?? '', desc: targetDesc },
-      ...peers.map(p => ({ isTarget: false, title: p.name ?? '', desc: shortDesc(p) }))])
+  private async rankTarget(orgId: string, query: string, targetTitle: string, targetDesc: string, candidates: Candidate[]): Promise<number | null> {
+    const pool = shuffle([{ isTarget: true, title: targetTitle, desc: targetDesc },
+      ...candidates.map(c => ({ isTarget: false, title: c.title, desc: c.desc }))])
     const list = pool.map((p, i) => `Produto ${i + 1}: ${p.title}\n${p.desc}`).join('\n\n')
     const targetNum = pool.findIndex(p => p.isTarget) + 1
 
@@ -201,7 +256,9 @@ export class RankSimulatorService {
       const obj = JSON.parse(out.text.replace(/```json/gi, '').replace(/```/g, '').trim()) as { ranking?: unknown }
       const ranking = Array.isArray(obj.ranking) ? obj.ranking.map(Number).filter(Number.isFinite) : []
       const pos = ranking.indexOf(targetNum)
-      return pos >= 0 ? pos + 1 : null
+      if (pos >= 0) return pos + 1
+      // Hardening: alvo ausente de um ranking válido = última posição (não null).
+      return ranking.length > 0 ? pool.length : null
     } catch (e) {
       this.logger.warn(`[rank-sim] rankTarget falhou: ${(e as Error).message}`)
       return null
