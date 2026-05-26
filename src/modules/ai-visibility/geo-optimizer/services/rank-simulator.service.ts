@@ -144,26 +144,34 @@ export class RankSimulatorService {
    * publicado): ranqueia o conteúdo atual do rascunho vs concorrentes (posição
    * atual, sem antes/depois). Resolve a categoria pelo product_id.
    */
-  async simulateDraft(orgId: string, input: { productId: string | null; title: string; description: string }, userId?: string): Promise<DraftSimReport> {
+  async simulateDraft(orgId: string, input: { productId: string | null; category?: string | null; title: string; description: string }, userId?: string): Promise<DraftSimReport> {
     const empty = (note: string): DraftSimReport => ({ title: input.title, category: null, candidate_count: 0, candidate_source: null, avg_rank: null, queries: [], note })
-    if (!input.productId) return empty('no_product')
-    const { data: prod } = await supabaseAdmin
-      .from('products')
-      .select('id, name, category, description, ai_short_description, ai_long_description, price, review_count, review_avg, attributes')
-      .eq('organization_id', orgId).eq('id', input.productId).maybeSingle()
+    const { data: prod } = input.productId
+      ? await supabaseAdmin
+          .from('products')
+          .select('id, name, category, description, ai_short_description, ai_long_description, price, review_count, review_avg, attributes')
+          .eq('organization_id', orgId).eq('id', input.productId).maybeSingle()
+      : { data: null }
     const pr = prod as ProductRow | null
-    if (!pr?.category) return empty('no_category')
+    // categoria do produto OU a do próprio rascunho (produtos podem estar sem categoria).
+    const category = pr?.category ?? input.category ?? null
+    if (!category) return empty('no_category')
 
-    const targetProxy: ProductRow = { ...pr, name: input.title || pr.name }
+    const targetProxy: ProductRow = {
+      id: pr?.id ?? input.productId ?? 'draft', name: input.title || pr?.name || '', category,
+      description: pr?.description ?? input.description ?? null,
+      ai_short_description: pr?.ai_short_description ?? null, ai_long_description: pr?.ai_long_description ?? null,
+      price: pr?.price ?? null, review_count: pr?.review_count ?? null, review_avg: pr?.review_avg ?? null, attributes: pr?.attributes ?? null,
+    }
     const { candidates, source } = await this.loadCandidates(orgId, targetProxy)
     if (candidates.length < 1) return empty('insufficient_candidates')
     const queries = await this.genQueries(orgId, targetProxy)
     if (queries.length === 0) return empty('query_gen_failed')
 
-    const desc = (input.description || shortDesc(pr, 600) || input.title).slice(0, 600)
+    const desc = (input.description || shortDesc(targetProxy, 600) || input.title).slice(0, 600)
     const results: Array<{ query: string; rank: number | null }> = []
     for (const q of queries) {
-      const rank = await this.rankTarget(orgId, q, input.title || pr.name || '', desc, candidates)
+      const rank = await this.rankTarget(orgId, q, targetProxy.name || input.title, desc, candidates)
       results.push({ query: q, rank })
     }
     const ranks = results.map(r => r.rank).filter((n): n is number => n != null)
@@ -174,7 +182,7 @@ export class RankSimulatorService {
       properties: { draft: true, product_id: input.productId, source, candidates: candidates.length + 1, avg_rank: avg },
     }).catch(() => {})
     this.logger.log(`[rank-sim] DRAFT org=${orgId} prod=${input.productId} fonte=${source} pos=${avg} (n=${candidates.length + 1})`)
-    return { title: input.title || pr.name || '', category: pr.category, candidate_count: candidates.length + 1, candidate_source: source, avg_rank: avg, queries: results, note: null }
+    return { title: targetProxy.name || input.title, category, candidate_count: candidates.length + 1, candidate_source: source, avg_rank: avg, queries: results, note: null }
   }
 
   // ── resolução de alvo ──────────────────────────────────────────────────────

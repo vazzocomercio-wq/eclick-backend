@@ -41,7 +41,8 @@ export class DraftGeoService {
   async simulate(orgId: string, listingId: string, userId?: string): Promise<DraftSimReport> {
     const d = await this.loadDraft(orgId, listingId)
     return this.simulator.simulateDraft(orgId, {
-      productId: d.product_id, title: d.title ?? '', description: this.contentText(d),
+      productId: d.product_id, category: d.suggested_category ?? d.category_ml_id,
+      title: d.title ?? '', description: this.contentText(d),
     }, userId)
   }
 
