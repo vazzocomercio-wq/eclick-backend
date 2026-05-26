@@ -157,7 +157,8 @@ export class ListingScraperService {
     // 1) PRIORIDADE: item_id no query — páginas de catálogo (/p/MLB...) trazem o
     //    anúncio real aqui (ex: .../p/MLB61260378?...item_id:MLB5857078832...).
     //    Sem isso, a gente pegaria o id de CATÁLOGO, que não existe em /items/ → 404.
-    const itemId = url.match(/item_id[:=]MLB-?(\d{6,})/i)
+    // aceita item_id:MLB, item_id=MLB e a forma URL-encoded item_id%3AMLB (%3A=":", %3D="=")
+    const itemId = url.match(/item_id(?::|=|%3[ad])MLB-?(\d{6,})/i)
     if (itemId) return `MLB${itemId[1]}`
     // 2) Anúncio no path (produto.mercadolivre.com.br/MLB-N), ignorando catálogo:
     //    /p/MLB... (PDP de catálogo) e MLBU/MLBA/MLBB. Catálogo sem item_id não é
