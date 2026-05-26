@@ -3,12 +3,9 @@ import { Cron, CronExpression } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 import { ListingScraperService } from '../ai-visibility/geo-score/services/listing-scraper.service'
 import { GeoScoreCalculatorService } from '../ai-visibility/geo-score/services/geo-score-calculator.service'
-import { GeoRecommendationsService } from '../ai-visibility/geo-score/services/geo-recommendations.service'
 import { RankSimulatorService } from '../ai-visibility/geo-optimizer/services/rank-simulator.service'
 import { GeoSkipError } from '../ai-visibility/shared/skip-error'
-import type {
-  GeoDimensionName, GeoDimensionResult, GeoScoreResult, GeoRecommendation, ScrapedListing,
-} from '../ai-visibility/shared/types'
+import type { GeoDimensionName, GeoDimensionResult, GeoScoreResult, ScrapedListing } from '../ai-visibility/shared/types'
 
 const STALE_MS = 3 * 60_000
 const MAX_ATTEMPTS = 3
@@ -23,7 +20,7 @@ export interface PublicAuditResult {
   band:      Band
   headline:  string
   dimensions: Array<{ key: GeoDimensionName; label: string; score: number; weight: number; status: Band }>
-  topProblems: Array<{ rank: number; title: string; why: string; gain: string }>
+  topProblems: Array<{ rank: number; key: GeoDimensionName; title: string; why: string; gain: string }>
   rankSimulation: { query: string; candidate_count: number; your_rank: number | null } | null
   science: { kdd: string; ego: string }
   skipped: { reason: string } | null
@@ -36,10 +33,10 @@ interface ClaimRow { id: string; url: string; attempts: number }
  * ScoreProcessorService do geo-score: @Cron(30s) reprocessa travadas +
  * kick() async no submit pra começar na hora. Claim via CAS em started_at.
  *
- * Reusa o motor existente: scrape → calculate → recommendations → simulateDraft.
- * Monta um result_json PÚBLICO: nota + 8 dimensões + 3 problemas (SEM a reescrita,
- * que é o produto pago) + mini simulação de ranking. Org fixa (plataforma) resolve
- * tokens ML + logging de custo — nunca vem do visitante.
+ * Reusa o motor: scrape → calculate → simulateDraft. Monta um result_json
+ * PÚBLICO: nota + 8 dimensões + top-3 problemas (derivados das dimensões mais
+ * fracas, SEM a reescrita — que é o produto pago) + mini simulação de ranking.
+ * Org fixa (plataforma) resolve tokens ML + logging de custo — nunca vem do visitante.
  */
 @Injectable()
 export class PublicAuditProcessorService {
@@ -49,7 +46,6 @@ export class PublicAuditProcessorService {
   constructor(
     private readonly scraper: ListingScraperService,
     private readonly calc:    GeoScoreCalculatorService,
-    private readonly recs:    GeoRecommendationsService,
     private readonly rankSim: RankSimulatorService,
   ) {}
 
@@ -106,13 +102,7 @@ export class PublicAuditProcessorService {
       const scraped = await this.scraper.scrape(job.url, orgId)
       const score = await this.calc.calculate(orgId, scraped)
 
-      // Enhancements best-effort — a NOTA é o must-have; recs/rank degradam sem quebrar.
-      let recommendations: GeoRecommendation[] = []
-      try {
-        recommendations = (await this.recs.generate(orgId, scraped, score.dimensions)).recommendations
-      } catch (e) {
-        this.logger.warn(`[public-audit-worker] recs falhou audit=${job.id}: ${(e as Error).message}`)
-      }
+      // Mini rank sim best-effort — a NOTA é o must-have; o ranking degrada sem quebrar.
       let rank: PublicAuditResult['rankSimulation'] = null
       try {
         const sim = await this.rankSim.simulateDraft(orgId, {
@@ -130,7 +120,7 @@ export class PublicAuditProcessorService {
         this.logger.warn(`[public-audit-worker] rankSim falhou audit=${job.id}: ${(e as Error).message}`)
       }
 
-      const result = buildPublicResult(scraped, score, recommendations, rank)
+      const result = buildPublicResult(scraped, score, rank)
       await supabaseAdmin.from('public_audits').update({
         status: 'done', geo_score: result.score, result_json: result,
         completed_at: new Date().toISOString(), duration_ms: Date.now() - t0, error_message: null,
@@ -139,7 +129,7 @@ export class PublicAuditProcessorService {
     } catch (e) {
       // Página inauditável (esgotada/403/404) → done com resultado "skipped" (sem retry).
       if (e instanceof GeoSkipError) {
-        const skipped = emptyResult(job.url, e.skipReason)
+        const skipped = emptyResult(e.skipReason)
         await supabaseAdmin.from('public_audits').update({
           status: 'done', geo_score: null, result_json: skipped,
           completed_at: new Date().toISOString(), duration_ms: Date.now() - t0,
@@ -186,7 +176,41 @@ const DIM_ORDER: GeoDimensionName[] = [
   'structured_data', 'review_architecture', 'faq_presence', 'crawler_access',
 ]
 
-const SEVERITY_RANK: Record<GeoRecommendation['severity'], number> = { high: 0, medium: 1, low: 2 }
+/** Problema (sem a solução) por dimensão — texto humano, pra tela de resultado. */
+const PROBLEM_INFO: Record<GeoDimensionName, { title: string; why: string }> = {
+  title_geo: {
+    title: 'Seu título não responde à intenção de compra',
+    why: 'A IA prioriza títulos no formato "[Produto] para [uso/contexto]". O seu não deixa claro pra quem e em qual situação o produto serve.',
+  },
+  description_depth: {
+    title: 'Sua descrição é rasa demais pra IA',
+    why: 'Descrições com dados, medidas e contexto de uso são citadas muito mais. A IA precisa de profundidade — não de um texto curto e genérico.',
+  },
+  entity_coverage: {
+    title: 'Faltam dados e atributos concretos',
+    why: 'Especificações, medidas e materiais ajudam a IA a recomendar com confiança. Seu anúncio expõe poucos desses dados.',
+  },
+  semantic_density: {
+    title: 'Conteúdo pouco focado (ou com excesso de palavra-chave)',
+    why: 'A IA penaliza enchimento de palavra-chave e valoriza texto coeso e informativo sobre o produto. O equilíbrio do seu conteúdo está fraco.',
+  },
+  structured_data: {
+    title: 'Faltam dados estruturados pra IA',
+    why: 'Marcações (schema/JSON-LD) entregam preço, avaliações e specs prontos pra IA. As suas estão ausentes ou incompletas.',
+  },
+  review_architecture: {
+    title: 'Sem avaliações e provas sociais visíveis',
+    why: 'Avaliações são um dos sinais mais fortes pra IA recomendar um produto. O seu anúncio não as expõe de forma legível pra IA.',
+  },
+  faq_presence: {
+    title: 'Seu anúncio não tem FAQ',
+    why: 'A IA "pensa" em formato de pergunta. Sem um FAQ respondendo dúvidas reais, você não é citado quando o comprador pergunta.',
+  },
+  crawler_access: {
+    title: 'Bots de IA podem estar bloqueados',
+    why: 'Se o robots.txt bloqueia os crawlers de IA, seu conteúdo nem chega a ser lido — você fica invisível por padrão.',
+  },
+}
 
 function bandOf(score100: number): Band {
   if (score100 < 40) return 'red'
@@ -200,10 +224,14 @@ function headlineOf(band: Band): string {
   return 'Sua marca está entre as mais bem posicionadas pra IA.'
 }
 
+const SCIENCE = {
+  kdd: 'Citar fontes, adicionar estatísticas e melhorar a fluência aumentam a visibilidade em IA em até +40% (KDD 2024, Princeton).',
+  ego: 'Existe uma “receita universal” que faz a IA recomendar seu produto: intenção, diferenciais, avaliações e factualidade (E-GEO 2025, Columbia + MIT).',
+}
+
 function buildPublicResult(
   scraped: ScrapedListing,
   score: GeoScoreResult,
-  recs: GeoRecommendation[],
   rank: PublicAuditResult['rankSimulation'],
 ): PublicAuditResult {
   const byName = new Map<GeoDimensionName, GeoDimensionResult>()
@@ -218,12 +246,20 @@ function buildPublicResult(
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
 
-  // Top 3 problemas: das recomendações (dimensões fracas), por severidade.
-  // Mostra só o PROBLEMA (title + why) — a reescrita (example_after) fica pro produto pago.
-  const topProblems = [...recs]
-    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+  // Top 3 problemas = dimensões mais fracas por IMPACTO (peso × distância do 10),
+  // só as que estão realmente fracas (score < 7/10). Mostra o problema, NÃO a reescrita.
+  const topProblems = score.dimensions
+    .filter((d) => d.score < 7)
+    .map((d) => ({ d, impact: (10 - d.score) * d.weight }))
+    .sort((a, b) => b.impact - a.impact)
     .slice(0, 3)
-    .map((r, i) => ({ rank: i + 1, title: r.title, why: r.description, gain: r.estimated_impact }))
+    .map(({ d }, i) => ({
+      rank: i + 1,
+      key: d.name,
+      title: PROBLEM_INFO[d.name].title,
+      why: PROBLEM_INFO[d.name].why,
+      gain: `+${Math.max(1, Math.round(((10 - d.score) * d.weight / 90) * 100))} pontos`,
+    }))
 
   const band = bandOf(score.geoScore)
   return {
@@ -234,23 +270,16 @@ function buildPublicResult(
     dimensions,
     topProblems,
     rankSimulation: rank,
-    science: {
-      kdd: 'Citar fontes, adicionar estatísticas e melhorar a fluência aumentam a visibilidade em IA em até +40% (KDD 2024, Princeton).',
-      ego: 'Existe uma “receita universal” que faz a IA recomendar seu produto: intenção, diferenciais, avaliações e factualidade (E-GEO 2025, Columbia + MIT).',
-    },
+    science: SCIENCE,
     skipped: null,
   }
 }
 
-function emptyResult(_url: string, reason: string): PublicAuditResult {
+function emptyResult(reason: string): PublicAuditResult {
   return {
     platform: 'unknown', score: 0, band: 'red',
     headline: 'Não conseguimos ler essa página automaticamente.',
     dimensions: [], topProblems: [], rankSimulation: null,
-    science: {
-      kdd: 'Citar fontes, adicionar estatísticas e melhorar a fluência aumentam a visibilidade em IA em até +40% (KDD 2024, Princeton).',
-      ego: 'Existe uma “receita universal” que faz a IA recomendar seu produto: intenção, diferenciais, avaliações e factualidade (E-GEO 2025, Columbia + MIT).',
-    },
-    skipped: { reason },
+    science: SCIENCE, skipped: { reason },
   }
 }
