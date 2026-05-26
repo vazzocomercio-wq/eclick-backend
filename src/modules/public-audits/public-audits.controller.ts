@@ -42,6 +42,12 @@ export class PublicAuditsController {
     )
   }
 
+  @Post('unsubscribe')
+  @Public()
+  async unsubscribe(@Body() body: { audit_id?: string }) {
+    return this.svc.unsubscribe(body.audit_id ?? '')
+  }
+
   @Get(':id')
   @Public()
   async status(@Param('id') id: string) {

@@ -15,6 +15,7 @@ export interface NurtureCtx {
   band:        'red' | 'yellow' | 'green'
   topProblems: string[]   // títulos dos 3 problemas
   resultUrl:   string
+  unsubUrl:    string     // link de descadastro (LGPD)
 }
 
 const DEMO_URL = 'https://eclick.app.br' // TODO: link real de demo/Calendly
@@ -27,7 +28,7 @@ function bandPhrase(band: NurtureCtx['band']): string {
 
 // ── Email (HTML) ────────────────────────────────────────────────────────
 
-function emailShell(inner: string): string {
+function emailShell(inner: string, unsubUrl: string): string {
   return `<div style="background:#f4f4f5;padding:24px 0;font-family:-apple-system,Segoe UI,Roboto,sans-serif">
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e4e4e7">
     <div style="background:#09090b;padding:18px 28px">
@@ -37,7 +38,8 @@ function emailShell(inner: string): string {
     <div style="padding:28px">${inner}</div>
     <div style="padding:16px 28px;border-top:1px solid #e4e4e7;color:#a1a1aa;font-size:12px;line-height:1.5">
       e-Click · Inteligência Comercial<br/>
-      Você recebeu este email porque pediu uma Auditoria GEO gratuita. Não quer mais receber? Responda este email com "sair".
+      Você recebeu este email porque pediu uma Auditoria GEO gratuita.<br/>
+      <a href="${unsubUrl}" style="color:#71717a">Descadastrar destes emails</a>.
     </div>
   </div>
 </div>`
@@ -53,11 +55,12 @@ function problemsList(items: string[]): string {
 
 export function emailFor(step: NurtureStep, c: NurtureCtx): { subject: string; html: string } {
   const nome = escapeHtml(c.firstName)
+  const shell = (inner: string) => emailShell(inner, c.unsubUrl)
   switch (step) {
     case 'd0':
       return {
         subject: `🎯 ${c.firstName}, sua nota GEO é ${c.score}/100`,
-        html: emailShell(
+        html: shell(
           `<p style="font-size:16px;color:#18181b;margin:0 0 14px">Oi ${nome},</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6;margin:0 0 16px">Analisei o link que você enviou. Aqui está o resultado:</p>
            <div style="text-align:center;background:#f4f4f5;border-radius:12px;padding:24px;margin:0 0 16px">
@@ -75,7 +78,7 @@ export function emailFor(step: NurtureStep, c: NurtureCtx): { subject: string; h
     case 'd2':
       return {
         subject: 'Os 3 erros que matam sua visibilidade na IA',
-        html: emailShell(
+        html: shell(
           `<p style="font-size:16px;color:#18181b;margin:0 0 14px">Oi ${nome},</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6">Os 3 erros mais comuns que a gente vê em 9 de cada 10 anúncios:</p>
            <p style="font-size:15px;color:#18181b;font-weight:700;margin:18px 0 4px">❌ Achar que "palavra-chave" ainda funciona</p>
@@ -91,7 +94,7 @@ export function emailFor(step: NurtureStep, c: NurtureCtx): { subject: string; h
     case 'd5':
       return {
         subject: 'Estamos testando GEO em anúncios reais. Te conto.',
-        html: emailShell(
+        html: shell(
           `<p style="font-size:16px;color:#18181b;margin:0 0 14px">Oi ${nome},</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6">A gente não fala de GEO só na teoria. Selecionamos anúncios reais da nossa operação e aplicamos as técnicas de GEO <b>só na descrição</b> — mesma foto, mesmo preço.</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6;margin:14px 0 0">Estamos medindo o impacto em vendas num teste controlado de 30 dias. <b>Em breve compartilho os números reais</b> — sem promessa mágica, só o que o dado mostrar.</p>
@@ -103,7 +106,7 @@ export function emailFor(step: NurtureStep, c: NurtureCtx): { subject: string; h
     case 'd8':
       return {
         subject: `${c.firstName}, que tal uma conversa de 30 min?`,
-        html: emailShell(
+        html: shell(
           `<p style="font-size:16px;color:#18181b;margin:0 0 14px">Oi ${nome},</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6">Vou ser direto: o e-Click é o único sistema brasileiro que não só MEDE sua visibilidade em IA — também <b>reescreve</b> seu anúncio com IA, <b>simula o ranking</b> antes de publicar e <b>prova o impacto</b> em vendas.</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6;margin:14px 0 0">Se quiser ver funcionando no seu catálogo (na sua tela, sem demo genérica), é só responder este email ou clicar abaixo:</p>
@@ -115,7 +118,7 @@ export function emailFor(step: NurtureStep, c: NurtureCtx): { subject: string; h
     case 'd10':
       return {
         subject: 'A vitrine da IA muda toda semana. A sua acompanhou?',
-        html: emailShell(
+        html: shell(
           `<p style="font-size:16px;color:#18181b;margin:0 0 14px">Oi ${nome},</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6">Nesses 10 dias, ChatGPT, Gemini e Perplexity lançaram atualizações. A "vitrine" que a IA mostra pros compradores está se reconstruindo o tempo todo.</p>
            <p style="font-size:15px;color:#3f3f46;line-height:1.6;margin:14px 0 0">Você fez a auditoria há 10 dias. Quer descobrir se algo mudou?</p>

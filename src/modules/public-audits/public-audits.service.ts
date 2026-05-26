@@ -160,6 +160,24 @@ export class PublicAuditsService {
     }
   }
 
+  /** Descadastro (LGPD): opta-out por email (todas as auditorias daquele email). */
+  async unsubscribe(auditId: string): Promise<{ ok: true; optedOut: boolean }> {
+    if (!isUuid(auditId)) throw new BadRequestException('Id inválido.')
+    const { data } = await supabaseAdmin
+      .from('public_audits')
+      .select('email')
+      .eq('id', auditId)
+      .maybeSingle()
+    const email = (data as { email: string } | null)?.email
+    if (!email) return { ok: true, optedOut: false } // id desconhecido: não vaza existência
+    await supabaseAdmin
+      .from('public_audits')
+      .update({ opted_out: true, opted_out_at: new Date().toISOString() })
+      .eq('email', email)
+    this.logger.log(`[public-audit] descadastro email=${email.replace(/(.{2}).*(@.*)/, '$1***$2')}`)
+    return { ok: true, optedOut: true }
+  }
+
   // ── internals ──────────────────────────────────────────────────────
 
   private async enforceRateLimit(ipHash: string): Promise<void> {

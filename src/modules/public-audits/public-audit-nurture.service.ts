@@ -7,6 +7,7 @@ import { emailFor, whatsappFor, type NurtureStep } from './public-audit-nurture.
 
 const ORG_ID = () => process.env.PUBLIC_AUDIT_ORG_ID ?? '4ef1aabd-c209-40b0-b034-ef69dcb66833'
 const RESULT_BASE = 'https://eclick.app.br/auditoria-gratis/resultado'
+const UNSUB_BASE = 'https://eclick.app.br/auditoria-gratis/descadastro'
 const NURTURE_PLAN: Array<{ step: NurtureStep; days: number }> = [
   { step: 'd0', days: 0 }, { step: 'd2', days: 2 }, { step: 'd5', days: 5 },
   { step: 'd8', days: 8 }, { step: 'd10', days: 10 },
@@ -17,7 +18,7 @@ interface DueMsg { id: string; audit_id: string; step: NurtureStep; channel: 'em
 interface AuditRow {
   name: string; email: string; whatsapp: string | null
   geo_score: number | null; result_json: { band?: string; topProblems?: Array<{ title: string }>; skipped?: unknown } | null
-  status: string
+  status: string; opted_out: boolean
 }
 
 /**
@@ -44,11 +45,18 @@ export class PublicAuditNurtureService {
     try {
       const { data } = await supabaseAdmin
         .from('public_audits')
-        .select('whatsapp, created_at')
+        .select('whatsapp, created_at, email')
         .eq('id', auditId)
         .maybeSingle()
       if (!data) return
-      const { whatsapp, created_at } = data as { whatsapp: string | null; created_at: string }
+      const { whatsapp, created_at, email } = data as { whatsapp: string | null; created_at: string; email: string }
+
+      // Respeita opt-out prévio (por email) — não agenda pra quem já saiu.
+      const { data: opted } = await supabaseAdmin
+        .from('public_audits')
+        .select('id').eq('email', email).eq('opted_out', true).limit(1).maybeSingle()
+      if (opted) { this.logger.log(`[nurture] scheduleFor ${auditId} pulado — email opted out`); return }
+
       const base = new Date(created_at).getTime()
 
       const rows: Array<{ audit_id: string; step: string; channel: string; scheduled_at: string; status: string }> = []
@@ -103,7 +111,7 @@ export class PublicAuditNurtureService {
   private async send(m: DueMsg): Promise<void> {
     const { data } = await supabaseAdmin
       .from('public_audits')
-      .select('name, email, whatsapp, geo_score, result_json, status')
+      .select('name, email, whatsapp, geo_score, result_json, status, opted_out')
       .eq('id', m.audit_id)
       .maybeSingle()
     const audit = data as AuditRow | null
@@ -111,6 +119,10 @@ export class PublicAuditNurtureService {
     // Sem auditoria pronta / sem nota / página pulada → não nutre.
     if (!audit || audit.status !== 'done' || !audit.result_json || audit.result_json.skipped) {
       return this.mark(m.id, 'skipped', 'audit não-elegível')
+    }
+    // Descadastro (LGPD) → não envia mais nada.
+    if (audit.opted_out) {
+      return this.mark(m.id, 'skipped', 'opted out')
     }
     // Guarda contra emails de teste do smoke.
     if (audit.email.endsWith('@teste-eclick.com')) {
@@ -123,6 +135,7 @@ export class PublicAuditNurtureService {
       band: (audit.result_json.band as 'red' | 'yellow' | 'green') ?? 'red',
       topProblems: (audit.result_json.topProblems ?? []).slice(0, 3).map((p) => p.title),
       resultUrl: `${RESULT_BASE}/${m.audit_id}`,
+      unsubUrl: `${UNSUB_BASE}?aid=${m.audit_id}`,
     }
 
     try {
