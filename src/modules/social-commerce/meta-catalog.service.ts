@@ -39,6 +39,10 @@ const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 // instagram_basic: ler conta IG + midia (posts/reels) — Frente 2 S1
 // instagram_shopping_tag_products: taguear produtos em posts — Frente 2 S2
 // instagram_content_publish: publicar posts do e-Click (Frente 2 modo B)
+// instagram_manage_insights: ler metricas organicas (reach/impressions/likes/
+//   saved/video_views) por post + insights de conta (seguidores/alcance/
+//   demografia) — Analytics Hub (modulo analytics-hub). SEM esse scope a Graph
+//   API rejeita /{media_id}/insights e /{ig_user_id}/insights.
 // pages_show_list: necessario pro fluxo IG (listar Pages com IG vinculado)
 //
 // Frente 4 (DM no Active) vai precisar de instagram_manage_messages +
@@ -53,6 +57,7 @@ const META_SCOPES = [
   'instagram_basic',
   'instagram_shopping_tag_products',
   'instagram_content_publish',
+  'instagram_manage_insights',
 ].join(',')
 
 @Injectable()

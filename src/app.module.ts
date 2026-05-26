@@ -91,6 +91,7 @@ import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-int
 import { RadarModule } from './modules/radar/radar.module'
 import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module'
 import { PublicAuditsModule } from './modules/public-audits/public-audits.module'
+import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module'
 
 @Module({
   imports: [
@@ -184,6 +185,7 @@ import { PublicAuditsModule } from './modules/public-audits/public-audits.module
     RadarModule,
     AiVisibilityModule,
     PublicAuditsModule,
+    AnalyticsHubModule,
   ],
   controllers: [AppController],
   providers: [AppService],
