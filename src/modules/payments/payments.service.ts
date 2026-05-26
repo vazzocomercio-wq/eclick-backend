@@ -9,6 +9,7 @@ import { StorefrontNotificationsService } from '../storefront-notifications/stor
 import { AffiliateAttributionService } from '../affiliates/affiliate-attribution.service'
 import { CartRecoveryService } from '../cart-recovery/cart-recovery.service'
 import { FulfillmentService } from '../fulfillment/fulfillment.service'
+import { CouponsService } from '../coupons/coupons.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -45,6 +46,7 @@ export class PaymentsService {
     private readonly affiliate:     AffiliateAttributionService,
     private readonly cartRecovery:  CartRecoveryService,
     private readonly fulfillment:   FulfillmentService,
+    private readonly coupons:       CouponsService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -357,6 +359,8 @@ export class PaymentsService {
     cashbackUsedCents?: number
     customerId?: string
     affiliateId?: string
+    couponCode?: string | null
+    couponDiscountCents?: number
   }): Promise<StorefrontOrder> {
     const subtotal = args.items.reduce((s, i) => s + i.price * i.qty, 0)
     const cashbackUsedReais = (args.cashbackUsedCents ?? 0) / 100
@@ -375,6 +379,8 @@ export class PaymentsService {
         cashback_used_cents:   args.cashbackUsedCents ?? 0,
         customer_id:           args.customerId ?? null,
         affiliate_id:          args.affiliateId ?? null,
+        coupon_code:           args.couponCode ?? null,
+        coupon_discount_cents: args.couponDiscountCents ?? 0,
       })
       .select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar pedido: ${error?.message ?? '?'}`)
@@ -421,6 +427,7 @@ export class PaymentsService {
     cashbackToUse?: number  // centavos — opt-in pelo cliente
     customerId?:    string  // FK opcional pra storefront_customers (cliente logado)
     affiliateCode?: string  // code do afiliado (cookie ?ref=)
+    couponCode?:    string  // cupom aplicado (validado server-side aqui)
   }): Promise<{ orderId: string; initPoint: string }> {
     if (!input.slug)               throw new BadRequestException('slug obrigatório')
     if (!Array.isArray(input.items) || input.items.length === 0)
@@ -433,6 +440,24 @@ export class PaymentsService {
     const store = await this.resolveStore(input.slug)
     const items = await this.revalidateItems(store.orgId, input.items)
     if (items.length === 0) throw new BadRequestException('Nenhum dos itens está disponível.')
+
+    // ── Cupom (opt-in) — validado + aplicado SERVER-SIDE ─────────────
+    // O front só sugere; aqui revalidamos (ativo/validade/limite/mínimo) e
+    // descontamos escalando as linhas (vale MP e Stripe — linhas positivas).
+    // O used_count só incrementa no runPaidHooks (1ª transição p/ 'paid'),
+    // respeitando usage_limit só em pedido efetivamente pago.
+    let couponCode: string | null = null
+    let couponDiscountCents = 0
+    if (input.couponCode?.trim()) {
+      const subC = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100)
+      const applied = await this.coupons.apply(store.orgId, input.couponCode, subC) // lança se inválido
+      couponCode = applied.code
+      if (applied.discount_cents > 0 && subC > 0) {
+        const factor = Math.max(0, subC - applied.discount_cents) / subC
+        for (const it of items) it.price = Math.round(it.price * factor * 100) / 100
+        couponDiscountCents = applied.discount_cents
+      }
+    }
 
     // ── Resgate de cashback (opt-in) ─────────────────────────────────
     // Server-side: valida saldo + regras (minBalance, maxRedemptionPct).
@@ -493,6 +518,8 @@ export class PaymentsService {
       cashbackUsedCents,
       customerId:        input.customerId,
       affiliateId,
+      couponCode,
+      couponDiscountCents,
     })
 
     const urls = this.buildReturnUrls(input.slug, store.customDomain, order.id)
@@ -586,7 +613,26 @@ export class PaymentsService {
     await this.creditCashbackOnPaid(orderId)
     await this.renewVisualizerCreditsOnPaid(orderId)
     await this.bumpKitStatsOnPaid(orderId)
+    await this.incrementCouponOnPaid(orderId)
     void this.fulfillment.autoIngestStorefrontOrder(orderId)
+  }
+
+  /** Contabiliza o uso do cupom (used_count) quando o pedido vira pago.
+   *  Idempotente: runPaidHooks só roda na 1ª transição (gate). */
+  private async incrementCouponOnPaid(orderId: string): Promise<void> {
+    try {
+      const { data: order } = await supabaseAdmin
+        .from('storefront_orders')
+        .select('organization_id, coupon_code, status')
+        .eq('id', orderId)
+        .maybeSingle()
+      if (!order || (order.status as string) !== 'paid') return
+      const code = ((order.coupon_code as string | null) ?? '').trim()
+      if (!code) return
+      await this.coupons.incrementUsage(order.organization_id as string, code)
+    } catch (e) {
+      this.logger.warn(`[coupon] incrementUsage falhou order=${orderId}: ${(e as Error).message}`)
+    }
   }
 
   /** Stripe webhook — payload no body (raw), signature em header. */

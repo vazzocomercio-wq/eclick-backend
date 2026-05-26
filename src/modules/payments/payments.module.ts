@@ -11,9 +11,10 @@ import { StorefrontNotificationsModule } from '../storefront-notifications/store
 import { AffiliatesModule } from '../affiliates/affiliates.module'
 import { CartRecoveryModule } from '../cart-recovery/cart-recovery.module'
 import { FulfillmentModule } from '../fulfillment/fulfillment.module'
+import { CouponsModule } from '../coupons/coupons.module'
 
 @Module({
-  imports:     [CredentialsModule, CashbackModule, BonusModule, LoyaltyModule, StorefrontNotificationsModule, AffiliatesModule, CartRecoveryModule, FulfillmentModule],
+  imports:     [CredentialsModule, CashbackModule, BonusModule, LoyaltyModule, StorefrontNotificationsModule, AffiliatesModule, CartRecoveryModule, FulfillmentModule, CouponsModule],
   providers:   [PaymentsService, MercadoPagoService, StripeService],
   controllers: [PaymentsController, StorefrontOrdersAdminController],
   exports:     [PaymentsService],
