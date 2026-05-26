@@ -281,8 +281,10 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 **Variantes**: cada listing pode ter N variantes por marketplace. Dropdown gera variante automática quando faltar.
 
-**Versionamento**: regenerate cria nova row com \`parent_listing_id\` apontando pra original. Histórico expandível no fundo.`,
-    tags: ['creative', 'listing', 'editor'],
+**Versionamento**: regenerate cria nova row com \`parent_listing_id\` apontando pra original. Histórico expandível no fundo.
+
+**Visibilidade em IA (GEO)** — painel novo no lado direito, ao lado do SEO do Mercado Livre. Mede o quanto o rascunho seria **citado por ChatGPT/Perplexity/Gemini** (lente diferente da busca interna do ML): dá uma nota 0-100 + as dimensões fracas, ANTES de publicar. Tem o botão **"Testar ranking na IA"**, que simula o motor de IA ranqueando seu anúncio vs concorrentes (posição estimada). Tudo read-only — não altera atributos nem a publicação. Além disso, o **"Regenerar"** agora escreve o texto com técnicas de GEO comprovadas (dados/estatísticas, intenção de busca, FAQ factual, sem encher de palavra-chave).`,
+    tags: ['creative', 'listing', 'editor', 'geo', 'visibilidade-ia'],
   },
   {
     routes:   ['/dashboard/creative/[productId]/listing/[listingId]/publish/ml'],
