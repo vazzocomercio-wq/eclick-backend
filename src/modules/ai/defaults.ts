@@ -15,6 +15,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Cat-5 — sugere a categoria de destino (Meta/Shopee/etc) que melhor casa
+  // com a categoria de origem (ML) ao criar um vínculo de categoria.
+  category_link_suggest: {
+    label:       'Sugestão de vínculo de categoria',
+    description: 'Casa a categoria do ML com a categoria equivalente em outro marketplace',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   product_title: {
     label:       'Títulos de produto',
     description: 'Gera títulos otimizados para marketplace',

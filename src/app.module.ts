@@ -52,6 +52,7 @@ import { ProductsAnalyticsModule } from './modules/products-analytics/products-a
 import { PricingAiModule } from './modules/pricing-ai/pricing-ai.module'
 import { StoreAutomationModule } from './modules/store-automation/store-automation.module'
 import { KitsModule } from './modules/kits/kits.module'
+import { CategoryLinksModule } from './modules/category-links/category-links.module'
 import { StorefrontModule } from './modules/storefront/storefront.module'
 import { StoreCopilotModule } from './modules/store-copilot/store-copilot.module'
 import { StoreConfigModule } from './modules/store-config/store-config.module'
@@ -144,6 +145,7 @@ import { PublicAuditsModule } from './modules/public-audits/public-audits.module
     PricingAiModule,
     StoreAutomationModule,
     KitsModule,
+    CategoryLinksModule,
     StorefrontModule,
     StoreCopilotModule,
     StoreConfigModule,
