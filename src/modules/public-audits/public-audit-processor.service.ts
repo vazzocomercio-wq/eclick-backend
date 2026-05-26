@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { ListingScraperService } from '../ai-visibility/geo-score/services/listing-scraper.service'
 import { GeoScoreCalculatorService } from '../ai-visibility/geo-score/services/geo-score-calculator.service'
 import { RankSimulatorService } from '../ai-visibility/geo-optimizer/services/rank-simulator.service'
+import { PublicAuditNurtureService } from './public-audit-nurture.service'
 import { GeoSkipError } from '../ai-visibility/shared/skip-error'
 import type { GeoDimensionName, GeoDimensionResult, GeoScoreResult, ScrapedListing } from '../ai-visibility/shared/types'
 
@@ -47,6 +48,7 @@ export class PublicAuditProcessorService {
     private readonly scraper: ListingScraperService,
     private readonly calc:    GeoScoreCalculatorService,
     private readonly rankSim: RankSimulatorService,
+    private readonly nurture: PublicAuditNurtureService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_SECONDS, { name: 'public-audit-processor' })
@@ -125,6 +127,8 @@ export class PublicAuditProcessorService {
         status: 'done', geo_score: result.score, result_json: result,
         completed_at: new Date().toISOString(), duration_ms: Date.now() - t0, error_message: null,
       }).eq('id', job.id)
+      // Agenda a nutrição (D+0..D+10) só pra auditoria com nota real.
+      void this.nurture.scheduleFor(job.id)
       this.logger.log(`[public-audit-worker] audit ${job.id} OK score=${result.score} ${Date.now() - t0}ms`)
     } catch (e) {
       // Página inauditável (esgotada/403/404) → done com resultado "skipped" (sem retry).
