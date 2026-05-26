@@ -11,6 +11,8 @@ import { AnalyticsOverviewService } from './overview/analytics-overview.service'
 import { GeoRadarController } from './geo-radar/geo-radar.controller'
 import { GeoRadarService } from './geo-radar/geo-radar.service'
 import { GeoRadarWorker } from './geo-radar/geo-radar.worker'
+import { AnalyticsInternalController } from './internal/analytics-internal.controller'
+import { InternalKeyGuard } from '../internal/internal-key.guard'
 
 /**
  * Analytics Hub — visão unificada de performance da org cruzando TODAS as
@@ -25,8 +27,8 @@ import { GeoRadarWorker } from './geo-radar/geo-radar.worker'
  */
 @Module({
   imports:     [AiModule, CredentialsModule],
-  controllers: [AnalyticsAccountsController, OrganicCollectorController, AnalyticsOverviewController, GeoRadarController],
-  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker, AnalyticsOverviewService, GeoRadarService, GeoRadarWorker],
+  controllers: [AnalyticsAccountsController, OrganicCollectorController, AnalyticsOverviewController, GeoRadarController, AnalyticsInternalController],
+  providers:   [AnalyticsAccountsService, OrganicCollectorService, OrganicCollectorWorker, AnalyticsOverviewService, GeoRadarService, GeoRadarWorker, InternalKeyGuard],
   exports:     [AnalyticsAccountsService, OrganicCollectorService],
 })
 export class AnalyticsHubModule {}

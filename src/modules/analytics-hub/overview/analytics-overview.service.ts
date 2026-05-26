@@ -31,6 +31,85 @@ interface AccountMetricRow {
 export class AnalyticsOverviewService {
   constructor(private readonly accounts: AnalyticsAccountsService) {}
 
+  /**
+   * Resumo orgânico COMPLETO pro bridge (Active Social Intelligence):
+   * totais + por formato + heatmap dia×hora (BRT) + tendência + top posts +
+   * best_format/best_hour. Alimenta o dashboard executivo e o cérebro do Active.
+   */
+  async getOrganicSummary(orgId: string) {
+    const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
+    const [postsRes, acctRes, dailyRes] = await Promise.all([
+      supabaseAdmin
+        .from('analytics_social_posts')
+        .select('permalink, caption, media_product_type, thumbnail_url, published_at, latest_metrics')
+        .eq('organization_id', orgId).limit(500),
+      supabaseAdmin
+        .from('analytics_account_metrics_daily')
+        .select('followers_count, reach, profile_views, date')
+        .eq('organization_id', orgId).order('date', { ascending: false }).limit(1),
+      supabaseAdmin
+        .from('analytics_social_metrics_daily')
+        .select('date, reach, video_views')
+        .eq('organization_id', orgId).gte('date', since)
+        .order('date', { ascending: true }).limit(2000),
+    ])
+
+    const posts = (postsRes.data ?? []) as PostRow[]
+    let reach = 0, views = 0, eng = 0, erSum = 0, erCount = 0
+    const fmt = new Map<string, { posts: number; reach: number; erSum: number; erCount: number }>()
+    const heat = new Map<string, { posts: number; reach: number }>()
+    for (const p of posts) {
+      const m = p.latest_metrics ?? {}
+      const r = m.reach ?? 0
+      reach += r
+      views += m.video_views ?? 0
+      eng += (m.likes ?? 0) + (m.comments ?? 0) + (m.shares ?? 0) + (m.saved ?? 0)
+      if (r > 0) { erSum += m.engagement_rate ?? 0; erCount++ }
+      const f = p.media_product_type ?? 'OUTRO'
+      const fe = fmt.get(f) ?? { posts: 0, reach: 0, erSum: 0, erCount: 0 }
+      fe.posts++; fe.reach += r
+      if (r > 0) { fe.erSum += m.engagement_rate ?? 0; fe.erCount++ }
+      fmt.set(f, fe)
+      if (p.published_at) {
+        const brt = new Date(new Date(p.published_at).getTime() - 3 * 3600000) // UTC→BRT
+        const key = `${brt.getUTCDay()}-${brt.getUTCHours()}`
+        const he = heat.get(key) ?? { posts: 0, reach: 0 }
+        he.posts++; he.reach += r
+        heat.set(key, he)
+      }
+    }
+
+    const by_format = [...fmt.entries()]
+      .map(([format, v]) => ({ format, posts: v.posts, avg_reach: v.posts ? Math.round(v.reach / v.posts) : 0, avg_engagement_rate: v.erCount ? v.erSum / v.erCount : 0 }))
+      .sort((a, b) => b.avg_engagement_rate - a.avg_engagement_rate)
+    const heatmap = [...heat.entries()].map(([k, v]) => {
+      const [dow, hour] = k.split('-').map(Number)
+      return { dow, hour, posts: v.posts, reach: v.reach }
+    })
+    const top_posts = [...posts]
+      .sort((a, b) => (b.latest_metrics?.reach ?? 0) - (a.latest_metrics?.reach ?? 0))
+      .slice(0, 5)
+      .map((p) => ({ permalink: p.permalink, caption: (p.caption ?? '').slice(0, 80), type: p.media_product_type, thumbnail_url: p.thumbnail_url, reach: p.latest_metrics?.reach ?? 0, views: p.latest_metrics?.video_views ?? 0, engagement_rate: p.latest_metrics?.engagement_rate ?? 0 }))
+    const acct = (acctRes.data?.[0] as { followers_count?: number; reach?: number; profile_views?: number } | undefined) ?? null
+    const trend = ((dailyRes.data ?? []) as { date: string; reach: number; video_views: number }[])
+      .reduce<Array<{ date: string; reach: number; views: number }>>((acc, r) => {
+        const e = acc.find((x) => x.date === r.date)
+        if (e) { e.reach += r.reach; e.views += r.video_views } else acc.push({ date: r.date, reach: r.reach, views: r.video_views })
+        return acc
+      }, [])
+
+    const best_hour = heatmap.length ? [...heatmap].sort((a, b) => b.reach - a.reach)[0].hour : null
+    return {
+      totals: { posts: posts.length, reach, views, engagement: eng, avg_engagement_rate: erCount ? erSum / erCount : 0, followers: acct?.followers_count ?? 0, profile_views: acct?.profile_views ?? 0 },
+      by_format,
+      heatmap,
+      top_posts,
+      trend,
+      best_format: by_format[0]?.format ?? null,
+      best_hour,
+    }
+  }
+
   async getOverview(orgId: string) {
     const [accounts, organic, geo, geoRadar] = await Promise.all([
       this.accounts.listAccounts(orgId),
