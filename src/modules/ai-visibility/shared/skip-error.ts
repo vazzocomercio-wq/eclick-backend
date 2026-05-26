@@ -1,5 +1,5 @@
 /** Motivos pra PULAR a auditoria (determinísticos — não adianta retry). */
-export type SkipReason = 'blocked_by_marketplace' | 'product_not_found' | 'product_unavailable'
+export type SkipReason = 'blocked_by_marketplace' | 'product_not_found' | 'product_unavailable' | 'not_a_product'
 
 /**
  * Lançado pelo scraper quando o anúncio não pode/não deve ser auditado

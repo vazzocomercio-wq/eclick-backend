@@ -47,7 +47,9 @@ export class ListingScraperService {
 
   private async scrapeMl(url: string, orgId: string): Promise<ScrapedListing> {
     const id = this.extractMlId(url)
-    if (!id) throw new BadRequestException('URL ML inválida — esperado MLB-1234567.')
+    // Sem id de produto = link de loja/categoria/busca, não de um anúncio.
+    // Skip determinístico (não é falha, não retenta) — a UI orienta a colar o link do produto.
+    if (!id) throw new GeoSkipError('not_a_product', `URL ML sem id de produto (MLB): ${url}`)
 
     // Multi-conta: a org pode ter várias contas ML e o anúncio pode ser de
     // qualquer uma. getTokenForOrg pega só 1 conta (a mais recente) → ler item
