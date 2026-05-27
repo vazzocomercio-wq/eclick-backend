@@ -743,6 +743,8 @@ export class OrdersService {
 
 interface DbOrderRow {
   id?:              string
+  source:           string | null
+  platform:         string | null
   external_order_id: string
   status:           string | null
   shipping_id:      number | null
@@ -834,6 +836,8 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
 
   return {
     order_id:      Number(row.external_order_id) || row.external_order_id,
+    source:        row.source ?? null,
+    platform:      row.platform ?? null,
     status:        row.status,
     status_detail: raw.status_detail ?? null,
     date_created:  raw.date_created ?? row.sold_at ?? row.created_at,
