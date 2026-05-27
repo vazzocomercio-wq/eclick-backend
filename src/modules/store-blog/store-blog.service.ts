@@ -369,6 +369,28 @@ export class StoreBlogService {
     return { post, products };
   }
 
+  /** Worker: publica todos os agendados vencidos (cross-org, service_role). Retorna quantos. */
+  async publishDue(): Promise<number> {
+    const nowIso = new Date().toISOString();
+    const { data } = await this.db
+      .from('store_blog_posts')
+      .select('id, published_at')
+      .eq('status', 'scheduled')
+      .lte('scheduled_for', nowIso)
+      .limit(20);
+    const rows = (data ?? []) as Array<{ id: string; published_at: string | null }>;
+    let n = 0;
+    for (const r of rows) {
+      const { error } = await this.db
+        .from('store_blog_posts')
+        .update({ status: 'published', published_at: r.published_at ?? nowIso, updated_at: nowIso })
+        .eq('id', r.id)
+        .eq('status', 'scheduled');
+      if (!error) n++;
+    }
+    return n;
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────
 
   private async markFailed(postId: string, reason: string): Promise<void> {
