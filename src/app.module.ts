@@ -92,6 +92,7 @@ import { RadarModule } from './modules/radar/radar.module'
 import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module'
 import { PublicAuditsModule } from './modules/public-audits/public-audits.module'
 import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module'
+import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
 
 @Module({
   imports: [
@@ -186,6 +187,7 @@ import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module
     AiVisibilityModule,
     PublicAuditsModule,
     AnalyticsHubModule,
+    TikTokShopModule,
   ],
   controllers: [AppController],
   providers: [AppService],
