@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AiModule } from '../ai/ai.module';
-import { StoreBlogController } from './store-blog.controller';
+import { StoreBlogController, StoreBlogPublicController } from './store-blog.controller';
 import { StoreBlogService } from './store-blog.service';
 
 /**
@@ -9,7 +9,7 @@ import { StoreBlogService } from './store-blog.service';
  */
 @Module({
   imports: [AiModule],
-  controllers: [StoreBlogController],
+  controllers: [StoreBlogController, StoreBlogPublicController],
   providers: [StoreBlogService],
   exports: [StoreBlogService],
 })

@@ -1,5 +1,6 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
+import { Public } from '../../common/decorators/public.decorator';
 import { ReqUser } from '../../common/decorators/user.decorator';
 import { StoreBlogService } from './store-blog.service';
 import type { GenerateStorePostDto, IdeateStoreDto } from './store-blog.types';
@@ -79,5 +80,25 @@ export class StoreBlogController {
   unschedule(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente');
     return this.svc.unschedule(user.orgId, id);
+  }
+}
+
+/** Leitura pública pra vitrine /loja/[slug]/blog (sem auth). */
+@Controller('public/store-blog')
+export class StoreBlogPublicController {
+  constructor(private readonly svc: StoreBlogService) {}
+
+  @Get(':slug/posts')
+  @Public()
+  posts(@Param('slug') slug: string) {
+    return this.svc.listPublishedBySlug(slug).then((posts) => ({ posts }));
+  }
+
+  @Get(':slug/posts/:postSlug')
+  @Public()
+  async post(@Param('slug') slug: string, @Param('postSlug') postSlug: string) {
+    const res = await this.svc.getPublishedBySlug(slug, postSlug);
+    if (!res) throw new NotFoundException('Post não encontrado');
+    return res;
   }
 }

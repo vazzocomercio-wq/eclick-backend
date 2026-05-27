@@ -317,6 +317,58 @@ export class StoreBlogService {
     return data as StoreBlogPostRow;
   }
 
+  // ── leitura pública (vitrine /loja/[slug]/blog) ──────────────────────
+
+  /** Resolve a org dona da loja a partir do slug público. null se não achar. */
+  async resolveOrgBySlug(slug: string): Promise<string | null> {
+    const { data } = await this.db
+      .from('store_config')
+      .select('organization_id')
+      .eq('store_slug', slug)
+      .maybeSingle();
+    return (data as { organization_id?: string } | null)?.organization_id ?? null;
+  }
+
+  /** Cards de posts publicados de uma loja (mais recentes primeiro). */
+  async listPublishedBySlug(slug: string): Promise<Array<Record<string, unknown>>> {
+    const orgId = await this.resolveOrgBySlug(slug);
+    if (!orgId) return [];
+    const { data } = await this.db
+      .from('store_blog_posts')
+      .select('id, title, slug, excerpt, cover_image_url, reading_time_minutes, tags, published_at')
+      .eq('organization_id', orgId)
+      .eq('status', 'published')
+      .lte('published_at', new Date().toISOString())
+      .order('published_at', { ascending: false })
+      .limit(100);
+    return (data ?? []) as Array<Record<string, unknown>>;
+  }
+
+  /** Post publicado (full) + produtos hidratados (featured + productGrid do corpo). */
+  async getPublishedBySlug(slug: string, postSlug: string): Promise<{ post: StoreBlogPostRow; products: StoreProductLite[] } | null> {
+    const orgId = await this.resolveOrgBySlug(slug);
+    if (!orgId) return null;
+    const { data } = await this.db
+      .from('store_blog_posts')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('slug', postSlug)
+      .eq('status', 'published')
+      .lte('published_at', new Date().toISOString())
+      .maybeSingle();
+    if (!data) return null;
+    const post = data as StoreBlogPostRow;
+    const ids = new Set<string>(post.featured_product_ids ?? []);
+    for (const node of post.body ?? []) {
+      const grid = node as { productIds?: string[] };
+      if (node._type === 'productGrid' && Array.isArray(grid.productIds)) {
+        for (const id of grid.productIds) ids.add(id);
+      }
+    }
+    const products = ids.size ? await this.listProducts(orgId, [...ids]) : [];
+    return { post, products };
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────
 
   private async markFailed(postId: string, reason: string): Promise<void> {
