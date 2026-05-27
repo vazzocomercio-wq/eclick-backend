@@ -253,6 +253,40 @@ export class TikTokShopController {
     })
   }
 
+  // ── TT-3: escrita no TikTok (preço + ativar/pausar) — ação do usuário ──────
+
+  /** Atualiza o preço de UM sku no anúncio TikTok (escrita real). */
+  @Post('listings/:productId/price')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  updatePrice(
+    @ReqUser() u: ReqUserPayload,
+    @Param('productId') productId: string,
+    @Body() body: { sku_id: string; price: number; currency?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.sku_id) throw new BadRequestException('sku_id obrigatório')
+    return this.svc.updateSkuPrice(u.orgId, productId, body.sku_id, Number(body.price), body.currency)
+  }
+
+  /** Ativa o produto no TikTok. */
+  @Post('listings/:productId/activate')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  activateListing(@ReqUser() u: ReqUserPayload, @Param('productId') productId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.setProductsActive(u.orgId, [productId], true)
+  }
+
+  /** Desativa (pausa) o produto no TikTok. */
+  @Post('listings/:productId/deactivate')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  deactivateListing(@ReqUser() u: ReqUserPayload, @Param('productId') productId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.setProductsActive(u.orgId, [productId], false)
+  }
+
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   @UseGuards(SupabaseAuthGuard)

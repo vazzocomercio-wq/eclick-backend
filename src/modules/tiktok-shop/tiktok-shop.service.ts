@@ -1286,4 +1286,56 @@ export class TikTokShopService {
     for (const r of all) counts[this.ttStatusTab(r.status)]++
     return counts
   }
+
+  // ── TT-3: escrita no TikTok (preço + ativar/pausar) ───────────────────────
+  // Ações EXPLÍCITAS do usuário (alteram o anúncio AO VIVO). Cada escrita
+  // re-sincroniza o produto (syncProductById) pra refletir o estado real.
+  // Contrato 202309: prices/update por sku; activate/deactivate por product_id.
+
+  /** Atualiza o preço de UM sku no TikTok (escrita real). */
+  async updateSkuPrice(
+    orgId: string,
+    productId: string,
+    skuId: string,
+    price: number,
+    currency = 'BRL',
+  ): Promise<{ ok: true }> {
+    if (!(price > 0)) throw new BadRequestException('Preço inválido')
+    if (!productId || !skuId) throw new BadRequestException('produto/sku ausente')
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    await this.ttsRequest<unknown>({
+      method: 'POST',
+      path: `/product/202309/products/${productId}/prices/update`,
+      accessToken,
+      query: { shop_cipher: shopCipher },
+      body: { skus: [{ id: skuId, price: { amount: price.toFixed(2), currency } }] },
+    })
+    // Reflete o novo estado na tabela local (não-fatal se falhar).
+    await this.syncProductById(orgId, productId).catch(() => undefined)
+    return { ok: true }
+  }
+
+  /** Ativa ou desativa produtos no TikTok (escrita real). */
+  async setProductsActive(
+    orgId: string,
+    productIds: string[],
+    active: boolean,
+  ): Promise<{ ok: true }> {
+    const ids = productIds.filter(Boolean)
+    if (ids.length === 0) throw new BadRequestException('Nenhum produto informado')
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    await this.ttsRequest<unknown>({
+      method: 'POST',
+      path: `/product/202309/products/${active ? 'activate' : 'deactivate'}`,
+      accessToken,
+      query: { shop_cipher: shopCipher },
+      body: { product_ids: ids },
+    })
+    for (const pid of ids) await this.syncProductById(orgId, pid).catch(() => undefined)
+    return { ok: true }
+  }
 }

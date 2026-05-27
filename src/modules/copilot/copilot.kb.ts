@@ -256,7 +256,9 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 🔄 **Sincronizar TikTok** (botão topo): re-importa os produtos da loja (idempotente). Também roda sozinho a cada 30min + via webhook em tempo real.
 
-**Estoque**: por enquanto é só exibição (mostra o estoque mestre do produto vinculado, que é a fonte que sincroniza com os canais). Edição de estoque e escrita de preço de volta no TikTok são fases seguintes.
+✏️ **Editar preço no TikTok** (escrita ao vivo): clique no preço do card → digita o novo → confirma → altera o anúncio real no TikTok (endpoint \`prices/update\` por SKU) e re-sincroniza. **Ativar/Pausar**: botão no card chama \`activate\`/\`deactivate\` do produto no TikTok. Toda escrita pede confirmação antes.
+
+**Estoque**: ainda é só exibição (mostra o estoque mestre do produto vinculado, que é a fonte que sincroniza com os canais). A edição de estoque + estoque unificado (vender no TikTok baixar o mestre) é a fase seguinte.
 
 **Importante**: vender no TikTok hoje NÃO baixa o estoque do ML/loja (pedidos TikTok entram sem produto vinculado de propósito). A unificação do estoque (TikTok como canal que recebe e baixa o estoque mestre) é uma fase futura, que será ligada com cuidado.`,
     tags: ['anúncios', 'listings', 'tiktok', 'tiktok-shop', 'vinculo', 'sku', 'product_listings', 'catalogo', 'margem', 'comissao'],
