@@ -4,6 +4,7 @@ import {
   Post,
   Body,
   Headers,
+  Param,
   Query,
   Res,
   UseGuards,
@@ -142,6 +143,61 @@ export class TikTokShopController {
   products(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listProducts(u.orgId)
+  }
+
+  // ── Fase 4: publicar produto — base de PREVIEW (read-only, NÃO publica) ────
+
+  /** Categorias do TikTok Shop (pt-BR), filtra por ?keyword= e ?leaf=true. */
+  @Get('publish/categories')
+  @UseGuards(SupabaseAuthGuard)
+  categories(
+    @ReqUser() u: ReqUserPayload,
+    @Query('keyword') keyword?: string,
+    @Query('leaf') leaf?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getCategories(u.orgId, { keyword, leafOnly: leaf === 'true' })
+  }
+
+  /** Atributos (required/opcional + valores) de uma categoria. */
+  @Get('publish/categories/:id/attributes')
+  @UseGuards(SupabaseAuthGuard)
+  categoryAttributes(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getCategoryAttributes(u.orgId, id)
+  }
+
+  /** Recomenda categoria a partir do nome (best-effort). */
+  @Post('publish/recommend-category')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  recommendCategory(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { product_name: string; description?: string },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.recommendCategory(u.orgId, body)
+  }
+
+  /** PREVIEW: mapeia o produto pro payload do TikTok + atributos faltando. NÃO publica. */
+  @Post('publish/preview')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  previewPublish(
+    @ReqUser() u: ReqUserPayload,
+    @Body()
+    body: {
+      product_name: string
+      description?: string
+      images?: string[]
+      price?: number
+      sku?: string
+      stock?: number
+      category_id?: string
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.previewPublish(u.orgId, body)
   }
 
   @Post('disconnect')

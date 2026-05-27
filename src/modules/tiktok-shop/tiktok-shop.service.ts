@@ -786,4 +786,152 @@ export class TikTokShopService {
       .limit(Math.min(limit, 200))
     return data ?? []
   }
+
+  // ── Fase 4: publicar produto — base de PREVIEW/MAPEAMENTO (NÃO publica) ─────
+  // Tudo read-only contra o TikTok (categorias/atributos/recomendar). A criação
+  // real do anúncio (product/202309/products create + upload imagem) é a fase 2,
+  // gated e validada com 1 produto de teste.
+
+  /** Árvore de categorias (pt-BR), filtrável por palavra-chave. Read-only. */
+  async getCategories(
+    orgId: string,
+    opts: { keyword?: string; leafOnly?: boolean; limit?: number } = {},
+  ): Promise<Array<{ id: string; name: string; is_leaf: boolean; parent_id: string }>> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const data = await this.ttsRequest<{
+      categories?: Array<{ id: string; local_name: string; is_leaf: boolean; parent_id: string }>
+    }>({
+      method: 'GET',
+      path: '/product/202309/categories',
+      accessToken,
+      query: { shop_cipher: shopCipher, category_version: 'v2', locale: 'pt-BR' },
+    })
+    let cats = (data.categories ?? []).map((c) => ({
+      id: c.id,
+      name: c.local_name,
+      is_leaf: c.is_leaf,
+      parent_id: c.parent_id,
+    }))
+    if (opts.leafOnly) cats = cats.filter((c) => c.is_leaf)
+    const kw = opts.keyword?.trim().toLowerCase()
+    if (kw) cats = cats.filter((c) => (c.name ?? '').toLowerCase().includes(kw))
+    return cats.slice(0, opts.limit ?? 50)
+  }
+
+  /** Atributos de uma categoria (required/opcional + valores). Read-only. */
+  async getCategoryAttributes(
+    orgId: string,
+    categoryId: string,
+  ): Promise<
+    Array<{ id: string; name: string; required: boolean; type: string; values: Array<{ id: string; name: string }> }>
+  > {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const data = await this.ttsRequest<{
+      attributes?: Array<{
+        id: string
+        name: string
+        is_requried?: boolean
+        is_required?: boolean
+        type?: string
+        values?: Array<{ id: string; name: string }>
+      }>
+    }>({
+      method: 'GET',
+      path: `/product/202309/categories/${categoryId}/attributes`,
+      accessToken,
+      query: { shop_cipher: shopCipher, category_version: 'v2', locale: 'pt-BR' },
+    })
+    return (data.attributes ?? []).map((a) => ({
+      id: a.id,
+      name: a.name,
+      required: !!(a.is_requried ?? a.is_required),
+      type: a.type ?? 'PRODUCT_PROPERTY',
+      values: a.values ?? [],
+    }))
+  }
+
+  /** Recomenda categoria a partir do nome (best-effort; pode não casar). */
+  async recommendCategory(
+    orgId: string,
+    args: { product_name: string; description?: string },
+  ): Promise<{ category_id: string | null; message?: string }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    try {
+      const data = await this.ttsRequest<{
+        leaf_category_ids?: string[]
+        categories?: Array<{ id: string }>
+      }>({
+        method: 'POST',
+        path: '/product/202309/categories/recommend',
+        accessToken,
+        query: { shop_cipher: shopCipher },
+        body: { product_title: args.product_name, description: args.description ?? '' },
+      })
+      return { category_id: data.leaf_category_ids?.[0] ?? data.categories?.[0]?.id ?? null }
+    } catch (e) {
+      return { category_id: null, message: e instanceof Error ? e.message : 'sem recomendação' }
+    }
+  }
+
+  /** PREVIEW de publicação (NÃO publica): mapeia o produto pro payload do TikTok
+   *  e lista os atributos obrigatórios que faltam. */
+  async previewPublish(
+    orgId: string,
+    src: {
+      product_name: string
+      description?: string
+      images?: string[]
+      price?: number
+      sku?: string
+      stock?: number
+      category_id?: string
+    },
+  ): Promise<{
+    category_id: string | null
+    recommended: boolean
+    attributes: Array<{ id: string; name: string; required: boolean }>
+    missing_required: Array<{ id: string; name: string }>
+    draft_payload: Record<string, unknown>
+  }> {
+    let categoryId = src.category_id ?? null
+    let recommended = false
+    if (!categoryId) {
+      const rec = await this.recommendCategory(orgId, {
+        product_name: src.product_name,
+        description: src.description,
+      })
+      categoryId = rec.category_id
+      recommended = !!categoryId
+    }
+    const attrs = categoryId ? await this.getCategoryAttributes(orgId, categoryId) : []
+    const missing_required = attrs
+      .filter((a) => a.required)
+      .map((a) => ({ id: a.id, name: a.name }))
+    const draft_payload: Record<string, unknown> = {
+      title: src.product_name,
+      description: src.description ?? '',
+      category_id: categoryId,
+      main_images: (src.images ?? []).slice(0, 9).map((url) => ({ url })),
+      skus: [
+        {
+          seller_sku: src.sku ?? '',
+          price: { amount: src.price != null ? String(src.price) : '', currency: 'BRL' },
+          inventory: [{ quantity: src.stock ?? 0 }],
+        },
+      ],
+    }
+    return {
+      category_id: categoryId,
+      recommended,
+      attributes: attrs.map((a) => ({ id: a.id, name: a.name, required: a.required })),
+      missing_required,
+      draft_payload,
+    }
+  }
 }
