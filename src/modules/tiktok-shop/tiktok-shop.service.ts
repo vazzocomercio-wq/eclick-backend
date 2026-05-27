@@ -73,6 +73,13 @@ interface TtsProduct {
   category_chains?: Array<{ local_name?: string; is_leaf?: boolean }>
 }
 
+interface TtsWebhookPayload {
+  type?: number
+  shop_id?: string | number
+  timestamp?: number
+  data?: Record<string, unknown>
+}
+
 @Injectable()
 export class TikTokShopService {
   private readonly logger = new Logger(TikTokShopService.name)
@@ -417,53 +424,7 @@ export class TikTokShopService {
       pages++
 
       for (const o of orders) {
-        const { error } = await supabaseAdmin.from('tiktok_shop_orders').upsert(
-          {
-            organization_id: orgId,
-            shop_id: shopId,
-            tts_order_id: o.id,
-            order_status: o.status ?? null,
-            buyer_message: o.buyer_message ?? null,
-            recipient_name: o.recipient_address?.name ?? null,
-            total_amount: o.payment?.total_amount ?? null,
-            currency: o.payment?.currency ?? null,
-            line_item_count: o.line_items?.length ?? 0,
-            tts_create_time: o.create_time ?? null,
-            tts_update_time: o.update_time ?? null,
-            raw: o as unknown as Record<string, unknown>,
-            synced_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'organization_id,tts_order_id' },
-        )
-
-        // Espelha no modelo UNIFICADO `orders` (tela central de pedidos, junto
-        // com ML/manual). product_id=NULL → ZERO impacto no estoque (o cron de
-        // estoque só lê platform='mercadolivre' + product_id not null).
-        // source/platform='tiktok_shop' isola totalmente do ML.
-        const total = o.payment?.total_amount ? Number(o.payment.total_amount) : null
-        const { error: ordErr } = await supabaseAdmin.from('orders').upsert(
-          {
-            organization_id: orgId,
-            source: 'tiktok_shop',
-            platform: 'tiktok_shop',
-            external_order_id: o.id,
-            sku: 'TTS-ORDER',
-            product_id: null,
-            product_title: 'Pedido TikTok Shop',
-            quantity: o.line_items?.length ?? 1,
-            sale_price: total != null && !Number.isNaN(total) ? total : null,
-            status: this.mapTtsStatus(o.status),
-            buyer_name: o.recipient_address?.name ?? null,
-            sold_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
-            raw_data: o as unknown as Record<string, unknown>,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'source,external_order_id,sku' },
-        )
-        if (ordErr) this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${ordErr.message}`)
-
-        if (!error) imported++
+        if (await this.persistOrder(orgId, shopId, o)) imported++
       }
 
       pageToken =
@@ -494,6 +455,185 @@ export class TikTokShopService {
       default:
         return 'pending'
     }
+  }
+
+  /** Upsert de UM pedido: tabela isolada + espelho no modelo unificado `orders`
+   *  (tela central, com ML/manual). product_id=NULL → ZERO impacto no estoque
+   *  (cron de estoque só lê platform='mercadolivre' + product_id not null).
+   *  source/platform='tiktok_shop' isola do ML. Retorna true se a isolada salvou.
+   *  Reutilizado por importOrders (batch) e pelo webhook (alvo, tempo real). */
+  private async persistOrder(
+    orgId: string,
+    shopId: string | null,
+    o: TtsOrder,
+  ): Promise<boolean> {
+    const { error } = await supabaseAdmin.from('tiktok_shop_orders').upsert(
+      {
+        organization_id: orgId,
+        shop_id: shopId,
+        tts_order_id: o.id,
+        order_status: o.status ?? null,
+        buyer_message: o.buyer_message ?? null,
+        recipient_name: o.recipient_address?.name ?? null,
+        total_amount: o.payment?.total_amount ?? null,
+        currency: o.payment?.currency ?? null,
+        line_item_count: o.line_items?.length ?? 0,
+        tts_create_time: o.create_time ?? null,
+        tts_update_time: o.update_time ?? null,
+        raw: o as unknown as Record<string, unknown>,
+        synced_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'organization_id,tts_order_id' },
+    )
+
+    const total = o.payment?.total_amount ? Number(o.payment.total_amount) : null
+    const { error: ordErr } = await supabaseAdmin.from('orders').upsert(
+      {
+        organization_id: orgId,
+        source: 'tiktok_shop',
+        platform: 'tiktok_shop',
+        external_order_id: o.id,
+        sku: 'TTS-ORDER',
+        product_id: null,
+        product_title: 'Pedido TikTok Shop',
+        quantity: o.line_items?.length ?? 1,
+        sale_price: total != null && !Number.isNaN(total) ? total : null,
+        status: this.mapTtsStatus(o.status),
+        buyer_name: o.recipient_address?.name ?? null,
+        sold_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
+        raw_data: o as unknown as Record<string, unknown>,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'source,external_order_id,sku' },
+    )
+    if (ordErr) this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${ordErr.message}`)
+    return !error
+  }
+
+  /** Sincroniza UM pedido pelo id (webhook): busca o detalhe via API e faz upsert. */
+  async syncOrderById(orgId: string, orderId: string): Promise<boolean> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) return false
+    const shopCipher = await this.getShopCipher(orgId)
+    const { data: cred } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('shop_id')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ shop_id: string | null }>()
+    const data = await this.ttsRequest<{ orders?: TtsOrder[] }>({
+      method: 'GET',
+      path: '/order/202309/orders',
+      accessToken,
+      query: { shop_cipher: shopCipher, ids: orderId },
+    })
+    const o = data.orders?.[0]
+    if (!o) return false
+    return this.persistOrder(orgId, cred?.shop_id ?? null, o)
+  }
+
+  /** Sincroniza UM produto pelo id (webhook): busca o detalhe e faz upsert. */
+  async syncProductById(orgId: string, productId: string): Promise<boolean> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) return false
+    const shopCipher = await this.getShopCipher(orgId)
+    const { data: cred } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('shop_id')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ shop_id: string | null }>()
+    const p = await this.getProductDetail(productId, shopCipher, accessToken)
+    if (!p) return false
+    const { error } = await supabaseAdmin.from('tiktok_shop_products').upsert(
+      {
+        organization_id: orgId,
+        shop_id: cred?.shop_id ?? null,
+        tts_product_id: p.id,
+        title: p.title ?? null,
+        status: p.status ?? null,
+        sku_count: p.skus?.length ?? 0,
+        main_image_url: p.main_images?.[0]?.urls?.[0] ?? null,
+        raw: p as unknown as Record<string, unknown>,
+        synced_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'organization_id,tts_product_id' },
+    )
+    return !error
+  }
+
+  /** Orgs com TikTok Shop conectado (pro cron de reconciliação). */
+  async getConnectedOrgIds(): Promise<string[]> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('organization_id')
+      .eq('status', 'connected')
+    return (data ?? []).map((r) => (r as { organization_id: string }).organization_id)
+  }
+
+  // ── Webhook (tempo real) ──────────────────────────────────────────────────
+
+  /** Verifica a assinatura do webhook: HMAC-SHA256(app_secret, app_key + body). */
+  verifyWebhookSignature(rawBody: string, signature: string | undefined): boolean {
+    if (!signature || !this.isConfigured()) return false
+    const { appKey, appSecret } = this.env()
+    const expected = crypto
+      .createHmac('sha256', appSecret)
+      .update(appKey + rawBody)
+      .digest('hex')
+    return expected.toLowerCase() === signature.toLowerCase()
+  }
+
+  /** Valida o secret embutido na URL do webhook (?key=). Sem secret configurado
+   *  no servidor → não bloqueia (confia na assinatura). */
+  isWebhookSecretValid(key: string | undefined): boolean {
+    const secret = process.env.TIKTOK_SHOP_WEBHOOK_SECRET
+    if (!secret) return true
+    return key === secret
+  }
+
+  private async orgByShopId(shopId: string): Promise<string | null> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('organization_id')
+      .eq('shop_id', shopId)
+      .maybeSingle<{ organization_id: string }>()
+    return data?.organization_id ?? null
+  }
+
+  /** Processa um evento de webhook. Roteia por order_id/product_id no payload e
+   *  faz sync ALVO (re-fetch da entidade via API assinada → upsert). Resolve a
+   *  org pelo shop_id. Idempotente (upsert). */
+  async handleWebhook(
+    payload: TtsWebhookPayload,
+  ): Promise<{ handled: boolean; action?: 'order' | 'product' }> {
+    const shopId = payload.shop_id != null ? String(payload.shop_id) : null
+    const data = payload.data ?? {}
+    const orgId = shopId ? await this.orgByShopId(shopId) : null
+    if (!orgId) {
+      this.logger.warn(`[tts.webhook] shop_id=${shopId} sem org conectada — ignorado`)
+      return { handled: false }
+    }
+    const orderId = (data.order_id ?? data.order_id_str) as string | number | undefined
+    const productId = (data.product_id ?? data.product_id_str) as string | number | undefined
+    try {
+      if (orderId != null) {
+        const ok = await this.syncOrderById(orgId, String(orderId))
+        this.logger.log(`[tts.webhook] order=${orderId} sync=${ok} type=${payload.type}`)
+        return { handled: true, action: 'order' }
+      }
+      if (productId != null) {
+        const ok = await this.syncProductById(orgId, String(productId))
+        this.logger.log(`[tts.webhook] product=${productId} sync=${ok} type=${payload.type}`)
+        return { handled: true, action: 'product' }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `[tts.webhook] processar falhou: ${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+    this.logger.log(`[tts.webhook] type=${payload.type} sem order_id/product_id — ignorado`)
+    return { handled: false }
   }
 
   /** Lista os pedidos já importados (pra UI/validação). */

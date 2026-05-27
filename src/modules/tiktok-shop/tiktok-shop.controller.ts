@@ -2,6 +2,8 @@ import {
   Controller,
   Get,
   Post,
+  Body,
+  Headers,
   Query,
   Res,
   UseGuards,
@@ -67,6 +69,30 @@ export class TikTokShopController {
       const msg = e instanceof Error ? e.message : 'erro'
       return res.redirect(`${frontendBase}${dest}?tiktok_shop=error&reason=${encodeURIComponent(msg)}`)
     }
+  }
+
+  /** Webhook do TikTok Shop (tempo real). Público — autenticado por secret na
+   *  URL (?key=) + assinatura HMAC. Responde 200 na hora e processa async
+   *  (TikTok espera ack rápido). Faz sync ALVO do pedido/produto do evento. */
+  @Post('webhook')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  webhook(
+    @Body() body: { type?: number; shop_id?: string | number; data?: Record<string, unknown> },
+    @Query('key') key?: string,
+    @Headers('authorization') auth?: string,
+    @Headers('x-tts-signature') xsig?: string,
+  ) {
+    if (!this.svc.isWebhookSecretValid(key)) {
+      throw new BadRequestException('webhook key inválida')
+    }
+    const sigOk = this.svc.verifyWebhookSignature(JSON.stringify(body ?? {}), xsig ?? auth)
+    if (!sigOk && process.env.TIKTOK_SHOP_WEBHOOK_ENFORCE_SIG === 'true') {
+      throw new BadRequestException('assinatura inválida')
+    }
+    // ack imediato + processa em background (não bloqueia a resposta)
+    void this.svc.handleWebhook(body).catch(() => undefined)
+    return { ok: true }
   }
 
   @Get('status')
