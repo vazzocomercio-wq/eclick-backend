@@ -61,17 +61,51 @@ interface TtsOrder {
   update_time?: number
 }
 
+interface TtsSku {
+  id: string
+  seller_sku?: string
+  price?: { currency?: string; sale_price?: string; tax_exclusive_price?: string }
+  inventory?: Array<{ quantity?: number; warehouse_id?: string }>
+  status_info?: { status?: string }
+  sales_attributes?: Array<{ name?: string; value_name?: string }>
+  sku_img?: { urls?: string[] }
+}
+
 interface TtsProduct {
   id: string
   title?: string
   status?: string
-  skus?: unknown[]
+  skus?: TtsSku[]
   main_images?: Array<{ uri?: string; urls?: string[] }>
   // Campos extras que SÓ vêm no detalhe (GET /product/202309/products/{id}),
   // não no search. Opcionais porque o search devolve só o produto "leve".
   description?: string
-  category_chains?: Array<{ local_name?: string; is_leaf?: boolean }>
+  category_chains?: Array<{ id?: string; local_name?: string; is_leaf?: boolean }>
 }
+
+/** Linha de anúncio TikTok no nível do SKU (unidade vendável: cada SKU tem
+ *  preço/estoque/seller_sku próprios). É o shape que a página de Anúncios
+ *  TikTok consome — espelha o MListing do ML no que faz sentido. */
+export interface TkListing {
+  tts_product_id: string
+  sku_id: string
+  seller_sku: string | null
+  title: string
+  variation_name: string | null
+  status: string | null // status do PRODUTO (ACTIVATE/PENDING/DRAFT/…)
+  sku_status: string | null // status do SKU (NORMAL/…)
+  price: number | null
+  currency: string | null
+  stock: number
+  warehouse_id: string | null
+  image: string | null
+  category: string | null
+  sku_count: number
+  synced_at: string | null
+}
+
+/** Abas da página (mesmo vocabulário do ML). */
+export type TkTab = 'active' | 'paused' | 'closed' | 'under_review'
 
 interface TtsWebhookPayload {
   type?: number
@@ -933,5 +967,152 @@ export class TikTokShopService {
       missing_required,
       draft_payload,
     }
+  }
+
+  // ── Página de Anúncios TikTok (leitura) ───────────────────────────────────
+
+  /** Mapeia o status do PRODUTO TikTok pras abas (vocabulário do ML). */
+  private ttStatusTab(s?: string | null): TkTab {
+    switch ((s ?? '').toUpperCase()) {
+      case 'ACTIVATE':
+        return 'active'
+      case 'SELLER_DEACTIVATED':
+      case 'PLATFORM_DEACTIVATED':
+      case 'FREEZE':
+        return 'paused'
+      case 'DELETED':
+        return 'closed'
+      case 'PENDING':
+      case 'DRAFT':
+      case 'FAILED':
+      default:
+        return 'under_review'
+    }
+  }
+
+  /** Folha da árvore de categorias (nome amigável). */
+  private leafCategory(chains?: TtsProduct['category_chains']): string | null {
+    if (!chains?.length) return null
+    const leaf = chains.find((c) => c.is_leaf)
+    return (leaf ?? chains[chains.length - 1])?.local_name ?? null
+  }
+
+  /** Lê tiktok_shop_products (raw) e achata em linhas no nível do SKU.
+   *  Dataset pequeno (centenas) → filtro/paginação em memória. */
+  private async buildListingRows(orgId: string): Promise<TkListing[]> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_products')
+      .select('tts_product_id, title, status, main_image_url, synced_at, raw')
+      .eq('organization_id', orgId)
+      .order('synced_at', { ascending: false })
+      .limit(500)
+
+    const rows: TkListing[] = []
+    for (const r of (data ?? []) as Array<{
+      tts_product_id: string
+      title: string | null
+      status: string | null
+      main_image_url: string | null
+      synced_at: string | null
+      raw: TtsProduct | null
+    }>) {
+      const raw = r.raw ?? null
+      const skus = raw?.skus ?? []
+      const category = this.leafCategory(raw?.category_chains)
+      const multi = skus.length > 1
+
+      if (skus.length === 0) {
+        // Produto sem detalhe ainda (search leve): linha mínima.
+        rows.push({
+          tts_product_id: r.tts_product_id,
+          sku_id: r.tts_product_id,
+          seller_sku: null,
+          title: r.title ?? '(sem título)',
+          variation_name: null,
+          status: r.status,
+          sku_status: null,
+          price: null,
+          currency: null,
+          stock: 0,
+          warehouse_id: null,
+          image: r.main_image_url,
+          category,
+          sku_count: 0,
+          synced_at: r.synced_at,
+        })
+        continue
+      }
+
+      for (const sku of skus) {
+        const variationName = multi
+          ? (sku.sales_attributes ?? [])
+              .map((a) => a.value_name)
+              .filter(Boolean)
+              .join(' / ') || null
+          : null
+        const priceStr = sku.price?.sale_price ?? sku.price?.tax_exclusive_price ?? null
+        const price = priceStr != null ? Number(priceStr) : null
+        const stock = (sku.inventory ?? []).reduce(
+          (sum, inv) => sum + (Number(inv.quantity) || 0),
+          0,
+        )
+        rows.push({
+          tts_product_id: r.tts_product_id,
+          sku_id: sku.id,
+          seller_sku: sku.seller_sku ?? null,
+          title: r.title ?? raw?.title ?? '(sem título)',
+          variation_name: variationName,
+          status: r.status ?? raw?.status ?? null,
+          sku_status: sku.status_info?.status ?? null,
+          price: price != null && !Number.isNaN(price) ? price : null,
+          currency: sku.price?.currency ?? null,
+          stock,
+          warehouse_id: sku.inventory?.[0]?.warehouse_id ?? null,
+          image: sku.sku_img?.urls?.[0] ?? r.main_image_url,
+          category,
+          sku_count: skus.length,
+          synced_at: r.synced_at,
+        })
+      }
+    }
+    return rows
+  }
+
+  /** Lista anúncios TikTok (nível SKU) com filtro de aba + busca + paginação. */
+  async listListings(
+    orgId: string,
+    opts: { status?: string; q?: string; offset?: number; limit?: number } = {},
+  ): Promise<{ items: TkListing[]; total: number }> {
+    const all = await this.buildListingRows(orgId)
+    const tab = (opts.status ?? '').toLowerCase()
+    const q = (opts.q ?? '').trim().toLowerCase()
+
+    let filtered = all
+    if (tab && tab !== 'all') {
+      filtered = filtered.filter((r) => this.ttStatusTab(r.status) === tab)
+    }
+    if (q) {
+      filtered = filtered.filter(
+        (r) =>
+          r.title.toLowerCase().includes(q) ||
+          (r.seller_sku ?? '').toLowerCase().includes(q) ||
+          r.tts_product_id.includes(q),
+      )
+    }
+
+    const total = filtered.length
+    const offset = Math.max(0, opts.offset ?? 0)
+    const limit = Math.min(Math.max(1, opts.limit ?? 20), 100)
+    return { items: filtered.slice(offset, offset + limit), total }
+  }
+
+  /** Contadores por aba (mesmo shape do ML). */
+  async listingCounts(
+    orgId: string,
+  ): Promise<{ active: number; paused: number; closed: number; under_review: number }> {
+    const all = await this.buildListingRows(orgId)
+    const counts = { active: 0, paused: 0, closed: 0, under_review: 0 }
+    for (const r of all) counts[this.ttStatusTab(r.status)]++
+    return counts
   }
 }

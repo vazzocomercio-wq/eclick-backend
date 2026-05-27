@@ -240,6 +240,28 @@ const CREATIVE_ENTRIES: KbEntry[] = [
     tags: ['anúncios', 'listings', 'ml', 'vinculo', 'bulk-link', 'multi-conta', 'product_listings', 'catalogo', 'teto', 'preco', 'price-to-win'],
   },
   {
+    routes:   ['/dashboard/catalogo/anuncios/tiktok'],
+    category: 'catalogo',
+    title:    'Anúncios TikTok Shop — listagem + vínculo por SKU + margem',
+    content: `**Lista os produtos da sua loja TikTok Shop no nível do SKU** (cada variação = uma linha, porque cada SKU tem preço e estoque próprios). Tabs: Ativos / Pausados / Finalizados / Em revisão (mapeados do status do TikTok: ACTIVATE→Ativo, SELLER/PLATFORM_DEACTIVATED/FREEZE→Inativo, DELETED→Finalizado, PENDING/DRAFT/FAILED→Em revisão).
+
+**Por linha (card)**: thumbnail + título (+ variação) + SKU do vendedor + categoria + preço + estoque + status. Badge "Produto vinculado" quando há entry em \`product_listings\` (platform='tiktok_shop').
+
+🔗 **Vincular por SKU (1 a 1)** — botão "Vincular Produto":
+- Cada SKU do TikTok vincula a UM produto do catálogo. Se já existe um produto com o MESMO SKU, o card mostra "Vincular a [nome]" (vínculo num clique, sem abrir o picker).
+- Senão, abre o modal de busca → escolhe o produto + qtd por unidade → confirma.
+- Backend grava \`product_listings\` com platform='tiktok_shop' e listing_id = sku_id do TikTok. É um insert puro: NÃO mexe no estoque nem dispara sync do ML.
+
+**Painel de margem** (aparece no card vinculado): reusa o motor canônico de margem. Custo (CMV) e Imposto são editáveis e gravam no produto. A **Comissão TikTok (%)** é um controle no topo da página (a taxa que entra no cálculo), persistida no navegador — ajuste se a sua categoria tiver comissão diferente. Margem = Preço − Comissão − Custo − Imposto.
+
+🔄 **Sincronizar TikTok** (botão topo): re-importa os produtos da loja (idempotente). Também roda sozinho a cada 30min + via webhook em tempo real.
+
+**Estoque**: por enquanto é só exibição (mostra o estoque mestre do produto vinculado, que é a fonte que sincroniza com os canais). Edição de estoque e escrita de preço de volta no TikTok são fases seguintes.
+
+**Importante**: vender no TikTok hoje NÃO baixa o estoque do ML/loja (pedidos TikTok entram sem produto vinculado de propósito). A unificação do estoque (TikTok como canal que recebe e baixa o estoque mestre) é uma fase futura, que será ligada com cuidado.`,
+    tags: ['anúncios', 'listings', 'tiktok', 'tiktok-shop', 'vinculo', 'sku', 'product_listings', 'catalogo', 'margem', 'comissao'],
+  },
+  {
     routes:   ['/dashboard/creative'],
     category: 'creative',
     title:    'IA Criativo — lista de produtos criativos',

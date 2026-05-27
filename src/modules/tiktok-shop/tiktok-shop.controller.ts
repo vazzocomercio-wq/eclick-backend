@@ -200,6 +200,34 @@ export class TikTokShopController {
     return this.svc.previewPublish(u.orgId, body)
   }
 
+  /** Contadores por aba (Ativos/Pausados/Finalizados/Em revisão). Estático
+   *  ANTES de qualquer rota dinâmica pra não ser capturado por param. */
+  @Get('listings/counts')
+  @UseGuards(SupabaseAuthGuard)
+  listingCounts(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listingCounts(u.orgId)
+  }
+
+  /** Anúncios TikTok no nível do SKU (página de Anúncios). */
+  @Get('listings')
+  @UseGuards(SupabaseAuthGuard)
+  listings(
+    @ReqUser() u: ReqUserPayload,
+    @Query('status') status?: string,
+    @Query('q') q?: string,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listListings(u.orgId, {
+      status,
+      q,
+      offset: offset ? Number(offset) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    })
+  }
+
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   @UseGuards(SupabaseAuthGuard)
