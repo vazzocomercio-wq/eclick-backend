@@ -29,9 +29,10 @@ export class ListingScraperService {
 
   detectPlatform(url: string): MarketplacePlatform {
     const u = url.toLowerCase()
-    // TikTok Shop: produto não tem URL pública raspável — usamos um esquema
-    // sintético tiktok-shop://product/<tts_product_id> (vindo do seletor da UI).
-    if (/^tiktok-shop:\/\/product\//i.test(u)) return 'tiktok_shop'
+    // TikTok Shop: produto não tem URL pública raspável. O seletor da UI manda
+    // https://shop.tiktok.com/product/<tts_product_id> (passa na validação http)
+    // ou o esquema sintético tiktok-shop://product/<id>.
+    if (/shop\.tiktok\.com\/product\/\d/i.test(u) || /^tiktok-shop:\/\/product\//i.test(u)) return 'tiktok_shop'
     if (/mercadoli(vre|bre)/.test(u)) return 'mercadolivre'
     if (/shopee/.test(u))            return 'shopee'
     if (/amazon\./.test(u))          return 'amazon'
@@ -51,7 +52,7 @@ export class ListingScraperService {
   // ── TikTok Shop (lê o detalhe já importado em tiktok_shop_products.raw) ─────
 
   private async scrapeTiktok(url: string, orgId: string): Promise<ScrapedListing> {
-    const productId = url.match(/tiktok-shop:\/\/product\/([A-Za-z0-9_-]+)/i)?.[1]
+    const productId = url.match(/product\/(\d{6,})/i)?.[1]
     if (!productId) throw new GeoSkipError('not_a_product', `URL TikTok sem product id: ${url}`)
 
     const { data } = await supabaseAdmin
