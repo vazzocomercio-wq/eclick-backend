@@ -21,6 +21,88 @@ interface AccountMetricRow {
   accounts_engaged: number
 }
 
+interface FullPostRow {
+  id: string
+  network: string
+  account_external_id: string
+  external_post_id: string
+  media_type: string | null
+  media_product_type: string | null
+  permalink: string | null
+  caption: string | null
+  thumbnail_url: string | null
+  media_url: string | null
+  published_at: string | null
+  source: string
+  insights_available: boolean
+  latest_metrics: Record<string, number> | null
+}
+
+// ─── Drill-down por post (TR-A) ─────────────────────────────────
+export interface OrganicPostMetrics {
+  reach: number
+  views: number
+  likes: number
+  comments: number
+  shares: number
+  saved: number
+  impressions: number
+  total_interactions: number
+  engagement_rate: number
+}
+export interface OrganicPostItem {
+  id: string
+  network: string
+  account_external_id: string
+  external_post_id: string
+  media_type: string | null
+  media_product_type: string | null
+  permalink: string | null
+  caption: string
+  thumbnail_url: string | null
+  media_url: string | null
+  published_at: string | null
+  source: string
+  insights_available: boolean
+  metrics: OrganicPostMetrics
+  score: number
+}
+export interface OrganicPostsPage {
+  posts: OrganicPostItem[]
+  total: number
+}
+export interface OrganicPostDailyPoint {
+  date: string
+  reach: number
+  impressions: number
+  likes: number
+  comments: number
+  shares: number
+  saved: number
+  video_views: number
+  total_interactions: number
+  engagement_rate: number
+}
+export interface OrganicPostDetail {
+  post: OrganicPostItem
+  daily: OrganicPostDailyPoint[]
+  benchmark: {
+    format: string
+    median_reach: number
+    median_engagement_rate: number
+    sample: number
+  } | null
+}
+export interface OrganicPostsFilters {
+  format?: string
+  network?: string
+  account?: string
+  search?: string
+  sort?: 'reach' | 'engagement' | 'recent' | 'score'
+  limit?: number
+  offset?: number
+}
+
 /**
  * Agregador do Analytics Hub. Cruza TODAS as superfícies da org num resumo
  * único pro painel: contas conectadas (multi-rede) + orgânico (IG) + GEO
@@ -108,6 +190,137 @@ export class AnalyticsOverviewService {
       best_format: by_format[0]?.format ?? null,
       best_hour,
     }
+  }
+
+  // ─── Drill-down: lista de posts (TR-A) ────────────────────────────────────
+  /**
+   * Lista TODOS os posts da org com métricas individuais + score relativo
+   * estável (calculado sobre o conjunto inteiro, não muda com filtro). Filtros
+   * e ordenação são em memória (≤500 posts/org).
+   */
+  async listOrganicPosts(orgId: string, f: OrganicPostsFilters = {}): Promise<OrganicPostsPage> {
+    const { data } = await supabaseAdmin
+      .from('analytics_social_posts')
+      .select('id, network, account_external_id, external_post_id, media_type, media_product_type, permalink, caption, thumbnail_url, media_url, published_at, source, insights_available, latest_metrics')
+      .eq('organization_id', orgId)
+      .limit(500)
+    const all = (data ?? []) as FullPostRow[]
+
+    // máximos globais → score estável independente do filtro
+    const maxReach = Math.max(...all.map((r) => r.latest_metrics?.reach ?? 0), 1)
+    const maxEr = Math.max(...all.map((r) => r.latest_metrics?.engagement_rate ?? 0), 0.0001)
+
+    let rows = all
+    if (f.format) rows = rows.filter((r) => (r.media_product_type ?? 'OUTRO') === f.format)
+    if (f.network) rows = rows.filter((r) => r.network === f.network)
+    if (f.account) rows = rows.filter((r) => r.account_external_id === f.account)
+    if (f.search) {
+      const s = f.search.toLowerCase()
+      rows = rows.filter((r) => (r.caption ?? '').toLowerCase().includes(s))
+    }
+    const total = rows.length
+
+    const score = (r: FullPostRow) => this.scoreOf(r.latest_metrics?.reach ?? 0, r.latest_metrics?.engagement_rate ?? 0, maxReach, maxEr)
+    const sort = f.sort ?? 'reach'
+    rows = [...rows].sort((a, b) => {
+      if (sort === 'recent') return (new Date(b.published_at ?? 0).getTime()) - (new Date(a.published_at ?? 0).getTime())
+      if (sort === 'engagement') return (b.latest_metrics?.engagement_rate ?? 0) - (a.latest_metrics?.engagement_rate ?? 0)
+      if (sort === 'score') return score(b) - score(a)
+      return (b.latest_metrics?.reach ?? 0) - (a.latest_metrics?.reach ?? 0)
+    })
+
+    const offset = Math.max(f.offset ?? 0, 0)
+    const limit = Math.min(f.limit ?? 50, 200)
+    const page = rows.slice(offset, offset + limit)
+    return { posts: page.map((r) => this.toPostItem(r, score(r))), total }
+  }
+
+  /** Detalhe de 1 post: métricas + série diária + benchmark (mediana do formato). */
+  async getOrganicPostDetail(orgId: string, postId: string): Promise<OrganicPostDetail | null> {
+    const { data: post } = await supabaseAdmin
+      .from('analytics_social_posts')
+      .select('id, network, account_external_id, external_post_id, media_type, media_product_type, permalink, caption, thumbnail_url, media_url, published_at, source, insights_available, latest_metrics')
+      .eq('organization_id', orgId)
+      .eq('id', postId)
+      .maybeSingle()
+    if (!post) return null
+    const p = post as FullPostRow
+
+    const [{ data: dailyData }, { data: peersData }] = await Promise.all([
+      supabaseAdmin
+        .from('analytics_social_metrics_daily')
+        .select('date, reach, impressions, likes, comments, shares, saved, video_views, total_interactions, engagement_rate')
+        .eq('organization_id', orgId)
+        .eq('post_id', postId)
+        .order('date', { ascending: true })
+        .limit(180),
+      supabaseAdmin
+        .from('analytics_social_posts')
+        .select('media_product_type, latest_metrics')
+        .eq('organization_id', orgId)
+        .limit(500),
+    ])
+
+    const daily = (dailyData ?? []) as OrganicPostDailyPoint[]
+
+    // benchmark: mediana de alcance/engajamento dos posts do MESMO formato
+    const fmt = p.media_product_type ?? 'OUTRO'
+    const peers = ((peersData ?? []) as Array<{ media_product_type: string | null; latest_metrics: Record<string, number> | null }>)
+      .filter((x) => (x.media_product_type ?? 'OUTRO') === fmt)
+    const benchmark = peers.length
+      ? {
+          format: fmt,
+          median_reach: this.median(peers.map((x) => x.latest_metrics?.reach ?? 0)),
+          median_engagement_rate: this.median(peers.map((x) => x.latest_metrics?.engagement_rate ?? 0)),
+          sample: peers.length,
+        }
+      : null
+
+    return { post: this.toPostItem(p, 0), daily, benchmark }
+  }
+
+  private toPostItem(r: FullPostRow, score: number): OrganicPostItem {
+    const m = r.latest_metrics ?? {}
+    return {
+      id: r.id,
+      network: r.network,
+      account_external_id: r.account_external_id,
+      external_post_id: r.external_post_id,
+      media_type: r.media_type,
+      media_product_type: r.media_product_type,
+      permalink: r.permalink,
+      caption: r.caption ?? '',
+      thumbnail_url: r.thumbnail_url,
+      media_url: r.media_url,
+      published_at: r.published_at,
+      source: r.source,
+      insights_available: r.insights_available,
+      metrics: {
+        reach: m.reach ?? 0,
+        views: m.video_views ?? 0,
+        likes: m.likes ?? 0,
+        comments: m.comments ?? 0,
+        shares: m.shares ?? 0,
+        saved: m.saved ?? 0,
+        impressions: m.impressions ?? 0,
+        total_interactions: m.total_interactions ?? 0,
+        engagement_rate: m.engagement_rate ?? 0,
+      },
+      score,
+    }
+  }
+
+  private scoreOf(reach: number, er: number, maxReach: number, maxEr: number): number {
+    const r = maxReach > 0 ? reach / maxReach : 0
+    const e = maxEr > 0 ? er / maxEr : 0
+    return Math.round((0.45 * r + 0.55 * e) * 100)
+  }
+
+  private median(nums: number[]): number {
+    if (!nums.length) return 0
+    const s = [...nums].sort((a, b) => a - b)
+    const mid = Math.floor(s.length / 2)
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
   }
 
   async getOverview(orgId: string) {
