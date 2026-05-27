@@ -76,6 +76,14 @@ export class TikTokShopController {
     return this.svc.getStatus(u.orgId)
   }
 
+  /** Lista as lojas autorizadas (chamada assinada) e guarda o shop_cipher. */
+  @Get('shops')
+  @UseGuards(SupabaseAuthGuard)
+  shops(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getAuthorizedShops(u.orgId)
+  }
+
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   @UseGuards(SupabaseAuthGuard)

@@ -8,6 +8,7 @@ import {
 import * as crypto from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { encryptConfig, decryptConfig } from '../marketplace/crypto.util'
+import { signTikTokShop } from './tiktok-shop-sign.util'
 
 /**
  * TikTok Shop (app Personalizado) — Fase 1: OAuth da loja.
@@ -25,6 +26,7 @@ import { encryptConfig, decryptConfig } from '../marketplace/crypto.util'
 
 const TTS_AUTHORIZE = 'https://services.tiktokshop.com/open/authorize'
 const TTS_TOKEN = 'https://auth.tiktok-shops.com/api/v2/token/get'
+const TTS_API_BASE = 'https://open-api.tiktokglobalshop.com'
 
 interface TtsTokenData {
   access_token?: string
@@ -155,12 +157,12 @@ export class TikTokShopService {
     if (!credentials_encrypted) {
       throw new BadRequestException('Falha ao cifrar credenciais do TikTok Shop')
     }
-    const now = Date.now()
+    // TikTok Shop devolve *_expire_in como timestamp Unix ABSOLUTO (segundos).
     const accessExp = d.access_token_expire_in
-      ? new Date(now + d.access_token_expire_in * 1000).toISOString()
+      ? new Date(d.access_token_expire_in * 1000).toISOString()
       : null
     const refreshExp = d.refresh_token_expire_in
-      ? new Date(now + d.refresh_token_expire_in * 1000).toISOString()
+      ? new Date(d.refresh_token_expire_in * 1000).toISOString()
       : null
 
     const { error } = await supabaseAdmin.from('tiktok_shop_credentials').upsert(
@@ -232,5 +234,93 @@ export class TikTokShopService {
     const dec = decryptConfig(data.credentials_encrypted)
     const token = dec?.access_token
     return typeof token === 'string' ? token : null
+  }
+
+  // ── Fase 2: chamadas de negócio (assinadas HMAC) ──────────────────────────
+
+  /** Request assinada às APIs de negócio do TikTok Shop (open-api). */
+  private async ttsRequest<T>(args: {
+    method: 'GET' | 'POST'
+    path: string
+    accessToken: string
+    query?: Record<string, string | number | undefined>
+    body?: unknown
+  }): Promise<T> {
+    const { appKey, appSecret } = this.env()
+    const baseQuery: Record<string, string | number | undefined> = {
+      app_key: appKey,
+      timestamp: Math.floor(Date.now() / 1000),
+      ...(args.query ?? {}),
+    }
+    const bodyStr =
+      args.body !== undefined ? JSON.stringify(args.body) : undefined
+    const sign = signTikTokShop({
+      appSecret,
+      path: args.path,
+      query: baseQuery,
+      body: bodyStr,
+    })
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(baseQuery)) {
+      if (v !== undefined && v !== '') qs.set(k, String(v))
+    }
+    qs.set('sign', sign)
+
+    const res = await fetch(`${TTS_API_BASE}${args.path}?${qs.toString()}`, {
+      method: args.method,
+      headers: {
+        'x-tts-access-token': args.accessToken,
+        'Content-Type': 'application/json',
+      },
+      body: bodyStr,
+      signal: AbortSignal.timeout(25_000),
+    })
+    const json = (await res.json()) as {
+      code?: number
+      message?: string
+      data?: T
+    }
+    if (!res.ok || json.code !== 0) {
+      throw new BadRequestException(
+        `TikTok Shop ${args.path} falhou: ${json.message ?? `HTTP ${res.status}`} (code ${json.code ?? '?'})`,
+      )
+    }
+    return json.data as T
+  }
+
+  /** Lista as lojas autorizadas e guarda o shop_cipher (necessário pras
+   *  chamadas de pedido/produto das próximas fases). */
+  async getAuthorizedShops(orgId: string): Promise<
+    Array<{ id: string; name: string; region: string; cipher: string; code?: string }>
+  > {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+
+    const data = await this.ttsRequest<{
+      shops?: Array<{
+        id: string
+        name: string
+        region: string
+        seller_type?: string
+        cipher: string
+        code?: string
+      }>
+    }>({ method: 'GET', path: '/authorization/202309/shops', accessToken })
+
+    const shops = data.shops ?? []
+    const first = shops[0]
+    if (first?.cipher) {
+      await supabaseAdmin
+        .from('tiktok_shop_credentials')
+        .update({
+          shop_id: first.id,
+          shop_cipher: first.cipher,
+          seller_name: first.name ?? undefined,
+          region: first.region ?? undefined,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('organization_id', orgId)
+    }
+    return shops
   }
 }
