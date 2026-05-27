@@ -326,6 +326,25 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Blog da Loja (épico SB) — artigo GEO da vitrine, ciente dos produtos da loja.
+  store_blog_article: {
+    label:       'Artigo do Blog da Loja',
+    description: 'Gera artigo GEO-otimizado pra vitrine, apresentando/linkando os produtos da loja (cita fontes, FAQ, aiPrompts). jsonMode.',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  store_blog_ideate: {
+    label:       'Pautas do Blog da Loja',
+    description: 'Sugere pautas de blog pra loja ancoradas nos produtos/categorias + intenção de compra.',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  store_blog_cover: {
+    label:       'Capa do Blog da Loja',
+    description: 'Gera a imagem de capa do artigo do blog da loja.',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

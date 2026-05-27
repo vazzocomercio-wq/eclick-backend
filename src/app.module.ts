@@ -74,6 +74,7 @@ import { StorefrontEventsModule } from './modules/storefront-events/storefront-e
 import { StorefrontVariantsModule } from './modules/storefront-variants/storefront-variants.module'
 import { ProductTelemetryModule } from './modules/product-telemetry/product-telemetry.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
+import { StoreBlogModule } from './modules/store-blog/store-blog.module'
 import { FulfillmentModule } from './modules/fulfillment/fulfillment.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
@@ -169,6 +170,7 @@ import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
     StorefrontVariantsModule,
     ProductTelemetryModule,
     BannerGeneratorModule,
+    StoreBlogModule,
     FulfillmentModule,
     PaymentsModule,
     MlAiCoreModule,
