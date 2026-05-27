@@ -52,6 +52,7 @@ export function buildStoreArticleUserPrompt(input: {
   storeName?: string;
   voice?: string;
   storeUrl?: string;
+  knowledge?: string;
   products: StoreProductLite[];
 }): string {
   const productLines = input.products
@@ -63,6 +64,7 @@ export function buildStoreArticleUserPrompt(input: {
     .join('\n');
   return [
     input.voice ? `VOZ DA MARCA (siga o tom): ${input.voice}` : '',
+    input.knowledge ? `BASE DE CONHECIMENTO (referência factual — não copie literal):\n${input.knowledge}` : '',
     input.storeName ? `LOJA: ${input.storeName}` : '',
     `TEMA/PAUTA: ${input.topic}`,
     input.notes ? `DIREÇÕES EXTRAS: ${input.notes}` : '',

@@ -2,9 +2,8 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '../../common/supabase';
 import { LlmService } from '../ai/llm.service';
+import { StoreBlogStudioService } from './store-blog-studio.service';
 import {
-  STORE_ARTICLE_SYSTEM_PROMPT,
-  STORE_IDEATE_SYSTEM_PROMPT,
   buildStoreArticleUserPrompt,
   buildStoreIdeateUserPrompt,
   fallbackCoverPrompt,
@@ -31,7 +30,10 @@ const BUCKET = 'storefront-assets';
 export class StoreBlogService {
   private readonly log = new Logger(StoreBlogService.name);
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly studio: StoreBlogStudioService,
+  ) {}
 
   private get db() {
     return supabaseAdmin;
@@ -104,12 +106,18 @@ export class StoreBlogService {
   ): Promise<StoreBlogPostRow> {
     const t0 = Date.now();
     try {
-      const [store, products] = await Promise.all([this.loadStore(orgId), this.listProducts(orgId, productIds)]);
+      const [store, products, system, voice, knowledge] = await Promise.all([
+        this.loadStore(orgId),
+        this.listProducts(orgId, productIds),
+        this.studio.resolveSystemPrompt(orgId, 'article'),
+        this.studio.getVoice(orgId),
+        this.studio.getKnowledgeBlock(orgId),
+      ]);
       const out = await this.llm.generateText({
         orgId,
         feature: 'store_blog_article',
-        systemPrompt: STORE_ARTICLE_SYSTEM_PROMPT,
-        userPrompt: buildStoreArticleUserPrompt({ topic, notes, storeName: store.store_name, voice: store.voice, products }),
+        systemPrompt: system,
+        userPrompt: buildStoreArticleUserPrompt({ topic, notes, storeName: store.store_name, voice, knowledge, products }),
         jsonMode: true,
         maxTokens: 6000,
         temperature: 0.6,
@@ -205,7 +213,7 @@ export class StoreBlogService {
 
   async ideate(orgId: string, dto: IdeateStoreDto): Promise<{ topics: StoreTopicIdea[] }> {
     const count = Math.min(Math.max(dto.count ?? 5, 1), 10);
-    const [store, products, existing] = await Promise.all([
+    const [store, products, existing, system] = await Promise.all([
       this.loadStore(orgId),
       this.listProducts(orgId, undefined, 50),
       this.db
@@ -214,12 +222,13 @@ export class StoreBlogService {
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false })
         .limit(50),
+      this.studio.resolveSystemPrompt(orgId, 'ideate'),
     ]);
     const existingTitles = ((existing.data ?? []) as Array<{ title: string }>).map((r) => r.title);
     const out = await this.llm.generateText({
       orgId,
       feature: 'store_blog_ideate',
-      systemPrompt: STORE_IDEATE_SYSTEM_PROMPT,
+      systemPrompt: system,
       userPrompt: buildStoreIdeateUserPrompt({ seed: dto.seed, count, storeName: store.store_name, existingTitles, products }),
       jsonMode: true,
       maxTokens: 2000,
@@ -282,8 +291,36 @@ export class StoreBlogService {
       .select('*')
       .single();
     if (error) throw new BadRequestException(error.message);
+    const published = data as StoreBlogPostRow;
+    void this.revalidateStoreBlog(await this.slugForOrg(orgId), published.slug);
     this.log.log(`[store-blog] post ${id} publicado`);
-    return data as StoreBlogPostRow;
+    return published;
+  }
+
+  /** Slug público da loja (store_config). */
+  private async slugForOrg(orgId: string): Promise<string | null> {
+    const { data } = await this.db.from('store_config').select('store_slug').eq('organization_id', orgId).maybeSingle();
+    return (data as { store_slug?: string } | null)?.store_slug ?? null;
+  }
+
+  /**
+   * Avisa o frontend pra revalidar a vitrine do blog da loja (post aparece na
+   * hora). Best-effort. Env: STORE_BLOG_REVALIDATE_URL (ou BLOG_REVALIDATE_URL)
+   * + BLOG_REVALIDATE_SECRET.
+   */
+  private async revalidateStoreBlog(slug: string | null, postSlug?: string): Promise<void> {
+    const url = process.env.STORE_BLOG_REVALIDATE_URL || process.env.BLOG_REVALIDATE_URL;
+    const secret = process.env.BLOG_REVALIDATE_SECRET;
+    if (!url || !secret || !slug) return;
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret, storeSlug: slug, postSlug }),
+      });
+    } catch (e) {
+      this.log.warn(`revalidate store-blog falhou (non-fatal): ${(e as Error).message}`);
+    }
   }
 
   async schedule(orgId: string, id: string, scheduledForIso: string): Promise<StoreBlogPostRow> {
@@ -329,23 +366,29 @@ export class StoreBlogService {
     return (data as { organization_id?: string } | null)?.organization_id ?? null;
   }
 
-  /** Cards de posts publicados de uma loja (mais recentes primeiro). */
-  async listPublishedBySlug(slug: string): Promise<Array<Record<string, unknown>>> {
+  /** Cards de posts publicados de uma loja (mais recentes primeiro) + fonte do blog. */
+  async listPublishedBySlug(slug: string): Promise<{ posts: Array<Record<string, unknown>>; blogFont: string | null }> {
     const orgId = await this.resolveOrgBySlug(slug);
-    if (!orgId) return [];
-    const { data } = await this.db
-      .from('store_blog_posts')
-      .select('id, title, slug, excerpt, cover_image_url, reading_time_minutes, tags, published_at')
-      .eq('organization_id', orgId)
-      .eq('status', 'published')
-      .lte('published_at', new Date().toISOString())
-      .order('published_at', { ascending: false })
-      .limit(100);
-    return (data ?? []) as Array<Record<string, unknown>>;
+    if (!orgId) return { posts: [], blogFont: null };
+    const [{ data }, blogFont] = await Promise.all([
+      this.db
+        .from('store_blog_posts')
+        .select('id, title, slug, excerpt, cover_image_url, reading_time_minutes, tags, published_at')
+        .eq('organization_id', orgId)
+        .eq('status', 'published')
+        .lte('published_at', new Date().toISOString())
+        .order('published_at', { ascending: false })
+        .limit(100),
+      this.studio.getDisplayFont(orgId),
+    ]);
+    return { posts: (data ?? []) as Array<Record<string, unknown>>, blogFont };
   }
 
-  /** Post publicado (full) + produtos hidratados (featured + productGrid do corpo). */
-  async getPublishedBySlug(slug: string, postSlug: string): Promise<{ post: StoreBlogPostRow; products: StoreProductLite[] } | null> {
+  /** Post publicado (full) + produtos hidratados + fonte do blog. */
+  async getPublishedBySlug(
+    slug: string,
+    postSlug: string,
+  ): Promise<{ post: StoreBlogPostRow; products: StoreProductLite[]; blogFont: string | null } | null> {
     const orgId = await this.resolveOrgBySlug(slug);
     if (!orgId) return null;
     const { data } = await this.db
@@ -365,8 +408,11 @@ export class StoreBlogService {
         for (const id of grid.productIds) ids.add(id);
       }
     }
-    const products = ids.size ? await this.listProducts(orgId, [...ids]) : [];
-    return { post, products };
+    const [products, blogFont] = await Promise.all([
+      ids.size ? this.listProducts(orgId, [...ids]) : Promise.resolve([]),
+      this.studio.getDisplayFont(orgId),
+    ]);
+    return { post, products, blogFont };
   }
 
   /** Worker: publica todos os agendados vencidos (cross-org, service_role). Retorna quantos. */
@@ -374,11 +420,12 @@ export class StoreBlogService {
     const nowIso = new Date().toISOString();
     const { data } = await this.db
       .from('store_blog_posts')
-      .select('id, published_at')
+      .select('id, organization_id, slug, published_at')
       .eq('status', 'scheduled')
       .lte('scheduled_for', nowIso)
       .limit(20);
-    const rows = (data ?? []) as Array<{ id: string; published_at: string | null }>;
+    const rows = (data ?? []) as Array<{ id: string; organization_id: string; slug: string; published_at: string | null }>;
+    const slugCache = new Map<string, string | null>();
     let n = 0;
     for (const r of rows) {
       const { error } = await this.db
@@ -386,7 +433,10 @@ export class StoreBlogService {
         .update({ status: 'published', published_at: r.published_at ?? nowIso, updated_at: nowIso })
         .eq('id', r.id)
         .eq('status', 'scheduled');
-      if (!error) n++;
+      if (error) continue;
+      n++;
+      if (!slugCache.has(r.organization_id)) slugCache.set(r.organization_id, await this.slugForOrg(r.organization_id));
+      void this.revalidateStoreBlog(slugCache.get(r.organization_id) ?? null, r.slug);
     }
     return n;
   }

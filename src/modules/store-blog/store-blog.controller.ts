@@ -1,8 +1,9 @@
-import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
 import { Public } from '../../common/decorators/public.decorator';
 import { ReqUser } from '../../common/decorators/user.decorator';
 import { StoreBlogService } from './store-blog.service';
+import { StoreBlogStudioService, type StoreBlogPromptKey } from './store-blog-studio.service';
 import type { GenerateStorePostDto, IdeateStoreDto } from './store-blog.types';
 
 interface ReqUserPayload {
@@ -13,7 +14,66 @@ interface ReqUserPayload {
 @Controller('store-blog')
 @UseGuards(SupabaseAuthGuard)
 export class StoreBlogController {
-  constructor(private readonly svc: StoreBlogService) {}
+  constructor(
+    private readonly svc: StoreBlogService,
+    private readonly studio: StoreBlogStudioService,
+  ) {}
+
+  // ── Estúdio: voz/fonte + prompts + conhecimento ──────────────────────
+
+  @Get('settings')
+  getSettings(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.getSettings(u.orgId);
+  }
+
+  @Put('settings')
+  updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: { voice?: string | null; display_font?: string | null }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.updateSettings(u.orgId, body);
+  }
+
+  @Get('studio/prompts')
+  listPrompts(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.listPrompts(u.orgId);
+  }
+
+  @Put('studio/prompts/:key')
+  upsertPrompt(@ReqUser() u: ReqUserPayload, @Param('key') key: StoreBlogPromptKey, @Body() body: { prompt: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.upsertPrompt(u.orgId, key, body?.prompt);
+  }
+
+  @Delete('studio/prompts/:key')
+  resetPrompt(@ReqUser() u: ReqUserPayload, @Param('key') key: StoreBlogPromptKey) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.resetPrompt(u.orgId, key);
+  }
+
+  @Post('studio/prompts/:key/generate')
+  generatePrompt(@ReqUser() u: ReqUserPayload, @Param('key') key: StoreBlogPromptKey, @Body() body: { instruction: string; current_prompt?: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.generatePrompt(u.orgId, { key, instruction: body?.instruction, current_prompt: body?.current_prompt });
+  }
+
+  @Get('studio/knowledge')
+  listKnowledge(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.listKnowledge(u.orgId);
+  }
+
+  @Post('studio/knowledge')
+  addKnowledge(@ReqUser() u: ReqUserPayload, @Body() body: { source_type: 'url' | 'text'; value: string; title?: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.addKnowledge(u.orgId, body);
+  }
+
+  @Delete('studio/knowledge/:id')
+  removeKnowledge(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente');
+    return this.studio.removeKnowledge(u.orgId, id);
+  }
 
   /** Produtos da loja (pra escolher quais o artigo apresenta). */
   @Get('products')
@@ -91,7 +151,7 @@ export class StoreBlogPublicController {
   @Get(':slug/posts')
   @Public()
   posts(@Param('slug') slug: string) {
-    return this.svc.listPublishedBySlug(slug).then((posts) => ({ posts }));
+    return this.svc.listPublishedBySlug(slug);
   }
 
   @Get(':slug/posts/:postSlug')
