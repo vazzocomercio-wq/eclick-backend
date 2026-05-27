@@ -61,6 +61,14 @@ interface TtsOrder {
   update_time?: number
 }
 
+interface TtsProduct {
+  id: string
+  title?: string
+  status?: string
+  skus?: unknown[]
+  main_images?: Array<{ uri?: string; urls?: string[] }>
+}
+
 @Injectable()
 export class TikTokShopService {
   private readonly logger = new Logger(TikTokShopService.name)
@@ -425,6 +433,79 @@ export class TikTokShopService {
       )
       .eq('organization_id', orgId)
       .order('tts_create_time', { ascending: false, nullsFirst: false })
+      .limit(Math.min(limit, 200))
+    return data ?? []
+  }
+
+  // ── Fase 3: produtos ──────────────────────────────────────────────────────
+
+  /** Importa produtos do TikTok Shop → tiktok_shop_products (isolada). */
+  async importProducts(
+    orgId: string,
+    maxPages = 4,
+  ): Promise<{ imported: number; pages: number }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+
+    const { data: cred } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('shop_id')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ shop_id: string | null }>()
+    const shopId = cred?.shop_id ?? null
+
+    let pageToken: string | undefined
+    let imported = 0
+    let pages = 0
+    do {
+      const data = await this.ttsRequest<{
+        products?: TtsProduct[]
+        next_page_token?: string
+      }>({
+        method: 'POST',
+        path: '/product/202309/products/search',
+        accessToken,
+        query: { shop_cipher: shopCipher, page_size: 50, page_token: pageToken },
+        body: {},
+      })
+      const products = data.products ?? []
+      pages++
+
+      for (const p of products) {
+        const mainImg = p.main_images?.[0]?.urls?.[0] ?? null
+        const { error } = await supabaseAdmin.from('tiktok_shop_products').upsert(
+          {
+            organization_id: orgId,
+            shop_id: shopId,
+            tts_product_id: p.id,
+            title: p.title ?? null,
+            status: p.status ?? null,
+            sku_count: p.skus?.length ?? 0,
+            main_image_url: mainImg,
+            raw: p as unknown as Record<string, unknown>,
+            synced_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'organization_id,tts_product_id' },
+        )
+        if (!error) imported++
+      }
+
+      pageToken =
+        data.next_page_token && products.length > 0 ? data.next_page_token : undefined
+    } while (pageToken && pages < maxPages)
+
+    return { imported, pages }
+  }
+
+  /** Lista os produtos já importados (pra UI/validação + Fase 4). */
+  async listProducts(orgId: string, limit = 50): Promise<unknown[]> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_products')
+      .select('tts_product_id, title, status, sku_count, main_image_url, synced_at')
+      .eq('organization_id', orgId)
+      .order('synced_at', { ascending: false })
       .limit(Math.min(limit, 200))
     return data ?? []
   }
