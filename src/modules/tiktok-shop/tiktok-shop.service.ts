@@ -414,6 +414,33 @@ export class TikTokShopService {
           },
           { onConflict: 'organization_id,tts_order_id' },
         )
+
+        // Espelha no modelo UNIFICADO `orders` (tela central de pedidos, junto
+        // com ML/manual). product_id=NULL → ZERO impacto no estoque (o cron de
+        // estoque só lê platform='mercadolivre' + product_id not null).
+        // source/platform='tiktok_shop' isola totalmente do ML.
+        const total = o.payment?.total_amount ? Number(o.payment.total_amount) : null
+        const { error: ordErr } = await supabaseAdmin.from('orders').upsert(
+          {
+            organization_id: orgId,
+            source: 'tiktok_shop',
+            platform: 'tiktok_shop',
+            external_order_id: o.id,
+            sku: 'TTS-ORDER',
+            product_id: null,
+            product_title: 'Pedido TikTok Shop',
+            quantity: o.line_items?.length ?? 1,
+            sale_price: total != null && !Number.isNaN(total) ? total : null,
+            status: this.mapTtsStatus(o.status),
+            buyer_name: o.recipient_address?.name ?? null,
+            sold_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
+            raw_data: o as unknown as Record<string, unknown>,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'source,external_order_id,sku' },
+        )
+        if (ordErr) this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${ordErr.message}`)
+
         if (!error) imported++
       }
 
@@ -422,6 +449,29 @@ export class TikTokShopService {
     } while (pageToken && pages < maxPages)
 
     return { imported, pages }
+  }
+
+  /** Normaliza o status do TikTok pro vocabulário da tela central (igual ML). */
+  private mapTtsStatus(s?: string): string {
+    switch ((s ?? '').toUpperCase()) {
+      case 'UNPAID':
+      case 'ON_HOLD':
+        return 'pending'
+      case 'AWAITING_SHIPMENT':
+      case 'AWAITING_COLLECTION':
+      case 'PARTIALLY_SHIPPING':
+        return 'paid'
+      case 'IN_TRANSIT':
+        return 'shipped'
+      case 'DELIVERED':
+      case 'COMPLETED':
+        return 'delivered'
+      case 'CANCELLED':
+      case 'CANCEL':
+        return 'cancelled'
+      default:
+        return 'pending'
+    }
   }
 
   /** Lista os pedidos já importados (pra UI/validação). */

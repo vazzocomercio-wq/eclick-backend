@@ -94,7 +94,7 @@ export class OrdersService {
       q?:         string
       seller_id?: number
       tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao' | 'canceladas'
-      platform?:  'mercadolivre' | 'manual' | 'storefront' | 'all'
+      platform?:  'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all'
     } = {},
   ) {
     const offset = Math.max(options.offset ?? 0, 0)
@@ -121,8 +121,10 @@ export class OrdersService {
       q = q.eq('source', 'mercadolivre')
     } else if (options.platform === 'manual') {
       q = q.eq('source', 'manual')
+    } else if (options.platform === 'tiktok_shop') {
+      q = q.eq('source', 'tiktok_shop')
     } else {
-      q = q.in('source', ['mercadolivre', 'manual'])
+      q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
     }
 
     // Filtro de busca: matcheia external_order_id, sku ou buyer_name
@@ -256,6 +258,11 @@ export class OrdersService {
     orders: Array<Record<string, unknown>>,
     sellerIdFilter?: number,
   ): Promise<void> {
+    // Enriquecimento usa item/token do Mercado Livre — só faz sentido pra
+    // pedidos ML. Em telas só de TikTok Shop / loja própria, pula o fan-out.
+    if (!orders.some((o) => o.source === 'mercadolivre' || o.platform === 'mercadolivre')) {
+      return
+    }
     const tokens = sellerIdFilter == null
       ? await this.ml.getAllTokensForOrg(orgId).catch(() => [])
       : await this.ml.getTokenForOrg(orgId, sellerIdFilter).then(t => [t]).catch(() => [])
@@ -482,7 +489,7 @@ export class OrdersService {
   async listOrdersTabCounts(
     orgId: string | null,
     sellerId?: number,
-    platform?: 'mercadolivre' | 'manual' | 'storefront' | 'all',
+    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all',
   ): Promise<{
     abertas: number; em_preparacao: number; despachadas: number;
     pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
@@ -498,7 +505,8 @@ export class OrdersService {
       if (sellerId) q = q.eq('seller_id', sellerId)
       if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
       else if (platform === 'manual')       q = q.eq('source', 'manual')
-      else                                  q = q.in('source', ['mercadolivre', 'manual'])
+      else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
+      else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
       return q
     }
 
@@ -576,7 +584,7 @@ export class OrdersService {
   async listOrdersKpis(
     orgId: string | null,
     sellerId?: number,
-    platform?: 'mercadolivre' | 'manual' | 'storefront' | 'all',
+    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all',
   ) {
     if (platform === 'storefront') {
       return this.listStorefrontKpis(orgId)
@@ -611,7 +619,8 @@ export class OrdersService {
         if (sellerId)   q = q.eq('seller_id', sellerId)
         if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
         else if (platform === 'manual')       q = q.eq('source', 'manual')
-        else                                  q = q.in('source', ['mercadolivre', 'manual'])
+        else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
+        else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
         q = q.range(pageStart, pageStart + PAGE_SIZE - 1)
 
         const { data, error } = await q

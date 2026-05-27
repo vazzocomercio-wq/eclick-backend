@@ -91,11 +91,12 @@ export class OrdersController {
 
 function sanitizePlatform(
   raw?: string,
-): 'mercadolivre' | 'manual' | 'storefront' | 'all' | undefined {
+): 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all' | undefined {
   if (!raw) return undefined
   const v = raw.toLowerCase()
   if (v === 'mercadolivre' || v === 'ml')   return 'mercadolivre'
   if (v === 'manual')                       return 'manual'
+  if (v === 'tiktok_shop' || v === 'tiktok') return 'tiktok_shop'
   if (v === 'storefront' || v === 'loja')   return 'storefront'
   if (v === 'all' || v === 'todas')         return 'all'
   return undefined
