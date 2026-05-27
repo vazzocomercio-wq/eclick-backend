@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import { MercadolivreService } from '../../../mercadolivre/mercadolivre.service'
+import { supabaseAdmin } from '../../../../common/supabase'
 import { MarketplacePlatform, ScrapedListing } from '../../shared/types'
 import { GeoSkipError } from '../../shared/skip-error'
 
@@ -28,6 +29,9 @@ export class ListingScraperService {
 
   detectPlatform(url: string): MarketplacePlatform {
     const u = url.toLowerCase()
+    // TikTok Shop: produto não tem URL pública raspável — usamos um esquema
+    // sintético tiktok-shop://product/<tts_product_id> (vindo do seletor da UI).
+    if (/^tiktok-shop:\/\/product\//i.test(u)) return 'tiktok_shop'
     if (/mercadoli(vre|bre)/.test(u)) return 'mercadolivre'
     if (/shopee/.test(u))            return 'shopee'
     if (/amazon\./.test(u))          return 'amazon'
@@ -39,7 +43,56 @@ export class ListingScraperService {
     switch (platform) {
       case 'mercadolivre': return this.scrapeMl(url, orgId)
       case 'shopee':       return this.scrapeShopee(url)
+      case 'tiktok_shop':  return this.scrapeTiktok(url, orgId)
       default:             return this.scrapeGeneric(url, platform)
+    }
+  }
+
+  // ── TikTok Shop (lê o detalhe já importado em tiktok_shop_products.raw) ─────
+
+  private async scrapeTiktok(url: string, orgId: string): Promise<ScrapedListing> {
+    const productId = url.match(/tiktok-shop:\/\/product\/([A-Za-z0-9_-]+)/i)?.[1]
+    if (!productId) throw new GeoSkipError('not_a_product', `URL TikTok sem product id: ${url}`)
+
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_products')
+      .select('tts_product_id, title, main_image_url, raw')
+      .eq('organization_id', orgId)
+      .eq('tts_product_id', productId)
+      .maybeSingle()
+    const row = data as {
+      title: string | null; main_image_url: string | null
+      raw: {
+        title?: string; description?: string
+        main_images?: Array<{ urls?: string[] }>
+        category_chains?: Array<{ local_name?: string; is_leaf?: boolean }>
+        skus?: Array<{ price?: { sale_price?: string; tax_exclusive_price?: string } }>
+      } | null
+    } | null
+    if (!row) throw new GeoSkipError('product_not_found', `produto TikTok ${productId} não importado nesta org`)
+
+    const raw = row.raw ?? {}
+    const title = raw.title ?? row.title ?? null
+    if (!title) throw new GeoSkipError('product_not_found', `produto TikTok ${productId} sem título`)
+
+    const description = raw.description ? stripHtml(raw.description) : null
+    const images = (raw.main_images ?? []).flatMap((im) => im.urls ?? []).filter(Boolean)
+    if (images.length === 0 && row.main_image_url) images.push(row.main_image_url)
+    const chains = raw.category_chains ?? []
+    const leaf = chains.find((c) => c.is_leaf) ?? chains[chains.length - 1]
+    const priceRaw = raw.skus?.[0]?.price?.sale_price ?? raw.skus?.[0]?.price?.tax_exclusive_price
+    const price = priceRaw ? Number(String(priceRaw).replace(/[^\d.]/g, '')) : null
+
+    return {
+      url, platform: 'tiktok_shop', listingId: productId,
+      title,
+      description,
+      attributes: [],
+      price: Number.isFinite(price as number) ? (price as number) : null,
+      images,
+      reviews_count: null,
+      rating: null,
+      category: leaf?.local_name ?? null,
     }
   }
 
@@ -329,5 +382,14 @@ export class ListingScraperService {
       category,
       rawHtmlSnippet: html.slice(0, 2000),
     }
+  }
+}
+
+/** Remove tags HTML → texto plano (descrições do TikTok vêm com HTML). */
+function stripHtml(html: string): string {
+  try {
+    return cheerio.load(html).text().replace(/\s+/g, ' ').trim().slice(0, 6000)
+  } catch {
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 6000)
   }
 }

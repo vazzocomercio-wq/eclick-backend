@@ -28,7 +28,7 @@ export interface ScoreDimension {
 }
 
 /** Marketplace de origem da URL auditada (coluna ai_audit_jobs.platform). */
-export type MarketplacePlatform = 'mercadolivre' | 'shopee' | 'amazon' | 'generic'
+export type MarketplacePlatform = 'mercadolivre' | 'shopee' | 'amazon' | 'tiktok_shop' | 'generic'
 
 /** Dados estruturados extraídos de um listing pelo ListingScraperService. */
 export interface ScrapedListing {
