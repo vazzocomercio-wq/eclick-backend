@@ -84,6 +84,23 @@ export class TikTokShopController {
     return this.svc.getAuthorizedShops(u.orgId)
   }
 
+  /** Importa pedidos do TikTok Shop pra tabela isolada (tiktok_shop_orders). */
+  @Post('orders/import')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  importOrders(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.importOrders(u.orgId)
+  }
+
+  /** Lista os pedidos já importados. */
+  @Get('orders')
+  @UseGuards(SupabaseAuthGuard)
+  orders(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listOrders(u.orgId)
+  }
+
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   @UseGuards(SupabaseAuthGuard)

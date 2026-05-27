@@ -50,6 +50,17 @@ interface OAuthStateRow {
   redirect_to: string | null
 }
 
+interface TtsOrder {
+  id: string
+  status?: string
+  buyer_message?: string
+  recipient_address?: { name?: string }
+  payment?: { total_amount?: string; currency?: string }
+  line_items?: unknown[]
+  create_time?: number
+  update_time?: number
+}
+
 @Injectable()
 export class TikTokShopService {
   private readonly logger = new Logger(TikTokShopService.name)
@@ -322,5 +333,99 @@ export class TikTokShopService {
         .eq('organization_id', orgId)
     }
     return shops
+  }
+
+  // ── Fase 2b: pedidos ──────────────────────────────────────────────────────
+
+  /** shop_cipher salvo; se faltar, busca via getAuthorizedShops. */
+  private async getShopCipher(orgId: string): Promise<string> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('shop_cipher')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ shop_cipher: string | null }>()
+    if (data?.shop_cipher) return data.shop_cipher
+    const shops = await this.getAuthorizedShops(orgId)
+    const cipher = shops[0]?.cipher
+    if (!cipher) {
+      throw new BadRequestException('Nenhuma loja TikTok Shop autorizada encontrada')
+    }
+    return cipher
+  }
+
+  /** Importa pedidos do TikTok Shop → tiktok_shop_orders (isolada). Até maxPages. */
+  async importOrders(
+    orgId: string,
+    maxPages = 4,
+  ): Promise<{ imported: number; pages: number }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+
+    const { data: cred } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('shop_id')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ shop_id: string | null }>()
+    const shopId = cred?.shop_id ?? null
+
+    let pageToken: string | undefined
+    let imported = 0
+    let pages = 0
+    do {
+      const data = await this.ttsRequest<{
+        orders?: TtsOrder[]
+        next_page_token?: string
+      }>({
+        method: 'POST',
+        path: '/order/202309/orders/search',
+        accessToken,
+        query: { shop_cipher: shopCipher, page_size: 50, page_token: pageToken },
+        body: {},
+      })
+      const orders = data.orders ?? []
+      pages++
+
+      for (const o of orders) {
+        const { error } = await supabaseAdmin.from('tiktok_shop_orders').upsert(
+          {
+            organization_id: orgId,
+            shop_id: shopId,
+            tts_order_id: o.id,
+            order_status: o.status ?? null,
+            buyer_message: o.buyer_message ?? null,
+            recipient_name: o.recipient_address?.name ?? null,
+            total_amount: o.payment?.total_amount ?? null,
+            currency: o.payment?.currency ?? null,
+            line_item_count: o.line_items?.length ?? 0,
+            tts_create_time: o.create_time ?? null,
+            tts_update_time: o.update_time ?? null,
+            raw: o as unknown as Record<string, unknown>,
+            synced_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'organization_id,tts_order_id' },
+        )
+        if (!error) imported++
+      }
+
+      pageToken =
+        data.next_page_token && orders.length > 0 ? data.next_page_token : undefined
+    } while (pageToken && pages < maxPages)
+
+    return { imported, pages }
+  }
+
+  /** Lista os pedidos já importados (pra UI/validação). */
+  async listOrders(orgId: string, limit = 50): Promise<unknown[]> {
+    const { data } = await supabaseAdmin
+      .from('tiktok_shop_orders')
+      .select(
+        'tts_order_id, order_status, recipient_name, total_amount, currency, line_item_count, tts_create_time, synced_at',
+      )
+      .eq('organization_id', orgId)
+      .order('tts_create_time', { ascending: false, nullsFirst: false })
+      .limit(Math.min(limit, 200))
+    return data ?? []
   }
 }
