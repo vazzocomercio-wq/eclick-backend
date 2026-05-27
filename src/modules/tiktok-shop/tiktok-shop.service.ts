@@ -969,6 +969,134 @@ export class TikTokShopService {
     }
   }
 
+  // ── Fase 4b: PUBLICAR de verdade (contrato validado ao vivo) ───────────────
+
+  /** Armazém de vendas da loja (necessário no estoque do create). */
+  private async getWarehouseId(orgId: string): Promise<string | null> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) return null
+    const data = await this.ttsRequest<{ warehouses?: Array<{ id: string; type?: string }> }>({
+      method: 'GET',
+      path: '/logistics/202309/warehouses',
+      accessToken,
+    })
+    const whs = data.warehouses ?? []
+    return whs.find((w) => w.type === 'SALES_WAREHOUSE')?.id ?? whs[0]?.id ?? null
+  }
+
+  /** Sobe UMA imagem (baixa a URL → upload pro CDN do TikTok). Multipart: a
+   *  assinatura NÃO inclui corpo e o endpoint NÃO aceita shop_cipher (erro
+   *  36009004). Devolve o `uri` pra usar em main_images. */
+  private async uploadImageToTikTok(
+    imageUrl: string,
+    accessToken: string,
+  ): Promise<string | null> {
+    try {
+      const img = await fetch(imageUrl, { signal: AbortSignal.timeout(20_000) })
+      if (!img.ok) return null
+      const buf = Buffer.from(await img.arrayBuffer())
+      const { appKey, appSecret } = this.env()
+      const path = '/product/202309/images/upload'
+      const query: Record<string, string | number> = {
+        app_key: appKey,
+        timestamp: Math.floor(Date.now() / 1000),
+      }
+      const sign = signTikTokShop({ appSecret, path, query })
+      const qs = new URLSearchParams()
+      for (const [k, v] of Object.entries(query)) qs.set(k, String(v))
+      qs.set('sign', sign)
+      const fd = new FormData()
+      fd.append('data', new Blob([buf]), 'image.jpg')
+      fd.append('use_case', 'MAIN_IMAGE')
+      const res = await fetch(`${TTS_API_BASE}${path}?${qs.toString()}`, {
+        method: 'POST',
+        headers: { 'x-tts-access-token': accessToken },
+        body: fd,
+        signal: AbortSignal.timeout(30_000),
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        code?: number
+        data?: { uri?: string }
+      }
+      return json.code === 0 ? (json.data?.uri ?? null) : null
+    } catch {
+      return null
+    }
+  }
+
+  /** PUBLICA um produto no TikTok Shop (cria anúncio). Sobe as imagens, monta o
+   *  payload e cria. O caller (IA Criativo) passa os campos já resolvidos do
+   *  listing/produto. Idempotência fica a cargo do caller (cada chamada cria). */
+  async publishProduct(
+    orgId: string,
+    input: {
+      title: string
+      description?: string
+      category_id: string
+      image_urls: string[]
+      price: number
+      stock?: number
+      sku?: string
+      package_weight_kg?: number
+      package_dimensions_cm?: { length: number; width: number; height: number }
+      dry_run?: boolean
+    },
+  ): Promise<{ product_id: string | null; uploaded_images: number; dry_run?: boolean; skus?: unknown }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    if (!input.category_id) throw new BadRequestException('category_id é obrigatório')
+    if (!input.title?.trim()) throw new BadRequestException('título é obrigatório')
+    if (!input.image_urls?.length) throw new BadRequestException('pelo menos 1 imagem é obrigatória')
+    if (input.price == null) throw new BadRequestException('preço é obrigatório')
+
+    const shopCipher = await this.getShopCipher(orgId)
+    const warehouseId = await this.getWarehouseId(orgId)
+    if (!warehouseId) throw new BadRequestException('Nenhum armazém encontrado na loja')
+
+    const uris: string[] = []
+    for (const url of input.image_urls.slice(0, 9)) {
+      const uri = await this.uploadImageToTikTok(url, accessToken)
+      if (uri) uris.push(uri)
+    }
+    if (!uris.length) throw new BadRequestException('Falha ao subir as imagens pro TikTok')
+
+    const dim = input.package_dimensions_cm ?? { length: 20, width: 20, height: 15 }
+    const body = {
+      title: input.title,
+      description: `<p>${(input.description ?? input.title).replace(/</g, '&lt;')}</p>`,
+      category_id: input.category_id,
+      main_images: uris.map((uri) => ({ uri })),
+      package_weight: { value: String(input.package_weight_kg ?? 1), unit: 'KILOGRAM' },
+      package_dimensions: {
+        length: String(dim.length),
+        width: String(dim.width),
+        height: String(dim.height),
+        unit: 'CENTIMETER',
+      },
+      skus: [
+        {
+          seller_sku: input.sku ?? '',
+          inventory: [{ warehouse_id: warehouseId, quantity: input.stock ?? 1 }],
+          price: { amount: String(input.price), currency: 'BRL' },
+        },
+      ],
+    }
+
+    if (input.dry_run) {
+      return { product_id: null, uploaded_images: uris.length, dry_run: true }
+    }
+
+    const data = await this.ttsRequest<{ product_id: string; skus?: unknown }>({
+      method: 'POST',
+      path: '/product/202309/products',
+      accessToken,
+      query: { shop_cipher: shopCipher },
+      body,
+    })
+    this.logger.log(`[tts.publish] produto criado ${data.product_id} (${uris.length} imgs)`)
+    return { product_id: data.product_id, uploaded_images: uris.length, skus: data.skus }
+  }
+
   // ── Página de Anúncios TikTok (leitura) ───────────────────────────────────
 
   /** Mapeia o status do PRODUTO TikTok pras abas (vocabulário do ML). */

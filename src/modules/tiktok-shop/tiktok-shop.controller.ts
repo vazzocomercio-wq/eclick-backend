@@ -200,6 +200,31 @@ export class TikTokShopController {
     return this.svc.previewPublish(u.orgId, body)
   }
 
+  /** PUBLICA de verdade: sobe as imagens e cria o anúncio no TikTok Shop.
+   *  Ação explícita do usuário (cria conteúdo público). `dry_run` testa sem criar. */
+  @Post('publish')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  publish(
+    @ReqUser() u: ReqUserPayload,
+    @Body()
+    body: {
+      title: string
+      description?: string
+      category_id: string
+      image_urls: string[]
+      price: number
+      stock?: number
+      sku?: string
+      package_weight_kg?: number
+      package_dimensions_cm?: { length: number; width: number; height: number }
+      dry_run?: boolean
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.publishProduct(u.orgId, body)
+  }
+
   /** Contadores por aba (Ativos/Pausados/Finalizados/Em revisão). Estático
    *  ANTES de qualquer rota dinâmica pra não ser capturado por param. */
   @Get('listings/counts')
