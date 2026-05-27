@@ -67,6 +67,10 @@ interface TtsProduct {
   status?: string
   skus?: unknown[]
   main_images?: Array<{ uri?: string; urls?: string[] }>
+  // Campos extras que SÓ vêm no detalhe (GET /product/202309/products/{id}),
+  // não no search. Opcionais porque o search devolve só o produto "leve".
+  description?: string
+  category_chains?: Array<{ local_name?: string; is_leaf?: boolean }>
 }
 
 @Injectable()
@@ -507,11 +511,39 @@ export class TikTokShopService {
 
   // ── Fase 3: produtos ──────────────────────────────────────────────────────
 
-  /** Importa produtos do TikTok Shop → tiktok_shop_products (isolada). */
+  /** Detalhe completo do produto (imagem/descrição/preço/categoria). O search
+   *  devolve só o produto "leve" (sem imagem/descrição) — pra gerar conteúdo
+   *  (que exige foto https) precisamos do detalhe. Falha = null (não-fatal). */
+  private async getProductDetail(
+    productId: string,
+    shopCipher: string,
+    accessToken: string,
+  ): Promise<TtsProduct | null> {
+    try {
+      return await this.ttsRequest<TtsProduct>({
+        method: 'GET',
+        path: `/product/202309/products/${productId}`,
+        accessToken,
+        query: { shop_cipher: shopCipher },
+      })
+    } catch (e) {
+      this.logger.warn(
+        `[tts] detalhe do produto ${productId} falhou: ${e instanceof Error ? e.message : String(e)}`,
+      )
+      return null
+    }
+  }
+
+  /** Importa produtos do TikTok Shop → tiktok_shop_products (isolada).
+   *  Enriquece cada produto com o DETALHE (imagem/descrição) — necessário pro
+   *  Social AI (TS-P4). `enrich=false` pula o detalhe (sync leve/rápido).
+   *  Skip incremental: produtos que já têm imagem não re-buscam o detalhe. */
   async importProducts(
     orgId: string,
     maxPages = 4,
-  ): Promise<{ imported: number; pages: number }> {
+    opts: { enrich?: boolean } = {},
+  ): Promise<{ imported: number; pages: number; enriched: number }> {
+    const enrich = opts.enrich !== false
     const accessToken = await this.getAccessToken(orgId)
     if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
     const shopCipher = await this.getShopCipher(orgId)
@@ -523,8 +555,9 @@ export class TikTokShopService {
       .maybeSingle<{ shop_id: string | null }>()
     const shopId = cred?.shop_id ?? null
 
+    // 1) Coleta todos os produtos via search (leve, paginado).
+    const all: TtsProduct[] = []
     let pageToken: string | undefined
-    let imported = 0
     let pages = 0
     do {
       const data = await this.ttsRequest<{
@@ -538,33 +571,69 @@ export class TikTokShopService {
         body: {},
       })
       const products = data.products ?? []
+      all.push(...products)
       pages++
-
-      for (const p of products) {
-        const mainImg = p.main_images?.[0]?.urls?.[0] ?? null
-        const { error } = await supabaseAdmin.from('tiktok_shop_products').upsert(
-          {
-            organization_id: orgId,
-            shop_id: shopId,
-            tts_product_id: p.id,
-            title: p.title ?? null,
-            status: p.status ?? null,
-            sku_count: p.skus?.length ?? 0,
-            main_image_url: mainImg,
-            raw: p as unknown as Record<string, unknown>,
-            synced_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'organization_id,tts_product_id' },
-        )
-        if (!error) imported++
-      }
-
       pageToken =
         data.next_page_token && products.length > 0 ? data.next_page_token : undefined
     } while (pageToken && pages < maxPages)
 
-    return { imported, pages }
+    // 2) Quais já têm imagem (pra pular o detalhe em re-syncs).
+    const { data: existingRows } = await supabaseAdmin
+      .from('tiktok_shop_products')
+      .select('tts_product_id, main_image_url')
+      .eq('organization_id', orgId)
+    const haveImage = new Set(
+      (existingRows ?? [])
+        .filter((r) => (r as { main_image_url: string | null }).main_image_url)
+        .map((r) => (r as { tts_product_id: string }).tts_product_id),
+    )
+
+    // 3) Enriquece (concorrência limitada) + upsert.
+    let imported = 0
+    let enriched = 0
+    const CONCURRENCY = 8
+    for (let i = 0; i < all.length; i += CONCURRENCY) {
+      const chunk = all.slice(i, i + CONCURRENCY)
+      await Promise.all(
+        chunk.map(async (p) => {
+          const skipDetail = !enrich || haveImage.has(p.id)
+          const detail = skipDetail
+            ? null
+            : await this.getProductDetail(p.id, shopCipher, accessToken)
+          if (detail) enriched++
+          const merged: TtsProduct = detail ?? p
+          const mainImg = merged.main_images?.[0]?.urls?.[0] ?? null
+
+          const row: Record<string, unknown> = {
+            organization_id: orgId,
+            shop_id: shopId,
+            tts_product_id: p.id,
+            title: merged.title ?? p.title ?? null,
+            status: merged.status ?? p.status ?? null,
+            sku_count: merged.skus?.length ?? p.skus?.length ?? 0,
+            synced_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }
+          // Só sobrescreve imagem/raw quando temos o detalhe; senão preserva o
+          // que já existe (não rebaixa um produto enriquecido pro "leve").
+          if (detail) {
+            row.main_image_url = mainImg
+            row.raw = merged as unknown as Record<string, unknown>
+          } else if (!haveImage.has(p.id)) {
+            // Primeiro insert sem detalhe (ex.: enrich=false): grava o leve.
+            row.main_image_url = mainImg
+            row.raw = merged as unknown as Record<string, unknown>
+          }
+
+          const { error } = await supabaseAdmin
+            .from('tiktok_shop_products')
+            .upsert(row, { onConflict: 'organization_id,tts_product_id' })
+          if (!error) imported++
+        }),
+      )
+    }
+
+    return { imported, pages, enriched }
   }
 
   /** Lista os produtos já importados (pra UI/validação + Fase 4). */
