@@ -821,6 +821,49 @@ export class TikTokShopService {
     return data ?? []
   }
 
+  // ── GEO Optimizer: ler + editar título/descrição do anúncio ────────────────
+
+  /** Título + descrição ATUAIS do produto, lidos AO VIVO do TikTok. Usado pelo
+   *  GEO Optimizer pra tirar o snapshot (rollback) antes de publicar. */
+  async getProductEditable(
+    orgId: string,
+    productId: string,
+  ): Promise<{ title: string; description: string } | null> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const p = await this.getProductDetail(productId, shopCipher, accessToken)
+    if (!p) return null
+    return { title: p.title ?? '', description: p.description ?? '' }
+  }
+
+  /** Edição PARCIAL do produto: atualiza SÓ os campos enviados; o resto do
+   *  anúncio (preço/estoque/imagens/atributos) fica intacto (atômico — se a API
+   *  recusar, nada muda). Usado pelo GEO Optimizer pra publicar o título/descrição
+   *  reescritos. ALTO RISCO: mexe no anúncio real → sempre gated + versionado
+   *  pelo publisher (rollback disponível). */
+  async partialEditProduct(
+    orgId: string,
+    productId: string,
+    fields: { title?: string; description?: string },
+  ): Promise<void> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const body: Record<string, unknown> = {}
+    if (fields.title != null && fields.title !== '') body.title = fields.title
+    if (fields.description != null && fields.description !== '') body.description = fields.description
+    if (Object.keys(body).length === 0) throw new BadRequestException('Nada pra editar no anúncio.')
+    await this.ttsRequest({
+      method: 'POST',
+      path: `/product/202309/products/${productId}/partial_edit`,
+      accessToken,
+      query: { shop_cipher: shopCipher },
+      body,
+    })
+    this.logger.log(`[tts] partial_edit product=${productId} campos=${Object.keys(body).join('+')}`)
+  }
+
   // ── Fase 4: publicar produto — base de PREVIEW/MAPEAMENTO (NÃO publica) ─────
   // Tudo read-only contra o TikTok (categorias/atributos/recomendar). A criação
   // real do anúncio (product/202309/products create + upload imagem) é a fase 2,

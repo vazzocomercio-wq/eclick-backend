@@ -9,6 +9,7 @@ import { GeoSkipError } from '../shared/skip-error'
 import { TitleRewriterService } from './services/title-rewriter.service'
 import { DescriptionBuilderService } from './services/description-builder.service'
 import { MlPublisherService } from './services/ml-publisher.service'
+import { TiktokPublisherService } from './services/tiktok-publisher.service'
 import { ImpactTrackerService } from './services/impact-tracker.service'
 import { RankSimulatorService } from './services/rank-simulator.service'
 import { DraftGeoService } from './services/draft-geo.service'
@@ -28,6 +29,7 @@ export class GeoOptimizerController {
     private readonly titles:       TitleRewriterService,
     private readonly descriptions: DescriptionBuilderService,
     private readonly publisher:    MlPublisherService,
+    private readonly ttPublisher:  TiktokPublisherService,
     private readonly impact:       ImpactTrackerService,
     private readonly simulator:    RankSimulatorService,
     private readonly draftGeo:     DraftGeoService,
@@ -168,10 +170,12 @@ export class GeoOptimizerController {
       orgId: user.orgId, userId: user.id, jobId: optimizerId, feature: 'geo_optimizer',
       eventName: 'geo_optimizer.variation_selected', properties: { optimizer_id: optimizerId, variant },
     })
-    return this.publisher.apply({
+    const args = {
       orgId: user.orgId, userId: user.id, optimizerId, variant: variant as 'A' | 'B' | 'C',
       confirmBatchExpansion: confirmBatch === 'true' || confirmBatch === '1',
-    })
+    }
+    const platform = await this.platformOf(user.orgId, optimizerId)
+    return platform === 'tiktok_shop' ? this.ttPublisher.apply(args) : this.publisher.apply(args)
   }
 
   /** POST /ai-visibility/optimize/:optimizerId/rollback — volta o anúncio ao original. */
@@ -181,6 +185,18 @@ export class GeoOptimizerController {
     @Param('optimizerId') optimizerId: string,
     @Body() body: { reason?: string },
   ) {
-    return this.publisher.rollback({ orgId: user.orgId, userId: user.id, optimizerId, reason: body?.reason })
+    const args = { orgId: user.orgId, userId: user.id, optimizerId, reason: body?.reason }
+    const platform = await this.platformOf(user.orgId, optimizerId)
+    return platform === 'tiktok_shop' ? this.ttPublisher.rollback(args) : this.publisher.rollback(args)
+  }
+
+  /** Lê a plataforma do rascunho pra rotear o publisher (ML × TikTok). */
+  private async platformOf(orgId: string, optimizerId: string): Promise<string> {
+    const { data } = await supabaseAdmin
+      .from('ai_optimizer_results')
+      .select('platform')
+      .eq('id', optimizerId).eq('org_id', orgId).maybeSingle()
+    if (!data) throw new NotFoundException('Otimização não encontrada.')
+    return (data as { platform: string }).platform
   }
 }
