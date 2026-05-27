@@ -184,22 +184,40 @@ export class TikTokShopService {
       ? new Date(d.refresh_token_expire_in * 1000).toISOString()
       : null
 
-    const { error } = await supabaseAdmin.from('tiktok_shop_credentials').upsert(
-      {
-        organization_id: orgId,
-        open_id: d.open_id ?? null,
-        seller_name: d.seller_name ?? null,
-        region: d.seller_base_region ?? null,
-        credentials_encrypted,
-        scopes: d.granted_scopes ?? [],
-        access_expires_at: accessExp,
-        refresh_expires_at: refreshExp,
-        status: 'connected',
-        raw: raw as Record<string, unknown>,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'organization_id' },
-    )
+    // Detecta TROCA DE CONTA: se o open_id mudou (lojista reautorizou com outra
+    // conta/loja), o shop_id/shop_cipher guardados são de OUTRA loja e ficariam
+    // obsoletos (o upsert não toca colunas ausentes). Zeramos pra forçar o
+    // getShopCipher a re-buscar a loja certa via getAuthorizedShops. Sem isso,
+    // chamadas de pedido/produto usariam o cipher da loja anterior.
+    const { data: existing } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .select('open_id')
+      .eq('organization_id', orgId)
+      .maybeSingle<{ open_id: string | null }>()
+    const accountChanged =
+      !!existing?.open_id && existing.open_id !== (d.open_id ?? null)
+
+    const row: Record<string, unknown> = {
+      organization_id: orgId,
+      open_id: d.open_id ?? null,
+      seller_name: d.seller_name ?? null,
+      region: d.seller_base_region ?? null,
+      credentials_encrypted,
+      scopes: d.granted_scopes ?? [],
+      access_expires_at: accessExp,
+      refresh_expires_at: refreshExp,
+      status: 'connected',
+      raw: raw as Record<string, unknown>,
+      updated_at: new Date().toISOString(),
+    }
+    if (accountChanged) {
+      row.shop_id = null
+      row.shop_cipher = null
+    }
+
+    const { error } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .upsert(row, { onConflict: 'organization_id' })
     if (error) {
       throw new BadRequestException(
         `Falha ao salvar credencial TikTok Shop: ${error.message}`,
