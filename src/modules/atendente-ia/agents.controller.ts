@@ -6,11 +6,12 @@ import { AgentsService } from './agents.service'
 import { ConversationsService } from './conversations.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('atendente-ia')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AgentsController {
   constructor(
     private readonly svc:           AgentsService,
@@ -20,21 +21,25 @@ export class AgentsController {
   // ── Agents ────────────────────────────────────────────────────────────────
 
   @Get('agents')
+  @RequirePermission('ai.view_usage')
   list(@ReqUser() u: ReqUserPayload) {
     return this.svc.listAgents(u.orgId!)
   }
 
   @Get('agents/:id')
+  @RequirePermission('ai.view_usage')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getAgent(u.orgId!, id)
   }
 
   @Post('agents')
+  @RequirePermission('ai.manage_budget')
   create(@ReqUser() u: ReqUserPayload, @Body() body: Parameters<AgentsService['createAgent']>[1]) {
     return this.svc.createAgent(u.orgId!, body)
   }
 
   @Patch('agents/:id')
+  @RequirePermission('ai.manage_budget')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -45,12 +50,14 @@ export class AgentsController {
 
   @Patch('agents/:id/toggle')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ai.manage_budget')
   toggle(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.toggleAgent(u.orgId!, id)
   }
 
   @Delete('agents/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   delete(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.deleteAgent(u.orgId!, id)
   }
@@ -58,6 +65,7 @@ export class AgentsController {
   // ── Channels ──────────────────────────────────────────────────────────────
 
   @Post('agents/:id/channels/:channel')
+  @RequirePermission('ai.manage_budget')
   upsertChannel(
     @ReqUser() u: ReqUserPayload,
     @Param('id') agentId: string,
@@ -69,6 +77,7 @@ export class AgentsController {
 
   @Delete('agents/:id/channels/:channel')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   deleteChannel(
     @ReqUser() u: ReqUserPayload,
     @Param('id') agentId: string,
@@ -80,11 +89,13 @@ export class AgentsController {
   // ── Knowledge ─────────────────────────────────────────────────────────────
 
   @Get('agents/:id/knowledge')
+  @RequirePermission('ai.view_usage')
   listKnowledge(@ReqUser() u: ReqUserPayload, @Param('id') agentId: string) {
     return this.svc.listKnowledge(u.orgId!, agentId)
   }
 
   @Post('agents/:id/knowledge')
+  @RequirePermission('ai.manage_budget')
   createKnowledge(
     @ReqUser() u: ReqUserPayload,
     @Param('id') agentId: string,
@@ -94,6 +105,7 @@ export class AgentsController {
   }
 
   @Patch('knowledge/:id')
+  @RequirePermission('ai.manage_budget')
   updateKnowledge(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -104,6 +116,7 @@ export class AgentsController {
 
   @Delete('knowledge/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   deleteKnowledge(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.deleteKnowledge(u.orgId!, id)
   }
@@ -111,11 +124,13 @@ export class AgentsController {
   // ── Training ──────────────────────────────────────────────────────────────
 
   @Get('agents/:id/training')
+  @RequirePermission('ai.view_usage')
   listTraining(@ReqUser() u: ReqUserPayload, @Param('id') agentId: string) {
     return this.svc.listTraining(u.orgId!, agentId)
   }
 
   @Post('agents/:id/training')
+  @RequirePermission('ai.manage_budget')
   createTraining(
     @ReqUser() u: ReqUserPayload,
     @Param('id') agentId: string,
@@ -126,12 +141,14 @@ export class AgentsController {
 
   @Patch('training/:id/validate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ai.manage_budget')
   validateTraining(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.validateTraining(u.orgId!, id)
   }
 
   @Delete('training/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   deleteTraining(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.deleteTraining(u.orgId!, id)
   }
@@ -139,6 +156,7 @@ export class AgentsController {
   // ── Analytics ─────────────────────────────────────────────────────────────
 
   @Get('analytics')
+  @RequirePermission('ai.view_usage')
   getAnalytics(
     @ReqUser() u: ReqUserPayload,
     @Query('agent_id') agentId: string,
@@ -151,6 +169,7 @@ export class AgentsController {
   }
 
   @Get('analytics/top-questions')
+  @RequirePermission('ai.view_usage')
   topQuestions(
     @ReqUser() u: ReqUserPayload,
     @Query('limit') limit?: string,
@@ -159,6 +178,7 @@ export class AgentsController {
   }
 
   @Get('analytics/by-agent')
+  @RequirePermission('ai.view_usage')
   byAgent(
     @ReqUser() u: ReqUserPayload,
     @Query('days') days?: string,
@@ -167,6 +187,7 @@ export class AgentsController {
   }
 
   @Get('analytics/insights')
+  @RequirePermission('ai.view_usage')
   insights(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     return this.conversations.listInsights(u.orgId!, limit ? Number(limit) : 10)
   }

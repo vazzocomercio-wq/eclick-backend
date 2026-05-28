@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Headers, HttpException, HttpCode, HttpSt
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { AiKnowledgeService } from './ai-knowledge.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface CreateKnowledgeDto {
   type:           string                   // faq | policy | product | procedure
@@ -21,7 +22,7 @@ interface UpdateKnowledgeDto {
 }
 
 @Controller('ai/knowledge')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AiKnowledgeController {
   constructor(private readonly kb: AiKnowledgeService) {}
 
@@ -43,6 +44,7 @@ export class AiKnowledgeController {
    * and returns top 10 sorted by score; otherwise plain SELECT.
    */
   @Get()
+  @RequirePermission('ai.view_usage')
   async list(
     @Headers('authorization') auth: string,
     @Query('agent_id') agentId?: string,
@@ -81,6 +83,7 @@ export class AiKnowledgeController {
   }
 
   @Post()
+  @RequirePermission('ai.manage_budget')
   async create(
     @Headers('authorization') auth: string,
     @Body() body: CreateKnowledgeDto,
@@ -132,6 +135,7 @@ export class AiKnowledgeController {
   }
 
   @Patch(':id')
+  @RequirePermission('ai.manage_budget')
   async update(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -160,6 +164,7 @@ export class AiKnowledgeController {
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   async remove(@Headers('authorization') auth: string, @Param('id') id: string) {
     const orgId = await this.resolveOrgId(auth)
     const { error } = await supabaseAdmin
@@ -175,6 +180,7 @@ export class AiKnowledgeController {
 
   @Post('/agent/:agentId/:kbId')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ai.manage_budget')
   async link(
     @Headers('authorization') auth: string,
     @Param('agentId') agentId: string,
@@ -199,6 +205,7 @@ export class AiKnowledgeController {
 
   @Delete('/agent/:agentId/:kbId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('ai.manage_budget')
   async unlink(
     @Headers('authorization') auth: string,
     @Param('agentId') agentId: string,

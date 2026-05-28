@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Body, Param, Query, UseGuards, BadRequestException, HttpCode, HttpStatus } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { CategoryResearchService } from './services/category-research.service'
 import { ExistingListingOptimizerService } from './services/existing-listing-optimizer.service'
 import { FeedbackLoopService } from './services/feedback-loop.service'
@@ -20,7 +21,7 @@ interface AuthUser { id: string; orgId: string | null }
  *   MVP 4: cron + dashboards de feedback loop
  */
 @Controller('e-otimizer')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class EOtimizerController {
   constructor(
     private readonly researchSvc: CategoryResearchService,
@@ -39,6 +40,7 @@ export class EOtimizerController {
    *   refresh      — força regenerar mesmo com cache (default: false)
    */
   @Get('research')
+  @RequirePermission('products.view')
   research(
     @ReqUser() user: AuthUser,
     @Query('categoryId') categoryId: string,
@@ -73,6 +75,7 @@ export class EOtimizerController {
    */
   @Post('listings/:mlbId/analyze')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
   analyzeListing(@ReqUser() user: AuthUser, @Param('mlbId') mlbId: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     if (!mlbId?.trim()) throw new BadRequestException('mlbId obrigatório')
@@ -86,6 +89,7 @@ export class EOtimizerController {
    */
   @Post('listings/optimizations/:optimizationId/apply')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.publish_ml')
   applyOptimization(
     @ReqUser() user: AuthUser,
     @Param('optimizationId') optimizationId: string,
@@ -106,6 +110,7 @@ export class EOtimizerController {
    * MVP 4 — histórico de otimizações da org (pra UI de tracking).
    */
   @Get('listings/optimizations/history')
+  @RequirePermission('products.view')
   optimizationHistory(@ReqUser() user: AuthUser, @Query('limit') limit?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const lim = limit ? Math.min(Math.max(1, Number(limit)), 200) : 50
@@ -117,6 +122,7 @@ export class EOtimizerController {
    * Retorna stats de quanto as otimizações estão de fato impactando vendas.
    */
   @Get('feedback/summary')
+  @RequirePermission('products.view')
   feedbackSummary(@ReqUser() user: AuthUser) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.feedback.getSummary(user.orgId)
@@ -128,6 +134,7 @@ export class EOtimizerController {
    */
   @Post('feedback/:optimizationId/capture')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
   captureMetrics(@ReqUser() user: AuthUser, @Param('optimizationId') optId: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.feedback.captureMetrics(user.orgId, optId)

@@ -2,6 +2,7 @@ import { Controller, Get, Post, Body, Param, Query, UseGuards, BadRequestExcepti
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RadarService } from './radar.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface AuthUser {
   id: string
@@ -13,36 +14,41 @@ interface AuthUser {
  * A coleta/escrita roda no eclick-workers; aqui é só leitura.
  */
 @Controller('radar')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class RadarController {
   constructor(private readonly radar: RadarService) {}
 
   /** Tela 1 — watchlist + agregados. ?status=ativo|pausado filtra. */
   @Get('products')
+  @RequirePermission('products.view')
   listProducts(@ReqUser() user: AuthUser, @Query('status') status?: string) {
     return this.radar.listProducts(this.org(user), status)
   }
 
   /** Tela 1 — KPI strip. */
   @Get('summary')
+  @RequirePermission('products.view')
   getSummary(@ReqUser() user: AuthUser) {
     return this.radar.getSummary(this.org(user))
   }
 
   /** Tela 1 — feed "o que mudou" (eventos da org inteira). */
   @Get('events')
+  @RequirePermission('products.view')
   listEvents(@ReqUser() user: AuthUser, @Query('limit') limit?: string) {
     return this.radar.listEvents(this.org(user), limit ? Number(limit) : undefined)
   }
 
   /** Status real do catálogo (price_to_win) dos itens próprios — telas de anúncios. */
   @Get('catalog-status')
+  @RequirePermission('products.view')
   catalogStatus(@ReqUser() user: AuthUser) {
     return this.radar.getCatalogStatus(this.org(user))
   }
 
   /** Teto do catálogo (concorrente mais barato) pros anúncios informados. */
   @Post('catalog-ceiling')
+  @RequirePermission('products.view')
   catalogCeiling(@ReqUser() user: AuthUser, @Body() body: { item_ids?: string[] }) {
     const ids = Array.isArray(body?.item_ids) ? body.item_ids : []
     return this.radar.getCatalogCeiling(this.org(user), ids)
@@ -50,24 +56,28 @@ export class RadarController {
 
   /** Tela 2 — produto + ranking competitivo + dados de margem. */
   @Get('products/:id')
+  @RequirePermission('products.view')
   getProduct(@ReqUser() user: AuthUser, @Param('id') id: string) {
     return this.radar.getProduct(this.org(user), id)
   }
 
   /** Modal "Ajustar preço" — preço pra ganhar + custo + tarifa + frete. */
   @Get('products/:id/price-context')
+  @RequirePermission('products.view')
   getPriceContext(@ReqUser() user: AuthUser, @Param('id') id: string) {
     return this.radar.getPriceContext(this.org(user), id)
   }
 
   /** Tela 2 — séries de preço (Vazzo + top 4 concorrentes) e visitas. */
   @Get('products/:id/series')
+  @RequirePermission('products.view')
   getSeries(@ReqUser() user: AuthUser, @Param('id') id: string) {
     return this.radar.getSeries(this.org(user), id)
   }
 
   /** Tela 2 — feed de eventos do produto. */
   @Get('products/:id/events')
+  @RequirePermission('products.view')
   getProductEvents(@ReqUser() user: AuthUser, @Param('id') id: string) {
     return this.radar.getProductEvents(this.org(user), id)
   }

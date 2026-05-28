@@ -5,6 +5,7 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { AlertManagersService } from './alert-managers.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import type { CreateManagerDto } from './dto/create-manager.dto'
 import type { UpdateManagerDto } from './dto/update-manager.dto'
 import type { ConfirmPhoneDto } from './dto/confirm-phone.dto'
@@ -12,29 +13,33 @@ import type { ConfirmPhoneDto } from './dto/confirm-phone.dto'
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('alert-managers')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AlertManagersController {
   constructor(private readonly svc: AlertManagersService) {}
 
   @Get()
+  @RequirePermission('settings.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Get(':id')
+  @RequirePermission('settings.view')
   findOne(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.findOne(u.orgId, id)
   }
 
   @Post()
+  @RequirePermission('settings.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: CreateManagerDto) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(u.orgId, body)
   }
 
   @Patch(':id')
+  @RequirePermission('settings.update')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -45,18 +50,21 @@ export class AlertManagersController {
   }
 
   @Delete(':id')
+  @RequirePermission('settings.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)
   }
 
   @Post(':id/verify-phone')
+  @RequirePermission('settings.update')
   verifyPhone(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.sendVerificationCode(u.orgId, id)
   }
 
   @Post(':id/confirm-phone')
+  @RequirePermission('settings.update')
   confirmPhone(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

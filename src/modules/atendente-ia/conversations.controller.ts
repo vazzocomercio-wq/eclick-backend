@@ -5,15 +5,17 @@ import {
 import { ConversationsService } from './conversations.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('atendente-ia/conversations')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ConversationsController {
   constructor(private readonly svc: ConversationsService) {}
 
   @Get()
+  @RequirePermission('crm.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status')   status?: string,
@@ -35,16 +37,19 @@ export class ConversationsController {
   }
 
   @Get(':id')
+  @RequirePermission('crm.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getConversation(u.orgId!, id)
   }
 
   @Get(':id/messages')
+  @RequirePermission('crm.view')
   messages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getMessages(u.orgId!, id)
   }
 
   @Post(':id/messages')
+  @RequirePermission('crm.message')
   sendMessage(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -55,6 +60,7 @@ export class ConversationsController {
 
   @Post(':id/approve')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   approve(
     @ReqUser() u: ReqUserPayload,
     @Param('id') convId: string,
@@ -65,6 +71,7 @@ export class ConversationsController {
 
   @Post(':id/discard-suggestion')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   discard(
     @ReqUser() u: ReqUserPayload,
     @Param('id') convId: string,
@@ -75,12 +82,14 @@ export class ConversationsController {
 
   @Post(':id/resolve')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   resolve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.resolve(u.orgId!, id)
   }
 
   @Post(':id/escalate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   escalate(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

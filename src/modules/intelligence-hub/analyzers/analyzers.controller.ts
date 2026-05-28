@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 import { AlertSignalsService } from '../alert-signals.service'
 import { AlertDeliveriesService } from '../alert-deliveries.service'
 import { AlertEngineService } from '../alert-engine.service'
@@ -25,7 +26,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   GET  /alert-deliveries     → lista deliveries com filtros
  */
 @Controller()
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AnalyzersController {
   constructor(
     private readonly signalsSvc:    AlertSignalsService,
@@ -39,6 +40,7 @@ export class AnalyzersController {
   ) {}
 
   @Post('analyzers/:name/run')
+  @RequirePermission('settings.update')
   async run(@ReqUser() u: ReqUserPayload, @Param('name') name: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
 
@@ -58,6 +60,7 @@ export class AnalyzersController {
   }
 
   @Get('alert-signals')
+  @RequirePermission('settings.view')
   listSignals(
     @ReqUser() u: ReqUserPayload,
     @Query('analyzer')  analyzer?: AnalyzerName,
@@ -79,12 +82,14 @@ export class AnalyzersController {
    * Processa todos pending+immediate da org da chamada — útil em testes.
    */
   @Post('alert-deliveries/dispatch-now')
+  @RequirePermission('settings.update')
   dispatchNow(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.waDelivery.runOnce()
   }
 
   @Get('alert-deliveries')
+  @RequirePermission('settings.view')
   listDeliveries(
     @ReqUser() u: ReqUserPayload,
     @Query('manager_id') managerId?: string,

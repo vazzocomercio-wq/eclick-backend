@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { AlertHubConfigService } from './alert-hub-config.service'
 import { AlertRoutingRulesService } from './alert-routing-rules.service'
 import { AlertHubStatsService } from './alert-hub-stats.service'
@@ -27,7 +28,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * Feed/stats ficam pra IH-3 (depois de analyzers/engine existirem).
  */
 @Controller('alert-hub')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AlertHubController {
   constructor(
     private readonly configSvc: AlertHubConfigService,
@@ -36,18 +37,21 @@ export class AlertHubController {
   ) {}
 
   @Get('config')
+  @RequirePermission('settings.view')
   getConfig(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.configSvc.get(u.orgId)
   }
 
   @Patch('config')
+  @RequirePermission('settings.update')
   updateConfig(@ReqUser() u: ReqUserPayload, @Body() body: UpdateHubConfigDto) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.configSvc.update(u.orgId, body)
   }
 
   @Post('enable')
+  @RequirePermission('settings.update')
   async enable(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const config = await this.configSvc.setEnabled(u.orgId, true)
@@ -56,24 +60,28 @@ export class AlertHubController {
   }
 
   @Post('disable')
+  @RequirePermission('settings.update')
   disable(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.configSvc.setEnabled(u.orgId, false)
   }
 
   @Get('routing-rules')
+  @RequirePermission('settings.view')
   listRules(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.rulesSvc.list(u.orgId)
   }
 
   @Post('routing-rules')
+  @RequirePermission('settings.update')
   createRule(@ReqUser() u: ReqUserPayload, @Body() body: CreateRoutingRuleDto) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.rulesSvc.create(u.orgId, body)
   }
 
   @Patch('routing-rules/:id')
+  @RequirePermission('settings.update')
   updateRule(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -84,6 +92,7 @@ export class AlertHubController {
   }
 
   @Delete('routing-rules/:id')
+  @RequirePermission('settings.update')
   deleteRule(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.rulesSvc.remove(u.orgId, id)
@@ -92,12 +101,14 @@ export class AlertHubController {
   // ── Stats / Reports ─────────────────────────────────────────────────────────
 
   @Get('stats')
+  @RequirePermission('settings.view')
   getStats(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.statsSvc.getOrgStats(u.orgId, days ? Number(days) : 30)
   }
 
   @Get('stats/managers')
+  @RequirePermission('settings.view')
   getManagerStats(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.statsSvc.getManagerStats(u.orgId, days ? Number(days) : 30)
