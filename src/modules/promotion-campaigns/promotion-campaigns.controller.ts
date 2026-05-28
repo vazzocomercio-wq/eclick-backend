@@ -5,39 +5,45 @@ import {
 import { PromotionCampaignsService, type PromotionCampaign } from './promotion-campaigns.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('store/config/campaigns')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class PromotionCampaignsController {
   constructor(private readonly svc: PromotionCampaignsService) {}
 
   @Get()
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Get(':id')
+  @RequirePermission('store.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(u.orgId, id)
   }
 
   @Post()
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: Partial<PromotionCampaign>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(u.orgId, body)
   }
 
   @Patch(':id')
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<PromotionCampaign>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.update(u.orgId, id, body)
   }
 
   @Delete(':id')
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)
@@ -47,6 +53,7 @@ export class PromotionCampaignsController {
 
   /** POST /store/config/campaigns/:id/products  { productIds[] } */
   @Post(':id/products')
+  @RequirePermission('store.update')
   addProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -58,6 +65,7 @@ export class PromotionCampaignsController {
   }
 
   @Delete(':id/products/:productId')
+  @RequirePermission('store.update')
   removeProduct(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -70,6 +78,7 @@ export class PromotionCampaignsController {
   /** PATCH /store/config/campaigns/:id/products/:productId
    *  Body: { discount_pct_override?, sale_price_override? } — override individual */
   @Patch(':id/products/:productId')
+  @RequirePermission('store.update')
   setOverride(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -86,12 +95,14 @@ export class PromotionCampaignsController {
   // ── Apply / Unapply ───────────────────────────────────────────────
 
   @Post(':id/apply')
+  @RequirePermission('store.update')
   apply(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.apply(u.orgId, id)
   }
 
   @Post(':id/unapply')
+  @RequirePermission('store.update')
   unapply(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.unapply(u.orgId, id)

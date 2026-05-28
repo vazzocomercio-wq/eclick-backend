@@ -5,6 +5,7 @@ import { CouponsService } from './coupons.service'
 import { Public } from '../../common/decorators/public.decorator'
 import { supabaseAdmin } from '../../common/supabase'
 import type { CouponType } from './coupons.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -19,14 +20,16 @@ export class CouponsController {
   // ─ Admin (com auth) ─────────────────────────────────────────
 
   @Get()
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Post()
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: {
     code?: string; type?: CouponType; value?: number;
     min_order_cents?: number; usage_limit?: number | null;
@@ -47,14 +50,16 @@ export class CouponsController {
   }
 
   @Put(':id')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.update(u.orgId, id, body)
   }
 
   @Delete(':id')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)

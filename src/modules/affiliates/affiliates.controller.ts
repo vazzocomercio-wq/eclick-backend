@@ -9,6 +9,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -26,7 +27,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   POST       /affiliates/commissions/:id/reject    { reason }
  */
 @Controller('affiliates')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AffiliatesAdminController {
   constructor(
     private readonly svc: AffiliatesService,
@@ -34,18 +35,21 @@ export class AffiliatesAdminController {
   ) {}
 
   @Get('settings')
+  @RequirePermission('store.view')
   getSettings(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSettings(u.orgId)
   }
 
   @Patch('settings')
+  @RequirePermission('store.update')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: Partial<AffiliateSettings>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateSettings(u.orgId, body)
   }
 
   @Get()
+  @RequirePermission('store.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -61,6 +65,7 @@ export class AffiliatesAdminController {
   }
 
   @Get('commissions')
+  @RequirePermission('store.view')
   listCommissions(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -76,42 +81,49 @@ export class AffiliatesAdminController {
   }
 
   @Get(':id')
+  @RequirePermission('store.view')
   getById(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getById(u.orgId, id)
   }
 
   @Post(':id/approve')
+  @RequirePermission('store.update')
   approve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.approve(u.orgId, id)
   }
 
   @Post(':id/reject')
+  @RequirePermission('store.update')
   reject(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { reason?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.reject(u.orgId, id, body?.reason)
   }
 
   @Post(':id/suspend')
+  @RequirePermission('store.update')
   suspend(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.suspend(u.orgId, id)
   }
 
   @Patch(':id/commission')
+  @RequirePermission('store.update')
   updateCommission(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { custom_commission_pct: number | null }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateCustomCommission(u.orgId, id, body.custom_commission_pct)
   }
 
   @Post('commissions/:id/mark-paid')
+  @RequirePermission('financeiro.reconcile')
   markPaid(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { notes?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.markCommissionPaid(u.orgId, id, body?.notes)
   }
 
   @Post('commissions/:id/reject')
+  @RequirePermission('financeiro.reconcile')
   rejectCommission(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { reason: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!body?.reason) throw new BadRequestException('reason obrigatório')
@@ -120,6 +132,7 @@ export class AffiliatesAdminController {
 
   /** POST /affiliates/cron/approve-expired — trigger manual do cron. */
   @Post('cron/approve-expired')
+  @RequirePermission('store.update')
   approveExpired() {
     return this.attribution.approveExpiredCommissions()
   }

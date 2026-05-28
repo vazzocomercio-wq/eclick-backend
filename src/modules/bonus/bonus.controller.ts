@@ -7,33 +7,38 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('bonus-rules')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class BonusController {
   constructor(private readonly svc: BonusService) {}
 
   @Get()
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Post()
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: Partial<BonusRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(u.orgId, body)
   }
 
   @Patch(':id')
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<BonusRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.update(u.orgId, id, body)
   }
 
   @Delete(':id')
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)

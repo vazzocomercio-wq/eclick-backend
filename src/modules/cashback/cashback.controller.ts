@@ -7,6 +7,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -25,17 +26,19 @@ interface ReqUserPayload { id: string; orgId: string | null }
  */
 
 @Controller('cashback')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CashbackController {
   constructor(private readonly svc: CashbackService) {}
 
   @Get('settings')
+  @RequirePermission('store.view')
   getSettings(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSettings(u.orgId)
   }
 
   @Patch('settings')
+  @RequirePermission('store.update')
   updateSettings(
     @ReqUser() u: ReqUserPayload,
     @Body() body: Partial<CashbackSettings>,
@@ -45,18 +48,21 @@ export class CashbackController {
   }
 
   @Get('stats')
+  @RequirePermission('store.view')
   getStats(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getStats(u.orgId)
   }
 
   @Get('balance/:email')
+  @RequirePermission('store.view')
   getBalance(@ReqUser() u: ReqUserPayload, @Param('email') email: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getBalance(u.orgId, email)
   }
 
   @Get('movements/:email')
+  @RequirePermission('store.view')
   listMovements(
     @ReqUser() u: ReqUserPayload,
     @Param('email') email: string,
@@ -73,6 +79,7 @@ export class CashbackController {
   /** POST /cashback/expire-now — dispara expiração manualmente (admin).
    *  Cron já roda diário às 03:00 BRT; este endpoint é pra emergência. */
   @Post('expire-now')
+  @RequirePermission('store.update')
   expireNow(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     // svc roda pra TODA a base (não filtra por org) — só admin trigger.
@@ -81,6 +88,7 @@ export class CashbackController {
 
   /** Ajuste manual de saldo — entrada ou saída. Útil pra suporte/correção. */
   @Post('adjust')
+  @RequirePermission('store.update')
   adjust(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { email: string; amountCents: number; reason?: string },
