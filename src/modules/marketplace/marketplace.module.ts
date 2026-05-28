@@ -12,12 +12,15 @@ import { ShopThrottleService } from './throttle/shop-throttle.service'
 import { ShopeeAlgoScoreService } from './shopee-algo-score/shopee-algo-score.service'
 import { ShopeeListingsController } from './shopee-algo-score/shopee-listings.controller'
 import { ShopeeListingsService } from './shopee-algo-score/shopee-listings.service'
+import { ShopeeQualityController } from './shopee-quality/shopee-quality.controller'
+import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController, // F1.2 — GET /shopee/listings/scores
+    ShopeeQualityController,  // F1.3 — GET /shopee/shop-metrics/{latest,history}
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -26,10 +29,12 @@ import { ShopeeListingsService } from './shopee-algo-score/shopee-listings.servi
     ShopThrottleService,       // F0.6 — throttle por shop_id pra ShopeeAdapter
     ShopeeAlgoScoreService,    // F1.1 — Algorithm Score 4 pilares
     ShopeeListingsService,     // F1.2 — query da view v_latest_algo_score
+    ShopeeQualityService,      // F1.3 — Quality Center (snapshot + alerts)
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
     ShopeeAlgoScoreService,    // F1.1 — exporta pra outros módulos (Listing Center)
+    ShopeeQualityService,      // F1.3 — exporta pro Algorithm Score Pillar 3 reusar
   ],
 })
 export class MarketplaceModule {}
