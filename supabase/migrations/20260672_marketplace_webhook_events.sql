@@ -7,8 +7,10 @@
 --
 -- Rollback:
 --   DROP TABLE IF EXISTS public.marketplace_webhook_events;
-
-BEGIN;
+--
+-- ⚠️ Sem BEGIN/COMMIT explícitos: o RPC _admin_exec_sql não aceita
+-- transaction commands (state 0A000). DDL roda em auto-commit por
+-- statement; rollback manual se precisar.
 
 CREATE TABLE IF NOT EXISTS public.marketplace_webhook_events (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -132,5 +134,3 @@ BEGIN
      WHERE id = v_phase_id;
   END IF;
 END $$;
-
-COMMIT;
