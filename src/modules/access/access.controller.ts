@@ -1,11 +1,12 @@
 import {
-  Controller, Get, Post, Body, Query, Param, Req, BadRequestException, UseGuards,
+  Controller, Get, Post, Body, Query, Param, Req, Headers, BadRequestException, HttpCode, HttpStatus, UseGuards,
 } from '@nestjs/common'
 import type { Request } from 'express'
 import { Public } from '../../common/decorators/public.decorator'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { AccessService } from './access.service'
+import { StripePlatformService } from './stripe-platform.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -23,7 +24,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
  */
 @Controller('access')
 export class AccessPublicController {
-  constructor(private readonly svc: AccessService) {}
+  constructor(
+    private readonly svc: AccessService,
+    private readonly stripe: StripePlatformService,
+  ) {}
 
   @Get('plans')
   @Public()
@@ -62,6 +66,46 @@ export class AccessPublicController {
       ipAddress: ip,
       userAgent: ua,
     })
+  }
+
+  /** Cria Stripe Checkout pra um access_request já cadastrado. Visitante
+   *  preenche o form, recebe o id do request, e (se o plano é pago) é
+   *  redirecionado pra Stripe Checkout via essa URL. */
+  @Post('checkout/stripe')
+  @Public()
+  async checkoutStripe(@Body() body: { request_id?: string }) {
+    if (!body?.request_id) throw new BadRequestException('request_id obrigatório.')
+    return this.stripe.createCheckoutForRequest(body.request_id)
+  }
+
+  /** Webhook do Stripe. Valida assinatura, processa evento, retorna 200
+   *  pra confirmar (mesmo eventos ignorados — senão Stripe re-tenta). */
+  @Post('webhooks/stripe')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  async webhookStripe(
+    @Req() req: Request,
+    @Headers('stripe-signature') sig: string,
+  ) {
+    if (!sig) throw new BadRequestException('Stripe-Signature ausente.')
+
+    type ReqWithRaw = Request & { rawBody?: Buffer | string }
+    const r = req as ReqWithRaw
+    const raw: string = typeof r.rawBody === 'string'
+      ? r.rawBody
+      : Buffer.isBuffer(r.rawBody)
+        ? r.rawBody.toString('utf8')
+        : JSON.stringify(req.body ?? {})
+
+    const ok = this.stripe.verifyWebhookSignature(raw, sig)
+    if (!ok) throw new BadRequestException('Assinatura inválida.')
+
+    let event: { type: string; data: { object: Record<string, unknown> } }
+    try { event = JSON.parse(raw) }
+    catch { throw new BadRequestException('Payload inválido.') }
+
+    const result = await this.stripe.handleEvent(event)
+    return { received: true, ...result }
   }
 }
 
