@@ -5,6 +5,7 @@ import {
 import { CredentialsService } from './credentials.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,14 +15,16 @@ export class CredentialsController {
 
   // GET /credentials — list (no raw keys, only preview)
   @Get()
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('integrations.view')
   list(@ReqUser() u: ReqUserPayload) {
     return this.svc.listCredentials(u.orgId)
   }
 
   // POST /credentials — save (and encrypt)
   @Post()
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('integrations.manage_keys')
   save(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { provider: string; key_name: string; key_value: string },
@@ -31,7 +34,8 @@ export class CredentialsController {
 
   // POST /credentials/:id/test — test connection
   @Post(':id/test')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('integrations.view')
   @HttpCode(HttpStatus.OK)
   test(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.testCredential(u.orgId, id)
@@ -39,7 +43,8 @@ export class CredentialsController {
 
   // DELETE /credentials/:id
   @Delete(':id')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('integrations.manage_keys')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.deleteCredential(u.orgId, id)

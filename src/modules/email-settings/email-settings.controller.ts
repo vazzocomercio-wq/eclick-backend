@@ -6,6 +6,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
 import { EmailSettingsService, EmailSettingsDto } from './email-settings.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,11 +15,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * encripta api_key (AES-256-CBC) antes de gravar; test envia email real
  * pro user logado pra validar credenciais. */
 @Controller('email-settings')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class EmailSettingsController {
   constructor(private readonly svc: EmailSettingsService) {}
 
   @Get()
+  @RequirePermission('integrations.view')
   async get(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(user.orgId)
@@ -26,6 +28,7 @@ export class EmailSettingsController {
 
   @Post()
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.manage_keys')
   save(
     @ReqUser() user: ReqUserPayload,
     @Body() body: EmailSettingsDto,
@@ -36,6 +39,7 @@ export class EmailSettingsController {
 
   @Delete()
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.manage_keys')
   remove(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(user.orgId)
@@ -45,6 +49,7 @@ export class EmailSettingsController {
    * derivado do auth.users.email pra evitar spam de testes pra terceiros. */
   @Post('test')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.view')
   async test(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
 

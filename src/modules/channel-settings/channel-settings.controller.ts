@@ -4,6 +4,7 @@ import {
 import { ChannelSettingsService, Channel } from './channel-settings.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload {
   id: string
@@ -11,12 +12,13 @@ interface ReqUserPayload {
 }
 
 @Controller('channel-settings')
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ChannelSettingsController {
   constructor(private readonly svc: ChannelSettingsService) {}
 
   /** Lista as configurações de canal da org (UI de Configurações > Canais). */
   @Get()
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('settings.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listForOrg(u.orgId)
@@ -24,7 +26,7 @@ export class ChannelSettingsController {
 
   /** Lê a config de UM canal (ex.: card de anúncios TikTok lê a comissão daqui). */
   @Get(':channel')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('settings.view')
   get(@ReqUser() u: ReqUserPayload, @Param('channel') channel: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(u.orgId, channel as Channel)
@@ -32,7 +34,7 @@ export class ChannelSettingsController {
 
   /** Atualiza/cria a config de UM canal (commission_pct, commission_fixed, notes). */
   @Patch(':channel')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('settings.update')
   upsert(
     @ReqUser() u: ReqUserPayload,
     @Param('channel') channel: string,
