@@ -94,6 +94,7 @@ import { AiVisibilityModule } from './modules/ai-visibility/ai-visibility.module
 import { PublicAuditsModule } from './modules/public-audits/public-audits.module'
 import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module'
 import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
+import { ChannelSettingsModule } from './modules/channel-settings/channel-settings.module'
 
 @Module({
   imports: [
@@ -190,6 +191,7 @@ import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
     PublicAuditsModule,
     AnalyticsHubModule,
     TikTokShopModule,
+    ChannelSettingsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
