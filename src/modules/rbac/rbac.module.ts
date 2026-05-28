@@ -1,16 +1,24 @@
-import { Global, Module } from '@nestjs/common'
+import { forwardRef, Global, Module } from '@nestjs/common'
 import { PermissionService } from './permission.service'
 import { RequirePermissionGuard } from './require-permission.guard'
+import { RbacAdminService } from './rbac-admin.service'
+import { RbacAdminController } from './rbac-admin.controller'
+import { AccessModule } from '../access/access.module'
 
 /**
  * F17-B · Módulo central de RBAC. `@Global` pra qualquer feature module
  * conseguir injetar `PermissionService` e `RequirePermissionGuard` sem
- * precisar importar `RbacModule` toda vez. Sem controllers — endpoints
- * de RBAC user-facing ficam no AccessController (/access/me/permissions).
+ * precisar importar `RbacModule` toda vez.
+ *
+ * Endpoint user-facing `/access/me/permissions` mora no `AccessMeController`.
+ * Endpoints admin (`/access/admin/rbac/*`) moram aqui via `RbacAdminController`
+ * — reusam `AccessService.assertPlatformAdmin` (forwardRef pra evitar ciclo).
  */
 @Global()
 @Module({
-  providers: [PermissionService, RequirePermissionGuard],
-  exports:   [PermissionService, RequirePermissionGuard],
+  imports:     [forwardRef(() => AccessModule)],
+  controllers: [RbacAdminController],
+  providers:   [PermissionService, RequirePermissionGuard, RbacAdminService],
+  exports:     [PermissionService, RequirePermissionGuard, RbacAdminService],
 })
 export class RbacModule {}
