@@ -6,11 +6,17 @@ import { ShopeeAdapter } from './adapters/shopee.adapter'
 import { MarketplaceAdapterRegistry } from './adapters/registry'
 import { MarketplaceService } from './marketplace.service'
 import { MarketplaceController } from './marketplace.controller'
+import { MarketplaceWebhooksController } from './marketplace-webhooks.controller'
+import { MarketplaceWebhooksService } from './marketplace-webhooks.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
-  controllers: [MarketplaceController],
-  providers:   [MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter, MarketplaceAdapterRegistry, MarketplaceService],
+  controllers: [MarketplaceController, MarketplaceWebhooksController],
+  providers:   [
+    MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
+    MarketplaceAdapterRegistry, MarketplaceService,
+    MarketplaceWebhooksService,
+  ],
   exports:     [MarketplaceService, MarketplaceAdapterRegistry],
 })
 export class MarketplaceModule {}

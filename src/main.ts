@@ -39,7 +39,17 @@ async function bootstrap() {
   // bodyParser: false + parsers manuais com limite maior — necessario pra
   // receber imagens em base64 (ex.: inspiracao visual do Designer da Loja).
   const app = await NestFactory.create(AppModule, { bodyParser: false });
-  app.use(json({ limit: '8mb' }));
+  app.use(json({
+    limit: '8mb',
+    // F18 F0.3 — captura raw body só pra /webhooks/* (Shopee assina url|body
+    // EXATAMENTE como veio; JSON.parse + re-stringify destrói whitespace e
+    // quebra HMAC). Outras rotas seguem sem overhead.
+    verify: (req: any, _res, buf) => {
+      if (typeof req.url === 'string' && req.url.startsWith('/webhooks/')) {
+        req.rawBody = buf.toString('utf8')
+      }
+    },
+  }));
   app.use(urlencoded({ extended: true, limit: '8mb' }));
   app.useWebSocketAdapter(new IoAdapter(app));
   app.enableCors({
