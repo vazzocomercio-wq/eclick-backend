@@ -96,10 +96,12 @@ import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module
 import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
 import { ChannelSettingsModule } from './modules/channel-settings/channel-settings.module'
 import { AccessModule } from './modules/access/access.module'
+import { RbacModule } from './modules/rbac/rbac.module'
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
+    RbacModule,
     MercadolivreModule,
     MlQualityModule,
     OrdersModule,

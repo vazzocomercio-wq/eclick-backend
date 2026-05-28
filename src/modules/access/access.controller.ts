@@ -7,6 +7,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { AccessService } from './access.service'
 import { StripePlatformService } from './stripe-platform.service'
+import { PermissionService } from '../rbac/permission.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -106,6 +107,22 @@ export class AccessPublicController {
 
     const result = await this.stripe.handleEvent(event)
     return { received: true, ...result }
+  }
+}
+
+/**
+ * F17-B · Endpoint pra frontend descobrir o que o user logado pode fazer.
+ * Consumido por PermissionsProvider/useCan no boot. Sempre authenticated.
+ */
+@Controller('access/me')
+@UseGuards(SupabaseAuthGuard)
+export class AccessMeController {
+  constructor(private readonly perms: PermissionService) {}
+
+  @Get('permissions')
+  async permissions(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) return { permissions: [], roles: [] }
+    return this.perms.snapshot(u.id, u.orgId)
   }
 }
 
