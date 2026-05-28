@@ -6,25 +6,29 @@ import {
 } from '@nestjs/common'
 import { StockService } from './stock.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('stock')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StockController {
   private readonly logger = new Logger(StockController.name)
 
   constructor(private readonly svc: StockService) {}
 
   @Get(':product_id/full')
+  @RequirePermission('stock.view')
   full(@Param('product_id') productId: string) {
     return this.svc.getFullStock(productId)
   }
 
   @Get(':product_id/movements')
+  @RequirePermission('stock.view')
   movements(@Param('product_id') productId: string) {
     return this.svc.getMovements(productId)
   }
 
   @Patch(':stock_id/safety')
+  @RequirePermission('stock.adjust')
   async updateSafety(
     @Param('stock_id') stockId: string,
     @Body() body: {
@@ -43,11 +47,13 @@ export class StockController {
   }
 
   @Get('distribution/:product_id')
+  @RequirePermission('stock.view')
   distributions(@Param('product_id') productId: string) {
     return this.svc.getDistributions(productId)
   }
 
   @Post('distribution')
+  @RequirePermission('stock.transfer')
   createDistribution(@Body() body: {
     product_id: string
     channel: string
@@ -63,6 +69,7 @@ export class StockController {
   }
 
   @Patch('distribution/:id')
+  @RequirePermission('stock.transfer')
   updateDistribution(
     @Param('id') id: string,
     @Body() body: Partial<{
@@ -82,12 +89,14 @@ export class StockController {
 
   @Delete('distribution/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('stock.transfer')
   deleteDistribution(@Param('id') id: string) {
     return this.svc.deleteDistribution(id)
   }
 
   @Post('sync/:product_id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.adjust')
   async sync(@Param('product_id') productId: string) {
     try {
       await this.svc.recalcAndPropagate(productId, 'manual_force_sync')
@@ -102,17 +111,20 @@ export class StockController {
   // ── Auto distribution ──────────────────────────────────────────────────────
 
   @Get(':product_id/auto-check')
+  @RequirePermission('stock.view')
   autoCheck(@Param('product_id') productId: string) {
     return this.svc.canUseAutoMode(productId)
   }
 
   @Get(':product_id/auto-preview')
+  @RequirePermission('stock.view')
   autoPreview(@Param('product_id') productId: string) {
     return this.svc.calculateAutoDistribution(productId)
   }
 
   @Post(':product_id/recalc-auto')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.transfer')
   async recalcAuto(@Param('product_id') productId: string) {
     try {
       return await this.svc.applyAutoDistribution(productId, 'user_manual')
@@ -123,6 +135,7 @@ export class StockController {
   }
 
   @Get(':product_id/recalc-history')
+  @RequirePermission('stock.view')
   recalcHistory(@Param('product_id') productId: string) {
     return this.svc.getRecalcHistory(productId)
   }
@@ -131,6 +144,7 @@ export class StockController {
 
   @Post('sync-all')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.adjust')
   async syncAll() {
     try {
       const result = await this.svc.syncAllProductsWithMlListing()
@@ -148,6 +162,7 @@ export class StockController {
   }
 
   @Get('sync-logs')
+  @RequirePermission('stock.view')
   syncLogs(
     @Query('status')  status?: string,
     @Query('channel') channel?: string,
@@ -163,12 +178,14 @@ export class StockController {
   }
 
   @Get('reservations')
+  @RequirePermission('stock.view')
   reservations(@Query('status') status?: string) {
     return this.svc.listReservations(status)
   }
 
   @Post('reservations/:id/release')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.adjust')
   releaseReservation(@Param('id') id: string) {
     return this.svc.releaseReservationById(id)
   }

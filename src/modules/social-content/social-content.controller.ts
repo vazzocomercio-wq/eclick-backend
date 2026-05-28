@@ -6,6 +6,7 @@ import {
 import { SocialContentService } from './social-content.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import type {
   SocialChannel,
   SocialContentStatus,
@@ -28,13 +29,14 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * DELETE /social/content/:id   (= archive)
  */
 @Controller('social')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class SocialContentController {
   constructor(private readonly svc: SocialContentService) {}
 
   /** POST /social/products/:id/generate — gera conteúdo pra 1 produto. */
   @Post('products/:id/generate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.create_post')
   generateForProduct(
     @ReqUser() u: ReqUserPayload,
     @Param('id') productId: string,
@@ -54,6 +56,7 @@ export class SocialContentController {
   /** POST /social/products/generate-batch — N produtos × N canais. */
   @Post('products/generate-batch')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.create_post')
   generateBatch(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -76,6 +79,7 @@ export class SocialContentController {
 
   /** GET /social/content?channel=&product_id=&status=&limit=&offset= */
   @Get('content')
+  @RequirePermission('social.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('channel')    channel?:    SocialChannel,
@@ -92,6 +96,7 @@ export class SocialContentController {
 
   /** GET /social/content/:id */
   @Get('content/:id')
+  @RequirePermission('social.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(id, u.orgId)
@@ -99,6 +104,7 @@ export class SocialContentController {
 
   /** PATCH /social/content/:id — edita content/creative ids/scheduled_at. */
   @Patch('content/:id')
+  @RequirePermission('social.create_post')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -111,6 +117,7 @@ export class SocialContentController {
   /** POST /social/content/:id/regenerate — refaz com instrução. */
   @Post('content/:id/regenerate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.create_post')
   regenerate(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -124,6 +131,7 @@ export class SocialContentController {
   /** POST /social/content/:id/approve */
   @Post('content/:id/approve')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.approve')
   approve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.approve(id, u.orgId)
@@ -132,6 +140,7 @@ export class SocialContentController {
   /** POST /social/content/:id/schedule body { scheduled_at: ISO } */
   @Post('content/:id/schedule')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.publish')
   schedule(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -144,6 +153,7 @@ export class SocialContentController {
 
   /** DELETE /social/content/:id — arquiva (soft). */
   @Delete('content/:id')
+  @RequirePermission('social.create_post')
   archive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.archive(id, u.orgId)
@@ -153,6 +163,7 @@ export class SocialContentController {
    *  no canal (hoje só whatsapp_broadcast via Active bridge). */
   @Post('content/:id/publish-now')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.publish')
   publishNow(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.publishContent(id, u.orgId)
@@ -163,6 +174,7 @@ export class SocialContentController {
   /** POST /social/products/:id/generate-image — gera N imagens de post. */
   @Post('products/:id/generate-image')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.create_post')
   generateImage(
     @ReqUser() u: ReqUserPayload,
     @Param('id') productId: string,
@@ -183,6 +195,7 @@ export class SocialContentController {
 
   /** GET /social/post-images?product_id= — galeria de imagens geradas. */
   @Get('post-images')
+  @RequirePermission('social.view')
   listPostImages(
     @ReqUser() u: ReqUserPayload,
     @Query('product_id') productId?: string,
@@ -193,6 +206,7 @@ export class SocialContentController {
 
   /** DELETE /social/post-images/:id */
   @Delete('post-images/:id')
+  @RequirePermission('social.create_post')
   deletePostImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.deletePostImage(id, u.orgId)

@@ -5,6 +5,7 @@ import {
 import { MlAdsService } from './ml-ads.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -18,11 +19,12 @@ const EMPTY_SUMMARY = {
 }
 
 @Controller('ml-ads')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlAdsController {
   constructor(private readonly svc: MlAdsService) {}
 
   @Get('advertiser')
+  @RequirePermission('ads.view')
   async advertiser(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
@@ -36,6 +38,7 @@ export class MlAdsController {
   }
 
   @Get('campaigns')
+  @RequirePermission('ads.view')
   async getCampaigns(
     @ReqUser() u: ReqUserPayload,
     @Query('from') dateFrom?: string,
@@ -54,6 +57,7 @@ export class MlAdsController {
   }
 
   @Get('reports/summary')
+  @RequirePermission('ads.view')
   async getSummary(
     @ReqUser() u: ReqUserPayload,
     @Query('from')    dateFrom: string,
@@ -75,6 +79,7 @@ export class MlAdsController {
   }
 
   @Get('reports/by-sku')
+  @RequirePermission('ads.view')
   async getBySku(
     @ReqUser() u: ReqUserPayload,
     @Query('from') dateFrom: string,
@@ -91,6 +96,7 @@ export class MlAdsController {
   }
 
   @Get('reports/campaign/:id')
+  @RequirePermission('ads.view')
   async getCampaignSeries(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -110,6 +116,7 @@ export class MlAdsController {
 
   @Post('sync')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.view')
   async sync(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
@@ -129,6 +136,7 @@ export class MlAdsController {
   }
 
   @Patch('campaigns/:id')
+  @RequirePermission('ads.update_budget')
   async updateCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -139,6 +147,7 @@ export class MlAdsController {
   }
 
   @Get('campaigns/:id/items')
+  @RequirePermission('ads.view')
   async getCampaignItems(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     try {
