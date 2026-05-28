@@ -4,6 +4,7 @@ import * as crypto from 'crypto'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
+  WebhookValidationInput,
 } from './base'
 
 const SHOPEE_BASE = 'https://openplatform.shopee.com.br' // BR prod
@@ -218,6 +219,48 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       access_token:  data.access_token,
       refresh_token: data.refresh_token,
       expires_at:    new Date(Date.now() + ttlSec * 1000).toISOString(),
+    }
+  }
+
+  /** F0.3/F0.5 — webhook Push. Shopee envia header `Authorization` com
+   *  HMAC-SHA256(partner_key, `${url}|${body}`) em hex lowercase. Validação
+   *  síncrona (sem fetch). rawBody DEVE ser o body cru (não JSON.parsed) —
+   *  parse perde whitespace e quebra o hash. URL é a do receptor REGISTRADO
+   *  no Shopee Partner Center (não a URL local da request — host/proxy podem
+   *  diferir). Caller passa via `input.url`. */
+  validateWebhookSignature(input: WebhookValidationInput): boolean {
+    const { headers, url, rawBody, secret } = input
+    const partnerKey = secret ?? process.env.SHOPEE_PARTNER_KEY
+    if (!partnerKey) {
+      this.logger.error('[shopee.webhook] SHOPEE_PARTNER_KEY ausente')
+      return false
+    }
+    if (!url) {
+      this.logger.warn('[shopee.webhook] url ausente — assinatura Shopee inclui URL')
+      return false
+    }
+
+    const headerAuth =
+      (headers['authorization'] as string | undefined) ??
+      (headers['Authorization'] as string | undefined)
+    if (!headerAuth) {
+      this.logger.warn('[shopee.webhook] header Authorization ausente')
+      return false
+    }
+    const provided = String(headerAuth).trim().toLowerCase()
+
+    const base   = `${url}|${rawBody}`
+    const expect = crypto.createHmac('sha256', partnerKey).update(base).digest('hex')
+
+    // timingSafeEqual exige mesmo tamanho — comparar buffers do hex.
+    if (provided.length !== expect.length) return false
+    try {
+      return crypto.timingSafeEqual(
+        Buffer.from(provided, 'hex'),
+        Buffer.from(expect,   'hex'),
+      )
+    } catch {
+      return false
     }
   }
 }
