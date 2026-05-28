@@ -87,6 +87,58 @@ export class OrdersController {
       sanitizePlatform(platform),
     )
   }
+
+  // ── TT-5c: agnóstico de canal pra dashboard + financeiro ────────────────
+  // Espelham /ml/recent-orders e /ml/financial-summary mas pra TODAS as
+  // plataformas (sem exigir ML conectado).
+
+  /** GET /orders/recent?offset=&limit=&date_from=&date_to=&seller_id=&platforms=ml,tiktok */
+  @Get('recent')
+  getRecentOrders(
+    @ReqUser() user: ReqUserPayload,
+    @Query('offset')    offset?:   string,
+    @Query('limit')     limit?:    string,
+    @Query('date_from') dateFrom?: string,
+    @Query('date_to')   dateTo?:   string,
+    @Query('seller_id') sellerId?: string,
+    @Query('platforms') platforms?: string,
+  ) {
+    const platformsList = platforms
+      ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined
+    return this.orders.getRecentOrders(
+      user.orgId!,
+      Number(offset ?? 0),
+      Number(limit ?? 50),
+      dateFrom,
+      dateTo,
+      sellerId ? Number(sellerId) : undefined,
+      platformsList,
+    )
+  }
+
+  /** GET /orders/financial-summary?date_from=&date_to=&status=&seller_id=&platforms= */
+  @Get('financial-summary')
+  getFinancialSummary(
+    @ReqUser() user: ReqUserPayload,
+    @Query('date_from') dateFrom: string,
+    @Query('date_to')   dateTo:   string,
+    @Query('status')    status?:  string,
+    @Query('seller_id') sellerId?: string,
+    @Query('platforms') platforms?: string,
+  ) {
+    const platformsList = platforms
+      ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined
+    return this.orders.getFinancialSummary(
+      user.orgId!,
+      dateFrom,
+      dateTo,
+      status,
+      sellerId ? Number(sellerId) : undefined,
+      platformsList,
+    )
+  }
 }
 
 function sanitizePlatform(

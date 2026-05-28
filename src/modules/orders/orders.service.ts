@@ -739,6 +739,315 @@ export class OrdersService {
     ])
     return { today, current_month: currentMonth, last_month: lastMonth }
   }
+
+  // ── TT-5c: endpoints agnósticos de canal pra dashboard + financeiro ─────
+  // /orders/recent  → espelha /ml/recent-orders, mas pra TODAS as plataformas
+  // /orders/financial-summary → espelha /ml/financial-summary, idem
+  // Sem 401 quando ML não conectado; lê do `orders` unificado.
+
+  /** Constrói mapa de account_nickname combinando ML + TikTok (e mais canais). */
+  private async ordersBuildNicknameMap(orgId: string): Promise<{
+    ml: Record<number, string>
+    tiktokSeller: string | null
+  }> {
+    const [mlRes, ttsRes] = await Promise.all([
+      supabaseAdmin
+        .from('ml_connections')
+        .select('seller_id, nickname')
+        .eq('organization_id', orgId),
+      supabaseAdmin
+        .from('tiktok_shop_credentials')
+        .select('seller_name')
+        .eq('organization_id', orgId)
+        .maybeSingle<{ seller_name: string | null }>(),
+    ])
+    const ml: Record<number, string> = {}
+    for (const c of (mlRes.data ?? []) as Array<{ seller_id: number; nickname: string | null }>) {
+      ml[c.seller_id] = c.nickname ?? `Conta #${c.seller_id}`
+    }
+    return { ml, tiktokSeller: ttsRes.data?.seller_name ?? null }
+  }
+
+  private ordersNicknameFor(
+    row: { source: string | null; seller_id: number | null },
+    nick: { ml: Record<number, string>; tiktokSeller: string | null },
+  ): string {
+    if (row.source === 'tiktok_shop') return nick.tiktokSeller ?? 'TikTok Shop'
+    if (row.source === 'storefront') return 'Loja Própria'
+    if (row.source === 'manual') return 'Manual'
+    if (row.seller_id != null && nick.ml[row.seller_id]) return nick.ml[row.seller_id]
+    return row.seller_id != null ? `Conta #${row.seller_id}` : 'Sem identificação'
+  }
+
+  /** Paginação manual — Supabase corta em 1000 sem .range(). */
+  private async ordersFetchRowsForReport(opts: {
+    orgId: string
+    dateFrom?: string | null
+    dateTo?: string | null
+    statusFilter?: string
+    sellerIdFilter?: number
+    platformsFilter?: string[]
+  }): Promise<OrdersReportRow[]> {
+    const PAGE_SIZE = 1000
+    const SAFETY_CAP = 50_000
+    const rows: OrdersReportRow[] = []
+    let pageStart = 0
+    while (pageStart < SAFETY_CAP) {
+      let q = supabaseAdmin
+        .from('orders')
+        .select(
+          'id, source, platform, external_order_id, status, sold_at, seller_id, ' +
+            'sku, product_title, quantity, sale_price, platform_fee, cost_price, ' +
+            'tax_amount, shipping_cost, shipping_buyer_paid, contribution_margin, ' +
+            'contribution_margin_pct, gross_profit, raw_data, marketplace_listing_id, ' +
+            'billing_address',
+        )
+        .eq('organization_id', opts.orgId)
+      if (opts.dateFrom) q = q.gte('sold_at', opts.dateFrom)
+      if (opts.dateTo) q = q.lte('sold_at', opts.dateTo)
+      if (opts.sellerIdFilter != null) q = q.eq('seller_id', opts.sellerIdFilter)
+      if (opts.statusFilter && opts.statusFilter !== 'all') q = q.eq('status', opts.statusFilter)
+      if (opts.platformsFilter && opts.platformsFilter.length > 0) {
+        q = q.in('platform', opts.platformsFilter)
+      }
+      q = q.order('sold_at', { ascending: false }).range(pageStart, pageStart + PAGE_SIZE - 1)
+      const { data, error } = await q
+      if (error) throw new Error(error.message)
+      const page = (data ?? []) as unknown as OrdersReportRow[]
+      if (page.length === 0) break
+      rows.push(...page)
+      if (page.length < PAGE_SIZE) break
+      pageStart += PAGE_SIZE
+    }
+    return rows
+  }
+
+  async getRecentOrders(
+    orgId: string,
+    offset = 0,
+    limit = 50,
+    dateFrom?: string,
+    dateTo?: string,
+    sellerIdFilter?: number,
+    platforms?: string[],
+  ) {
+    const nick = await this.ordersBuildNicknameMap(orgId)
+    const isoFrom = dateFrom ? `${dateFrom}T00:00:00.000-03:00` : null
+    const isoTo = dateTo ? `${dateTo}T23:59:59.999-03:00` : null
+    const allRows = await this.ordersFetchRowsForReport({
+      orgId, dateFrom: isoFrom, dateTo: isoTo, sellerIdFilter, platformsFilter: platforms,
+    })
+
+    const sliceStart = Math.max(offset, 0)
+    const sliceEnd = limit > 0 ? sliceStart + limit : allRows.length
+    const paginated = allRows.slice(sliceStart, sliceEnd)
+
+    const orders = paginated.map((row) => {
+      const raw = (row.raw_data ?? {}) as Record<string, unknown>
+      const itemRaw = (raw.item ?? {}) as Record<string, unknown>
+      const shipping = (raw.shipping ?? {}) as Record<string, unknown>
+      const billing = (row.billing_address ?? {}) as Record<string, unknown>
+      let shippingState: string | null = null
+      let shippingCity: string | null = null
+      if (row.source === 'mercadolivre' || row.source === 'manual') {
+        const recvAddr = (shipping.receiver_address as Record<string, unknown> | undefined) ?? {}
+        const stateRaw = recvAddr.state ?? billing.state
+        if (typeof stateRaw === 'string') {
+          shippingState = stateRaw.startsWith('BR-') ? stateRaw.slice(3) : stateRaw
+        } else if (stateRaw && typeof stateRaw === 'object') {
+          const s = String(
+            (stateRaw as { id?: unknown; name?: unknown }).id ??
+              (stateRaw as { name?: unknown }).name ?? '',
+          )
+          shippingState = s.startsWith('BR-') ? s.slice(3) : s
+        }
+        const cityRaw = recvAddr.city ?? billing.city ?? billing.city_name
+        if (typeof cityRaw === 'string') shippingCity = cityRaw
+        else if (cityRaw && typeof cityRaw === 'object')
+          shippingCity = (cityRaw as { name?: string }).name ?? null
+      }
+      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      return {
+        id: row.external_order_id,
+        source: row.source,
+        platform: row.platform,
+        status: row.status,
+        date_created: (raw.date_created as string) ?? row.sold_at,
+        total_amount: totalAmount,
+        seller_id: row.seller_id,
+        account_nickname: this.ordersNicknameFor(row, nick),
+        items: [{
+          item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
+          title: (itemRaw.title as string) ?? row.product_title,
+          quantity: row.quantity ?? 1,
+          unit_price: Number(row.sale_price ?? 0),
+          seller_sku: row.sku ?? null,
+        }],
+        shipping_state: shippingState,
+        shipping_city: shippingCity,
+        platform_fee: Number(row.platform_fee ?? 0),
+        shipping_cost: Number(row.shipping_cost ?? 0),
+        shipping_buyer_paid: Number(row.shipping_buyer_paid ?? 0),
+        cost_price: row.cost_price != null ? Number(row.cost_price) : null,
+        tax_amount: row.tax_amount != null ? Number(row.tax_amount) : null,
+        contribution_margin: row.contribution_margin != null ? Number(row.contribution_margin) : null,
+        contribution_margin_pct: row.contribution_margin_pct != null ? Number(row.contribution_margin_pct) : null,
+        gross_profit: row.gross_profit != null ? Number(row.gross_profit) : null,
+      }
+    })
+    return { orders, total: allRows.length }
+  }
+
+  async getFinancialSummary(
+    orgId: string,
+    dateFrom: string,
+    dateTo: string,
+    statusFilter?: string,
+    sellerIdFilter?: number,
+    platforms?: string[],
+  ) {
+    const nick = await this.ordersBuildNicknameMap(orgId)
+    const allRows = await this.ordersFetchRowsForReport({
+      orgId, dateFrom, dateTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
+    })
+
+    let faturamento = 0, canceladas = 0
+    let tarifa_total = 0, frete_vendedor_total = 0, frete_comprador_total = 0
+    let custo_total = 0, imposto_total = 0
+    let qtd_aprovadas = 0, qtd_canceladas = 0
+    let qtd_com_custo = 0, qtd_sem_custo = 0
+    let fat_com_custo = 0
+
+    const enrichedOrders = allRows.map((row) => {
+      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      const isCancelled = row.status === 'cancelled'
+      const isInvalid = row.status === 'invalid'
+      const tarifaML = Number(row.platform_fee ?? 0)
+      const freteVendedor = Number(row.shipping_cost ?? 0)
+      const freteComprador = Number(row.shipping_buyer_paid ?? 0)
+      const costPrice = row.cost_price != null ? Number(row.cost_price) : null
+      const taxAmount = row.tax_amount != null ? Number(row.tax_amount) : null
+      const lucroBruto = row.gross_profit != null
+        ? Number(row.gross_profit)
+        : Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
+      const contribMargin = row.contribution_margin != null ? Number(row.contribution_margin) : null
+      const contribMarginPct = row.contribution_margin_pct != null ? Number(row.contribution_margin_pct) : null
+
+      if (!isCancelled && !isInvalid) {
+        faturamento += totalAmount
+        tarifa_total += tarifaML
+        frete_vendedor_total += freteVendedor
+        frete_comprador_total += freteComprador
+        custo_total += costPrice ?? 0
+        imposto_total += taxAmount ?? 0
+        qtd_aprovadas++
+        if (costPrice != null && costPrice > 0) { qtd_com_custo++; fat_com_custo += totalAmount }
+        else qtd_sem_custo++
+      } else if (isCancelled) {
+        canceladas += totalAmount; qtd_canceladas++
+      }
+
+      const raw = (row.raw_data ?? {}) as Record<string, unknown>
+      const itemRaw = (raw.item ?? {}) as Record<string, unknown>
+      const shipping = (raw.shipping ?? {}) as Record<string, unknown>
+
+      return {
+        order_id: row.external_order_id,
+        source: row.source,
+        platform: row.platform,
+        status: row.status,
+        date_created: (raw.date_created as string) ?? row.sold_at,
+        account_nickname: this.ordersNicknameFor(row, nick),
+        seller_id: row.seller_id,
+        item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
+        title: (itemRaw.title as string) ?? row.product_title,
+        sku: row.sku,
+        thumbnail: (itemRaw.thumbnail as string) ?? null,
+        quantity: row.quantity ?? 1,
+        unit_price: Number(row.sale_price ?? 0),
+        total_amount: totalAmount,
+        shipping_type: (shipping.logistic_type as string) ?? null,
+        frete_comprador: freteComprador,
+        frete_vendedor: freteVendedor,
+        tarifa_ml: tarifaML,
+        cost_price: costPrice,
+        tax_amount: taxAmount,
+        lucro_bruto: lucroBruto,
+        contribution_margin: contribMargin,
+        contribution_margin_pct: contribMarginPct,
+        is_paid: !isCancelled,
+        is_cancelled: isCancelled,
+      }
+    })
+
+    const r2 = (v: number) => Math.round(v * 100) / 100
+    const vendas_aprovadas = faturamento - tarifa_total - frete_vendedor_total
+    const margem_contribuicao = vendas_aprovadas - custo_total - imposto_total
+    const margem_pct = faturamento > 0 ? Math.round((margem_contribuicao / faturamento) * 10000) / 100 : 0
+    const ticket_medio = qtd_aprovadas > 0 ? Math.round((faturamento / qtd_aprovadas) * 100) / 100 : 0
+    const ticket_medio_mc = qtd_aprovadas > 0 ? Math.round((margem_contribuicao / qtd_aprovadas) * 100) / 100 : 0
+    const custo_pct_medio = fat_com_custo > 0 ? Math.round((custo_total / fat_com_custo) * 10000) / 100 : 0
+    const custo_projetado = faturamento * (custo_pct_medio / 100)
+    const margem_projetada = faturamento - tarifa_total - frete_vendedor_total - custo_projetado - imposto_total
+    const margem_projetada_pct = faturamento > 0 ? Math.round((margem_projetada / faturamento) * 10000) / 100 : 0
+
+    const kpis = {
+      vendas_aprovadas: r2(vendas_aprovadas),
+      // Mantém `faturamento_ml` no payload (dashboard/financeiro já leem essa
+      // chave) — agora engloba TODAS as plataformas. Renomear pra
+      // `faturamento_total` é refactor pra outra hora.
+      faturamento_ml: r2(faturamento),
+      canceladas: r2(canceladas),
+      custo_total: r2(custo_total),
+      imposto_total: r2(imposto_total),
+      tarifa_total: r2(tarifa_total),
+      frete_comprador: r2(frete_comprador_total),
+      frete_vendedor: r2(frete_vendedor_total),
+      frete_total: r2(frete_vendedor_total + frete_comprador_total),
+      margem_contribuicao: r2(margem_contribuicao),
+      margem_pct,
+      qtd_aprovadas, qtd_canceladas,
+      ticket_medio, ticket_medio_mc,
+      qtd_com_custo, qtd_sem_custo,
+      custo_pct_medio,
+      margem_projetada: r2(margem_projetada),
+      margem_projetada_pct,
+    }
+    const donutBase = faturamento || 1
+    const donutData = [
+      { name: 'Custo', value: r2(custo_total), pct: r2((custo_total / donutBase) * 100), color: '#f97316' },
+      { name: 'Tarifa', value: r2(tarifa_total), pct: r2((tarifa_total / donutBase) * 100), color: '#f59e0b' },
+      { name: 'Frete', value: r2(frete_vendedor_total), pct: r2((frete_vendedor_total / donutBase) * 100), color: '#3b82f6' },
+      { name: 'Imposto', value: r2(imposto_total), pct: r2((imposto_total / donutBase) * 100), color: '#ef4444' },
+      { name: 'M. Contribuição', value: r2(margem_contribuicao), pct: margem_pct, color: '#22c55e' },
+    ]
+    return { kpis, donutData, orders: enrichedOrders }
+  }
+}
+
+type OrdersReportRow = {
+  id: string
+  source: string | null
+  platform: string | null
+  external_order_id: string
+  status: string | null
+  sold_at: string | null
+  seller_id: number | null
+  sku: string | null
+  product_title: string | null
+  quantity: number | null
+  sale_price: number | null
+  platform_fee: number | null
+  cost_price: number | null
+  tax_amount: number | null
+  shipping_cost: number | null
+  shipping_buyer_paid: number | null
+  contribution_margin: number | null
+  contribution_margin_pct: number | null
+  gross_profit: number | null
+  raw_data: Record<string, unknown> | null
+  marketplace_listing_id: string | null
+  billing_address: Record<string, unknown> | null
 }
 
 interface DbOrderRow {
