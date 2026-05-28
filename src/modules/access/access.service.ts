@@ -2,6 +2,7 @@ import {
   Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException,
 } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 
 /**
  * F17-A · Gate de cadastro — orquestração.
@@ -22,6 +23,8 @@ export class AccessService {
 
   /** E-mail do platform admin (alinhado com isPlatformAdmin do frontend). */
   private readonly PLATFORM_ADMIN_EMAILS = ['vazzocomercio@gmail.com']
+
+  constructor(private readonly wa: WhatsAppSender) {}
 
   /** Lança ForbiddenException se o user não for platform admin. */
   async assertPlatformAdmin(userId: string): Promise<void> {
@@ -107,7 +110,56 @@ export class AccessService {
     if (error) throw new BadRequestException(`Erro ao salvar pedido: ${error.message}`)
 
     this.logger.log(`[access.submit] novo pedido id=${data.id} email=${email} plan=${planKey ?? 'none'}`)
+
+    // A9 · notifica founder via WhatsApp (best-effort, não trava o submit)
+    this.notifyFounder({
+      requestId: data.id as string,
+      name, email,
+      phone:    input.phone?.trim() || null,
+      company:  input.company?.trim() || null,
+      planKey,
+    }).catch(e => this.logger.warn(`[access.submit] notify falhou: ${(e as Error).message}`))
+
     return { id: data.id, duplicated: false, status: 'pending' }
+  }
+
+  /** Dispara WhatsApp pro founder com resumo do pedido + link pro painel admin.
+   *  Best-effort: erros são logados mas não propagam. Skip silencioso se
+   *  FOUNDER_NOTIFICATION_PHONE (ou fallback TELEMETRY_ALERT_PHONE) não setado. */
+  private async notifyFounder(p: {
+    requestId: string
+    name:      string
+    email:     string
+    phone:     string | null
+    company:   string | null
+    planKey:   string | null
+  }): Promise<void> {
+    const phone = process.env.FOUNDER_NOTIFICATION_PHONE
+      ?? process.env.TELEMETRY_ALERT_PHONE
+      ?? ''
+    if (!phone) {
+      this.logger.log('[access.notify] FOUNDER_NOTIFICATION_PHONE/TELEMETRY_ALERT_PHONE não setado — skip')
+      return
+    }
+
+    const planLabel = p.planKey ? `plano *${p.planKey}*` : 'sem plano'
+    const lines = [
+      `🚪 *Novo pedido de acesso* — e-Click`,
+      ``,
+      `*${p.name}*${p.company ? ` (${p.company})` : ''}`,
+      `📧 ${p.email}`,
+      p.phone ? `📱 ${p.phone}` : null,
+      `💼 ${planLabel}`,
+      ``,
+      `🔗 https://eclick.app.br/dashboard/admin/access-requests`,
+    ].filter(Boolean) as string[]
+
+    const r = await this.wa.sendTextMessage({ phone, message: lines.join('\n') })
+    if (r.success) {
+      this.logger.log(`[access.notify] whatsapp ok requestId=${p.requestId} -> ${phone}`)
+    } else {
+      this.logger.warn(`[access.notify] whatsapp falhou requestId=${p.requestId}: ${r.error ?? '?'}`)
+    }
   }
 
   /** Lista pedidos pra painel admin. */
