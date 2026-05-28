@@ -1082,9 +1082,20 @@ export class TikTokShopService {
       sku?: string
       package_weight_kg?: number
       package_dimensions_cm?: { length: number; width: number; height: number }
+      // Atributos do IA Criativo (formato ML: [{id, value_name, value_id}]) —
+      // mapeados pros atributos/marca do TikTok. Opcional.
+      ml_attributes?: Array<{ id: string; value_name?: string; value_id?: string }>
+      brand_name?: string
       dry_run?: boolean
     },
-  ): Promise<{ product_id: string | null; uploaded_images: number; dry_run?: boolean; skus?: unknown }> {
+  ): Promise<{
+    product_id: string | null
+    uploaded_images: number
+    mapped_attributes?: number
+    brand_id?: string | null
+    dry_run?: boolean
+    skus?: unknown
+  }> {
     const accessToken = await this.getAccessToken(orgId)
     if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
     if (!input.category_id) throw new BadRequestException('category_id é obrigatório')
@@ -1103,8 +1114,20 @@ export class TikTokShopService {
     }
     if (!uris.length) throw new BadRequestException('Falha ao subir as imagens pro TikTok')
 
+    // Mapeia atributos ML → TikTok + resolve a marca (reusa o que o IA Criativo
+    // já cadastrou pro ML — não redigita nada).
+    const productAttributes = await this.mapMlAttributesToTikTok(
+      orgId,
+      input.category_id,
+      input.ml_attributes ?? [],
+    )
+    const brandName =
+      input.brand_name ??
+      input.ml_attributes?.find((a) => a.id === 'BRAND')?.value_name
+    const brandId = await this.resolveTikTokBrandId(orgId, brandName)
+
     const dim = input.package_dimensions_cm ?? { length: 20, width: 20, height: 15 }
-    const body = {
+    const body: Record<string, unknown> = {
       title: input.title,
       description: `<p>${(input.description ?? input.title).replace(/</g, '&lt;')}</p>`,
       category_id: input.category_id,
@@ -1124,9 +1147,17 @@ export class TikTokShopService {
         },
       ],
     }
+    if (productAttributes.length) body.product_attributes = productAttributes
+    if (brandId) body.brand_id = brandId
 
     if (input.dry_run) {
-      return { product_id: null, uploaded_images: uris.length, dry_run: true }
+      return {
+        product_id: null,
+        uploaded_images: uris.length,
+        mapped_attributes: productAttributes.length,
+        brand_id: brandId,
+        dry_run: true,
+      }
     }
 
     const data = await this.ttsRequest<{ product_id: string; skus?: unknown }>({
@@ -1136,8 +1167,112 @@ export class TikTokShopService {
       query: { shop_cipher: shopCipher },
       body,
     })
-    this.logger.log(`[tts.publish] produto criado ${data.product_id} (${uris.length} imgs)`)
-    return { product_id: data.product_id, uploaded_images: uris.length, skus: data.skus }
+    this.logger.log(
+      `[tts.publish] produto criado ${data.product_id} (${uris.length} imgs, ${productAttributes.length} attrs, brand=${brandId ?? '-'})`,
+    )
+    return {
+      product_id: data.product_id,
+      uploaded_images: uris.length,
+      mapped_attributes: productAttributes.length,
+      brand_id: brandId,
+      skus: data.skus,
+    }
+  }
+
+  /** Marcas do catálogo TikTok (filtra por nome). Read-only. */
+  async getBrands(
+    orgId: string,
+    opts: { keyword?: string } = {},
+  ): Promise<Array<{ id: string; name: string }>> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const data = await this.ttsRequest<{ brands?: Array<{ id: string; name: string }> }>({
+      method: 'GET',
+      path: '/product/202309/brands',
+      accessToken,
+      query: {
+        shop_cipher: shopCipher,
+        category_version: 'v2',
+        page_size: 50,
+        brand_name: opts.keyword,
+      },
+    })
+    return data.brands ?? []
+  }
+
+  /** normaliza p/ comparar nomes (lower + sem acento). */
+  private norm(s?: string): string {
+    return (s ?? '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .trim()
+  }
+
+  /** De-para semântico: id de atributo ML → palavras-chave do nome no TikTok. */
+  private static readonly ML_TO_TT_ATTR: Record<string, string[]> = {
+    VOLTAGE: ['tensao', 'voltage'],
+    POWER: ['potencia', 'power'],
+    MATERIALS: ['material'],
+    COLOR: ['cor'],
+    MAIN_COLOR: ['cor'],
+  }
+
+  /** Mapeia atributos do IA Criativo (formato ML) → product_attributes do TikTok.
+   *  Casa o atributo por nome e o valor pela lista de valores da categoria
+   *  (enum → value_id; sem enum → free-text). De-dup por atributo TikTok. Valor
+   *  enum sem match é PULADO (não manda valor inválido). */
+  private async mapMlAttributesToTikTok(
+    orgId: string,
+    categoryId: string,
+    mlAttributes: Array<{ id: string; value_name?: string; value_id?: string }>,
+  ): Promise<Array<{ id: string; values: Array<{ id?: string; name: string }> }>> {
+    if (!mlAttributes?.length) return []
+    let catAttrs: Array<{ id: string; name: string; values: Array<{ id: string; name: string }> }>
+    try {
+      catAttrs = await this.getCategoryAttributes(orgId, categoryId)
+    } catch {
+      return []
+    }
+    const out: Array<{ id: string; values: Array<{ id?: string; name: string }> }> = []
+    const seen = new Set<string>()
+    for (const ml of mlAttributes) {
+      if (!ml.value_name || ml.value_id === '-1') continue
+      const kws = TikTokShopService.ML_TO_TT_ATTR[ml.id]
+      if (!kws) continue
+      const tk = catAttrs.find((t) => kws.some((kw) => this.norm(t.name).includes(this.norm(kw))))
+      if (!tk || seen.has(tk.id)) continue
+      let value: { id?: string; name: string }
+      if (tk.values?.length) {
+        const mlv = this.norm(ml.value_name)
+        const v =
+          tk.values.find((x) => this.norm(x.name) === mlv) ??
+          tk.values.find((x) => this.norm(x.name).includes(mlv) || mlv.includes(this.norm(x.name)))
+        if (!v) continue // enum sem match → não manda valor inválido
+        value = { id: v.id, name: v.name }
+      } else {
+        value = { name: ml.value_name }
+      }
+      out.push({ id: tk.id, values: [value] })
+      seen.add(tk.id)
+    }
+    return out
+  }
+
+  /** Resolve o brand_id do TikTok a partir do nome da marca (ex.: "Vazzo"). */
+  private async resolveTikTokBrandId(
+    orgId: string,
+    brandName?: string,
+  ): Promise<string | null> {
+    if (!brandName?.trim()) return null
+    try {
+      const brands = await this.getBrands(orgId, { keyword: brandName })
+      const m = brands.find((b) => this.norm(b.name) === this.norm(brandName))
+      return m?.id ?? null
+    } catch {
+      return null
+    }
   }
 
   // ── Página de Anúncios TikTok (leitura) ───────────────────────────────────

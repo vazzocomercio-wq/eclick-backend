@@ -218,6 +218,8 @@ export class TikTokShopController {
       sku?: string
       package_weight_kg?: number
       package_dimensions_cm?: { length: number; width: number; height: number }
+      ml_attributes?: Array<{ id: string; value_name?: string; value_id?: string }>
+      brand_name?: string
       dry_run?: boolean
     },
   ) {
