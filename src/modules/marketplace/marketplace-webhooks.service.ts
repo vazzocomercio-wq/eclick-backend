@@ -65,6 +65,9 @@ export class MarketplaceWebhooksService {
 
     // 3. Resolve org_id via shop_id (best-effort — pode ser null se loja
     //    ainda não estiver conectada; webhook entra como audit órfão).
+    //    F0.8 defesa: .eq('status','connected') + order+limit em vez de
+    //    maybeSingle() — UNIQUE INDEX parcial garante 1 row, mas se algum
+    //    bug futuro deixar 2 rows passarem, não crashamos o webhook.
     let organizationId: string | null = null
     if (shopIdStr) {
       const { data } = await supabaseAdmin
@@ -72,8 +75,11 @@ export class MarketplaceWebhooksService {
         .select('organization_id')
         .eq('platform', 'shopee')
         .eq('shop_id', Number(shopIdStr))
-        .maybeSingle()
-      organizationId = (data as { organization_id: string } | null)?.organization_id ?? null
+        .eq('status', 'connected')
+        .order('updated_at', { ascending: false })
+        .limit(1)
+      const first = (data as Array<{ organization_id: string }> | null)?.[0]
+      organizationId = first?.organization_id ?? null
     }
 
     // 4. Persiste ANTES de processar — se handler crashar, evento permanece
