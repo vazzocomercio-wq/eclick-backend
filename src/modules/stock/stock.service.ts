@@ -1,4 +1,4 @@
-import { Injectable, Logger, HttpException } from '@nestjs/common'
+import { Injectable, Logger, HttpException, Inject, forwardRef } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
@@ -9,6 +9,8 @@ export class StockService {
 
   constructor(
     private readonly mlService: MercadolivreService,
+    // forwardRef: ciclo StockModule ↔ TikTokShopModule (TT-4a push / TT-4b pull).
+    @Inject(forwardRef(() => TikTokShopService))
     private readonly tiktokService: TikTokShopService,
   ) {}
 

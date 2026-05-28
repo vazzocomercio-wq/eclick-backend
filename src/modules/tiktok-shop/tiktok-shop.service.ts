@@ -4,11 +4,14 @@ import {
   BadRequestException,
   HttpException,
   HttpStatus,
+  Inject,
+  forwardRef,
 } from '@nestjs/common'
 import * as crypto from 'node:crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { encryptConfig, decryptConfig } from '../marketplace/crypto.util'
 import { signTikTokShop } from './tiktok-shop-sign.util'
+import { StockService } from '../stock/stock.service'
 
 /**
  * TikTok Shop (app Personalizado) — Fase 1: OAuth da loja.
@@ -50,13 +53,23 @@ interface OAuthStateRow {
   redirect_to: string | null
 }
 
+interface TtsOrderLineItem {
+  id?: string
+  sku_id?: string
+  seller_sku?: string
+  product_id?: string
+  sku_name?: string
+}
+
 interface TtsOrder {
   id: string
   status?: string
   buyer_message?: string
   recipient_address?: { name?: string }
   payment?: { total_amount?: string; currency?: string }
-  line_items?: unknown[]
+  // line_items do TikTok são POR-UNIDADE (cada unidade = 1 entrada; qtd de um
+  // SKU = nº de entradas com aquele sku_id). sku_id == product_listings.listing_id.
+  line_items?: TtsOrderLineItem[]
   create_time?: number
   update_time?: number
 }
@@ -117,6 +130,13 @@ interface TtsWebhookPayload {
 @Injectable()
 export class TikTokShopService {
   private readonly logger = new Logger(TikTokShopService.name)
+
+  // forwardRef: StockModule importa TikTokShopModule (TT-4a push) e vice-versa
+  // (TT-4b pull) — ciclo resolvido pelo Nest.
+  constructor(
+    @Inject(forwardRef(() => StockService))
+    private readonly stockService: StockService,
+  ) {}
 
   private env(): { appKey: string; appSecret: string; serviceId: string } {
     const appKey = process.env.TIKTOK_SHOP_APP_KEY
@@ -500,6 +520,7 @@ export class TikTokShopService {
     orgId: string,
     shopId: string | null,
     o: TtsOrder,
+    applyStock = false,
   ): Promise<boolean> {
     const { error } = await supabaseAdmin.from('tiktok_shop_orders').upsert(
       {
@@ -542,7 +563,63 @@ export class TikTokShopService {
       { onConflict: 'source,external_order_id,sku' },
     )
     if (ordErr) this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${ordErr.message}`)
+
+    // TT-4b (PULL): só no caminho do WEBHOOK (venda nova em tempo real) e com a
+    // flag ligada. NUNCA no import/cron — evita baixar retroativamente pedidos
+    // históricos. O espelho em `orders` segue product_id=NULL (a baixa é feita
+    // aqui, explícita, via applySaleMovement idempotente).
+    if (applyStock && this.isOrderDecrementEnabled()) {
+      await this.applyOrderStockMovement(orgId, o).catch((e) =>
+        this.logger.warn(
+          `[tts.stock] baixa do pedido ${o.id} falhou: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      )
+    }
     return !error
+  }
+
+  /** Flag de segurança: venda no TikTok só baixa o estoque mestre quando ligado. */
+  isOrderDecrementEnabled(): boolean {
+    return process.env.TIKTOK_ORDER_DECREMENT === 'on'
+  }
+
+  /** Baixa o estoque mestre a partir das linhas do pedido TikTok. line_items são
+   *  por-unidade → qtd por sku_id = nº de linhas. Resolve sku_id (=listing_id)
+   *  pros produtos vinculados e chama applySaleMovement (idempotente; recalc
+   *  re-propaga pro ML + TikTok). Cancelamento/refund estorna. */
+  private async applyOrderStockMovement(orgId: string, o: TtsOrder): Promise<void> {
+    const items = o.line_items ?? []
+    if (!items.length) return
+    const qtyBySku = new Map<string, number>()
+    for (const it of items) {
+      if (!it.sku_id) continue
+      qtyBySku.set(it.sku_id, (qtyBySku.get(it.sku_id) ?? 0) + 1)
+    }
+    if (qtyBySku.size === 0) return
+
+    const { data: links } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id, product_id')
+      .eq('platform', 'tiktok_shop')
+      .eq('is_active', true)
+      .in('listing_id', [...qtyBySku.keys()])
+    if (!links?.length) return
+
+    const status = this.mapTtsStatus(o.status)
+    for (const l of links as Array<{ listing_id: string; product_id: string }>) {
+      const qty = qtyBySku.get(l.listing_id) ?? 0
+      if (qty <= 0) continue
+      const r = await this.stockService.applySaleMovement({
+        productId: l.product_id,
+        quantity: qty,
+        externalOrderId: String(o.id),
+        status,
+        channel: 'tiktok_shop',
+      })
+      this.logger.log(
+        `[tts.stock] pedido=${o.id} sku=${l.listing_id} produto=${l.product_id} qty=${qty} status=${status} → ${r}`,
+      )
+    }
   }
 
   /** Sincroniza UM pedido pelo id (webhook): busca o detalhe via API e faz upsert. */
@@ -563,7 +640,8 @@ export class TikTokShopService {
     })
     const o = data.orders?.[0]
     if (!o) return false
-    return this.persistOrder(orgId, cred?.shop_id ?? null, o)
+    // Webhook = venda nova em tempo real → aplica a baixa de estoque (gateada).
+    return this.persistOrder(orgId, cred?.shop_id ?? null, o, true)
   }
 
   /** Sincroniza UM produto pelo id (webhook): busca o detalhe e faz upsert. */
