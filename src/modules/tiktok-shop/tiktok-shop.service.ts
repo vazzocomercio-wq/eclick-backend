@@ -12,6 +12,8 @@ import { supabaseAdmin } from '../../common/supabase'
 import { encryptConfig, decryptConfig } from '../marketplace/crypto.util'
 import { signTikTokShop } from './tiktok-shop-sign.util'
 import { StockService } from '../stock/stock.service'
+import { ChannelSettingsService } from '../channel-settings/channel-settings.service'
+import { computeContributionMargin, round2 } from '../../common/margin'
 
 /**
  * TikTok Shop (app Personalizado) — Fase 1: OAuth da loja.
@@ -59,6 +61,20 @@ interface TtsOrderLineItem {
   seller_sku?: string
   product_id?: string
   sku_name?: string
+  product_name?: string
+  sale_price?: string
+  original_price?: string
+}
+
+interface TtsOrderPayment {
+  total_amount?: string
+  sub_total?: string
+  shipping_fee?: string
+  seller_discount?: string
+  platform_discount?: string
+  original_shipping_fee?: string
+  shipping_fee_platform_discount?: string
+  currency?: string
 }
 
 interface TtsOrder {
@@ -66,7 +82,7 @@ interface TtsOrder {
   status?: string
   buyer_message?: string
   recipient_address?: { name?: string }
-  payment?: { total_amount?: string; currency?: string }
+  payment?: TtsOrderPayment
   // line_items do TikTok são POR-UNIDADE (cada unidade = 1 entrada; qtd de um
   // SKU = nº de entradas com aquele sku_id). sku_id == product_listings.listing_id.
   line_items?: TtsOrderLineItem[]
@@ -136,6 +152,7 @@ export class TikTokShopService {
   constructor(
     @Inject(forwardRef(() => StockService))
     private readonly stockService: StockService,
+    private readonly channelSettings: ChannelSettingsService,
   ) {}
 
   private env(): { appKey: string; appSecret: string; serviceId: string } {
@@ -542,27 +559,16 @@ export class TikTokShopService {
       { onConflict: 'organization_id,tts_order_id' },
     )
 
-    const total = o.payment?.total_amount ? Number(o.payment.total_amount) : null
-    const { error: ordErr } = await supabaseAdmin.from('orders').upsert(
-      {
-        organization_id: orgId,
-        source: 'tiktok_shop',
-        platform: 'tiktok_shop',
-        external_order_id: o.id,
-        sku: 'TTS-ORDER',
-        product_id: null,
-        product_title: 'Pedido TikTok Shop',
-        quantity: o.line_items?.length ?? 1,
-        sale_price: total != null && !Number.isNaN(total) ? total : null,
-        status: this.mapTtsStatus(o.status),
-        buyer_name: o.recipient_address?.name ?? null,
-        sold_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,
-        raw_data: o as unknown as Record<string, unknown>,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'source,external_order_id,sku' },
+    // Espelho no `orders` unificado: TT-5b mudou pra 1 ROW POR SKU VENDIDO
+    // (não mais 1 marker agregado 'TTS-ORDER'). Custos populados:
+    // platform_fee (comissão TikTok estimada via channel-settings, já que a
+    // API não devolve no pedido — só em Settlement), shipping_cost (frete real
+    // pago pelo vendedor, rateado por SKU), cost_price/tax/margem (do produto
+    // vinculado, quando há vínculo). Permite dashboards/financeiro verem
+    // margem real por produto+canal.
+    await this.mirrorOrderLines(orgId, o).catch((e) =>
+      this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${e instanceof Error ? e.message : String(e)}`),
     )
-    if (ordErr) this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${ordErr.message}`)
 
     // TT-4b (PULL): só no caminho do WEBHOOK (venda nova em tempo real) e com a
     // flag ligada. NUNCA no import/cron — evita baixar retroativamente pedidos
@@ -619,6 +625,156 @@ export class TikTokShopService {
       this.logger.log(
         `[tts.stock] pedido=${o.id} sku=${l.listing_id} produto=${l.product_id} qty=${qty} status=${status} → ${r}`,
       )
+    }
+  }
+
+  /** TT-5b — espelha o pedido TikTok em `orders` no nível do SKU vendido, com
+   *  decomposição de custos (platform_fee/shipping_cost/cost_price/tax_amount/
+   *  margem) pra alimentar dashboards e financeiro. Idempotente via upsert
+   *  por (source, external_order_id, sku). Cada canal tem seus custos próprios:
+   *
+   *  - platform_fee: comissão TikTok ESTIMADA (sub_total × commission_pct/100,
+   *    rateada por SKU) — a API do TikTok só devolve a comissão real em
+   *    Settlement (pós-faturamento). channel-settings.commission_pct é a
+   *    referência (configurável por org).
+   *  - shipping_cost: o frete REAL pago pelo vendedor já descontados os
+   *    subsídios da plataforma (payment.shipping_fee), rateado por SKU pelo
+   *    share no sub_total.
+   *  - cost_price / tax_amount / margem: vêm do produto VINCULADO (quando há
+   *    link em product_listings). Sem vínculo, ficam NULL (revenue conta;
+   *    margem só após vincular).
+   */
+  private async mirrorOrderLines(orgId: string, o: TtsOrder): Promise<void> {
+    const items = o.line_items ?? []
+    if (!items.length) return
+
+    // Agrupa por (seller_sku || sku_id) — cada line item = 1 unidade no TikTok.
+    type Group = {
+      sku: string
+      sku_id: string
+      product_title: string
+      qty: number
+      sale_total: number
+    }
+    const groups = new Map<string, Group>()
+    for (const it of items) {
+      const sku = (it.seller_sku ?? '').trim() || (it.sku_id ?? '').trim()
+      if (!sku) continue
+      const g = groups.get(sku) ?? {
+        sku,
+        sku_id: it.sku_id ?? '',
+        product_title: it.product_name ?? it.sku_name ?? '(produto)',
+        qty: 0,
+        sale_total: 0,
+      }
+      g.qty += 1
+      g.sale_total += Number(it.sale_price ?? 0) || 0
+      groups.set(sku, g)
+    }
+    if (groups.size === 0) return
+
+    // Resolve produtos vinculados (custos/imposto) por sku_id.
+    type LinkRow = {
+      listing_id: string
+      product_id: string
+      products: {
+        cost_price: number | null
+        tax_percentage: number | null
+        tax_on_freight: boolean | null
+      } | null
+    }
+    const linkBySkuId = new Map<
+      string,
+      { product_id: string; cost_price: number | null; tax_pct: number; tax_on_freight: boolean }
+    >()
+    const skuIds = [...groups.values()].map((g) => g.sku_id).filter(Boolean)
+    if (skuIds.length) {
+      const { data } = await supabaseAdmin
+        .from('product_listings')
+        .select('listing_id, product_id, products(cost_price, tax_percentage, tax_on_freight)')
+        .eq('platform', 'tiktok_shop')
+        .eq('is_active', true)
+        .in('listing_id', skuIds)
+      for (const r of (data ?? []) as unknown as LinkRow[]) {
+        const prod = r.products
+        linkBySkuId.set(r.listing_id, {
+          product_id: r.product_id,
+          cost_price: prod?.cost_price ?? null,
+          tax_pct: Number(prod?.tax_percentage ?? 0) || 0,
+          tax_on_freight: Boolean(prod?.tax_on_freight),
+        })
+      }
+    }
+
+    // Custos do canal — comissão configurada da org pro tiktok_shop.
+    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'tiktok_shop', 0)
+
+    // Sub_total e frete vindos do payment do pedido (rateio por SKU).
+    const subTotalAll =
+      Number(o.payment?.sub_total ?? 0) ||
+      [...groups.values()].reduce((s, g) => s + g.sale_total, 0)
+    const shippingFee = Number(o.payment?.shipping_fee ?? 0) || 0
+    const status = this.mapTtsStatus(o.status)
+    const soldAt = o.create_time ? new Date(o.create_time * 1000).toISOString() : null
+    const buyer = o.recipient_address?.name ?? null
+    const nowIso = new Date().toISOString()
+
+    // Upsert 1 row por SKU vendido.
+    for (const g of groups.values()) {
+      const link = linkBySkuId.get(g.sku_id) ?? null
+      const sale_price = round2(g.sale_total)
+      const platform_fee = round2(sale_price * commissionPct / 100)
+      const shipping_cost = subTotalAll > 0 ? round2(shippingFee * sale_price / subTotalAll) : 0
+      const cost_price = link?.cost_price != null ? round2(Number(link.cost_price) * g.qty) : null
+
+      let tax_amount: number | null = null
+      let contribution_margin: number | null = null
+      let contribution_margin_pct: number | null = null
+      if (cost_price != null) {
+        const m = computeContributionMargin({
+          price: sale_price,
+          saleFee: platform_fee,
+          shipping: shipping_cost,
+          cost: cost_price,
+          taxPercentage: link?.tax_pct ?? 0,
+          taxOnFreight: link?.tax_on_freight ?? false,
+        })
+        tax_amount = m.taxAmount
+        contribution_margin = m.contributionMargin
+        contribution_margin_pct = m.contributionMarginPct
+      }
+      // Lucro bruto = receita − tarifa − frete (antes de custo/imposto).
+      const gross_profit = round2(sale_price - platform_fee - shipping_cost)
+
+      const { error } = await supabaseAdmin.from('orders').upsert(
+        {
+          organization_id: orgId,
+          source: 'tiktok_shop',
+          platform: 'tiktok_shop',
+          external_order_id: o.id,
+          sku: g.sku,
+          product_id: link?.product_id ?? null,
+          product_title: g.product_title,
+          quantity: g.qty,
+          sale_price,
+          platform_fee,
+          shipping_cost,
+          cost_price,
+          tax_amount,
+          gross_profit,
+          contribution_margin,
+          contribution_margin_pct,
+          status,
+          buyer_name: buyer,
+          sold_at: soldAt,
+          raw_data: o as unknown as Record<string, unknown>,
+          updated_at: nowIso,
+        },
+        { onConflict: 'source,external_order_id,sku' },
+      )
+      if (error) {
+        this.logger.warn(`[tts.mirror] sku=${g.sku} pedido=${o.id}: ${error.message}`)
+      }
     }
   }
 
