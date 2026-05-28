@@ -34,8 +34,7 @@ FROM shopee.algo_score_breakdown
 ORDER BY organization_id, shop_id, item_id, computed_at DESC;
 
 COMMENT ON VIEW shopee.v_latest_algo_score IS
-  'F18 F1.2 — Score mais recente por (org, shop, item). Fonte: ' ||
-  'algo_score_breakdown via DISTINCT ON. Listing Center consome esta view.';
+  'F18 F1.2 — Score mais recente por (org, shop, item). Fonte: algo_score_breakdown via DISTINCT ON. Listing Center consome esta view.';
 
 GRANT SELECT ON shopee.v_latest_algo_score TO authenticated, service_role;
 
