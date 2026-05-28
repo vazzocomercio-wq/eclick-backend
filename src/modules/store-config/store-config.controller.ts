@@ -6,6 +6,7 @@ import { StoreConfigService, THEME_PRESETS, type StoreConfig } from './store-con
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -26,17 +27,19 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   GET    /public/store/:slug/product/:productId
  */
 @Controller('store/config')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StoreConfigController {
   constructor(private readonly svc: StoreConfigService) {}
 
   @Get()
+  @RequirePermission('store.view')
   get(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(u.orgId)
   }
 
   @Post()
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: { store_name: string; store_slug?: string }) {
     if (!u.orgId)             throw new BadRequestException('orgId ausente')
     if (!body?.store_name)    throw new BadRequestException('store_name obrigatório')
@@ -44,18 +47,21 @@ export class StoreConfigController {
   }
 
   @Patch()
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Body() body: Partial<StoreConfig>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.update(u.orgId, body)
   }
 
   @Post('verify-domain')
+  @RequirePermission('store.update')
   verifyDomain(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.verifyDomain(u.orgId)
   }
 
   @Get('theme-presets')
+  @RequirePermission('store.view')
   themePresets() {
     return THEME_PRESETS
   }
@@ -66,6 +72,7 @@ export class StoreConfigController {
   // PATCH  /store/config/promotions/bulk
 
   @Get('promotions')
+  @RequirePermission('store.view')
   listPromotions(
     @ReqUser() u: ReqUserPayload,
     @Query('filter') filter?: string,
@@ -87,6 +94,7 @@ export class StoreConfigController {
   }
 
   @Patch('promotions/:productId')
+  @RequirePermission('store.update')
   setPromotion(
     @ReqUser() u: ReqUserPayload,
     @Param('productId') productId: string,
@@ -102,6 +110,7 @@ export class StoreConfigController {
   }
 
   @Patch('promotions/bulk/metadata')
+  @RequirePermission('store.update')
   bulkSetPromotionMetadata(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -120,6 +129,7 @@ export class StoreConfigController {
    *  Body: { productIds[], discountPct? | salePrice?, startAt?, endAt?, badgeText? }
    *  Aplica desconto linear (% calcula por produto, salePrice fixo idem em todos). */
   @Post('promotions/bulk-apply')
+  @RequirePermission('store.update')
   bulkApplyDiscount(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -140,6 +150,7 @@ export class StoreConfigController {
 
   /** POST /store/config/promotions/bulk-clear — remove promoção de N produtos */
   @Post('promotions/bulk-clear')
+  @RequirePermission('store.update')
   bulkClearPromotions(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { productIds: string[] },

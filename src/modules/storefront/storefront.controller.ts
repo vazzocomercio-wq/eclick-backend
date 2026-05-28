@@ -6,6 +6,7 @@ import { StorefrontService, type StorefrontRule, type ProductCollection } from '
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -35,29 +36,33 @@ interface ReqUserPayload { id: string; orgId: string | null }
 
 // Auth controller
 @Controller('storefront')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontController {
   constructor(private readonly svc: StorefrontService) {}
 
   @Get('rules')
+  @RequirePermission('store.view')
   listRules(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listRules(u.orgId)
   }
 
   @Post('rules')
+  @RequirePermission('store.update')
   createRule(@ReqUser() u: ReqUserPayload, @Body() body: Partial<StorefrontRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.createRule(u.orgId, body)
   }
 
   @Patch('rules/:id')
+  @RequirePermission('store.update')
   updateRule(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<StorefrontRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateRule(id, u.orgId, body)
   }
 
   @Delete('rules/:id')
+  @RequirePermission('store.update')
   deleteRule(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.deleteRule(id, u.orgId)
@@ -96,17 +101,19 @@ export class StorefrontPublicController {
 
 // Collections (auth)
 @Controller('collections')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CollectionsController {
   constructor(private readonly svc: StorefrontService) {}
 
   @Get()
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listCollections(u.orgId)
   }
 
   @Post()
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: Partial<ProductCollection>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.createCollection(u.orgId, body)
@@ -114,24 +121,28 @@ export class CollectionsController {
 
   @Post('generate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('store.update')
   generate(@ReqUser() u: ReqUserPayload, @Body() body: { count?: number } = {}) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.generateCollections(u.orgId, body.count ?? 5)
   }
 
   @Get(':id')
+  @RequirePermission('store.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getCollection(id, u.orgId)
   }
 
   @Patch(':id')
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<ProductCollection>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.updateCollection(id, u.orgId, body)
   }
 
   @Delete(':id')
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.deleteCollection(id, u.orgId)

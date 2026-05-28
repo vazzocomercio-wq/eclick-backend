@@ -4,6 +4,7 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { StorefrontDesignService } from './storefront-design.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -22,11 +23,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   PUT  /store/config/design                      { design }
  */
 @Controller('store/config/design')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontDesignController {
   constructor(private readonly svc: StorefrontDesignService) {}
 
   @Post('generate')
+  @RequirePermission('store.update')
   generate(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { prompt?: string; inspirationId?: string },
@@ -39,6 +41,7 @@ export class StorefrontDesignController {
   }
 
   @Post('generate-from-image')
+  @RequirePermission('store.update')
   generateFromImage(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { imageBase64?: string; imageMimeType?: string; prompt?: string },
@@ -53,6 +56,7 @@ export class StorefrontDesignController {
   }
 
   @Post('generate-from-url')
+  @RequirePermission('store.update')
   generateFromUrl(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { url?: string; prompt?: string },
@@ -63,12 +67,14 @@ export class StorefrontDesignController {
   }
 
   @Post('hero-image')
+  @RequirePermission('store.update')
   generateHeroImage(@ReqUser() u: ReqUserPayload, @Body() body: { prompt?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.generateHeroImage(u.orgId, { prompt: body?.prompt })
   }
 
   @Post('section-image')
+  @RequirePermission('store.update')
   generateSectionImage(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -93,6 +99,7 @@ export class StorefrontDesignController {
   }
 
   @Post('scene-image')
+  @RequirePermission('store.update')
   generateSceneImage(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { prompt?: string; format?: 'wide' | 'square' | 'story' },
@@ -106,6 +113,7 @@ export class StorefrontDesignController {
   }
 
   @Post('upload-asset')
+  @RequirePermission('store.update')
   uploadAsset(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { imageBase64?: string; imageMimeType?: string },
@@ -119,12 +127,14 @@ export class StorefrontDesignController {
   }
 
   @Get('canva/designs')
+  @RequirePermission('store.view')
   listCanvaDesigns(@ReqUser() u: ReqUserPayload, @Query('query') query?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listCanvaDesigns(u.orgId, query)
   }
 
   @Post('canva/generate')
+  @RequirePermission('store.update')
   generateFromCanva(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { designId?: string; prompt?: string },
@@ -138,6 +148,7 @@ export class StorefrontDesignController {
   }
 
   @Put()
+  @RequirePermission('store.update')
   save(@ReqUser() u: ReqUserPayload, @Body() body: { design?: unknown }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.saveDesign(u.orgId, body?.design)
