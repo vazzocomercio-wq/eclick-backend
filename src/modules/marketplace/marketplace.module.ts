@@ -8,6 +8,7 @@ import { MarketplaceService } from './marketplace.service'
 import { MarketplaceController } from './marketplace.controller'
 import { MarketplaceWebhooksController } from './marketplace-webhooks.controller'
 import { MarketplaceWebhooksService } from './marketplace-webhooks.service'
+import { ShopThrottleService } from './throttle/shop-throttle.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
@@ -16,6 +17,7 @@ import { MarketplaceWebhooksService } from './marketplace-webhooks.service'
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
     MarketplaceAdapterRegistry, MarketplaceService,
     MarketplaceWebhooksService,
+    ShopThrottleService, // F0.6 — throttle por shop_id pra ShopeeAdapter
   ],
   exports:     [MarketplaceService, MarketplaceAdapterRegistry],
 })

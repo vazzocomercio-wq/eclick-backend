@@ -6,6 +6,8 @@ import {
   RawOrder, BuyerBilling, AddressShape, TokenPair,
   WebhookValidationInput,
 } from './base'
+import { ShopThrottleService } from '../throttle/shop-throttle.service'
+import { retryWithBackoff } from '../throttle/retry-with-backoff'
 
 const SHOPEE_BASE = 'https://openplatform.shopee.com.br' // BR prod
 
@@ -21,6 +23,24 @@ const SHOPEE_BASE = 'https://openplatform.shopee.com.br' // BR prod
 export class ShopeeAdapter extends MarketplaceAdapter {
   readonly platform: MarketplacePlatform = 'shopee'
   private readonly logger = new Logger(ShopeeAdapter.name)
+
+  constructor(private readonly throttle: ShopThrottleService) {
+    super()
+  }
+
+  /** F0.6 — wrapper que serializa por shop_id + retry 429/5xx com backoff.
+   *  Todo outbound da Shopee passa por aqui. Chave do throttle inclui
+   *  prefixo de op pra refresh (sem shop_id válido na config) não colidir
+   *  com listOrders da mesma loja. */
+  private callShopee<T>(args: {
+    key:  string
+    tag:  string
+    exec: () => Promise<T>
+  }): Promise<T> {
+    return this.throttle.run(args.key, () =>
+      retryWithBackoff(args.exec, { tag: args.tag }),
+    )
+  }
 
   // ── sign helpers ────────────────────────────────────────────────────────
 
@@ -85,8 +105,12 @@ export class ShopeeAdapter extends MarketplaceAdapter {
           page_size:        '100',
           cursor,
         })
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data } = await axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`)
+        const { data } = await this.callShopee({
+          key:  `shop:${shopId}`,
+          tag:  'shopee.listOrders',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+        })
         if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
         const orderList: unknown[] = data?.response?.order_list ?? []
         for (const o of orderList) {
@@ -139,8 +163,12 @@ export class ShopeeAdapter extends MarketplaceAdapter {
         order_sn_list:            chunk.join(','),
         response_optional_fields: 'buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,total_amount,pay_time',
       })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`)
+      const { data } = await this.callShopee({
+        key:  `shop:${shopId}`,
+        tag:  'shopee.getOrderDetail',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+      })
       if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
       out.push(...(data?.response?.order_list ?? []))
     }
@@ -210,8 +238,12 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       shop_id:       conn.shop_id,
       refresh_token: conn.refresh_token,
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data } = await axios.post<any>(url, body)
+    const { data } = await this.callShopee({
+      key:  `shop:${conn.shop_id}`,
+      tag:  'shopee.refreshToken',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
     if (data?.error) throw new Error(`Shopee refresh ${data.error}: ${data.message}`)
     // Shopee usa `expire_in` (não `expires_in`)
     const ttlSec = Number(data?.expire_in ?? 14400)
