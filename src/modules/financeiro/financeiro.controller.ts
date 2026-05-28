@@ -7,9 +7,10 @@ import { supabaseAdmin } from '../../common/supabase'
 import {
   FinanceiroService, CreatePayableDto, UpdatePayableDto, MarkPaidDto,
 } from './financeiro.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('financeiro')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class FinanceiroController {
   constructor(private readonly svc: FinanceiroService) {}
 
@@ -34,6 +35,7 @@ export class FinanceiroController {
   // ── Payables ───────────────────────────────────────────────────────────────
 
   @Get('payables')
+  @RequirePermission('financeiro.view')
   async list(
     @Headers('authorization') auth: string,
     @Query('status') status?: string,
@@ -48,12 +50,14 @@ export class FinanceiroController {
   }
 
   @Get('payables/summary')
+  @RequirePermission('financeiro.view')
   async summary(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getSummary(orgId)
   }
 
   @Get('payables/:id')
+  @RequirePermission('financeiro.view')
   async get(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -63,6 +67,7 @@ export class FinanceiroController {
   }
 
   @Post('payables')
+  @RequirePermission('financeiro.reconcile')
   async create(
     @Headers('authorization') auth: string,
     @Body() dto: CreatePayableDto,
@@ -73,6 +78,7 @@ export class FinanceiroController {
   }
 
   @Patch('payables/:id')
+  @RequirePermission('financeiro.reconcile')
   async update(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -83,6 +89,7 @@ export class FinanceiroController {
   }
 
   @Post('payables/:id/pay')
+  @RequirePermission('financeiro.reconcile')
   async pay(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -94,6 +101,7 @@ export class FinanceiroController {
 
   @Delete('payables/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('financeiro.reconcile')
   async cancel(
     @Headers('authorization') auth: string,
     @Param('id') id: string,

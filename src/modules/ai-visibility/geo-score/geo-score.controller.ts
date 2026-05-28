@@ -2,6 +2,7 @@ import { Controller, Get, Post, Delete, Body, Param, Query, BadRequestException,
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 import { ListingScraperService } from './services/listing-scraper.service'
 import { GeoTelemetryService } from './services/geo-telemetry.service'
 import { ScoreProcessorService } from './workers/score-processor.service'
@@ -16,7 +17,7 @@ const SORTABLE = new Set(['created_at', 'cost_usd', 'completed_at'])
  * org_id do JWT (as tabelas têm GRANT só service_role; isolamento na app).
  */
 @Controller('ai-visibility')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class GeoScoreController {
   constructor(
     private readonly scraper:   ListingScraperService,
@@ -26,6 +27,7 @@ export class GeoScoreController {
 
   /** POST /ai-visibility/score — cria o job e dispara o processamento. */
   @Post('score')
+  @RequirePermission('products.update')
   async createScore(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { url?: string },
@@ -91,6 +93,7 @@ export class GeoScoreController {
 
   /** GET /ai-visibility/score/:jobId — status + resultado. */
   @Get('score/:jobId')
+  @RequirePermission('products.view')
   async getScore(@ReqUser() user: ReqUserPayload, @Param('jobId') jobId: string) {
     const { data: job } = await supabaseAdmin
       .from('ai_audit_jobs')
@@ -127,6 +130,7 @@ export class GeoScoreController {
 
   /** GET /ai-visibility/scores — lista paginada da org. */
   @Get('scores')
+  @RequirePermission('products.view')
   async listScores(
     @ReqUser() user: ReqUserPayload,
     @Query('page') page?: string,
@@ -152,6 +156,7 @@ export class GeoScoreController {
 
   /** DELETE /ai-visibility/scores/:jobId — soft delete. */
   @Delete('scores/:jobId')
+  @RequirePermission('products.update')
   async deleteScore(@ReqUser() user: ReqUserPayload, @Param('jobId') jobId: string): Promise<{ deleted: boolean }> {
     const { data } = await supabaseAdmin
       .from('ai_audit_jobs')

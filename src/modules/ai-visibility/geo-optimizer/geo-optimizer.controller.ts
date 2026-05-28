@@ -2,6 +2,7 @@ import { Controller, Post, Get, Body, Param, Query, BadRequestException, NotFoun
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 import { ListingScraperService } from '../geo-score/services/listing-scraper.service'
 import { GeoTelemetryService } from '../geo-score/services/geo-telemetry.service'
 import { GeoDimensionResult } from '../shared/types'
@@ -22,7 +23,7 @@ interface ReqUserPayload { id: string; orgId: string }
  * SupabaseAuthGuard por-controller; tudo escopado por org do JWT.
  */
 @Controller('ai-visibility')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class GeoOptimizerController {
   constructor(
     private readonly scraper:      ListingScraperService,
@@ -38,6 +39,7 @@ export class GeoOptimizerController {
 
   /** POST /ai-visibility/optimize — gera o rascunho de otimização. */
   @Post('optimize')
+  @RequirePermission('products.update')
   async optimize(@ReqUser() user: ReqUserPayload, @Body() body: { url?: string }) {
     const url = (body?.url ?? '').trim()
     if (!/^https?:\/\//i.test(url)) throw new BadRequestException('Informe uma URL válida (http/https).')
@@ -109,6 +111,7 @@ export class GeoOptimizerController {
    * captura 'impact' como id). Read-only.
    */
   @Get('optimize/impact')
+  @RequirePermission('products.view')
   async impactReport(@ReqUser() user: ReqUserPayload) {
     return this.impact.report(user.orgId, user.id)
   }
@@ -119,6 +122,7 @@ export class GeoOptimizerController {
    * com descrição atual × otimizada. Rota ESTÁTICA antes de :optimizerId.
    */
   @Post('optimize/simulate')
+  @RequirePermission('products.view')
   async simulate(@ReqUser() user: ReqUserPayload, @Body() body: { url?: string }) {
     const url = (body?.url ?? '').trim()
     if (!/^https?:\/\//i.test(url)) throw new BadRequestException('Informe uma URL válida (http/https).')
@@ -130,12 +134,14 @@ export class GeoOptimizerController {
    * (creative_listings) antes de publicar. NÃO toca em atributos/publicação ML.
    */
   @Post('optimize/score-draft')
+  @RequirePermission('products.view')
   async scoreDraft(@ReqUser() user: ReqUserPayload, @Body() body: { listingId?: string }) {
     if (!body?.listingId) throw new BadRequestException('Informe o listingId do rascunho.')
     return this.draftGeo.score(user.orgId, body.listingId)
   }
 
   @Post('optimize/simulate-draft')
+  @RequirePermission('products.view')
   async simulateDraft(@ReqUser() user: ReqUserPayload, @Body() body: { listingId?: string }) {
     if (!body?.listingId) throw new BadRequestException('Informe o listingId do rascunho.')
     return this.draftGeo.simulate(user.orgId, body.listingId, user.id)
@@ -143,6 +149,7 @@ export class GeoOptimizerController {
 
   /** GET /ai-visibility/optimize/:optimizerId — rascunho + status. */
   @Get('optimize/:optimizerId')
+  @RequirePermission('products.view')
   async getOptimization(@ReqUser() user: ReqUserPayload, @Param('optimizerId') optimizerId: string) {
     const { data } = await supabaseAdmin
       .from('ai_optimizer_results')
@@ -158,6 +165,7 @@ export class GeoOptimizerController {
    * ?confirm_batch_expansion=true libera além do cap de 5/dia.
    */
   @Post('optimize/:optimizerId/apply')
+  @RequirePermission('products.publish_ml')
   async apply(
     @ReqUser() user: ReqUserPayload,
     @Param('optimizerId') optimizerId: string,
@@ -180,6 +188,7 @@ export class GeoOptimizerController {
 
   /** POST /ai-visibility/optimize/:optimizerId/rollback — volta o anúncio ao original. */
   @Post('optimize/:optimizerId/rollback')
+  @RequirePermission('products.publish_ml')
   async rollback(
     @ReqUser() user: ReqUserPayload,
     @Param('optimizerId') optimizerId: string,
