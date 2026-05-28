@@ -4,6 +4,7 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import { MlQualityService } from './ml-quality.service'
 import { MlQualitySyncService } from './ml-quality-sync.service'
 import { MlLabelsService } from './ml-labels.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload {
   id: string
@@ -11,7 +12,7 @@ interface ReqUserPayload {
 }
 
 @Controller('ml-quality')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlQualityController {
   constructor(
     private readonly svc:    MlQualityService,
@@ -22,6 +23,7 @@ export class MlQualityController {
   // ── Dashboard ─────────────────────────────────────────────────
 
   @Get('dashboard')
+  @RequirePermission('products.view')
   dashboard(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -33,6 +35,7 @@ export class MlQualityController {
   // ── Listagem de items ─────────────────────────────────────────
 
   @Get('items')
+  @RequirePermission('products.view')
   listItems(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')       sellerId?:      string,
@@ -68,6 +71,7 @@ export class MlQualityController {
 
   /** Fire-and-forget enriquecer listing_status nos snapshots existentes. */
   @Post('sync/enrich-listing-status')
+  @RequirePermission('products.update')
   enrichListingStatus(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -77,6 +81,7 @@ export class MlQualityController {
   }
 
   @Get('items/:itemId')
+  @RequirePermission('products.view')
   getItem(
     @ReqUser() u: ReqUserPayload,
     @Param('itemId') itemId: string,
@@ -87,6 +92,7 @@ export class MlQualityController {
   }
 
   @Get('items/:itemId/history')
+  @RequirePermission('products.view')
   getItemHistory(
     @ReqUser() u: ReqUserPayload,
     @Param('itemId') itemId: string,
@@ -100,6 +106,7 @@ export class MlQualityController {
   // ── Labels (traducoes PT-BR de domains/attributes) ────────────
 
   @Get('labels')
+  @RequirePermission('products.view')
   getLabels(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -111,6 +118,7 @@ export class MlQualityController {
   // ── Categorias / domains ──────────────────────────────────────
 
   @Get('categories')
+  @RequirePermission('products.view')
   categories(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -122,6 +130,7 @@ export class MlQualityController {
   // ── Visoes especiais ──────────────────────────────────────────
 
   @Get('quick-wins')
+  @RequirePermission('products.view')
   quickWins(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -132,6 +141,7 @@ export class MlQualityController {
   }
 
   @Get('penalties')
+  @RequirePermission('products.view')
   penalties(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -144,6 +154,7 @@ export class MlQualityController {
   // ── Sync (manual trigger) ─────────────────────────────────────
 
   @Post('sync')
+  @RequirePermission('products.update')
   syncOrg(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -153,6 +164,7 @@ export class MlQualityController {
   }
 
   @Get('sync/logs')
+  @RequirePermission('products.view')
   syncLogs(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)

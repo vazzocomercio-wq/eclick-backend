@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { MlClaimsService } from './services/ml-claims.service'
 import { MlClaimRemovalService } from './services/ml-claim-removal.service'
 import { MlReputationService } from './services/ml-reputation.service'
@@ -11,7 +12,7 @@ import { MlReputationService } from './services/ml-reputation.service'
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('intelligence/ml')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlVerticalController {
   constructor(
     private readonly claims:        MlClaimsService,
@@ -22,12 +23,14 @@ export class MlVerticalController {
   // ── Reputação ──────────────────────────────────────────────────────────
 
   @Get('reputation/latest')
+  @RequirePermission('orders.view')
   reputationLatest(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.reputation.getLatestForOrg(u.orgId)
   }
 
   @Get('reputation/history')
+  @RequirePermission('orders.view')
   reputationHistory(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     const d = days ? Math.min(180, Math.max(1, parseInt(days, 10) || 30)) : 30
@@ -37,6 +40,7 @@ export class MlVerticalController {
   // ── Claims ─────────────────────────────────────────────────────────────
 
   @Get('claims')
+  @RequirePermission('orders.view')
   listClaims(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -54,6 +58,7 @@ export class MlVerticalController {
   }
 
   @Get('claims/:id')
+  @RequirePermission('orders.view')
   detailClaim(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.claims.findOne(u.orgId, id)
@@ -62,6 +67,7 @@ export class MlVerticalController {
   // ── Candidatos a exclusão de reclamação ────────────────────────────────
 
   @Get('claim-removals')
+  @RequirePermission('orders.view')
   listRemovals(
     @ReqUser() u: ReqUserPayload,
     @Query('status')     status?: string,
@@ -77,6 +83,7 @@ export class MlVerticalController {
   }
 
   @Get('claim-removals/:id')
+  @RequirePermission('orders.view')
   detailRemoval(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.claimRemovals.findOne(u.orgId, id)
@@ -84,6 +91,7 @@ export class MlVerticalController {
 
   @Post('claim-removals/:id/dismiss')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   dismissRemoval(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.claimRemovals.dismiss(u.orgId, id, u.id)
@@ -91,6 +99,7 @@ export class MlVerticalController {
 
   @Post('claim-removals/:id/proceed')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   proceedRemoval(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -102,6 +111,7 @@ export class MlVerticalController {
 
   @Post('claim-removals/:id/regenerate-text')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.view')
   regenerateRemovalText(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.claimRemovals.regenerateRequestText(u.orgId, id)

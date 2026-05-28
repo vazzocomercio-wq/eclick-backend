@@ -6,19 +6,21 @@ import { MlPostsaleService } from './ml-postsale.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import type { SlaState } from './helpers/sla-state'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 const SLA_STATES: SlaState[] = ['green', 'yellow', 'orange', 'red', 'critical', 'resolved']
 
 @Controller('ml/postsale')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlPostsaleController {
   constructor(private readonly svc: MlPostsaleService) {}
 
   // ── Listagem + dashboard ────────────────────────────────────────────────
 
   @Get('conversations')
+  @RequirePermission('crm.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -41,6 +43,7 @@ export class MlPostsaleController {
   }
 
   @Get('dashboard/sla')
+  @RequirePermission('crm.view')
   slaDashboard(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.svc.slaDashboard(u.orgId)
@@ -49,6 +52,7 @@ export class MlPostsaleController {
   // ── Detalhe + ações da conversa ─────────────────────────────────────────
 
   @Get('conversations/:id')
+  @RequirePermission('crm.view')
   detail(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.svc.getConversationDetail(u.orgId, id)
@@ -56,6 +60,7 @@ export class MlPostsaleController {
 
   @Post('conversations/:id/suggest')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   regenerateSuggestion(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.svc.regenerateSuggestion(u.orgId, id)
@@ -63,6 +68,7 @@ export class MlPostsaleController {
 
   @Post('conversations/:id/suggest/transform')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   transformTone(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -79,6 +85,7 @@ export class MlPostsaleController {
 
   @Post('conversations/:id/send')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   send(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -99,6 +106,7 @@ export class MlPostsaleController {
 
   @Post('conversations/:id/resolve')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   resolve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.svc.markResolved(u.orgId, id, u.id)
@@ -107,6 +115,7 @@ export class MlPostsaleController {
   // ── Knowledge base por produto ─────────────────────────────────────────
 
   @Get('knowledge/:product_id')
+  @RequirePermission('products.view')
   getKnowledge(@ReqUser() u: ReqUserPayload, @Param('product_id') productId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente no JWT')
     return this.svc.getKnowledgeByProductId(u.orgId, productId)
@@ -114,6 +123,7 @@ export class MlPostsaleController {
 
   @Put('knowledge/:product_id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   saveKnowledge(
     @ReqUser() u: ReqUserPayload,
     @Param('product_id') productId: string,

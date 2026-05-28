@@ -7,6 +7,7 @@ import * as crypto from 'crypto'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { MarketplaceService } from './marketplace.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -23,7 +24,7 @@ const MAGALU_SCOPES = [
  * authorization_code padrão. Redirect URIs vêm de env (config do app no
  * portal de cada plataforma é lockada). */
 @Controller('marketplace')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MarketplaceController {
   private readonly logger = new Logger(MarketplaceController.name)
 
@@ -35,6 +36,7 @@ export class MarketplaceController {
    * api_path + timestamp, partner_key). Após login, Shopee redireciona pra
    * SHOPEE_REDIRECT_URI com `?code=...&shop_id=...`. */
   @Get('shopee/auth-url')
+  @RequirePermission('integrations.connect')
   shopeeAuthUrl() {
     const partnerId  = process.env.SHOPEE_PARTNER_ID
     const partnerKey = process.env.SHOPEE_PARTNER_KEY
@@ -59,6 +61,7 @@ export class MarketplaceController {
    * tokens via /api/v2/auth/token/get e persiste em marketplace_connections. */
   @Post('shopee/callback')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.connect')
   async shopeeCallback(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { code: string; shop_id: number | string },
@@ -115,6 +118,7 @@ export class MarketplaceController {
   /** Gera URL de autorização Magalu. Authorization Code padrão; redirect
    * ja é lockado no portal Magalu. */
   @Get('magalu/auth-url')
+  @RequirePermission('integrations.connect')
   magaluAuthUrl() {
     const clientId = process.env.MAGALU_CLIENT_ID
     const redirect = process.env.MAGALU_REDIRECT_URI
@@ -137,6 +141,7 @@ export class MarketplaceController {
    * em sprint posterior. */
   @Post('magalu/callback')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.connect')
   async magaluCallback(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { code: string },
