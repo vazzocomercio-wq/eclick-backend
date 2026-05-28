@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { MlListingService } from './services/ml-listing.service'
 import type { TaskType, TaskSeverity, TaskStatus } from './ml-listing.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface AuthUser { id: string; orgId: string | null }
 
@@ -16,13 +17,14 @@ interface AuthUser { id: string; orgId: string | null }
  * o seller_id selecionado pelo AccountSelector.
  */
 @Controller('listings')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlListingController {
   constructor(private readonly svc: MlListingService) {}
 
   // ── Dashboard / Summary ──────────────────────────────────────────────────
 
   @Get('summary')
+  @RequirePermission('products.view')
   getSummary(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.getSummary(user.orgId, sellerId ? Number(sellerId) : undefined)
@@ -31,6 +33,7 @@ export class MlListingController {
   // ── Tasks ────────────────────────────────────────────────────────────────
 
   @Get('tasks')
+  @RequirePermission('products.view')
   listTasks(
     @ReqUser() user: AuthUser,
     @Query('task_type')   taskType?: TaskType,
@@ -58,12 +61,14 @@ export class MlListingController {
   }
 
   @Get('tasks/:id')
+  @RequirePermission('products.view')
   getTask(@ReqUser() user: AuthUser, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.getTask(user.orgId, id)
   }
 
   @Patch('tasks/:id')
+  @RequirePermission('products.update')
   patchTask(
     @ReqUser() user: AuthUser,
     @Param('id') id: string,
@@ -85,6 +90,7 @@ export class MlListingController {
   // ── Visão por anúncio ────────────────────────────────────────────────────
 
   @Get('items/:itemId')
+  @RequirePermission('products.view')
   getItemTasks(@ReqUser() user: AuthUser, @Param('itemId') itemId: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.listTasksByItem(user.orgId, itemId)
@@ -93,6 +99,7 @@ export class MlListingController {
   // ── Atalhos ──────────────────────────────────────────────────────────────
 
   @Get('out-of-stock')
+  @RequirePermission('products.view')
   listOutOfStock(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -107,6 +114,7 @@ export class MlListingController {
   }
 
   @Get('inactive')
+  @RequirePermission('products.view')
   listInactive(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -123,6 +131,7 @@ export class MlListingController {
   // ── Scans ────────────────────────────────────────────────────────────────
 
   @Post('scan/full')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runFullScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -131,6 +140,7 @@ export class MlListingController {
   }
 
   @Post('scan/aggregation')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runAggregation(@ReqUser() user: AuthUser, @Body() body: { seller_id?: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -141,6 +151,7 @@ export class MlListingController {
   }
 
   @Post('scan/stock')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runStockScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -149,6 +160,7 @@ export class MlListingController {
   }
 
   @Post('scan/status')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runStatusScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -157,6 +169,7 @@ export class MlListingController {
   }
 
   @Post('scan/pricing')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runPricingScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -165,6 +178,7 @@ export class MlListingController {
   }
 
   @Post('scan/seo')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runSeoScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -175,6 +189,7 @@ export class MlListingController {
   // ── SEO scores (Passo 2) ─────────────────────────────────────────────────
 
   @Get('seo/scores')
+  @RequirePermission('products.view')
   listSeoScores(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -194,6 +209,7 @@ export class MlListingController {
   }
 
   @Get('seo/top-opportunities')
+  @RequirePermission('products.view')
   listSeoTop(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -207,6 +223,7 @@ export class MlListingController {
   }
 
   @Get('seo/scores/:itemId')
+  @RequirePermission('products.view')
   getSeoScore(
     @ReqUser() user: AuthUser,
     @Param('itemId') itemId: string,
@@ -218,6 +235,7 @@ export class MlListingController {
   // ── Pricing — sugestões ──────────────────────────────────────────────────
 
   @Get('pricing/suggestions')
+  @RequirePermission('products.view')
   listSuggestions(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -237,6 +255,7 @@ export class MlListingController {
   }
 
   @Get('pricing/suggestions/:itemId')
+  @RequirePermission('products.view')
   getSuggestion(
     @ReqUser() user: AuthUser,
     @Param('itemId') itemId: string,
@@ -248,6 +267,7 @@ export class MlListingController {
   }
 
   @Post('pricing/apply/:itemId')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   async applyPrice(
     @ReqUser() user: AuthUser,
@@ -268,6 +288,7 @@ export class MlListingController {
   // ── Automation scanner + ops (Sprint 4) ──────────────────────────────────
 
   @Post('scan/automation')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runAutomationScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -276,6 +297,7 @@ export class MlListingController {
   }
 
   @Post('scan/catalog')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runCatalogScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -284,6 +306,7 @@ export class MlListingController {
   }
 
   @Get('pricing/automation')
+  @RequirePermission('products.view')
   listAutomation(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -299,6 +322,7 @@ export class MlListingController {
   }
 
   @Post('pricing/automation/:itemId/activate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   activate(
     @ReqUser() user: AuthUser,
@@ -313,6 +337,7 @@ export class MlListingController {
   }
 
   @Post('pricing/automation/:itemId/pause')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   pause(
     @ReqUser() user: AuthUser,
@@ -325,6 +350,7 @@ export class MlListingController {
   }
 
   @Post('pricing/automation/:itemId/configure')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   configure(
     @ReqUser() user: AuthUser,
@@ -339,6 +365,7 @@ export class MlListingController {
   }
 
   @Post('pricing/automation/:itemId/disable')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   disable(
     @ReqUser() user: AuthUser,
@@ -353,6 +380,7 @@ export class MlListingController {
   // ── Fiscal scanner (Sprint 5 / L3) ───────────────────────────────────────
 
   @Post('scan/fiscal')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   runFiscalScan(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -361,6 +389,7 @@ export class MlListingController {
   }
 
   @Get('fiscal')
+  @RequirePermission('products.view')
   listFiscal(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -376,6 +405,7 @@ export class MlListingController {
   }
 
   @Get('fiscal/blocked-nfe')
+  @RequirePermission('products.view')
   listBlockedNfe(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.fiscal().list(user.orgId, {
@@ -388,18 +418,21 @@ export class MlListingController {
   // ── Policy (Sprint 6 / L3) ───────────────────────────────────────────────
 
   @Get('policy/by-category')
+  @RequirePermission('products.view')
   policyByCategory(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.policyByCategory(user.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   @Get('policy/critical')
+  @RequirePermission('products.view')
   policyCritical(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.policyCritical(user.orgId, sellerId ? Number(sellerId) : undefined)
   }
 
   @Get('policy')
+  @RequirePermission('products.view')
   policyList(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -417,6 +450,7 @@ export class MlListingController {
   // ── Health Scores (Sprint 7 / L4) ────────────────────────────────────────
 
   @Post('health/calculate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   calculateHealth(@ReqUser() user: AuthUser, @Body() body: { seller_id: number }) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
@@ -425,6 +459,7 @@ export class MlListingController {
   }
 
   @Get('health')
+  @RequirePermission('products.view')
   listHealth(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -442,6 +477,7 @@ export class MlListingController {
   }
 
   @Get('health/:itemId')
+  @RequirePermission('products.view')
   getHealth(@ReqUser() user: AuthUser, @Param('itemId') itemId: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.health().getOne(user.orgId, itemId)
@@ -450,6 +486,7 @@ export class MlListingController {
   // ── Bulk actions (Sprint 8 / L4) ─────────────────────────────────────────
 
   @Post('bulk/apply-prices')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.ACCEPTED)
   bulkApplyPrices(
     @ReqUser() user: AuthUser,
@@ -469,6 +506,7 @@ export class MlListingController {
   }
 
   @Post('bulk/resolve-tasks')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.ACCEPTED)
   bulkResolveTasks(
     @ReqUser() user: AuthUser,
@@ -488,6 +526,7 @@ export class MlListingController {
   }
 
   @Post('bulk/snooze-tasks')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.ACCEPTED)
   bulkSnoozeTasks(
     @ReqUser() user: AuthUser,
@@ -507,6 +546,7 @@ export class MlListingController {
   }
 
   @Post('bulk/dismiss-tasks')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.ACCEPTED)
   bulkDismissTasks(
     @ReqUser() user: AuthUser,
@@ -526,6 +566,7 @@ export class MlListingController {
   }
 
   @Get('bulk/actions')
+  @RequirePermission('products.view')
   listBulkActions(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -539,6 +580,7 @@ export class MlListingController {
   }
 
   @Get('bulk/actions/:id')
+  @RequirePermission('products.view')
   getBulkAction(@ReqUser() user: AuthUser, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     return this.svc.bulk().getAction(user.orgId, id)
@@ -551,6 +593,7 @@ export class MlListingController {
   // payload pequeno e linkável.
 
   @Get('copilot/snapshot')
+  @RequirePermission('products.view')
   async copilotSnapshot(@ReqUser() user: AuthUser, @Query('seller_id') sellerId?: string) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const sid = sellerId ? Number(sellerId) : undefined
@@ -575,6 +618,7 @@ export class MlListingController {
   }
 
   @Get('copilot/top-problems')
+  @RequirePermission('products.view')
   async copilotTopProblems(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerId?: string,
@@ -588,6 +632,7 @@ export class MlListingController {
   }
 
   @Post('fiscal/:itemId/fix')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   fixFiscal(
     @ReqUser() user: AuthUser,

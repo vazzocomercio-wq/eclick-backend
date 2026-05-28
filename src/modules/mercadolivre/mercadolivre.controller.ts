@@ -19,6 +19,7 @@ import { MlQuestionsAiService, TransformAction } from './ml-questions-ai.service
 import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload {
   id: string
@@ -26,7 +27,7 @@ interface ReqUserPayload {
 }
 
 @Controller('ml')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MercadolivreController {
   constructor(
     private readonly ml: MercadolivreService,
@@ -41,6 +42,7 @@ export class MercadolivreController {
    * unificado (por CPF) + comunicação (OCJ + sends). 404 só se order não
    * existe; customer/communication podem vir null. Org-scoped. */
   @Get('orders/:external_order_id/full-detail')
+  @RequirePermission('orders.view')
   fullDetail(
     @ReqUser() user: ReqUserPayload,
     @Param('external_order_id') externalOrderId: string,
@@ -54,6 +56,7 @@ export class MercadolivreController {
   // The /clientes button can be re-clicked to drain the queue.
   @Post('orders/fetch-billing')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   async fetchBilling(@Body() body: { limit?: number }) {
     try {
       const limit = Math.min(Math.max(Number(body?.limit ?? 50), 1), 200)
@@ -70,6 +73,7 @@ export class MercadolivreController {
   // GET /ml/orders/billing-pending-count — # of orders still missing
   // buyer_billing_fetched_at. Drives the counter on the /clientes button.
   @Get('orders/billing-pending-count')
+  @RequirePermission('orders.view')
   async fetchBillingPendingCount() {
     try {
       const count = await this.billingFetcher.countPending()
@@ -83,6 +87,7 @@ export class MercadolivreController {
   // ended up with NULL doc_number (e.g. parsed by an older shape).
   // Drives the "Resetar pedidos sem CPF" counter in /clientes.
   @Get('orders/orphans-count')
+  @RequirePermission('orders.view')
   async fetchOrphansCount() {
     try {
       const count = await this.billingFetcher.countOrphans()
@@ -100,6 +105,7 @@ export class MercadolivreController {
   // constraint no DB). Match por external_order_id.
   @Post('orders/bulk-mark-problem')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   async bulkMarkProblem(@Body() body: {
     order_ids: Array<string | number>
     note:      string
@@ -121,6 +127,7 @@ export class MercadolivreController {
   // /users/{buyer_id} for phone/email fallback. Returns the resolved buyer.
   @Post('orders/:order_id/refetch-billing')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   async refetchOrderBilling(@Param('order_id') orderId: string) {
     try {
       return await this.billingFetcher.refetchOne(orderId)
@@ -137,6 +144,7 @@ export class MercadolivreController {
   // Read-only — does NOT touch the orders table.
   @Post('orders/:order_id/debug-billing')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.view')
   async debugOrderBilling(@Param('order_id') orderId: string) {
     try {
       return await this.billingFetcher.debugBilling(orderId)
@@ -153,6 +161,7 @@ export class MercadolivreController {
   // missing CPF; never undoes successful refetches).
   @Post('orders/reset-billing-fetched')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.update_status')
   async resetBillingFetched(@Body() body: { force_all?: boolean } = {}) {
     try {
       return await this.billingFetcher.resetBillingFetched({ forceAll: body?.force_all === true })
@@ -164,6 +173,7 @@ export class MercadolivreController {
 
   // GET /ml/competitors/preview?url=...
   @Get('competitors/preview')
+  @RequirePermission('products.view')
   async previewCompetitor(@Query('url') url: string) {
     if (!url) throw new BadRequestException('url é obrigatório')
     return this.scraper.scrapeProduct(url)
@@ -171,6 +181,7 @@ export class MercadolivreController {
 
   // GET /ml/auth-url?redirect_uri=...
   @Get('auth-url')
+  @RequirePermission('integrations.connect')
   getAuthUrl(@Query('redirect_uri') redirectUri: string) {
     return { url: this.ml.getAuthUrl(redirectUri) }
   }
@@ -178,6 +189,7 @@ export class MercadolivreController {
   // POST /ml/connect  { code, redirect_uri }
   @Post('connect')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.connect')
   connect(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { code: string; redirect_uri: string },
@@ -188,6 +200,7 @@ export class MercadolivreController {
   // DELETE /ml/disconnect?seller_id=123456  (omit to remove all)
   @Delete('disconnect')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('integrations.disconnect')
   disconnect(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -197,18 +210,21 @@ export class MercadolivreController {
 
   // GET /ml/status  (backward compat — first connection)
   @Get('status')
+  @RequirePermission('integrations.view')
   status(@ReqUser() user: ReqUserPayload) {
     return this.ml.getConnection(user.orgId!)
   }
 
   // GET /ml/connections  (all connected accounts, no tokens)
   @Get('connections')
+  @RequirePermission('integrations.view')
   getConnections(@ReqUser() user: ReqUserPayload) {
     return this.ml.getConnections(user.orgId!)
   }
 
   // GET /ml/item-info?url=...
   @Get('item-info')
+  @RequirePermission('products.view')
   getItemInfo(
     @ReqUser() user: ReqUserPayload,
     @Query('url') url: string,
@@ -218,6 +234,7 @@ export class MercadolivreController {
 
   // GET /ml/vinculos/preview?listing_id=MLB...
   @Get('vinculos/preview')
+  @RequirePermission('products.view')
   getVinculoPreview(@Query('listing_id') listingId: string) {
     if (!listingId) throw new BadRequestException('listing_id é obrigatório')
     return this.ml.getListingPreview(listingId)
@@ -225,6 +242,7 @@ export class MercadolivreController {
 
   // GET /ml/items?offset=0&limit=50
   @Get('items')
+  @RequirePermission('products.view')
   getItems(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
@@ -235,6 +253,7 @@ export class MercadolivreController {
 
   // POST /ml/items/import  { ml_item_id }
   @Post('items/import')
+  @RequirePermission('products.import')
   @HttpCode(HttpStatus.OK)
   importItem(
     @ReqUser() user: ReqUserPayload,
@@ -245,6 +264,7 @@ export class MercadolivreController {
 
   // GET /ml/orders?offset=0&limit=50&seller_id=...
   @Get('orders')
+  @RequirePermission('orders.view')
   getOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
@@ -261,6 +281,7 @@ export class MercadolivreController {
 
   // GET /ml/metrics?seller_id=...
   @Get('metrics')
+  @RequirePermission('orders.view')
   getMetrics(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -273,6 +294,7 @@ export class MercadolivreController {
   // GET /ml/my-items
   // GET /ml/my-items?seller_id=...
   @Get('my-items')
+  @RequirePermission('products.view')
   getMyItems(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -282,12 +304,14 @@ export class MercadolivreController {
 
   // GET /ml/categories/:id  — proxies ML API, no seller token needed
   @Get('categories/:id')
+  @RequirePermission('products.view')
   getCategory(@Param('id') id: string) {
     return this.ml.getCategory(id)
   }
 
   // GET /ml/items/:mlbId
   @Get('items/:mlbId')
+  @RequirePermission('products.view')
   getItemDetail(
     @ReqUser() user: ReqUserPayload,
     @Param('mlbId') mlbId: string,
@@ -297,6 +321,7 @@ export class MercadolivreController {
 
   // GET /ml/items/:mlbId/visits
   @Get('items/:mlbId/visits')
+  @RequirePermission('products.view')
   getItemVisits(
     @ReqUser() user: ReqUserPayload,
     @Param('mlbId') mlbId: string,
@@ -306,6 +331,7 @@ export class MercadolivreController {
 
   // GET /ml/recent-orders?offset=0&limit=50&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&seller_id=...
   @Get('recent-orders')
+  @RequirePermission('orders.view')
   getRecentOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset')    offset?:   string,
@@ -326,6 +352,7 @@ export class MercadolivreController {
 
   // GET /ml/catalog-competitors/:catalogId
   @Get('catalog-competitors/:catalogId')
+  @RequirePermission('products.view')
   getCatalogCompetitors(
     @ReqUser() user: ReqUserPayload,
     @Param('catalogId') catalogId: string,
@@ -335,6 +362,7 @@ export class MercadolivreController {
 
   // GET /ml/seller-info?seller_id=...
   @Get('seller-info')
+  @RequirePermission('integrations.view')
   getSellerInfo(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -344,6 +372,7 @@ export class MercadolivreController {
 
   // GET /ml/reputation?seller_id=...
   @Get('reputation')
+  @RequirePermission('orders.view')
   getReputation(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -355,6 +384,7 @@ export class MercadolivreController {
   // Always responds 200 — frontend (sidebar badges, etc.) polls this and
   // can't tolerate 500s. Real errors are logged server-side.
   @Get('questions')
+  @RequirePermission('crm.view')
   async getQuestions(
     @ReqUser() user: ReqUserPayload,
     @Query('status') status?: string,
@@ -375,6 +405,7 @@ export class MercadolivreController {
 
   // POST /ml/questions/transform-text  { text, action }
   @Post('questions/transform-text')
+  @RequirePermission('crm.message')
   @HttpCode(HttpStatus.OK)
   transformText(
     @ReqUser() user: ReqUserPayload,
@@ -385,6 +416,7 @@ export class MercadolivreController {
 
   // POST /ml/questions/poll — manual trigger do cron de sugestões pra esta org.
   @Post('questions/poll')
+  @RequirePermission('crm.view')
   @HttpCode(HttpStatus.OK)
   pollQuestions(@ReqUser() user: ReqUserPayload) {
     return this.questionsAi.pollAndSuggest(user.orgId!)
@@ -393,6 +425,7 @@ export class MercadolivreController {
   // GET /ml/questions/ai-stats — métricas dos últimos 30 dias (Aprovação IA)
   // + contagem de auto-respostas das últimas 24h.
   @Get('questions/ai-stats')
+  @RequirePermission('crm.view')
   getAiStats(@ReqUser() user: ReqUserPayload) {
     return this.questionsAi.getAiStats(user.orgId!)
   }
@@ -402,6 +435,7 @@ export class MercadolivreController {
   // por-conta. Períodos: Seg-Sex 9-18h, Seg-Sex 18-00h, Sáb/Dom.
   // 14 dias.
   @Get('questions/perf-stats')
+  @RequirePermission('crm.view')
   async getQuestionsPerfStats(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerIdParam?: string,
@@ -432,6 +466,7 @@ export class MercadolivreController {
 
   // POST /ml/questions/:id/answer  { text: string, seller_id?: number }
   @Post('questions/:id/answer')
+  @RequirePermission('crm.message')
   @HttpCode(HttpStatus.OK)
   answerQuestion(
     @ReqUser() user: ReqUserPayload,
@@ -445,6 +480,7 @@ export class MercadolivreController {
 
   // DELETE /ml/questions/:id?seller_id=...  — exclui no ML
   @Delete('questions/:id')
+  @RequirePermission('crm.manage_pipeline')
   @HttpCode(HttpStatus.OK)
   deleteQuestion(
     @ReqUser() user: ReqUserPayload,
@@ -457,6 +493,7 @@ export class MercadolivreController {
 
   // POST /ml/questions/:id/suggest-answer
   @Post('questions/:id/suggest-answer')
+  @RequirePermission('crm.message')
   @HttpCode(HttpStatus.OK)
   suggestAnswer(
     @ReqUser() user: ReqUserPayload,
@@ -467,6 +504,7 @@ export class MercadolivreController {
 
   // POST /ml/questions/:id/approve-and-send  { finalAnswer, wasEdited, seller_id? }
   @Post('questions/:id/approve-and-send')
+  @RequirePermission('crm.message')
   @HttpCode(HttpStatus.OK)
   approveAndSend(
     @ReqUser() user: ReqUserPayload,
@@ -479,6 +517,7 @@ export class MercadolivreController {
 
   // GET /ml/settings/auto-answer
   @Get('settings/auto-answer')
+  @RequirePermission('settings.view')
   async getAutoAnswerSetting(@ReqUser() user: ReqUserPayload) {
     const enabled = await this.questionsAi.getAutoSendEnabled(user.orgId!)
     return { enabled }
@@ -486,6 +525,7 @@ export class MercadolivreController {
 
   // PATCH /ml/settings/auto-answer  { enabled: boolean }
   @Patch('settings/auto-answer')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.OK)
   setAutoAnswerSetting(
     @ReqUser() user: ReqUserPayload,
@@ -496,6 +536,7 @@ export class MercadolivreController {
 
   // GET /ml/claims?seller_id=... — always 200, see comment on /questions above.
   @Get('claims')
+  @RequirePermission('orders.view')
   async getClaims(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -513,6 +554,7 @@ export class MercadolivreController {
 
   // GET /ml/claims/:id/detail
   @Get('claims/:id/detail')
+  @RequirePermission('orders.view')
   getClaimDetail(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -523,6 +565,7 @@ export class MercadolivreController {
 
   // GET /ml/claims/:id/messages
   @Get('claims/:id/messages')
+  @RequirePermission('orders.view')
   getClaimMessages(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -533,6 +576,7 @@ export class MercadolivreController {
 
   // GET /ml/claims/:id/actions-history
   @Get('claims/:id/actions-history')
+  @RequirePermission('orders.view')
   getClaimActionsHistory(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -543,6 +587,7 @@ export class MercadolivreController {
 
   // POST /ml/claims/:id/messages
   @Post('claims/:id/messages')
+  @RequirePermission('orders.update_status')
   sendClaimMessage(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -561,6 +606,7 @@ export class MercadolivreController {
 
   // GET /ml/claims/:id (catch-all — fica POR ÚLTIMO entre as rotas /claims/:id)
   @Get('claims/:id')
+  @RequirePermission('orders.view')
   getClaim(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -573,6 +619,7 @@ export class MercadolivreController {
 
   // GET /ml/orders/kpis?seller_id=...
   @Get('orders/kpis')
+  @RequirePermission('orders.view')
   getOrdersKpis(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -582,6 +629,7 @@ export class MercadolivreController {
 
   // GET /ml/orders/enriched?offset=0&limit=20&q=...&seller_id=...
   @Get('orders/enriched')
+  @RequirePermission('orders.view')
   getOrdersEnriched(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
@@ -600,12 +648,14 @@ export class MercadolivreController {
 
   // GET /ml/listings/visits
   @Get('listings/visits')
+  @RequirePermission('products.view')
   getListingsVisits(@ReqUser() user: ReqUserPayload) {
     return this.ml.getListingsVisits(user.orgId!)
   }
 
   // GET /ml/listings/counts?seller_id=...
   @Get('listings/counts')
+  @RequirePermission('products.view')
   getListingsCounts(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -617,6 +667,7 @@ export class MercadolivreController {
   // PATCH /ml/listings/:itemId/price  { price: number; seller_id?: number }
   // Escreve o novo preço no Mercado Livre (anúncio real) + registros locais.
   @Patch('listings/:itemId/price')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   updateListingPrice(
     @ReqUser() user: ReqUserPayload,
@@ -633,6 +684,7 @@ export class MercadolivreController {
   // POST /ml/listings/price-to-win  { items: [{ item_id, seller_id? }] }
   // Status do catálogo + preço pra ganhar, AO VIVO no ML (telas de anúncio).
   @Post('listings/price-to-win')
+  @RequirePermission('products.view')
   @HttpCode(HttpStatus.OK)
   listingsPriceToWin(
     @ReqUser() user: ReqUserPayload,
@@ -651,6 +703,7 @@ export class MercadolivreController {
   // POST /ml/listings/shipping-cost  { items: [{ item_id, seller_id? }] }
   // Custo real do frete grátis — dimensões reais do próprio anúncio no ML.
   @Post('listings/shipping-cost')
+  @RequirePermission('products.view')
   @HttpCode(HttpStatus.OK)
   listingsShippingCost(
     @ReqUser() user: ReqUserPayload,
@@ -668,6 +721,7 @@ export class MercadolivreController {
 
   // POST /ml/products/from-listing  { listing_ids: string[]; seller_id?: number }
   @Post('products/from-listing')
+  @RequirePermission('products.create')
   @HttpCode(HttpStatus.OK)
   async createFromListing(
     @ReqUser() user: ReqUserPayload,
@@ -682,6 +736,7 @@ export class MercadolivreController {
 
   // GET /ml/financial-summary?date_from=...&date_to=...&status=...&kpis_only=true&totals_only=true&seller_id=...
   @Get('financial-summary')
+  @RequirePermission('financeiro.view')
   getFinancialSummary(
     @ReqUser() user: ReqUserPayload,
     @Query('date_from')    dateFrom?: string,
@@ -710,6 +765,7 @@ export class MercadolivreController {
 
   // GET /ml/listings?status=active&limit=20&offset=0&q=busca&seller_id=...
   @Get('listings')
+  @RequirePermission('products.view')
   getListings(
     @ReqUser() user: ReqUserPayload,
     @Query('status') status?: string,

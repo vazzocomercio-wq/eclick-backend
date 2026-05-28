@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Patch, Body, Query, Param, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { MlCampaignsService } from './ml-campaigns.service'
 import { MlCampaignsSyncService } from './ml-campaigns-sync.service'
 import { MlCampaignsDecisionService } from './ml-campaigns-decision.service'
@@ -15,7 +16,7 @@ interface ReqUserPayload {
 }
 
 @Controller('ml-campaigns')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MlCampaignsController {
   constructor(
     private readonly svc:        MlCampaignsService,
@@ -30,6 +31,7 @@ export class MlCampaignsController {
   // ── Dashboard ──────────────────────────────────────────────────
 
   @Get('dashboard')
+  @RequirePermission('ads.view')
   dashboard(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -41,6 +43,7 @@ export class MlCampaignsController {
   // ── Campanhas ──────────────────────────────────────────────────
 
   @Get()
+  @RequirePermission('ads.view')
   listCampaigns(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')        sellerId?:     string,
@@ -65,6 +68,7 @@ export class MlCampaignsController {
   }
 
   @Get('deadlines')
+  @RequirePermission('ads.view')
   deadlines(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')  sellerId?: string,
@@ -75,6 +79,7 @@ export class MlCampaignsController {
   }
 
   @Get('health')
+  @RequirePermission('ads.view')
   health(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -87,6 +92,7 @@ export class MlCampaignsController {
   // ── Items (visao por anuncio) ────────────────────────────────────
 
   @Get('items/list')
+  @RequirePermission('ads.view')
   listAllItems(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')       sellerId?:      string,
@@ -115,6 +121,7 @@ export class MlCampaignsController {
   }
 
   @Get('items/:itemId/promotions')
+  @RequirePermission('ads.view')
   getItemPromotions(
     @ReqUser() u: ReqUserPayload,
     @Param('itemId') itemId: string,
@@ -127,6 +134,7 @@ export class MlCampaignsController {
   // ── Sync ────────────────────────────────────────────────────────
 
   @Post('sync')
+  @RequirePermission('ads.view')
   syncOrg(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -138,6 +146,7 @@ export class MlCampaignsController {
   }
 
   @Get('sync/logs')
+  @RequirePermission('ads.view')
   syncLogs(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSyncLogs(u.orgId, limit ? Number(limit) : 20)
@@ -147,6 +156,7 @@ export class MlCampaignsController {
    *  Chamado pelo frontend apos load da lista pra preencher visuais
    *  sem bloquear render. Retorna { items_pending, started }. */
   @Post('sync/enrich-metadata')
+  @RequirePermission('ads.view')
   enrichMetadata(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -159,6 +169,7 @@ export class MlCampaignsController {
    *  Use quando user atualiza custos/impostos no catalogo — em ~1s reflete
    *  o INCOMPLETE → ready sem aguardar sync ML completo. */
   @Post('sync/recompute-health')
+  @RequirePermission('ads.view')
   recomputeHealth(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -170,6 +181,7 @@ export class MlCampaignsController {
   // ═══ Camada 2: Recommendations + Config ═══════════════════════════
 
   @Post('recommendations/generate')
+  @RequirePermission('ads.view')
   generateAll(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -179,6 +191,7 @@ export class MlCampaignsController {
   }
 
   @Post('recommendations/generate-item/:campaignItemId')
+  @RequirePermission('ads.view')
   generateForItem(
     @ReqUser() u: ReqUserPayload,
     @Param('campaignItemId') campaignItemId: string,
@@ -188,6 +201,7 @@ export class MlCampaignsController {
   }
 
   @Get('recommendations')
+  @RequirePermission('ads.view')
   listRecommendations(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')      sellerId?:       string,
@@ -212,6 +226,7 @@ export class MlCampaignsController {
   }
 
   @Get('recommendations/:id')
+  @RequirePermission('ads.view')
   getRecommendation(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -221,6 +236,7 @@ export class MlCampaignsController {
   }
 
   @Post('recommendations/:id/approve')
+  @RequirePermission('ads.update_budget')
   approveRecommendation(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -234,6 +250,7 @@ export class MlCampaignsController {
   }
 
   @Post('recommendations/:id/reject')
+  @RequirePermission('ads.update_budget')
   rejectRecommendation(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -246,6 +263,7 @@ export class MlCampaignsController {
 
   /** Lista recomendações que o operador tentou aprovar mas margem < gate */
   @Get('manager-queue')
+  @RequirePermission('ads.view')
   managerQueue(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -263,6 +281,7 @@ export class MlCampaignsController {
 
   /** Gestor aprova override (libera pra apply) */
   @Post('recommendations/:id/manager-approve')
+  @RequirePermission('ads.update_budget')
   managerApprove(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -274,6 +293,7 @@ export class MlCampaignsController {
 
   /** Gestor rejeita override */
   @Post('recommendations/:id/manager-reject')
+  @RequirePermission('ads.update_budget')
   managerReject(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -286,6 +306,7 @@ export class MlCampaignsController {
   /** Audit: tentativas de um operador específico nos últimos 30d.
    *  Gestor pode usar antes de decidir um override. */
   @Get('audit/operator/:userId')
+  @RequirePermission('ads.view')
   auditOperator(
     @ReqUser() u: ReqUserPayload,
     @Param('userId') userId: string,
@@ -297,6 +318,7 @@ export class MlCampaignsController {
   // ── Config ─────────────────────────────────────────────────────────
 
   @Get('config')
+  @RequirePermission('settings.view')
   getConfig(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId: string,
@@ -307,6 +329,7 @@ export class MlCampaignsController {
   }
 
   @Patch('config')
+  @RequirePermission('settings.update')
   updateConfig(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId: string,
@@ -318,6 +341,7 @@ export class MlCampaignsController {
   }
 
   @Get('ai-usage')
+  @RequirePermission('ai.view_usage')
   aiUsage(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getAiUsageToday(u.orgId)
@@ -326,6 +350,7 @@ export class MlCampaignsController {
   // ═══ Camada 3: Apply + Auditoria ═════════════════════════════════════
 
   @Post('validate')
+  @RequirePermission('ads.view')
   validateRecommendations(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { recommendation_ids: string[] },
@@ -338,6 +363,7 @@ export class MlCampaignsController {
   }
 
   @Post('apply/single')
+  @RequirePermission('ads.spend')
   applySingle(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { recommendation_id: string; seller_id: number; apply_mode?: 'safe' | 'best_effort' },
@@ -355,6 +381,7 @@ export class MlCampaignsController {
   }
 
   @Post('apply/batch')
+  @RequirePermission('ads.spend')
   applyBatch(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { recommendation_ids: string[]; seller_id: number; apply_mode?: 'safe' | 'best_effort' },
@@ -374,6 +401,7 @@ export class MlCampaignsController {
   }
 
   @Post('leave/single')
+  @RequirePermission('ads.spend')
   leaveSingle(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { campaign_item_id: string; seller_id: number },
@@ -385,6 +413,7 @@ export class MlCampaignsController {
   }
 
   @Get('apply/jobs')
+  @RequirePermission('ads.view')
   listApplyJobs(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -395,6 +424,7 @@ export class MlCampaignsController {
   }
 
   @Get('apply/jobs/:id')
+  @RequirePermission('ads.view')
   getApplyJob(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -406,6 +436,7 @@ export class MlCampaignsController {
   // ═══ Camada 4: Pos-analise + Aprendizado ═══════════════════════
 
   @Post('post-analysis/generate/:campaignId')
+  @RequirePermission('ads.view')
   generateAnalysis(
     @ReqUser() u: ReqUserPayload,
     @Param('campaignId') campaignId: string,
@@ -415,6 +446,7 @@ export class MlCampaignsController {
   }
 
   @Get('post-analysis')
+  @RequirePermission('ads.view')
   listAnalyses(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -425,6 +457,7 @@ export class MlCampaignsController {
   }
 
   @Get('post-analysis/:id')
+  @RequirePermission('ads.view')
   getAnalysis(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -434,6 +467,7 @@ export class MlCampaignsController {
   }
 
   @Get('post-analysis/campaign/:campaignId')
+  @RequirePermission('ads.view')
   getAnalysisByCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('campaignId') campaignId: string,
@@ -443,6 +477,7 @@ export class MlCampaignsController {
   }
 
   @Get('learnings')
+  @RequirePermission('ads.view')
   learnings(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -452,6 +487,7 @@ export class MlCampaignsController {
   }
 
   @Get('audit')
+  @RequirePermission('ads.view')
   audit(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id')   sellerId?:   string,
@@ -474,6 +510,7 @@ export class MlCampaignsController {
   /** Roda a varredura de alertas agora, sem aguardar cron 9h.
    *  Útil pra testar config + ver mensagem chegar. */
   @Post('alerts/run')
+  @RequirePermission('ads.view')
   runAlertsNow(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -484,6 +521,7 @@ export class MlCampaignsController {
 
   /** Lista os últimos alertas enviados pra esta org (audit). */
   @Get('alerts/log')
+  @RequirePermission('ads.view')
   async listAlerts(
     @ReqUser() u: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -510,6 +548,7 @@ export class MlCampaignsController {
   // Por isso ficam aqui no final, depois de todas as rotas estáticas.
 
   @Get(':id')
+  @RequirePermission('ads.view')
   getCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -519,6 +558,7 @@ export class MlCampaignsController {
   }
 
   @Get(':id/items')
+  @RequirePermission('ads.view')
   listItemsForCampaign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') campaignId: string,
