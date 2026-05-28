@@ -95,6 +95,7 @@ import { PublicAuditsModule } from './modules/public-audits/public-audits.module
 import { AnalyticsHubModule } from './modules/analytics-hub/analytics-hub.module'
 import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
 import { ChannelSettingsModule } from './modules/channel-settings/channel-settings.module'
+import { AccessModule } from './modules/access/access.module'
 
 @Module({
   imports: [
@@ -192,6 +193,7 @@ import { ChannelSettingsModule } from './modules/channel-settings/channel-settin
     AnalyticsHubModule,
     TikTokShopModule,
     ChannelSettingsModule,
+    AccessModule,
   ],
   controllers: [AppController],
   providers: [AppService],
