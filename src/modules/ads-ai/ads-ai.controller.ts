@@ -5,11 +5,12 @@ import { InsightDetectorService } from './services/insight-detector.service'
 import { AiChatService } from './services/ai-chat.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('ads-ai')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AdsAiController {
   private readonly logger = new Logger(AdsAiController.name)
 
@@ -29,20 +30,24 @@ export class AdsAiController {
 
   // ── Settings + models ──
   @Get('settings')
+  @RequirePermission('ads.view')
   settings(@ReqUser() u: ReqUserPayload) {
     return this.safe('settings', () => this.svc.getSettings(u.orgId ?? ''), null)
   }
 
   @Patch('settings')
+  @RequirePermission('ads.update_budget')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: Partial<AdsAiSettings>) {
     return this.safe('settings.update', () => this.svc.updateSettings(u.orgId ?? '', body), null)
   }
 
   @Get('models/available')
+  @RequirePermission('ads.view')
   models() { return this.svc.availableModels() }
 
   // ── Insights ──
   @Get('insights')
+  @RequirePermission('ads.view')
   insights(
     @ReqUser() u: ReqUserPayload,
     @Query('status')   status?: string,
@@ -55,6 +60,7 @@ export class AdsAiController {
 
   @Post('insights/detect')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.view')
   detect(@ReqUser() u: ReqUserPayload) {
     return this.safe('insights.detect',
       async () => ({ found: await this.detector.detect(u.orgId ?? '') }),
@@ -62,28 +68,33 @@ export class AdsAiController {
   }
 
   @Patch('insights/:id/dismiss')
+  @RequirePermission('ads.view')
   dismiss(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('insights.dismiss', () => this.svc.dismissInsight(u.orgId ?? '', id), null)
   }
 
   @Patch('insights/:id/resolve')
+  @RequirePermission('ads.view')
   resolve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('insights.resolve', () => this.svc.resolveInsight(u.orgId ?? '', id), null)
   }
 
   // ── Conversations ──
   @Get('conversations')
+  @RequirePermission('ads.view')
   conversations(@ReqUser() u: ReqUserPayload) {
     return this.safe('conversations.list', () => this.svc.listConversations(u.orgId ?? ''), [])
   }
 
   @Post('conversations')
+  @RequirePermission('ads.view')
   createConversation(@ReqUser() u: ReqUserPayload, @Body() body: { title?: string; model?: string }) {
     return this.safe('conversations.create',
       () => this.svc.createConversation(u.orgId ?? '', u.id, body.title ?? null, body.model ?? null), null)
   }
 
   @Get('conversations/:id/messages')
+  @RequirePermission('ads.view')
   messages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('conversations.messages', () => this.svc.listMessages(u.orgId ?? '', id), [])
   }
@@ -92,6 +103,7 @@ export class AdsAiController {
    * Frontend should consume with EventSource or fetch+ReadableStream and
    * parse `event: delta` / `event: done` / `event: error` lines. */
   @Post('conversations/:id/messages')
+  @RequirePermission('ads.view')
   async sendMessage(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

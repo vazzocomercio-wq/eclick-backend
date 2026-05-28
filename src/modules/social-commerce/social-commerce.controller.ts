@@ -8,6 +8,7 @@ import { MetaCatalogService } from './meta-catalog.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -42,6 +43,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *  POST  /social-commerce/whatsapp/disconnect     (auth)
  */
 @Controller('social-commerce')
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class SocialCommerceController {
   constructor(
     private readonly svc:  SocialCommerceService,
@@ -53,7 +55,7 @@ export class SocialCommerceController {
   /** GET /social-commerce/instagram/connect — gera authorize_url e
    *  retorna ao frontend pra window.location.href. */
   @Get('instagram/connect')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.connect')
   connect(
     @ReqUser() u: ReqUserPayload,
     @Query('redirect_to') redirectTo?: string,
@@ -84,7 +86,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/disconnect */
   @Post('instagram/disconnect')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.disconnect')
   disconnect(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.disconnect(u.orgId, 'instagram_shop')
@@ -99,7 +101,7 @@ export class SocialCommerceController {
    *  Page + Catalog) — sem isso, o front mostra "Nao conectado" pro
    *  estado intermediario, e o user nao consegue completar o setup. */
   @Get('instagram/status')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   async status(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const ch = await this.svc.getStatus(u.orgId, 'instagram_shop')
@@ -123,7 +125,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/pages */
   @Get('instagram/pages')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   pages(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listAvailablePages(u.orgId)
@@ -131,7 +133,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/catalogs */
   @Get('instagram/catalogs')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   catalogs(
     @ReqUser() u: ReqUserPayload,
     @Query('business_id') businessId?: string,
@@ -143,7 +145,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/setup-catalog */
   @Post('instagram/setup-catalog')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.connect')
   setup(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -161,7 +163,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/ig-account — resolve + persiste IG account id */
   @Get('instagram/ig-account')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   igAccount(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.resolveInstagramAccount(u.orgId)
@@ -169,7 +171,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/media?after= — lista posts/reels */
   @Get('instagram/media')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.view')
   igMedia(@ReqUser() u: ReqUserPayload, @Query('after') after?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listInstagramMedia(u.orgId, after)
@@ -177,7 +179,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/taggable-products?search= */
   @Get('instagram/taggable-products')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.view')
   taggableProducts(@ReqUser() u: ReqUserPayload, @Query('search') search?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listTaggableProducts(u.orgId, search)
@@ -185,7 +187,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/media/:id/tags */
   @Get('instagram/media/:id/tags')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.view')
   getMediaTags(@ReqUser() u: ReqUserPayload, @Param('id') mediaId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getMediaTags(u.orgId, mediaId)
@@ -194,7 +196,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/media/:id/tag-products */
   @Post('instagram/media/:id/tag-products')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   tagProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('id') mediaId: string,
@@ -208,7 +210,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/media/:id/untag-products */
   @Post('instagram/media/:id/untag-products')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   untagProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('id') mediaId: string,
@@ -224,7 +226,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/sync */
   @Post('instagram/sync')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   syncAll(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.syncAll(u.orgId)
@@ -233,7 +235,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/sync-product/:id */
   @Post('instagram/sync-product/:id')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   syncProduct(
     @ReqUser() u: ReqUserPayload,
     @Param('id') productId: string,
@@ -246,7 +248,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/instagram/products */
   @Get('instagram/products')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.view')
   listProducts(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listSyncedProducts(u.orgId, 'instagram_shop')
@@ -255,7 +257,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/products/add */
   @Post('instagram/products/add')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   addProducts(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { product_ids: string[] },
@@ -268,7 +270,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/instagram/products/remove */
   @Post('instagram/products/remove')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   removeProducts(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { product_ids: string[] },
@@ -282,7 +284,7 @@ export class SocialCommerceController {
 
   /** GET /social-commerce/whatsapp/status — mesmo formato do instagram. */
   @Get('whatsapp/status')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   async whatsappStatus(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const ch = await this.svc.getStatus(u.orgId, 'whatsapp_business')
@@ -292,7 +294,7 @@ export class SocialCommerceController {
   /** GET /social-commerce/whatsapp/wabas — lista WABAs do user, reusando
    *  o token do channel instagram_shop (OAuth Meta cobre todos os scopes). */
   @Get('whatsapp/wabas')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.view')
   whatsappWabas(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listAvailableWabas(u.orgId)
@@ -303,7 +305,7 @@ export class SocialCommerceController {
    *
    *  Vincula catalog ao WABA no Meta + persiste channel local. */
   @Post('whatsapp/setup')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.connect')
   whatsappSetup(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -333,7 +335,7 @@ export class SocialCommerceController {
    *  widget. Lojista deve fazer o vinculo real depois pela UI da Meta
    *  OU re-rodar /setup quando Business Verification aprovar. */
   @Post('whatsapp/setup-manual')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.connect')
   whatsappSetupManual(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -357,7 +359,7 @@ export class SocialCommerceController {
   /** POST /social-commerce/whatsapp/disconnect — desvincula no Meta +
    *  zera channel local. */
   @Post('whatsapp/disconnect')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('integrations.disconnect')
   whatsappDisconnect(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.disconnectWhatsAppCatalog(u.orgId)
@@ -373,7 +375,7 @@ export class SocialCommerceController {
    *  pra forcar tracking. A sincronizacao real ja roda via syncAll
    *  do instagram quando o usuario clica "sincronizar" la. */
   @Post('whatsapp/sync')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.publish')
   whatsappSync(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.syncAll(u.orgId)
@@ -384,7 +386,7 @@ export class SocialCommerceController {
   /** GET /social-commerce/tiktok/readiness/:productId — checklist
    *  pra preparar produto pro TikTok Shop quando a API liberar BR. */
   @Get('tiktok/readiness/:productId')
-  @UseGuards(SupabaseAuthGuard)
+  @RequirePermission('social.view')
   tiktokReadiness(
     @ReqUser() u: ReqUserPayload,
     @Param('productId') productId: string,

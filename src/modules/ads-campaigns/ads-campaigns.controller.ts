@@ -9,6 +9,7 @@ import { MetaAdsService } from './meta-ads.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import type {
   AdsPlatform, AdsObjective, AdsStatus, AdCopy,
 } from './ads-campaigns.types'
@@ -33,7 +34,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * GET    /ads/dashboard
  */
 @Controller('ads')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AdsCampaignsController {
   constructor(
     private readonly svc:     AdsCampaignsService,
@@ -44,6 +45,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/meta/connect */
   @Get('meta/connect')
+  @RequirePermission('integrations.connect')
   metaConnect(
     @ReqUser() u: ReqUserPayload,
     @Query('redirect_to') redirectTo?: string,
@@ -72,6 +74,7 @@ export class AdsCampaignsController {
   /** POST /ads/meta/disconnect */
   @Post('meta/disconnect')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.disconnect')
   metaDisconnect(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.metaAds.disconnect(u.orgId)
@@ -79,6 +82,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/meta/ad-accounts */
   @Get('meta/ad-accounts')
+  @RequirePermission('integrations.view')
   async metaAdAccounts(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const stored = await this.metaAds.getStoredToken(u.orgId)
@@ -89,6 +93,7 @@ export class AdsCampaignsController {
   /** POST /ads/meta/select-ad-account */
   @Post('meta/select-ad-account')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.connect')
   metaSelectAccount(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { ad_account_id: string },
@@ -100,6 +105,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/meta/status */
   @Get('meta/status')
+  @RequirePermission('integrations.view')
   async metaStatus(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const stored = await this.metaAds.getStoredToken(u.orgId)
@@ -116,6 +122,7 @@ export class AdsCampaignsController {
   /** POST /ads/products/:id/generate-campaign */
   @Post('products/:id/generate-campaign')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.create_campaign')
   generate(
     @ReqUser() u: ReqUserPayload,
     @Param('id') productId: string,
@@ -135,6 +142,7 @@ export class AdsCampaignsController {
 
   /** POST /ads/campaigns — manual */
   @Post('campaigns')
+  @RequirePermission('ads.create_campaign')
   create(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -158,6 +166,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/campaigns?platform=&status=&product_id=&limit=&offset= */
   @Get('campaigns')
+  @RequirePermission('ads.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('platform')   platform?:  AdsPlatform,
@@ -176,6 +185,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/dashboard */
   @Get('dashboard')
+  @RequirePermission('ads.view')
   dashboard(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.dashboard(u.orgId)
@@ -183,6 +193,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/campaigns/:id */
   @Get('campaigns/:id')
+  @RequirePermission('ads.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(id, u.orgId)
@@ -190,6 +201,7 @@ export class AdsCampaignsController {
 
   /** PATCH /ads/campaigns/:id */
   @Patch('campaigns/:id')
+  @RequirePermission('ads.update_budget')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -202,6 +214,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/regenerate-copy */
   @Post('campaigns/:id/regenerate-copy')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.update_budget')
   regenerateCopy(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -215,6 +228,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/add-variant */
   @Post('campaigns/:id/add-variant')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.update_budget')
   addVariant(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -227,6 +241,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/mark-ready  (Sprint 6 fará publish real) */
   @Post('campaigns/:id/mark-ready')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.spend')
   markReady(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -238,6 +253,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/pause */
   @Post('campaigns/:id/pause')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.pause_resume')
   pause(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.pause(id, u.orgId)
@@ -246,6 +262,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/resume */
   @Post('campaigns/:id/resume')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.pause_resume')
   resume(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.resume(id, u.orgId)
@@ -253,6 +270,7 @@ export class AdsCampaignsController {
 
   /** DELETE /ads/campaigns/:id (= archive) */
   @Delete('campaigns/:id')
+  @RequirePermission('ads.update_budget')
   archive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.archive(id, u.orgId)
@@ -260,6 +278,7 @@ export class AdsCampaignsController {
 
   /** GET /ads/campaigns/:id/metrics */
   @Get('campaigns/:id/metrics')
+  @RequirePermission('ads.view')
   metrics(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getMetrics(id, u.orgId)
@@ -268,6 +287,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/publish (Sprint 6) */
   @Post('campaigns/:id/publish')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.spend')
   publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.publish(id, u.orgId)
@@ -276,6 +296,7 @@ export class AdsCampaignsController {
   /** POST /ads/campaigns/:id/sync-metrics */
   @Post('campaigns/:id/sync-metrics')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ads.view')
   syncMetrics(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.syncMetrics(id, u.orgId)
