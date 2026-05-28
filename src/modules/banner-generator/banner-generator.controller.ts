@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { BannerGeneratorService } from './banner-generator.service'
 import type { BannerGenerateInput } from './banner-generator.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,16 +15,18 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   POST /banner-generator/generate                     → gera banner(s)
  */
 @Controller('banner-generator')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class BannerGeneratorController {
   constructor(private readonly svc: BannerGeneratorService) {}
 
   @Get('styles')
+  @RequirePermission('store.view')
   listStyles() {
     return { styles: this.svc.listStyles() }
   }
 
   @Get('products')
+  @RequirePermission('store.view')
   listProducts(
     @ReqUser() u: ReqUserPayload,
     @Query('q') q?: string,
@@ -37,6 +40,7 @@ export class BannerGeneratorController {
   }
 
   @Post('generate')
+  @RequirePermission('store.update')
   generate(@ReqUser() u: ReqUserPayload, @Body() body: BannerGenerateInput) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.generateBanner(u.orgId, body)
@@ -44,6 +48,7 @@ export class BannerGeneratorController {
 
   /** GET /banner-generator/history?format=&limit=&offset= — galeria */
   @Get('history')
+  @RequirePermission('store.view')
   history(
     @ReqUser() u: ReqUserPayload,
     @Query('format') format?: string,
@@ -60,6 +65,7 @@ export class BannerGeneratorController {
 
   /** DELETE /banner-generator/:id — remove do histórico */
   @Delete(':id')
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.deleteBanner(u.orgId, id)

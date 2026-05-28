@@ -8,6 +8,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { StorefrontVisualizerService, type VisualizerSettings } from './storefront-visualizer.service'
 import { hashIp } from '../storefront-leads/storefront-leads.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -123,23 +124,26 @@ export class StorefrontVisualizerPublicController {
  *   POST /storefront-visualizer/customers/:id/grant-credits  { amount }
  */
 @Controller('storefront-visualizer')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontVisualizerOwnerController {
   constructor(private readonly svc: StorefrontVisualizerService) {}
 
   @Get()
+  @RequirePermission('store.view')
   view(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.ownerView(u.orgId)
   }
 
   @Put('settings')
+  @RequirePermission('store.update')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: Partial<VisualizerSettings>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.ownerUpdateSettings(u.orgId, body ?? {})
   }
 
   @Post('customers/:id/grant-credits')
+  @RequirePermission('store.update')
   grant(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

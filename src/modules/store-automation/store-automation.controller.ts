@@ -10,6 +10,7 @@ import type {
   AutomationStatus, AutomationTrigger, AutomationSeverity,
   StoreAutomationConfig,
 } from './store-automation.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -28,7 +29,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * GET    /store-automation/stats
  */
 @Controller('store-automation')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StoreAutomationController {
   constructor(
     private readonly svc:    StoreAutomationService,
@@ -38,12 +39,14 @@ export class StoreAutomationController {
   /** GET /store-automation/bridge-health — smoke test do bridge SaaS↔Active.
    *  Usa notify-lojista com severity='low' (digest, não spam). */
   @Get('bridge-health')
+  @RequirePermission('store.view')
   bridgeHealth(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.bridge.pingBridge(u.orgId)
   }
 
   @Get('actions')
+  @RequirePermission('store.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status')        status?:    AutomationStatus,
@@ -61,18 +64,21 @@ export class StoreAutomationController {
   }
 
   @Get('stats')
+  @RequirePermission('store.view')
   stats(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.stats(u.orgId)
   }
 
   @Get('config')
+  @RequirePermission('settings.view')
   getConfig(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getConfig(u.orgId)
   }
 
   @Patch('config')
+  @RequirePermission('settings.update')
   updateConfig(
     @ReqUser() u: ReqUserPayload,
     @Body() body: Partial<StoreAutomationConfig>,
@@ -82,6 +88,7 @@ export class StoreAutomationController {
   }
 
   @Post('analyze')
+  @RequirePermission('store.update')
   @HttpCode(HttpStatus.OK)
   analyze(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
@@ -89,12 +96,14 @@ export class StoreAutomationController {
   }
 
   @Get('actions/:id')
+  @RequirePermission('store.view')
   getAction(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getAction(id, u.orgId)
   }
 
   @Post('actions/:id/approve')
+  @RequirePermission('store.update')
   @HttpCode(HttpStatus.OK)
   approve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
@@ -102,6 +111,7 @@ export class StoreAutomationController {
   }
 
   @Post('actions/:id/reject')
+  @RequirePermission('store.update')
   @HttpCode(HttpStatus.OK)
   reject(
     @ReqUser() u: ReqUserPayload,
@@ -113,6 +123,7 @@ export class StoreAutomationController {
   }
 
   @Post('actions/approve-batch')
+  @RequirePermission('store.update')
   @HttpCode(HttpStatus.OK)
   approveBatch(
     @ReqUser() u: ReqUserPayload,
@@ -124,6 +135,7 @@ export class StoreAutomationController {
   }
 
   @Post('actions/:id/feedback')
+  @RequirePermission('store.update')
   @HttpCode(HttpStatus.OK)
   feedback(
     @ReqUser() u: ReqUserPayload,

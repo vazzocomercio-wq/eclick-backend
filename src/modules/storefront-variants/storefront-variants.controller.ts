@@ -7,6 +7,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { Public } from '../../common/decorators/public.decorator'
 import { supabaseAdmin } from '../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -18,11 +19,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   PUT /storefront-variants                             → { baseProductId, variants: [{variantProductId, label?}] }
  */
 @Controller('storefront-variants')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontVariantsController {
   constructor(private readonly svc: StorefrontVariantsService) {}
 
   @Get()
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload, @Query('baseProductId') baseProductId?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!baseProductId) throw new BadRequestException('baseProductId obrigatório')
@@ -30,6 +32,7 @@ export class StorefrontVariantsController {
   }
 
   @Get('suggest')
+  @RequirePermission('store.view')
   suggest(@ReqUser() u: ReqUserPayload, @Query('baseProductId') baseProductId?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!baseProductId) throw new BadRequestException('baseProductId obrigatório')
@@ -37,6 +40,7 @@ export class StorefrontVariantsController {
   }
 
   @Put()
+  @RequirePermission('store.update')
   set(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { baseProductId?: string; variants?: Array<{ variantProductId: string; label?: string | null }> },

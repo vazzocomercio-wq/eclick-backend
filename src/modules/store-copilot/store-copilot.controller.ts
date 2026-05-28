@@ -5,6 +5,7 @@ import { StoreCopilotService } from './store-copilot.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import type { ChatMessage } from './store-copilot.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -17,12 +18,13 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *              executed, execution_result, cost_usd }
  */
 @Controller('store-copilot')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StoreCopilotController {
   constructor(private readonly svc: StoreCopilotService) {}
 
   @Post('message')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('store.update')
   message(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
