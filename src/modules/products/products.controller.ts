@@ -13,13 +13,14 @@ import { CreativeService } from '../creative/creative.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 type UploadedXlsxFile = { originalname: string; size: number; buffer: Buffer; mimetype: string }
 
 @Controller('products')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ProductsController {
   constructor(
     private readonly products: ProductsService,
@@ -36,6 +37,7 @@ export class ProductsController {
   /** POST /products/storefront-visibility — Loja Propria Fase 9: envia ou
    *  remove produtos da vitrine /loja/[slug] em lote. */
   @Post('storefront-visibility')
+  @RequirePermission('products.update')
   setStorefrontVisibility(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { productIds?: string[]; visible?: boolean },
@@ -83,6 +85,7 @@ export class ProductsController {
    *  configura operador/pipeline; cria 1 card no Active por produto. */
   @Post('dispatch-to-operator')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   dispatchToOperator(@ReqUser() u: ReqUserPayload, @Body() body: DispatchInput) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.cadastroDispatch.dispatch(u.orgId, u.id, body)
@@ -92,6 +95,7 @@ export class ProductsController {
    *  funil de Anúncios do Active; o operador cria/vincula o anúncio. */
   @Post('dispatch-to-publish')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   dispatchToPublish(@ReqUser() u: ReqUserPayload, @Body() body: DispatchInput) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.cadastroDispatch.dispatchToPublish(u.orgId, u.id, body)
@@ -159,6 +163,7 @@ export class ProductsController {
    *  'cadastro_pendente' se ficou completo (ou readiciona se voltou). */
   @Post(':id/refresh-completeness')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   async refreshCompleteness(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.completeness.refreshAndCleanupTag(id)
@@ -261,6 +266,7 @@ export class ProductsController {
    * Parseia + mapeia colunas + conta criados vs skip, SEM INSERT. */
   @Post('import/dry-run')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
   async importDryRun(
     @ReqUser() u: ReqUserPayload,
@@ -275,6 +281,7 @@ export class ProductsController {
    *  Pula SKUs já existentes. Marca novos com tag 'cadastro_pendente'. */
   @Post('import')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.import')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
   async importCommit(
     @ReqUser() u: ReqUserPayload,
@@ -310,6 +317,7 @@ export class ProductsController {
   /** POST /products/:id/enrich — chama Sonnet pra preencher 9 campos AI. */
   @Post(':id/enrich')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   enrichProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.enrichment.enrichProduct(u.orgId, id)
@@ -318,6 +326,7 @@ export class ProductsController {
   /** POST /products/:id/recompute-score — reavalia score sem chamar AI. */
   @Post(':id/recompute-score')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   recomputeScore(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.enrichment.recomputeScore(u.orgId, id)
@@ -327,6 +336,7 @@ export class ProductsController {
    *  enrichment. Worker dedicado processa, UI faz polling. Cap 200/job. */
   @Post('enrich-bulk')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   enrichBulk(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -349,6 +359,7 @@ export class ProductsController {
 
   @Post('enrichment-jobs/:id/cancel')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   cancelEnrichmentJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.enrichment.cancelEnrichmentJob(u.orgId, id)
@@ -370,6 +381,7 @@ export class ProductsController {
 
   /** PATCH /products/:id/catalog-status — toggle paused/ready manual. */
   @Patch(':id/catalog-status')
+  @RequirePermission('products.update')
   setCatalogStatus(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -384,6 +396,7 @@ export class ProductsController {
    *  oficiais (name, description, bullets, category). */
   @Post(':id/apply-suggestions')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   applySuggestions(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -404,6 +417,7 @@ export class ProductsController {
 
   /** PATCH /products/:id/landing — toggle landing_published. */
   @Patch(':id/landing')
+  @RequirePermission('products.update')
   setLanding(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -437,6 +451,7 @@ export class ProductsController {
    *  faz upload primeiro pra bucket creative). */
   @Post(':id/creative')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   createCreativeFromProduct(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -504,6 +519,7 @@ export class ProductsController {
    *  propaga pros produtos: 'all' = todos, 'only_empty' = só sem imposto,
    *  'none' = só salva o padrão (produtos sem imposto herdam no cálculo). */
   @Put('tax-config')
+  @RequirePermission('settings.update')
   updateTaxConfig(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { tax_percentage?: number | null; tax_on_freight?: boolean; apply?: string },
@@ -523,6 +539,7 @@ export class ProductsController {
 
   // POST /products/vinculos
   @Post('vinculos')
+  @RequirePermission('products.update')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createVinculo(@Body() body: any) {
     return this.products.createVinculo(body)
@@ -535,6 +552,7 @@ export class ProductsController {
   // vez. Resposta inclui per-listing status pra UI mostrar o que deu certo
   // e o que falhou (ex: vínculo já existia → skip).
   @Post('vinculos/bulk')
+  @RequirePermission('products.update')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createVinculosBulk(@Body() body: any) {
     return this.products.createVinculosBulk(body)
@@ -543,18 +561,21 @@ export class ProductsController {
   // DELETE /products/vinculos/:id
   @Delete('vinculos/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('products.delete')
   deleteVinculo(@Param('id') id: string) {
     return this.products.deleteVinculo(id)
   }
 
   // POST /products/stock/movement
   @Post('stock/movement')
+  @RequirePermission('stock.adjust')
   createStockMovement(@ReqUser() user: ReqUserPayload, @Body() dto: CreateStockMovementDto) {
     return this.products.createStockMovement(dto, user.id)
   }
 
   // PATCH /products/stock/:id
   @Patch('stock/:id')
+  @RequirePermission('stock.adjust')
   updateStock(@Param('id') id: string, @Body() dto: UpdateStockDto) {
     return this.products.updateStock(id, dto)
   }
@@ -567,6 +588,7 @@ export class ProductsController {
 
   // PUT /products/:id  (full update)
   @Put(':id')
+  @RequirePermission('products.update')
   updateFull(
     @Param('id') id: string,
     @Body() body: Record<string, unknown>,
@@ -576,6 +598,7 @@ export class ProductsController {
 
   // PATCH /products/:id  (costs only)
   @Patch(':id')
+  @RequirePermission('products.update')
   updateCosts(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -587,6 +610,7 @@ export class ProductsController {
   // DELETE /products/:id
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('products.delete')
   deleteProduct(@Param('id') id: string) {
     return this.products.deleteProduct(id)
   }
@@ -594,6 +618,7 @@ export class ProductsController {
   // POST /products/bulk-delete  { ids: string[] }
   @Post('bulk-delete')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequirePermission('products.delete')
   bulkDelete(@Body() body: { ids: string[] }) {
     return this.products.deleteMany(body.ids)
   }
@@ -611,6 +636,7 @@ export class ProductsController {
    */
   @Post('bulk-update-costs')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   bulkUpdateCosts(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {

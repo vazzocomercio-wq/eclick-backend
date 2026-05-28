@@ -2,17 +2,19 @@ import { Controller, Get, Post, Body, Query, UseGuards, HttpCode, HttpStatus } f
 import { OrdersService, CreateManualOrderDto } from './orders.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('orders')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   // POST /orders/manual
   @Post('manual')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('orders.update_status')
   createManual(
     @ReqUser() user: ReqUserPayload,
     @Body() dto: CreateManualOrderDto,
@@ -22,6 +24,7 @@ export class OrdersController {
 
   // GET /orders/manual?offset=0&limit=20
   @Get('manual')
+  @RequirePermission('orders.view')
   getManual(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
@@ -36,6 +39,7 @@ export class OrdersController {
    *  platform=storefront lê de storefront_orders (Loja Própria).
    */
   @Get('list')
+  @RequirePermission('orders.view')
   listOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset')    offset?:   string,
@@ -62,6 +66,7 @@ export class OrdersController {
 
   /** GET /orders/list/kpis?seller_id=&platform= */
   @Get('list/kpis')
+  @RequirePermission('orders.view')
   listOrdersKpis(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -76,6 +81,7 @@ export class OrdersController {
 
   /** GET /orders/list/tab-counts?seller_id=&platform= */
   @Get('list/tab-counts')
+  @RequirePermission('orders.view')
   listOrdersTabCounts(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id') sellerId?: string,
@@ -94,6 +100,7 @@ export class OrdersController {
 
   /** GET /orders/recent?offset=&limit=&date_from=&date_to=&seller_id=&platforms=ml,tiktok */
   @Get('recent')
+  @RequirePermission('orders.view')
   getRecentOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset')    offset?:   string,
@@ -119,6 +126,7 @@ export class OrdersController {
 
   /** GET /orders/financial-summary?date_from=&date_to=&status=&seller_id=&platforms= */
   @Get('financial-summary')
+  @RequirePermission('orders.view')
   getFinancialSummary(
     @ReqUser() user: ReqUserPayload,
     @Query('date_from') dateFrom: string,
