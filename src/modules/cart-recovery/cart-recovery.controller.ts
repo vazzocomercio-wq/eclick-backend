@@ -7,6 +7,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { Public } from '../../common/decorators/public.decorator'
 import { CartRecoveryService, hashIp, type CartItem } from './cart-recovery.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -20,11 +21,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   POST   /cart-recovery/run-tick      (testing — dispara cron manualmente)
  */
 @Controller('cart-recovery')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CartRecoveryController {
   constructor(private readonly svc: CartRecoveryService) {}
 
   @Get()
+  @RequirePermission('crm.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -40,12 +42,14 @@ export class CartRecoveryController {
   }
 
   @Get('settings')
+  @RequirePermission('crm.view')
   getSettings(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSettings(u.orgId)
   }
 
   @Put('settings')
+  @RequirePermission('settings.update')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: {
     enabled?:              boolean
     minutes_after?:        number
@@ -60,18 +64,21 @@ export class CartRecoveryController {
   }
 
   @Post(':id/send-now')
+  @RequirePermission('crm.message')
   sendNow(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.sendNow(u.orgId, id)
   }
 
   @Post(':id/dismiss')
+  @RequirePermission('crm.manage_pipeline')
   dismiss(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.dismiss(u.orgId, id)
   }
 
   @Post('run-tick')
+  @RequirePermission('crm.manage_pipeline')
   runTick(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.runRecoveryTick()

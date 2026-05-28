@@ -7,6 +7,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { Public } from '../../common/decorators/public.decorator'
 import { StorefrontLeadsService, hashIp } from './storefront-leads.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -16,11 +17,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   POST /storefront-leads/:id/retry
  */
 @Controller('storefront-leads')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontLeadsController {
   constructor(private readonly svc: StorefrontLeadsService) {}
 
   @Get()
+  @RequirePermission('crm.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -36,6 +38,7 @@ export class StorefrontLeadsController {
   }
 
   @Post(':id/retry')
+  @RequirePermission('crm.manage_pipeline')
   retry(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.retry(u.orgId, id)

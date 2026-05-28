@@ -7,11 +7,12 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CustomerHubService, CustomerSegment } from './customer-hub.service'
 import { SegmentEvaluatorService, SegmentRule } from './segment-evaluator.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('customer-hub')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CustomerHubController {
   constructor(
     private readonly svc: CustomerHubService,
@@ -21,6 +22,7 @@ export class CustomerHubController {
   // ── Métricas e ABC ──────────────────────────────────────────────────────
 
   @Get('overview')
+  @RequirePermission('crm.view')
   overview(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getOverview(user.orgId)
@@ -28,30 +30,35 @@ export class CustomerHubController {
 
   @Post('compute')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   compute(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.computeMetrics(user.orgId)
   }
 
   @Get('abc')
+  @RequirePermission('crm.view')
   abc(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getAbc(user.orgId)
   }
 
   @Get('rfm-distribution')
+  @RequirePermission('crm.view')
   rfm(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getRfmDistribution(user.orgId)
   }
 
   @Get('churn-risk')
+  @RequirePermission('crm.view')
   churn(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getChurnRisk(user.orgId)
   }
 
   @Get('churn-risk/customers')
+  @RequirePermission('crm.view')
   churnList(
     @ReqUser() user: ReqUserPayload,
     @Query('limit') limit?: string,
@@ -61,6 +68,7 @@ export class CustomerHubController {
   }
 
   @Get('top-customers')
+  @RequirePermission('crm.view')
   top(
     @ReqUser() user: ReqUserPayload,
     @Query('limit') limit?: string,
@@ -77,6 +85,7 @@ export class CustomerHubController {
   // ── Segments CRUD ───────────────────────────────────────────────────────
 
   @Get('segments')
+  @RequirePermission('crm.view')
   listSegments(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listSegments(user.orgId)
@@ -84,6 +93,7 @@ export class CustomerHubController {
 
   @Post('segments')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('crm.manage_pipeline')
   createSegment(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<CustomerSegment>,
@@ -93,6 +103,7 @@ export class CustomerHubController {
   }
 
   @Patch('segments/:id')
+  @RequirePermission('crm.manage_pipeline')
   updateSegment(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -104,6 +115,7 @@ export class CustomerHubController {
 
   @Delete('segments/:id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   deleteSegment(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -116,6 +128,7 @@ export class CustomerHubController {
    * customer_segment_members. */
   @Post('segments/:id/compute')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   computeSegment(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -128,6 +141,7 @@ export class CustomerHubController {
    * UI: conta clientes que casariam SEM persistir membros. */
   @Post('segments/preview')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.view')
   previewSegment(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { rules: SegmentRule[] },
@@ -138,6 +152,7 @@ export class CustomerHubController {
   }
 
   @Get('segments/:id/customers')
+  @RequirePermission('crm.view')
   segmentCustomers(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,

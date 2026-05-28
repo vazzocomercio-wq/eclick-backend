@@ -3,13 +3,15 @@ import type { Response } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CustomerIdentityService } from './customer-identity.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('customers')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CustomersController {
   constructor(private readonly svc: CustomerIdentityService) {}
 
   @Get()
+  @RequirePermission('crm.view')
   list(
     @Query('search')            search?:           string,
     @Query('channel')           channel?:          string,
@@ -48,6 +50,7 @@ export class CustomersController {
    * a org. NÃO é filtrado por paginação. Frontend chama no carregamento
    * da página de clientes pra alimentar contadores do painel lateral. */
   @Get('stats')
+  @RequirePermission('crm.view')
   stats(@ReqUser() user: { id: string; orgId: string | null }) {
     return this.svc.getStats(user.orgId ?? '')
   }
@@ -59,6 +62,7 @@ export class CustomersController {
   /** PATCH /customers/bulk — VIP / Bloquear em N clientes via tags.
    * Body: { customer_ids, is_vip?, is_blocked? }. Retorna { updated, total }. */
   @Patch('bulk')
+  @RequirePermission('crm.manage_pipeline')
   async bulkUpdate(
     @ReqUser() user: { id: string; orgId: string | null },
     @Body() body: { customer_ids?: string[]; is_vip?: boolean; is_blocked?: boolean },
@@ -74,6 +78,7 @@ export class CustomersController {
   /** GET /customers/export?ids=id1,id2 — CSV download. Sem ids exporta
    * a org inteira (cap 50k). Headers Content-Type/Content-Disposition. */
   @Get('export')
+  @RequirePermission('crm.export_contacts')
   async exportCsv(
     @ReqUser() user: { id: string; orgId: string | null },
     @Res() res: Response,
@@ -88,6 +93,7 @@ export class CustomersController {
   }
 
   @Post('merge')
+  @RequirePermission('crm.manage_pipeline')
   merge(
     @ReqUser() user: { id: string; orgId: string | null },
     @Body() body: { target_id?: string; source_id?: string; keep_id?: string; discard_id?: string },
@@ -103,6 +109,7 @@ export class CustomersController {
   /** POST /customers/segments/bulk-add — STUB. Implementação real em
    * customer-hub (segments evaluator). Retorna { success, message }. */
   @Post('segments/bulk-add')
+  @RequirePermission('crm.manage_pipeline')
   segmentsBulkAdd(@Body() body: { customer_ids?: string[]; segment_id?: string }) {
     const n = Array.isArray(body?.customer_ids) ? body.customer_ids.length : 0
     return { success: true, message: 'Em breve', total: n, segment_id: body?.segment_id ?? null }
@@ -111,11 +118,13 @@ export class CustomersController {
   // ── Single-customer routes (depois das literais) ───────────────────────
 
   @Get(':id')
+  @RequirePermission('crm.view')
   get(@Param('id') id: string) {
     return this.svc.get(id)
   }
 
   @Patch(':id')
+  @RequirePermission('crm.manage_pipeline')
   update(
     @Param('id') id: string,
     @Body() body: { display_name?: string; tags?: string[]; notes?: string; email?: string; phone?: string },
@@ -124,16 +133,19 @@ export class CustomersController {
   }
 
   @Post(':id/tags/:tag')
+  @RequirePermission('crm.manage_pipeline')
   addTag(@Param('id') id: string, @Param('tag') tag: string) {
     return this.svc.setTag(id, tag, true)
   }
 
   @Delete(':id/tags/:tag')
+  @RequirePermission('crm.manage_pipeline')
   removeTag(@Param('id') id: string, @Param('tag') tag: string) {
     return this.svc.setTag(id, tag, false)
   }
 
   @Delete(':id')
+  @RequirePermission('crm.manage_pipeline')
   remove(@Param('id') id: string) {
     return this.svc.remove(id)
   }
