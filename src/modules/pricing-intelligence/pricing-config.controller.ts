@@ -10,11 +10,12 @@ import {
 } from './pricing-config.service'
 import { PricingPresetsService, PresetName } from './pricing-presets.service'
 import { PricingAuditService } from './pricing-audit.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('pricing')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class PricingConfigController {
   constructor(
     private readonly cfg:     PricingConfigService,
@@ -25,6 +26,7 @@ export class PricingConfigController {
   // ── Config ──────────────────────────────────────────────────────────────
 
   @Get('config')
+  @RequirePermission('settings.view')
   getConfig(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.cfg.getOrCreate(user.orgId)
@@ -33,6 +35,7 @@ export class PricingConfigController {
   /** PATCH /pricing/config { path, value, reason? } — deep merge JSONB
    * via path notation (ex: "abc_strategies.A.min_margin_pct"). */
   @Patch('config')
+  @RequirePermission('settings.update')
   patchConfig(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { path: string; value: unknown; reason?: string },
@@ -45,6 +48,7 @@ export class PricingConfigController {
   /** POST /pricing/config/preset { preset } — aplica conservador/
    * equilibrado/agressivo. */
   @Post('config/preset')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.OK)
   applyPreset(
     @ReqUser() user: ReqUserPayload,
@@ -57,6 +61,7 @@ export class PricingConfigController {
 
   /** POST /pricing/config/reset — recria com defaults DB (DELETE+INSERT). */
   @Post('config/reset')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.OK)
   resetConfig(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
@@ -65,6 +70,7 @@ export class PricingConfigController {
 
   /** GET /pricing/config/audit?limit=50 — últimas mudanças. */
   @Get('config/audit')
+  @RequirePermission('settings.view')
   getAudit(
     @ReqUser() user: ReqUserPayload,
     @Query('limit') limit?: string,
@@ -75,6 +81,7 @@ export class PricingConfigController {
 
   /** GET /pricing/config/presets — lista nomes de presets. UI usa pra dropdown. */
   @Get('config/presets')
+  @RequirePermission('settings.view')
   listPresets() {
     return this.presets.list().map(name => ({ name, payload: this.presets.get(name) }))
   }
@@ -82,12 +89,14 @@ export class PricingConfigController {
   // ── Sazonalidade ────────────────────────────────────────────────────────
 
   @Get('seasonal')
+  @RequirePermission('settings.view')
   listSeasonal(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.cfg.listSeasonal(user.orgId)
   }
 
   @Post('seasonal')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.CREATED)
   createSeasonal(
     @ReqUser() user: ReqUserPayload,
@@ -98,6 +107,7 @@ export class PricingConfigController {
   }
 
   @Patch('seasonal/:id')
+  @RequirePermission('settings.update')
   updateSeasonal(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -108,6 +118,7 @@ export class PricingConfigController {
   }
 
   @Delete('seasonal/:id')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.OK)
   deleteSeasonal(
     @ReqUser() user: ReqUserPayload,
@@ -120,12 +131,14 @@ export class PricingConfigController {
   // ── Vendedores intocáveis ───────────────────────────────────────────────
 
   @Get('untouchable-sellers')
+  @RequirePermission('settings.view')
   listUntouchable(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.cfg.listUntouchable(user.orgId)
   }
 
   @Post('untouchable-sellers')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.CREATED)
   createUntouchable(
     @ReqUser() user: ReqUserPayload,
@@ -136,6 +149,7 @@ export class PricingConfigController {
   }
 
   @Delete('untouchable-sellers/:id')
+  @RequirePermission('settings.update')
   @HttpCode(HttpStatus.OK)
   deleteUntouchable(
     @ReqUser() user: ReqUserPayload,

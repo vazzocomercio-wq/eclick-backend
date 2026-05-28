@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { OrganicCollectorService, type CollectSummary } from './organic-collector.service'
 import { supabaseAdmin } from '../../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -11,18 +12,20 @@ interface ReqUserPayload { id: string; orgId: string }
  * com métricas. Org vem do JWT; leitura backend-gated (service_role).
  */
 @Controller('analytics/organic')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class OrganicCollectorController {
   constructor(private readonly collector: OrganicCollectorService) {}
 
   /** POST /analytics/organic/collect — dispara a coleta do feed da org. */
   @Post('collect')
+  @RequirePermission('social.view')
   collect(@ReqUser() user: ReqUserPayload): Promise<CollectSummary> {
     return this.collector.collectForOrg(user.orgId)
   }
 
   /** GET /analytics/organic/posts — lista posts com último snapshot. */
   @Get('posts')
+  @RequirePermission('social.view')
   async posts(
     @ReqUser() user: ReqUserPayload,
     @Query('network') network?: string,
@@ -53,6 +56,7 @@ export class OrganicCollectorController {
   /** GET /analytics/organic/account-metrics — série diária de insights de conta
    *  (seguidores/alcance/visitas/engajamento + demografia). */
   @Get('account-metrics')
+  @RequirePermission('social.view')
   async accountMetrics(
     @ReqUser() user: ReqUserPayload,
     @Query('account') account?: string,

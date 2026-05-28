@@ -9,11 +9,12 @@ import { WhatsAppConfigService } from '../../whatsapp/whatsapp-config.service'
 import { WhatsAppSender } from '../../whatsapp/whatsapp.sender'
 import { NotificationSettingsService } from './notification-settings.service'
 import { NotificationSettings } from './types'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('pricing/notifications')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class NotificationsController {
   constructor(
     private readonly settings: NotificationSettingsService,
@@ -22,12 +23,14 @@ export class NotificationsController {
   ) {}
 
   @Get('settings')
+  @RequirePermission('settings.view')
   getSettings(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.settings.getOrCreate(user.orgId)
   }
 
   @Patch('settings')
+  @RequirePermission('settings.update')
   updateSettings(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<NotificationSettings>,
@@ -40,6 +43,7 @@ export class NotificationsController {
    * número configurado. */
   @Post('test')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('settings.update')
   async test(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const cfg = await this.settings.getOrCreate(user.orgId)
@@ -53,6 +57,7 @@ export class NotificationsController {
 
   /** GET /pricing/notifications/log?limit=50 — últimos envios. */
   @Get('log')
+  @RequirePermission('settings.view')
   async log(
     @ReqUser() user: ReqUserPayload,
     @Query('limit') limitStr?: string,

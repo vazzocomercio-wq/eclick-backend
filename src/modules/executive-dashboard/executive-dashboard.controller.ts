@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { ExecutiveDashboardService } from './executive-dashboard.service'
 import { ExecutiveReputationService } from './executive-reputation.service'
 import { ExecutiveLogisticsService } from './executive-logistics.service'
@@ -18,7 +19,7 @@ interface AuthUser { id: string; orgId: string | null }
  * literais antes de catch-all `:id` se algum vier.
  */
 @Controller('executive')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ExecutiveDashboardController {
   constructor(
     private readonly dashboard:  ExecutiveDashboardService,
@@ -37,6 +38,7 @@ export class ExecutiveDashboardController {
    * o array e mostra seletor / agregado.
    */
   @Get('dashboard')
+  @RequirePermission('orders.view')
   async getDashboard(
     @ReqUser() user: AuthUser,
     @Query('fresh') fresh?: string,
@@ -54,6 +56,7 @@ export class ExecutiveDashboardController {
    * Trigger manual (botão "Atualizar agora" no UI). Síncrono — espera concluir.
    */
   @Post('dashboard/refresh')
+  @RequirePermission('orders.view')
   @HttpCode(HttpStatus.OK)
   async refresh(
     @ReqUser() user: AuthUser,
@@ -79,6 +82,7 @@ export class ExecutiveDashboardController {
    * GET /executive/dashboard/refresh-logs?limit=50
    */
   @Get('dashboard/refresh-logs')
+  @RequirePermission('orders.view')
   async refreshLogs(
     @ReqUser() user: AuthUser,
     @Query('limit') limitQuery?: string,
@@ -93,6 +97,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/reputation — current de todas as contas da org. */
   @Get('reputation')
+  @RequirePermission('orders.view')
   async getReputation(@ReqUser() user: AuthUser) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const snapshots = await this.reputation.getCurrentForOrg(user.orgId)
@@ -104,6 +109,7 @@ export class ExecutiveDashboardController {
    * Série temporal pra gráfico de evolução.
    */
   @Get('reputation/history')
+  @RequirePermission('orders.view')
   async reputationHistory(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerIdQuery?: string,
@@ -123,6 +129,7 @@ export class ExecutiveDashboardController {
    * POST /executive/reputation/sync?seller_id=X      — sync de 1 conta
    */
   @Post('reputation/sync')
+  @RequirePermission('orders.view')
   @HttpCode(HttpStatus.OK)
   async syncReputation(
     @ReqUser() user: AuthUser,
@@ -151,6 +158,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/logistics — summary de todas as contas. */
   @Get('logistics')
+  @RequirePermission('orders.view')
   async getLogistics(@ReqUser() user: AuthUser) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const summaries = await this.logistics.getSummaryForOrg(user.orgId)
@@ -159,6 +167,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/logistics/delays?seller_id=X&limit=50 — atrasos abertos. */
   @Get('logistics/delays')
+  @RequirePermission('orders.view')
   async listDelays(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerIdQuery?: string,
@@ -174,6 +183,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/logistics/flex/eligible?seller_id=X&limit=100 — items com has_flex=true. */
   @Get('logistics/flex/eligible')
+  @RequirePermission('orders.view')
   async listFlexEligible(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerIdQuery?: string,
@@ -195,6 +205,7 @@ export class ExecutiveDashboardController {
    * POST /executive/logistics/scan?kind=summary       — só refresh do agregado
    */
   @Post('logistics/scan')
+  @RequirePermission('orders.view')
   @HttpCode(HttpStatus.OK)
   async scan(
     @ReqUser() user: AuthUser,
@@ -228,6 +239,7 @@ export class ExecutiveDashboardController {
    * Histórico diário com visits + orders + conversion.
    */
   @Get('visits')
+  @RequirePermission('products.view')
   async getVisits(
     @ReqUser() user: AuthUser,
     @Query('seller_id') sellerIdQuery?: string,
@@ -247,6 +259,7 @@ export class ExecutiveDashboardController {
    * POST /executive/visits/sync                       — todas as contas, últimos 7d
    */
   @Post('visits/sync')
+  @RequirePermission('products.view')
   @HttpCode(HttpStatus.OK)
   async syncVisits(
     @ReqUser() user: AuthUser,
@@ -277,6 +290,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/ads — summary org-level (sem multi-conta — Ads é por advertiser, não seller). */
   @Get('ads')
+  @RequirePermission('ads.view')
   async getAds(@ReqUser() user: AuthUser) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')
     const summary = await this.ads.getSummaryForOrg(user.orgId)
@@ -285,6 +299,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/ads/leaderboard?kind=winners|losers&limit=10 */
   @Get('ads/leaderboard')
+  @RequirePermission('ads.view')
   async leaderboard(
     @ReqUser() user: AuthUser,
     @Query('kind')  kindQuery?: string,
@@ -299,6 +314,7 @@ export class ExecutiveDashboardController {
 
   /** GET /executive/ads/chart?days=30 — série temporal spend + revenue. */
   @Get('ads/chart')
+  @RequirePermission('ads.view')
   async adsChart(
     @ReqUser() user: AuthUser,
     @Query('days') daysQuery?: string,
@@ -311,6 +327,7 @@ export class ExecutiveDashboardController {
 
   /** POST /executive/ads/refresh — manual (sem ML calls). */
   @Post('ads/refresh')
+  @RequirePermission('ads.view')
   @HttpCode(HttpStatus.OK)
   async refreshAds(@ReqUser() user: AuthUser) {
     if (!user.orgId) throw new BadRequestException('Usuário sem org')

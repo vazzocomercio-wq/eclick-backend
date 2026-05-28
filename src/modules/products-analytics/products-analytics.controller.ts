@@ -4,6 +4,7 @@ import {
 import { ProductsAnalyticsService } from './products-analytics.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,11 +15,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * GET /products/analytics-social/top?limit=10
  */
 @Controller('products')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ProductsAnalyticsController {
   constructor(private readonly svc: ProductsAnalyticsService) {}
 
   @Get('analytics-social/top')
+  @RequirePermission('products.view')
   top(
     @ReqUser() u: ReqUserPayload,
     @Query('limit') limitRaw?: string,
@@ -29,6 +31,7 @@ export class ProductsAnalyticsController {
   }
 
   @Get(':id/analytics-social')
+  @RequirePermission('products.view')
   one(
     @ReqUser() u: ReqUserPayload,
     @Param('id') productId: string,

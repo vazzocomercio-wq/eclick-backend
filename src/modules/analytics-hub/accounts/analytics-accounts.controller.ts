@@ -6,6 +6,7 @@ import {
   type AnalyticsAccount,
   type AnalyticsNetwork,
 } from './analytics-accounts.service'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -15,11 +16,12 @@ interface ReqUserPayload { id: string; orgId: string }
  * iterarem e pra UI mostrar "suas contas conectadas". Org vem do JWT.
  */
 @Controller('analytics')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class AnalyticsAccountsController {
   constructor(private readonly accounts: AnalyticsAccountsService) {}
 
   @Get('accounts')
+  @RequirePermission('integrations.view')
   async list(
     @ReqUser() user: ReqUserPayload,
     @Query('network') network?: AnalyticsNetwork,

@@ -8,6 +8,7 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import type {
   PricingSuggestionStatus, PricingRules,
 } from './pricing-ai.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -27,12 +28,13 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * GET    /pricing-ai/dashboard
  */
 @Controller('pricing-ai')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class PricingAiController {
   constructor(private readonly svc: PricingAiService) {}
 
   /** POST /pricing-ai/analyze — análise em massa (até 50 produtos). */
   @Post('analyze')
+  @RequirePermission('products.view')
   @HttpCode(HttpStatus.OK)
   analyzeAll(
     @ReqUser() u: ReqUserPayload,
@@ -47,6 +49,7 @@ export class PricingAiController {
 
   /** POST /pricing-ai/analyze/:productId */
   @Post('analyze/:productId')
+  @RequirePermission('products.view')
   @HttpCode(HttpStatus.OK)
   analyzeOne(
     @ReqUser() u: ReqUserPayload,
@@ -58,6 +61,7 @@ export class PricingAiController {
 
   /** GET /pricing-ai/suggestions */
   @Get('suggestions')
+  @RequirePermission('products.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status')     status?:    PricingSuggestionStatus,
@@ -75,6 +79,7 @@ export class PricingAiController {
 
   /** GET /pricing-ai/suggestions/:id */
   @Get('suggestions/:id')
+  @RequirePermission('products.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSuggestion(id, u.orgId)
@@ -82,6 +87,7 @@ export class PricingAiController {
 
   /** POST /pricing-ai/suggestions/:id/approve */
   @Post('suggestions/:id/approve')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   approve(
     @ReqUser() u: ReqUserPayload,
@@ -94,6 +100,7 @@ export class PricingAiController {
 
   /** POST /pricing-ai/suggestions/:id/reject */
   @Post('suggestions/:id/reject')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   reject(
     @ReqUser() u: ReqUserPayload,
@@ -106,6 +113,7 @@ export class PricingAiController {
 
   /** POST /pricing-ai/suggestions/approve-batch */
   @Post('suggestions/approve-batch')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   approveBatch(
     @ReqUser() u: ReqUserPayload,
@@ -118,6 +126,7 @@ export class PricingAiController {
 
   /** GET /pricing-ai/rules */
   @Get('rules')
+  @RequirePermission('settings.view')
   getRules(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getRules(u.orgId)
@@ -125,6 +134,7 @@ export class PricingAiController {
 
   /** PATCH /pricing-ai/rules */
   @Patch('rules')
+  @RequirePermission('settings.update')
   updateRules(
     @ReqUser() u: ReqUserPayload,
     @Body() body: Partial<PricingRules>,
@@ -135,6 +145,7 @@ export class PricingAiController {
 
   /** GET /pricing-ai/history/:productId */
   @Get('history/:productId')
+  @RequirePermission('products.view')
   history(
     @ReqUser() u: ReqUserPayload,
     @Param('productId') productId: string,
@@ -147,6 +158,7 @@ export class PricingAiController {
 
   /** GET /pricing-ai/dashboard */
   @Get('dashboard')
+  @RequirePermission('products.view')
   dashboard(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.dashboard(u.orgId)

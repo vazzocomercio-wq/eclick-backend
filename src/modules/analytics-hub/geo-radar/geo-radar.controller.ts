@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { GeoRadarService, type RadarEngine, type RadarRunSummary } from './geo-radar.service'
 import { supabaseAdmin } from '../../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string }
 
@@ -11,18 +12,20 @@ interface ReqUserPayload { id: string; orgId: string }
  * (gasta créditos) e expõe o resumo. Org do JWT; leitura backend-gated.
  */
 @Controller('analytics/geo-radar')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class GeoRadarController {
   constructor(private readonly radar: GeoRadarService) {}
 
   /** POST /analytics/geo-radar/seed — gera queries do catálogo + alvos. */
   @Post('seed')
+  @RequirePermission('products.update')
   seed(@ReqUser() user: ReqUserPayload): Promise<{ queries: number; products: number }> {
     return this.radar.seed(user.orgId)
   }
 
   /** POST /analytics/geo-radar/run — roda a medição (CUSTA créditos). */
   @Post('run')
+  @RequirePermission('ai.manage_budget')
   run(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { maxQueries?: number; engines?: RadarEngine[]; maxCostUsd?: number },
@@ -32,6 +35,7 @@ export class GeoRadarController {
 
   /** GET /analytics/geo-radar — resumo da última medição. */
   @Get()
+  @RequirePermission('products.view')
   async summary(@ReqUser() user: ReqUserPayload): Promise<{
     latest_date: string | null
     by_engine: Record<string, { runs: number; mentioned: number; mention_rate: number }>

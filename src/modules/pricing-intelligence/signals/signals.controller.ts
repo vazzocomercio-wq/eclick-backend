@@ -6,17 +6,19 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../../common/supabase'
 import { SignalScannerService } from './signal-scanner.service'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('pricing/signals')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class SignalsController {
   constructor(private readonly scanner: SignalScannerService) {}
 
   /** GET /pricing/signals?status=&signal_type=&severity=&product_id=
    *                       &channel=&limit=&offset= */
   @Get()
+  @RequirePermission('products.view')
   async list(
     @ReqUser() user: ReqUserPayload,
     @Query('status')      status?:     string,
@@ -60,6 +62,7 @@ export class SignalsController {
 
   /** GET /pricing/signals/summary — counts por severity e signal_type. */
   @Get('summary')
+  @RequirePermission('products.view')
   async summary(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const { data } = await supabaseAdmin
@@ -76,6 +79,7 @@ export class SignalsController {
   }
 
   @Get(':id')
+  @RequirePermission('products.view')
   async get(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const { data } = await supabaseAdmin
@@ -88,6 +92,7 @@ export class SignalsController {
   /** POST /pricing/signals/:id/action
    *   { action: 'approve'|'dismiss'|'snooze', snooze_hours?, note? } */
   @Post(':id/action')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   async action(
     @ReqUser() user: ReqUserPayload,
@@ -121,6 +126,7 @@ export class SignalsController {
 
   /** POST /pricing/signals/scan — scan manual da org inteira. */
   @Post('scan')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   scan(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
@@ -129,6 +135,7 @@ export class SignalsController {
 
   /** POST /pricing/signals/scan-product/:product_id — scan ad-hoc. */
   @Post('scan-product/:product_id')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   scanProduct(
     @ReqUser() user: ReqUserPayload,
