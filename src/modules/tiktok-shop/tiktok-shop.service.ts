@@ -1473,4 +1473,102 @@ export class TikTokShopService {
     for (const pid of ids) await this.syncProductById(orgId, pid).catch(() => undefined)
     return { ok: true }
   }
+
+  // ── TT-4: estoque unificado — push do estoque mestre pro TikTok ───────────
+  // GATEADO por TIKTOK_STOCK_SYNC=on (default OFF). Quando ligado, o estoque do
+  // produto do catálogo (products.stock = espelho do disponível) é empurrado
+  // pros SKUs TikTok vinculados — no momento do vínculo e a cada
+  // recalcAndPropagate (Icarus, venda ML, edição manual). OFF = nada acontece.
+
+  /** Flag de segurança: só sincroniza estoque pro TikTok quando explicitamente ligado. */
+  isStockSyncEnabled(): boolean {
+    return process.env.TIKTOK_STOCK_SYNC === 'on'
+  }
+
+  /** Atualiza o estoque de UM sku no TikTok (escrita real). */
+  async updateSkuInventory(
+    orgId: string,
+    productId: string,
+    skuId: string,
+    quantity: number,
+    warehouseId: string,
+  ): Promise<{ ok: true }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    await this.ttsRequest<unknown>({
+      method: 'POST',
+      path: `/product/202309/products/${productId}/inventory/update`,
+      accessToken,
+      query: { shop_cipher: shopCipher },
+      body: {
+        skus: [
+          { id: skuId, inventory: [{ warehouse_id: warehouseId, quantity: Math.max(0, Math.round(quantity)) }] },
+        ],
+      },
+    })
+    return { ok: true }
+  }
+
+  /** Empurra o estoque mestre do produto interno pros SKUs TikTok vinculados.
+   *  Chamado pelo StockService (recalcAndPropagate) e ao vincular. Gateado.
+   *  `qtyOverride` evita reler products.stock quando o recalc já tem o valor.
+   *  Lê warehouse_id/tts_product_id do raw importado (sku_id = listing_id). */
+  async pushStockForProduct(
+    productId: string,
+    qtyOverride?: number,
+  ): Promise<{ pushed: number; skipped?: string }> {
+    if (!this.isStockSyncEnabled()) return { pushed: 0, skipped: 'gate_off' }
+
+    const { data: prod } = await supabaseAdmin
+      .from('products')
+      .select('organization_id, stock')
+      .eq('id', productId)
+      .maybeSingle<{ organization_id: string | null; stock: number | null }>()
+    const orgId = prod?.organization_id ?? null
+    if (!orgId || prod?.stock == null) return { pushed: 0, skipped: 'no_stock_or_org' }
+    const qty = Math.max(0, Math.round(qtyOverride ?? prod.stock))
+
+    const { data: vinculos } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id')
+      .eq('product_id', productId)
+      .eq('platform', 'tiktok_shop')
+      .eq('is_active', true)
+    if (!vinculos?.length) return { pushed: 0, skipped: 'no_tiktok_links' }
+
+    // mapa sku_id → { ttsProductId, warehouseId } a partir do raw importado
+    const { data: rows } = await supabaseAdmin
+      .from('tiktok_shop_products')
+      .select('tts_product_id, raw')
+      .eq('organization_id', orgId)
+    const loc = new Map<string, { ttsProductId: string; warehouseId: string | null }>()
+    for (const r of (rows ?? []) as Array<{ tts_product_id: string; raw: TtsProduct | null }>) {
+      for (const sku of r.raw?.skus ?? []) {
+        loc.set(sku.id, {
+          ttsProductId: r.tts_product_id,
+          warehouseId: sku.inventory?.[0]?.warehouse_id ?? null,
+        })
+      }
+    }
+
+    let pushed = 0
+    for (const v of vinculos as Array<{ listing_id: string }>) {
+      const where = loc.get(v.listing_id)
+      if (!where?.warehouseId) {
+        this.logger.warn(`[tts.stock] sku=${v.listing_id} sem warehouse/local — pulado`)
+        continue
+      }
+      try {
+        await this.updateSkuInventory(orgId, where.ttsProductId, v.listing_id, qty, where.warehouseId)
+        pushed++
+        this.logger.log(`[tts.stock] product=${productId} sku=${v.listing_id} → qty=${qty} OK`)
+      } catch (e) {
+        this.logger.warn(
+          `[tts.stock] product=${productId} sku=${v.listing_id} falhou: ${e instanceof Error ? e.message : String(e)}`,
+        )
+      }
+    }
+    return { pushed }
+  }
 }

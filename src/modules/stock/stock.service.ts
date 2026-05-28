@@ -1,12 +1,16 @@
 import { Injectable, Logger, HttpException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
 
 @Injectable()
 export class StockService {
   private readonly logger = new Logger(StockService.name)
 
-  constructor(private readonly mlService: MercadolivreService) {}
+  constructor(
+    private readonly mlService: MercadolivreService,
+    private readonly tiktokService: TikTokShopService,
+  ) {}
 
   // ── Central calculation ───────────────────────────────────────────────────
 
@@ -622,6 +626,16 @@ export class StockService {
           .update({ stock: Math.max(0, Math.round(calc.available)) })
           .eq('id', productId)
       }
+      // TT-4: empurra o MESMO disponível do catálogo pros SKUs TikTok vinculados.
+      // Gateado dentro de pushStockForProduct (TIKTOK_STOCK_SYNC); OFF = noop.
+      // Fora do loop de canais do ML (TikTok assume o estoque do catálogo, não
+      // entra na distribuição por canal). Não-fatal: nunca quebra o sync do ML.
+      void this.tiktokService
+        .pushStockForProduct(productId, Math.max(0, Math.round(calc.available)))
+        .catch((e) =>
+          this.logger.warn(`[stock.tts] product=${productId}: ${e instanceof Error ? e.message : String(e)}`),
+        )
+
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return
 

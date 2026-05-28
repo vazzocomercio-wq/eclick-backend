@@ -289,6 +289,18 @@ export class TikTokShopController {
     return this.svc.setProductsActive(u.orgId, [productId], false)
   }
 
+  /** TT-4: empurra o estoque mestre do produto interno pros SKUs TikTok
+   *  vinculados (chamado pelo front logo após vincular). Gateado por
+   *  TIKTOK_STOCK_SYNC — quando OFF, responde {pushed:0,skipped:'gate_off'}. */
+  @Post('listings/sync-stock')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  syncStock(@ReqUser() u: ReqUserPayload, @Body() body: { product_id: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.product_id) throw new BadRequestException('product_id obrigatório')
+    return this.svc.pushStockForProduct(body.product_id)
+  }
+
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   @UseGuards(SupabaseAuthGuard)

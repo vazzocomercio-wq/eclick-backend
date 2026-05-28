@@ -258,7 +258,7 @@ const CREATIVE_ENTRIES: KbEntry[] = [
 
 ✏️ **Editar preço no TikTok** (escrita ao vivo): clique no preço do card → digita o novo → confirma → altera o anúncio real no TikTok (endpoint \`prices/update\` por SKU) e re-sincroniza. **Ativar/Pausar**: botão no card chama \`activate\`/\`deactivate\` do produto no TikTok. Toda escrita pede confirmação antes.
 
-**Estoque**: ainda é só exibição (mostra o estoque mestre do produto vinculado, que é a fonte que sincroniza com os canais). A edição de estoque + estoque unificado (vender no TikTok baixar o mestre) é a fase seguinte.
+📦 **Estoque (TT-4 — estoque unificado, GATEADO):** ao vincular um SKU, o TikTok **assume o estoque do produto do catálogo** (\`products.stock\`, espelho do disponível). A cada mudança do estoque mestre (Icarus, venda no ML, edição) o novo valor é empurrado pros SKUs TikTok vinculados. **Só funciona com a flag \`TIKTOK_STOCK_SYNC=on\` no Railway** (nasce OFF por segurança — desligada, nada é empurrado). O card mostra o estoque mestre (read-only nesta tela). Falta (fase seguinte): vender no TikTok baixar o estoque mestre (hoje o pedido entra com product_id=NULL).
 
 **Importante**: vender no TikTok hoje NÃO baixa o estoque do ML/loja (pedidos TikTok entram sem produto vinculado de propósito). A unificação do estoque (TikTok como canal que recebe e baixa o estoque mestre) é uma fase futura, que será ligada com cuidado.`,
     tags: ['anúncios', 'listings', 'tiktok', 'tiktok-shop', 'vinculo', 'sku', 'product_listings', 'catalogo', 'margem', 'comissao'],
