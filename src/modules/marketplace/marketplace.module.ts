@@ -14,13 +14,16 @@ import { ShopeeListingsController } from './shopee-algo-score/shopee-listings.co
 import { ShopeeListingsService } from './shopee-algo-score/shopee-listings.service'
 import { ShopeeQualityController } from './shopee-quality/shopee-quality.controller'
 import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
+import { ShopeeCampaignsController } from './shopee-campaigns/shopee-campaigns.controller'
+import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
-    ShopeeListingsController, // F1.2 — GET /shopee/listings/scores
-    ShopeeQualityController,  // F1.3 — GET /shopee/shop-metrics/{latest,history}
+    ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores
+    ShopeeQualityController,   // F1.3 — GET /shopee/shop-metrics/{latest,history}
+    ShopeeCampaignsController, // F1.4 — GET /shopee/campaigns + /shopee/campaigns/:id
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -30,6 +33,7 @@ import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
     ShopeeAlgoScoreService,    // F1.1 — Algorithm Score 4 pilares
     ShopeeListingsService,     // F1.2 — query da view v_latest_algo_score
     ShopeeQualityService,      // F1.3 — Quality Center (snapshot + alerts)
+    ShopeeCampaignsService,    // F1.4 — Campaign Center (READ-ONLY Sprint 1)
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
