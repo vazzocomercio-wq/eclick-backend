@@ -3,6 +3,7 @@ import { IcarusIntegrationService, type ConnectInput } from './icarus-integratio
 import { IcarusCatalogService } from './icarus-catalog.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,7 +15,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * Sempre filtra por orgId (multi-tenant), nunca devolve access_token plain.
  */
 @Controller('suppliers/:supplierId/integrations/icarus')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class IcarusIntegrationController {
   private readonly log = new Logger(IcarusIntegrationController.name)
 
@@ -27,6 +28,7 @@ export class IcarusIntegrationController {
    *  Conecta (ou reconecta) Icarus pro fornecedor. Faz ping antes de persistir. */
   @Post()
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.connect')
   connect(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -39,6 +41,7 @@ export class IcarusIntegrationController {
 
   /** GET /suppliers/:supplierId/integrations/icarus — status atual */
   @Get()
+  @RequirePermission('integrations.view')
   get(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -50,6 +53,7 @@ export class IcarusIntegrationController {
   /** POST /suppliers/:supplierId/integrations/icarus/test — smoke test */
   @Post('test')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.view')
   test(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -61,6 +65,7 @@ export class IcarusIntegrationController {
   /** DELETE /suppliers/:supplierId/integrations/icarus — desconecta (soft) */
   @Delete()
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.disconnect')
   disconnect(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -75,6 +80,7 @@ export class IcarusIntegrationController {
    *  Responde na hora; a UI acompanha pelo status da integração (polling). */
   @Post('catalog/pull')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.import')
   pullCatalog(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     // Catálogo grande pode demorar — roda em segundo plano pra não estourar o
@@ -87,6 +93,7 @@ export class IcarusIntegrationController {
 
   /** GET .../catalog — lista do staging com status synced/available/new. */
   @Get('catalog')
+  @RequirePermission('products.view')
   listCatalog(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -106,6 +113,7 @@ export class IcarusIntegrationController {
 
   /** GET .../catalog/summary — contagem por status pro cabeçalho. */
   @Get('catalog/summary')
+  @RequirePermission('products.view')
   catalogSummary(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.catalog.getCatalogSummary(u.orgId, supplierId)
@@ -114,6 +122,7 @@ export class IcarusIntegrationController {
   /** POST .../catalog/sync — sincroniza os itens selecionados. */
   @Post('catalog/sync')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.import')
   syncCatalog(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -125,6 +134,7 @@ export class IcarusIntegrationController {
 
   /** GET .../discount — desconto geral do fornecedor. */
   @Get('discount')
+  @RequirePermission('products.view')
   getDiscount(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.catalog.getSupplierDiscount(u.orgId, supplierId)
@@ -132,6 +142,7 @@ export class IcarusIntegrationController {
 
   /** PUT .../discount — define o desconto geral e recalcula custos. */
   @Put('discount')
+  @RequirePermission('products.update')
   setDiscount(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -143,6 +154,7 @@ export class IcarusIntegrationController {
 
   /** GET .../products — produtos já vinculados (pra ajuste por produto). */
   @Get('products')
+  @RequirePermission('products.view')
   listSyncedProducts(
     @ReqUser() u: ReqUserPayload,
     @Param('supplierId') supplierId: string,
@@ -160,6 +172,7 @@ export class IcarusIntegrationController {
 
   /** PUT .../products/:spId/adjustment — ajuste de custo de um produto. */
   @Put('products/:spId/adjustment')
+  @RequirePermission('products.update')
   setProductAdjustment(
     @ReqUser() u: ReqUserPayload,
     @Param('spId') spId: string,
@@ -173,11 +186,12 @@ export class IcarusIntegrationController {
 
 /** Listagem global de todas integrações Icarus da org — usado pelo cron de sync. */
 @Controller('integrations/icarus')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class IcarusIntegrationListController {
   constructor(private readonly service: IcarusIntegrationService) {}
 
   @Get()
+  @RequirePermission('integrations.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.service.list(u.orgId)

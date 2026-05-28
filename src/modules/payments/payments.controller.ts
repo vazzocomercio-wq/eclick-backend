@@ -5,6 +5,7 @@ import {
 import { Public } from '../../common/decorators/public.decorator'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { PaymentsService } from './payments.service'
 import type { CheckoutCustomer, CheckoutItem, Gateway } from './types'
 import type { Request } from 'express'
@@ -118,11 +119,12 @@ export class PaymentsController {
  *       { shipping_status?, shipping_carrier?, tracking_code? }
  */
 @Controller('storefront-orders')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class StorefrontOrdersAdminController {
   constructor(private readonly svc: PaymentsService) {}
 
   @Patch(':id/shipping')
+  @RequirePermission('orders.update_status')
   updateShipping(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

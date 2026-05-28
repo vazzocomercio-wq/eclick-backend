@@ -5,6 +5,7 @@ import {
 import type { Response } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import {
   DropshipService,
   CreateDropshipPartnerDto, UpdateDropshipPartnerDto,
@@ -16,7 +17,7 @@ import {
 } from './dropship.service'
 
 @Controller('dropship')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class DropshipController {
   constructor(private readonly svc: DropshipService) {}
 
@@ -35,6 +36,7 @@ export class DropshipController {
   // ── Partners ─────────────────────────────────────────────────────────────
 
   @Get('partners')
+  @RequirePermission('products.view')
   async listPartners(
     @Headers('authorization') auth: string,
     @Query('status') status?: string,
@@ -45,6 +47,7 @@ export class DropshipController {
   }
 
   @Get('partners/:id')
+  @RequirePermission('products.view')
   async getPartner(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -54,6 +57,7 @@ export class DropshipController {
   }
 
   @Post('partners')
+  @RequirePermission('products.update')
   async createPartner(
     @Headers('authorization') auth: string,
     @Body() dto: CreateDropshipPartnerDto,
@@ -63,6 +67,7 @@ export class DropshipController {
   }
 
   @Patch('partners/:id')
+  @RequirePermission('products.update')
   async updatePartner(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -73,6 +78,7 @@ export class DropshipController {
   }
 
   @Delete('partners/:id')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.NO_CONTENT)
   async archivePartner(
     @Headers('authorization') auth: string,
@@ -85,6 +91,7 @@ export class DropshipController {
   // ── Account-Suppliers ────────────────────────────────────────────────────
 
   @Get('connected-accounts')
+  @RequirePermission('integrations.view')
   async listConnectedAccounts(
     @Headers('authorization') auth: string,
     @Query('marketplace') marketplace: string,
@@ -94,6 +101,7 @@ export class DropshipController {
   }
 
   @Get('account-suppliers')
+  @RequirePermission('integrations.view')
   async listAccountSuppliers(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -104,6 +112,7 @@ export class DropshipController {
   }
 
   @Post('account-suppliers')
+  @RequirePermission('integrations.manage_keys')
   async createAccountSupplier(
     @Headers('authorization') auth: string,
     @Body() dto: CreateAccountSupplierDto,
@@ -113,6 +122,7 @@ export class DropshipController {
   }
 
   @Patch('account-suppliers/:id')
+  @RequirePermission('integrations.manage_keys')
   async updateAccountSupplier(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -123,6 +133,7 @@ export class DropshipController {
   }
 
   @Delete('account-suppliers/:id')
+  @RequirePermission('integrations.manage_keys')
   @HttpCode(HttpStatus.NO_CONTENT)
   async unlinkAccountSupplier(
     @Headers('authorization') auth: string,
@@ -135,6 +146,7 @@ export class DropshipController {
   // ── Partner Products (catálogo dropship) ──────────────────────────────────
 
   @Get('partner-products')
+  @RequirePermission('products.view')
   async listPartnerProducts(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -147,6 +159,7 @@ export class DropshipController {
   }
 
   @Get('partner-products/:id')
+  @RequirePermission('products.view')
   async getPartnerProduct(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -156,6 +169,7 @@ export class DropshipController {
   }
 
   @Post('partner-products')
+  @RequirePermission('products.update')
   async createPartnerProduct(
     @Headers('authorization') auth: string,
     @Body() dto: CreatePartnerProductDto,
@@ -165,6 +179,7 @@ export class DropshipController {
   }
 
   @Patch('partner-products/:id')
+  @RequirePermission('products.update')
   async updatePartnerProduct(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -175,6 +190,7 @@ export class DropshipController {
   }
 
   @Delete('partner-products/:id')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.NO_CONTENT)
   async archivePartnerProduct(
     @Headers('authorization') auth: string,
@@ -185,6 +201,7 @@ export class DropshipController {
   }
 
   @Get('partner-products/:id/cost-history')
+  @RequirePermission('products.view')
   async listCostHistory(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -196,6 +213,7 @@ export class DropshipController {
   // ── Sync logs ──────────────────────────────────────────────────────────────
 
   @Get('sync-logs')
+  @RequirePermission('products.view')
   async listSyncLogs(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -206,6 +224,7 @@ export class DropshipController {
   }
 
   @Get('sync-logs/:id')
+  @RequirePermission('products.view')
   async getSyncLog(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -217,6 +236,7 @@ export class DropshipController {
   // ── Bulk import (planilha pré-parseada no client) ─────────────────────────
 
   @Post('partner-products/bulk-import')
+  @RequirePermission('products.import')
   async bulkImport(
     @Headers('authorization') auth: string,
     @Body() dto: BulkImportDto,
@@ -232,6 +252,7 @@ export class DropshipController {
   // ── Orders identification (Sprint 3) ──────────────────────────────────────
 
   @Get('orders')
+  @RequirePermission('orders.view')
   async listOrders(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -245,6 +266,7 @@ export class DropshipController {
   }
 
   @Get('orders/:id')
+  @RequirePermission('orders.view')
   async getOrder(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -254,12 +276,14 @@ export class DropshipController {
   }
 
   @Post('orders/identify')
+  @RequirePermission('orders.view')
   async forceIdentify(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.identifyDropshipOrders(orgId)
   }
 
   @Post('orders/:id/hold')
+  @RequirePermission('orders.update_status')
   async hold(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -270,6 +294,7 @@ export class DropshipController {
   }
 
   @Post('orders/:id/release')
+  @RequirePermission('orders.update_status')
   async release(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -281,18 +306,21 @@ export class DropshipController {
   // ── Dashboard ──────────────────────────────────────────────────────────────
 
   @Get('dashboard')
+  @RequirePermission('orders.view')
   async dashboard(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getDashboard(orgId)
   }
 
   @Get('today')
+  @RequirePermission('orders.view')
   async today(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getTodayOrders(orgId)
   }
 
   @Get('setup-status')
+  @RequirePermission('integrations.view')
   async setupStatus(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getSetupStatus(orgId)
@@ -301,6 +329,7 @@ export class DropshipController {
   // ── OC (Sprint 4) ──────────────────────────────────────────────────────────
 
   @Get('oc')
+  @RequirePermission('financeiro.view')
   async listOCs(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -313,12 +342,14 @@ export class DropshipController {
   }
 
   @Get('oc/preview')
+  @RequirePermission('financeiro.view')
   async previewOCs(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.previewOCs(orgId)
   }
 
   @Get('oc/:id')
+  @RequirePermission('financeiro.view')
   async getOC(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -328,12 +359,14 @@ export class DropshipController {
   }
 
   @Post('oc/generate')
+  @RequirePermission('financeiro.reconcile')
   async generateOCs(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.generateDailyOCs(orgId)
   }
 
   @Get('oc/:id/pdf')
+  @RequirePermission('financeiro.view')
   async ocPdf(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -350,6 +383,7 @@ export class DropshipController {
   }
 
   @Post('oc/:id/cancel')
+  @RequirePermission('financeiro.reconcile')
   async cancelOC(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -362,6 +396,7 @@ export class DropshipController {
   // ── Portal envio (auth) ────────────────────────────────────────────────────
 
   @Post('oc/:id/send')
+  @RequirePermission('financeiro.reconcile')
   async sendToPartner(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -371,6 +406,7 @@ export class DropshipController {
   }
 
   @Get('oc/:id/notifications')
+  @RequirePermission('financeiro.view')
   async listOCNotifications(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -382,6 +418,7 @@ export class DropshipController {
   // ── Returns (Sprint 8) ────────────────────────────────────────────────────
 
   @Get('returns')
+  @RequirePermission('orders.view')
   async listReturns(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -395,6 +432,7 @@ export class DropshipController {
   }
 
   @Get('returns/:id')
+  @RequirePermission('orders.view')
   async getReturn(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -404,6 +442,7 @@ export class DropshipController {
   }
 
   @Post('returns')
+  @RequirePermission('orders.update_status')
   async createReturn(
     @Headers('authorization') auth: string,
     @Body() dto: CreateReturnDto,
@@ -413,6 +452,7 @@ export class DropshipController {
   }
 
   @Patch('returns/:id')
+  @RequirePermission('orders.update_status')
   async updateReturn(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -423,6 +463,7 @@ export class DropshipController {
   }
 
   @Post('returns/:id/approve')
+  @RequirePermission('orders.update_status')
   async approveReturn(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -433,6 +474,7 @@ export class DropshipController {
   }
 
   @Post('returns/:id/reject')
+  @RequirePermission('orders.update_status')
   async rejectReturn(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -445,6 +487,7 @@ export class DropshipController {
   // ── Credits (Sprint 9) ────────────────────────────────────────────────────
 
   @Get('credits')
+  @RequirePermission('financeiro.view')
   async listCredits(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -455,6 +498,7 @@ export class DropshipController {
   }
 
   @Get('partners/:supplierId/credits-balance')
+  @RequirePermission('financeiro.view')
   async creditsBalance(
     @Headers('authorization') auth: string,
     @Param('supplierId') supplierId: string,
@@ -467,6 +511,7 @@ export class DropshipController {
   // ── Disputes (Sprint 10) ──────────────────────────────────────────────────
 
   @Get('disputes')
+  @RequirePermission('orders.view')
   async listDisputes(
     @Headers('authorization') auth: string,
     @Query('supplier_id') supplier_id?: string,
@@ -479,6 +524,7 @@ export class DropshipController {
   }
 
   @Get('disputes/:id')
+  @RequirePermission('orders.view')
   async getDispute(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -488,6 +534,7 @@ export class DropshipController {
   }
 
   @Post('disputes')
+  @RequirePermission('orders.update_status')
   async createDispute(
     @Headers('authorization') auth: string,
     @Body() dto: CreateDisputeDto,
@@ -499,6 +546,7 @@ export class DropshipController {
   }
 
   @Patch('disputes/:id')
+  @RequirePermission('orders.update_status')
   async updateDispute(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -509,6 +557,7 @@ export class DropshipController {
   }
 
   @Post('disputes/:id/resolve')
+  @RequirePermission('orders.update_status')
   async resolveDispute(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -523,12 +572,14 @@ export class DropshipController {
   // ── Scores (Sprint 11) ────────────────────────────────────────────────────
 
   @Get('partners/scores')
+  @RequirePermission('products.view')
   async listScores(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.listPartnerScores(orgId)
   }
 
   @Get('partners/:supplierId/score-history')
+  @RequirePermission('products.view')
   async scoreHistory(
     @Headers('authorization') auth: string,
     @Param('supplierId') supplierId: string,

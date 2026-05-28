@@ -5,6 +5,7 @@ import { Public } from '../../common/decorators/public.decorator'
 import { supabaseAdmin } from '../../common/supabase'
 import { ShippingService } from './shipping.service'
 import type { ShippingRule } from './shipping.types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -15,28 +16,32 @@ export class ShippingController {
   // ─ Admin (com auth) ──────────────────────────────────────────
 
   @Get('shipping-rules')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Post('shipping-rules')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   create(@ReqUser() u: ReqUserPayload, @Body() body: Partial<ShippingRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(u.orgId, body)
   }
 
   @Put('shipping-rules/:id')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   update(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<ShippingRule>) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.update(u.orgId, id, body)
   }
 
   @Delete('shipping-rules/:id')
-  @UseGuards(SupabaseAuthGuard)
+  @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)

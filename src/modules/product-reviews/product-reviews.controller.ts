@@ -8,6 +8,7 @@ import { Public } from '../../common/decorators/public.decorator'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductReviewsService } from './product-reviews.service'
 import { StorefrontCustomersService } from '../storefront-customers/storefront-customers.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -23,11 +24,12 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   DELETE /reviews/:id
  */
 @Controller('reviews')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ProductReviewsController {
   constructor(private readonly svc: ProductReviewsService) {}
 
   @Get()
+  @RequirePermission('store.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status')    status?:    'pending' | 'approved' | 'rejected',
@@ -44,18 +46,21 @@ export class ProductReviewsController {
   }
 
   @Get('stats')
+  @RequirePermission('store.view')
   stats(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.stats(u.orgId)
   }
 
   @Get('settings')
+  @RequirePermission('store.view')
   getSettings(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSettings(u.orgId)
   }
 
   @Put('settings')
+  @RequirePermission('store.update')
   updateSettings(@ReqUser() u: ReqUserPayload, @Body() body: {
     auto_approve?:            boolean
     min_body_chars?:          number
@@ -69,24 +74,28 @@ export class ProductReviewsController {
   }
 
   @Post('run-invite-tick')
+  @RequirePermission('store.update')
   runInviteTick(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.runReviewInviteTick()
   }
 
   @Put(':id/approve')
+  @RequirePermission('store.update')
   approve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.approve(u.orgId, id)
   }
 
   @Put(':id/reject')
+  @RequirePermission('store.update')
   reject(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { reason?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.reject(u.orgId, id, body?.reason)
   }
 
   @Put(':id/reply')
+  @RequirePermission('store.update')
   reply(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { text?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!body?.text?.trim()) throw new BadRequestException('text obrigatório')
@@ -94,6 +103,7 @@ export class ProductReviewsController {
   }
 
   @Delete(':id')
+  @RequirePermission('store.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)
