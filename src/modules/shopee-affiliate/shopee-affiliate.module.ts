@@ -9,6 +9,7 @@ import { ContentStudioService } from './content-studio.service'
 import { MatchScoreService } from './matchmaker/match-score.service'
 import { MatchmakerService } from './matchmaker/matchmaker.service'
 import { MatchmakerController } from './matchmaker/matchmaker.controller'
+import { PonteMetricsService } from './matchmaker/ponte-metrics.service'
 import { AiModule } from '../ai/ai.module'
 
 /** F18 Fase 2 + 4 — Lado Afiliado + A Ponte. Módulo SEPARADO do
@@ -22,7 +23,7 @@ import { AiModule } from '../ai/ai.module'
   providers:   [
     ShopeeAffiliateService, OpportunityScoreService, LinkStudioService,
     AttributionService, ContentStudioService,
-    MatchScoreService, MatchmakerService,
+    MatchScoreService, MatchmakerService, PonteMetricsService,
   ],
   exports:     [
     OpportunityScoreService, ShopeeAffiliateService, LinkStudioService,

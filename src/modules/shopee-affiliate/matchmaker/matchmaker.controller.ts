@@ -4,16 +4,26 @@ import {
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { MatchmakerService } from './matchmaker.service'
+import { PonteMetricsService } from './ponte-metrics.service'
 import { MatchStatus } from './match-score.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 F4.1 — A Ponte (Matchmaker). Vendedor rankeia afiliados por fit +
- *  propõe comissão; afiliado aceita/recusa. */
+/** F18 F4.1 — A Ponte (Matchmaker). F4.5 — métricas north-star. */
 @Controller('shopee/matchmaker')
 @UseGuards(SupabaseAuthGuard)
 export class MatchmakerController {
-  constructor(private readonly svc: MatchmakerService) {}
+  constructor(
+    private readonly svc:     MatchmakerService,
+    private readonly metrics: PonteMetricsService,
+  ) {}
+
+  /** GET /shopee/matchmaker/metrics — north-star da Ponte (GMV via afiliados). */
+  @Get('metrics')
+  ponteMetrics(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.metrics.summary(user.orgId)
+  }
 
   /** GET /shopee/matchmaker/affiliates?category=X&niche=Y — ranking pro vendedor. */
   @Get('affiliates')
