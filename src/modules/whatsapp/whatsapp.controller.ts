@@ -3,7 +3,11 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { WhatsAppConfigService } from './whatsapp-config.service'
 import { WhatsAppSender } from './whatsapp.sender'
-import { RequirePermission, RequirePermissionGuard } from '../rbac'
+// Import direto dos arquivos concretos (NÃO do barrel '../rbac') pra evitar
+// dependência circular: rbac barrel → RbacModule → AccessModule → WhatsAppModule
+// → whatsapp.controller → barrel (meio-carregado) → RequirePermission undefined.
+import { RequirePermission } from '../rbac/require-permission.decorator'
+import { RequirePermissionGuard } from '../rbac/require-permission.guard'
 
 @Controller('whatsapp/config')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)

@@ -2,7 +2,10 @@ import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post,
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { WhatsAppSender } from './whatsapp.sender'
 import { ZapiProvider } from './zapi.provider'
-import { RequirePermission, RequirePermissionGuard } from '../rbac'
+// Import direto dos arquivos concretos (NÃO do barrel '../rbac') — ver
+// comentário em whatsapp.controller.ts: evita ciclo rbac→access→whatsapp→rbac.
+import { RequirePermission } from '../rbac/require-permission.decorator'
+import { RequirePermissionGuard } from '../rbac/require-permission.guard'
 
 /** Endpoints de operação do WhatsApp (status, teste). Separado do
  * WhatsAppController (/whatsapp/config) que cuida de CRUD do Meta legado.
