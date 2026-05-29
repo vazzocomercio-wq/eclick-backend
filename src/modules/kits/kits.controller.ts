@@ -7,6 +7,7 @@ import {
 } from './kits.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -23,12 +24,13 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * POST   /kits/:id/archive        → arquiva
  */
 @Controller('kits')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class KitsController {
   constructor(private readonly svc: KitsService) {}
 
   @Post('generate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update', 'ai.view_usage')
   generate(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { count?: number; types?: KitType[]; product_ids?: string[] } = {},
@@ -38,6 +40,7 @@ export class KitsController {
   }
 
   @Get()
+  @RequirePermission('products.view')
   list(
     @ReqUser() u: ReqUserPayload,
     @Query('status')   status?:   KitStatus,
@@ -52,12 +55,14 @@ export class KitsController {
   }
 
   @Get(':id')
+  @RequirePermission('products.view')
   get(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.get(id, u.orgId)
   }
 
   @Patch(':id')
+  @RequirePermission('products.update')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -69,6 +74,7 @@ export class KitsController {
 
   @Post(':id/approve')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   approve(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.approve(id, u.orgId)
@@ -76,6 +82,7 @@ export class KitsController {
 
   @Post(':id/activate')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   activate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.activate(id, u.orgId)
@@ -83,6 +90,7 @@ export class KitsController {
 
   @Post(':id/pause')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   pause(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.pause(id, u.orgId)
@@ -90,6 +98,7 @@ export class KitsController {
 
   @Post(':id/archive')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
   archive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.archive(id, u.orgId)

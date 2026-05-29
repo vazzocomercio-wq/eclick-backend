@@ -2,9 +2,10 @@ import { Body, Controller, Delete, Get, Headers, HttpException, Param, Patch, Po
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { ChatWidgetService } from './chat-widget.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('widgets')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class WidgetsController {
   constructor(private readonly svc: ChatWidgetService) {}
 
@@ -16,24 +17,28 @@ export class WidgetsController {
   }
 
   @Get()
+  @RequirePermission('integrations.view')
   async list(@Headers('authorization') auth: string) {
     const userId = await this.resolveUserId(auth)
     return this.svc.listForUser(userId)
   }
 
   @Post()
+  @RequirePermission('integrations.connect')
   async create(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) {
     const userId = await this.resolveUserId(auth)
     return this.svc.create(userId, body)
   }
 
   @Patch(':id')
+  @RequirePermission('integrations.manage_keys')
   async update(@Headers('authorization') auth: string, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     await this.resolveUserId(auth) // RLS ensures tenant isolation
     return this.svc.update(id, body)
   }
 
   @Delete(':id')
+  @RequirePermission('integrations.disconnect')
   async remove(@Headers('authorization') auth: string, @Param('id') id: string) {
     await this.resolveUserId(auth)
     await this.svc.remove(id)
@@ -41,6 +46,7 @@ export class WidgetsController {
   }
 
   @Get(':id/snippet')
+  @RequirePermission('integrations.view')
   async snippet(@Headers('authorization') auth: string, @Param('id') id: string) {
     await this.resolveUserId(auth)
     const widget = await this.svc.getOrThrow(id)

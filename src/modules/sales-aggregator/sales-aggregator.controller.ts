@@ -5,6 +5,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { BackfillService } from './services/backfill.service'
 import { OrdersIngestionService } from './services/orders-ingestion.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface AuthUser {
   id: string
@@ -16,7 +17,7 @@ interface BackfillBody {
 }
 
 @Controller('sales-aggregator')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class SalesAggregatorController {
   constructor(
     private readonly backfill: BackfillService,
@@ -25,6 +26,7 @@ export class SalesAggregatorController {
 
   // GET /sales-aggregator/sync-stats — last sync metrics for dashboards.
   @Get('sync-stats')
+  @RequirePermission('financeiro.view')
   async syncStats() {
     return {
       last_sync: this.ingestion.getLastStats(),
@@ -34,6 +36,7 @@ export class SalesAggregatorController {
 
   @Post('backfill')
   @HttpCode(202)
+  @RequirePermission('settings.update')
   async startBackfill(
     @ReqUser() user: AuthUser,
     @Body() body: BackfillBody,
@@ -44,12 +47,14 @@ export class SalesAggregatorController {
   }
 
   @Get('status')
+  @RequirePermission('financeiro.view')
   async getStatus(@ReqUser() user: AuthUser) {
     return this.backfill.getStatus(user.orgId)
   }
 
   @Post('run-now')
   @HttpCode(202)
+  @RequirePermission('settings.update')
   async runNow(
     @ReqUser() user: AuthUser,
     @Body() body: BackfillBody,
@@ -59,11 +64,9 @@ export class SalesAggregatorController {
     return { runId, message: `Sincronização de ${days} dias iniciada` }
   }
 
-  // POST /sales-aggregator/sync-now — alias semântico de run-now com
-  // default de 1 dia. Usado por ops/scripts pra disparar sync imediato
-  // sem esperar o cron das 02h ou o horário do :17min.
   @Post('sync-now')
   @HttpCode(202)
+  @RequirePermission('settings.update')
   async syncNow(
     @ReqUser() user: AuthUser,
     @Body() body: BackfillBody,
@@ -75,6 +78,7 @@ export class SalesAggregatorController {
 
   @Post('cancel/:runId')
   @HttpCode(200)
+  @RequirePermission('settings.update')
   async cancelRun(
     @ReqUser() user: AuthUser,
     @Param('runId') runId: string,
@@ -88,6 +92,7 @@ export class SalesAggregatorController {
    *  histórico além do cron horário. */
   @Post('enrich-shipping')
   @HttpCode(202)
+  @RequirePermission('settings.update')
   async enrichShipping(
     @ReqUser() user: AuthUser,
     @Body() body: { limit?: number; daysBack?: number },
@@ -105,6 +110,7 @@ export class SalesAggregatorController {
    *  endereço (ML retorna `shipping: {id}` apenas em /orders/{id}). */
   @Post('enrich-shipping-address')
   @HttpCode(202)
+  @RequirePermission('settings.update')
   async enrichShippingAddress(
     @ReqUser() user: AuthUser,
     @Body() body: { limit?: number; daysBack?: number },

@@ -4,9 +4,10 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { ComprasService } from './compras.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('compras')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ComprasController {
   constructor(private readonly svc: ComprasService) {}
 
@@ -24,12 +25,14 @@ export class ComprasController {
 
   // Must be declared before the generic 'inteligencia' route to avoid path conflict
   @Get('inteligencia/summary')
+  @RequirePermission('financeiro.view')
   async getSummary(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getSummary(orgId)
   }
 
   @Get('inteligencia')
+  @RequirePermission('financeiro.view')
   async getInteligencia(
     @Headers('authorization') auth: string,
     @Query('periodo')     periodo?:     string,

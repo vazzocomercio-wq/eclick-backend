@@ -4,6 +4,7 @@ import {
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeQualityService } from './shopee-quality.service'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -13,13 +14,14 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *  pra mini-gráficos de tendência. Save snapshot vem da Sprint 2 (sync ou
  *  extension) — não exposto via HTTP por enquanto. */
 @Controller('shopee/shop-metrics')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeQualityController {
   constructor(private readonly svc: ShopeeQualityService) {}
 
   /** GET /shopee/shop-metrics/latest
    *  Optional ?shop_id=N pra filtrar; sem filtro = todas lojas da org. */
   @Get('latest')
+  @RequirePermission('products.view')
   async latest(
     @ReqUser() user: ReqUserPayload,
     @Query('shop_id') shopIdRaw?: string,
@@ -36,6 +38,7 @@ export class ShopeeQualityController {
   /** GET /shopee/shop-metrics/history?shop_id=N&days=30
    *  Histórico ASC por snapshot_date (default 30d). */
   @Get('history')
+  @RequirePermission('products.view')
   async history(
     @ReqUser() user: ReqUserPayload,
     @Query('shop_id') shopIdRaw?: string,

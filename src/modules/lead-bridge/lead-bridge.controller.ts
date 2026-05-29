@@ -3,11 +3,12 @@ import { LeadBridgeService } from './lead-bridge.service'
 import type { LeadBridgeConfig } from './lead-bridge.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('lead-bridge')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class LeadBridgeController {
   private readonly logger = new Logger(LeadBridgeController.name)
 
@@ -25,17 +26,20 @@ export class LeadBridgeController {
 
   // ── Config ──
   @Get('config')
+  @RequirePermission('crm.view')
   config(@ReqUser() u: ReqUserPayload) {
     return this.safe('config.get', () => this.svc.getConfig(u.orgId ?? ''), null)
   }
 
   @Patch('config')
+  @RequirePermission('crm.manage_pipeline')
   updateConfig(@ReqUser() u: ReqUserPayload, @Body() body: Partial<LeadBridgeConfig>) {
     return this.safe('config.update', () => this.svc.updateConfig(u.orgId ?? '', body), null)
   }
 
   // ── Links ──
   @Get('links')
+  @RequirePermission('crm.view')
   links(
     @ReqUser() u: ReqUserPayload,
     @Query('channel') channel?: string,
@@ -46,6 +50,7 @@ export class LeadBridgeController {
   }
 
   @Post('links/generate')
+  @RequirePermission('crm.manage_pipeline')
   generateLink(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { channel: 'rastreio' | 'garantia' | 'posvenda'; order_id?: string; product_sku?: string; product_name?: string; marketplace?: string; marketplace_buyer_id?: string },
@@ -54,6 +59,7 @@ export class LeadBridgeController {
   }
 
   @Post('links/bulk-generate')
+  @RequirePermission('crm.manage_pipeline')
   bulkGenerate(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { channel: 'rastreio' | 'garantia' | 'posvenda'; from: string; to: string },
@@ -63,6 +69,7 @@ export class LeadBridgeController {
 
   // ── Conversions ──
   @Get('conversions')
+  @RequirePermission('crm.view')
   conversions(
     @ReqUser() u: ReqUserPayload,
     @Query('channel') channel?: string,
@@ -73,12 +80,14 @@ export class LeadBridgeController {
   }
 
   @Get('conversions/:id')
+  @RequirePermission('crm.view')
   conversionDetail(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('conversions.detail', () => this.svc.getConversion(u.orgId ?? '', id), null)
   }
 
   // ── Analytics ──
   @Get('analytics/funnel')
+  @RequirePermission('crm.view')
   funnel(@ReqUser() u: ReqUserPayload) {
     return this.safe('analytics.funnel', () => this.svc.funnel(u.orgId ?? ''), {
       links: 0, scans: 0, conversions: 0, converted_links: 0, scan_rate: 0, conversion_rate: 0,
@@ -86,17 +95,20 @@ export class LeadBridgeController {
   }
 
   @Get('analytics/by-channel')
+  @RequirePermission('crm.view')
   byChannel(@ReqUser() u: ReqUserPayload) {
     return this.safe('analytics.by-channel', () => this.svc.byChannel(u.orgId ?? ''), [])
   }
 
   // ── Journeys ──
   @Get('journeys')
+  @RequirePermission('crm.view')
   journeys(@ReqUser() u: ReqUserPayload) {
     return this.safe('journeys.list', () => this.svc.listJourneys(u.orgId ?? ''), [])
   }
 
   @Post('journeys')
+  @RequirePermission('crm.manage_pipeline')
   createJourney(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { name: string; trigger_channel: string | null; steps: unknown[] },
@@ -105,6 +117,7 @@ export class LeadBridgeController {
   }
 
   @Patch('journeys/:id')
+  @RequirePermission('crm.manage_pipeline')
   updateJourney(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

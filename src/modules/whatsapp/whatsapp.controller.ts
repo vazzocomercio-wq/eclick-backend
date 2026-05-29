@@ -3,9 +3,10 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { WhatsAppConfigService } from './whatsapp-config.service'
 import { WhatsAppSender } from './whatsapp.sender'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('whatsapp/config')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class WhatsAppController {
   constructor(
     private readonly cfg:    WhatsAppConfigService,
@@ -35,6 +36,7 @@ export class WhatsAppController {
   }
 
   @Get()
+  @RequirePermission('integrations.view')
   async getConfig(@Headers('authorization') auth: string) {
     const userId = await this.resolveUserId(auth)
     const orgId  = await this.resolveOrgId(userId)
@@ -45,6 +47,7 @@ export class WhatsAppController {
   }
 
   @Post()
+  @RequirePermission('integrations.connect')
   async createConfig(
     @Headers('authorization') auth: string,
     @Body() body: { phone_number_id: string; business_account_id: string; access_token: string; display_phone?: string; display_name?: string; webhook_url?: string },
@@ -56,6 +59,7 @@ export class WhatsAppController {
   }
 
   @Patch(':id')
+  @RequirePermission('integrations.manage_keys')
   async updateConfig(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -67,6 +71,7 @@ export class WhatsAppController {
   }
 
   @Delete(':id')
+  @RequirePermission('integrations.disconnect')
   async removeConfig(@Headers('authorization') auth: string, @Param('id') id: string) {
     await this.resolveUserId(auth)
     await this.cfg.remove(id)
@@ -74,12 +79,14 @@ export class WhatsAppController {
   }
 
   @Post(':id/test')
+  @RequirePermission('integrations.view')
   async test(@Headers('authorization') auth: string, @Param('id') id: string) {
     await this.resolveUserId(auth)
     return this.cfg.testCredentials(id)
   }
 
   @Get(':id/webhook-info')
+  @RequirePermission('integrations.view')
   async webhookInfo(@Headers('authorization') auth: string, @Param('id') id: string) {
     const userId = await this.resolveUserId(auth)
     const orgId  = await this.resolveOrgId(userId)

@@ -5,17 +5,19 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeCampaignsService } from './shopee-campaigns.service'
 import { CampaignKind, CampaignStatus } from './shopee-campaigns.types'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 /** F18 F1.4 — Campaign Center endpoints READ-ONLY na Sprint 1. */
 @Controller('shopee/campaigns')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeCampaignsController {
   constructor(private readonly svc: ShopeeCampaignsService) {}
 
   /** GET /shopee/campaigns?kind=voucher&status=active&limit=50&offset=0 */
   @Get()
+  @RequirePermission('ads.view')
   async list(
     @ReqUser() user: ReqUserPayload,
     @Query('kind')   kindRaw?:   string,
@@ -37,6 +39,7 @@ export class ShopeeCampaignsController {
 
   /** GET /shopee/campaigns/:id */
   @Get(':id')
+  @RequirePermission('ads.view')
   async getById(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const card = await this.svc.getById(user.orgId, id)

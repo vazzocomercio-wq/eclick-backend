@@ -5,6 +5,7 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CanvaService, MarketplaceKey, ExportFormat } from './canva.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -13,7 +14,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * Rotas OAuth (/canva/oauth/*) ficam em CanvaOauthController.
  * As rotas estáticas vêm antes das com :param pra evitar bugs de roteamento. */
 @Controller('canva')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CanvaController {
   constructor(private readonly canva: CanvaService) {}
 
@@ -22,6 +23,7 @@ export class CanvaController {
   /** GET /canva/marketplace-dims — lista os marketplaces + dimensões. Frontend
    * usa pra renderizar o select "Onde vai usar?". */
   @Get('marketplace-dims')
+  @RequirePermission('social.view')
   marketplaceDims() {
     return { items: this.canva.listMarketplaceDims() }
   }
@@ -29,6 +31,7 @@ export class CanvaController {
   // ── Designs do seller (Canva API) ──────────────────────────────────────
 
   @Get('designs')
+  @RequirePermission('social.view')
   async listDesigns(
     @ReqUser() u: ReqUserPayload,
     @Query('query') query?: string,
@@ -39,6 +42,7 @@ export class CanvaController {
   }
 
   @Get('designs/:id')
+  @RequirePermission('social.view')
   async getDesign(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -48,6 +52,7 @@ export class CanvaController {
   }
 
   @Get('designs/:id/pages')
+  @RequirePermission('social.view')
   async getDesignPages(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -61,6 +66,7 @@ export class CanvaController {
   /** POST /canva/export — exporta um design + mirror pro Storage + INSERT canva_assets.
    * Demora 5-15s tipicamente. */
   @Post('export')
+  @RequirePermission('social.create_post')
   async export(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -82,6 +88,7 @@ export class CanvaController {
   /** POST /canva/upload-and-open — generico, nao depende de tabela products.
    *  Recebe image_url + marketplace + title opcional, retorna edit_url. */
   @Post('upload-and-open')
+  @RequirePermission('social.create_post')
   async uploadAndOpen(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { image_url: string; marketplace: MarketplaceKey; title?: string },
@@ -99,6 +106,7 @@ export class CanvaController {
   // ── Criar capa de produto (sobe imagem + abre editor Canva) ────────────
 
   @Post('product-image/:productId')
+  @RequirePermission('social.create_post')
   async createProductImage(
     @ReqUser() u: ReqUserPayload,
     @Param('productId') productId: string,
@@ -112,6 +120,7 @@ export class CanvaController {
   // ── Galeria de assets exportados ───────────────────────────────────────
 
   @Get('assets')
+  @RequirePermission('social.view')
   async listAssets(
     @ReqUser() u: ReqUserPayload,
     @Query('product_id') productId?: string,
@@ -131,6 +140,7 @@ export class CanvaController {
   }
 
   @Get('assets/:id')
+  @RequirePermission('social.view')
   async getAsset(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -140,6 +150,7 @@ export class CanvaController {
   }
 
   @Delete('assets/:id')
+  @RequirePermission('social.create_post')
   async deleteAsset(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -152,6 +163,7 @@ export class CanvaController {
   // ── Disconnect ─────────────────────────────────────────────────────────
 
   @Delete('disconnect')
+  @RequirePermission('integrations.disconnect')
   async disconnect(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.canva.disconnect(u.orgId)

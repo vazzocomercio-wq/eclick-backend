@@ -4,6 +4,7 @@ import {
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeListingsService, ListingScoreFilters } from './shopee-listings.service'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -12,7 +13,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *  Devolve anúncios Shopee com score mais recente + breakdown + top issues.
  *  Listing Center UI ranqueia por score asc (prioridade = piores primeiro). */
 @Controller('shopee/listings')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeListingsController {
   constructor(private readonly svc: ShopeeListingsService) {}
 
@@ -20,6 +21,7 @@ export class ShopeeListingsController {
    *  Query: ?limit=50&offset=0&min_score=0&max_score=100&shop_id=N
    *  Response: { items: ListingScoreCard[], total: number } */
   @Get('scores')
+  @RequirePermission('products.view')
   async listScores(
     @ReqUser() user: ReqUserPayload,
     @Query('limit')     limit?:    string,

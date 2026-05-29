@@ -9,11 +9,12 @@ import {
   MessagingService, MessagingTemplate, MessagingJourney,
 } from './messaging.service'
 import { JourneyEngineService } from './journey-engine.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('messaging')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class MessagingController {
   constructor(
     private readonly svc:    MessagingService,
@@ -23,6 +24,7 @@ export class MessagingController {
   // ── Templates ───────────────────────────────────────────────────────────
 
   @Get('templates')
+  @RequirePermission('crm.view')
   listTemplates(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listTemplates(user.orgId)
@@ -30,6 +32,7 @@ export class MessagingController {
 
   @Post('templates')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('crm.message')
   createTemplate(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<MessagingTemplate>,
@@ -39,6 +42,7 @@ export class MessagingController {
   }
 
   @Patch('templates/:id')
+  @RequirePermission('crm.message')
   updateTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -50,6 +54,7 @@ export class MessagingController {
 
   @Delete('templates/:id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   deleteTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -62,6 +67,7 @@ export class MessagingController {
    * + envia teste via WhatsApp + persiste em messaging_sends. */
   @Post('templates/:id/preview')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   previewTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -74,6 +80,7 @@ export class MessagingController {
   // ── Journeys ────────────────────────────────────────────────────────────
 
   @Get('journeys')
+  @RequirePermission('crm.view')
   listJourneys(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listJourneys(user.orgId)
@@ -81,6 +88,7 @@ export class MessagingController {
 
   @Post('journeys')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('crm.manage_pipeline')
   createJourney(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<MessagingJourney>,
@@ -90,6 +98,7 @@ export class MessagingController {
   }
 
   @Patch('journeys/:id')
+  @RequirePermission('crm.manage_pipeline')
   updateJourney(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -101,6 +110,7 @@ export class MessagingController {
 
   @Delete('journeys/:id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   deleteJourney(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -113,6 +123,7 @@ export class MessagingController {
    * messaging_journey_runs com next_step_at=now). Engine (C2) processa. */
   @Post('journeys/:id/trigger')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   triggerJourney(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -134,6 +145,7 @@ export class MessagingController {
    * Dispara em massa; cap 500/call (50s @ 100ms/send). */
   @Post('campaigns/send')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   sendCampaign(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {
@@ -151,6 +163,7 @@ export class MessagingController {
 
   /** GET /messaging/analytics?from=&to= */
   @Get('analytics')
+  @RequirePermission('crm.view')
   getAnalytics(
     @ReqUser() user: ReqUserPayload,
     @Query('from') from?: string,
@@ -165,6 +178,7 @@ export class MessagingController {
   /** GET /messaging/sends?status=&from=&to=&customer_id=&journey_id=
    *                       &limit=&offset= */
   @Get('sends')
+  @RequirePermission('crm.view')
   listSends(
     @ReqUser() user: ReqUserPayload,
     @Query('status')      status?:     string,
@@ -190,6 +204,7 @@ export class MessagingController {
   /** GET /messaging/runs?status=&journey_id=&customer_id=&from=&to=
    *                      &limit=&offset= */
   @Get('runs')
+  @RequirePermission('crm.view')
   listRuns(
     @ReqUser() user: ReqUserPayload,
     @Query('status')      status?:     string,
@@ -214,12 +229,14 @@ export class MessagingController {
    * esperar cron. Processa apenas runs da org do JWT (multi-tenant). */
   @Post('runs/process-now')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   processNow(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.engine.runOnce({ orgId: user.orgId })
   }
 
   @Get('runs/:id')
+  @RequirePermission('crm.view')
   getRun(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getRun(user.orgId, id)
@@ -227,6 +244,7 @@ export class MessagingController {
 
   @Post('runs/:id/skip-step')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   skipStep(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.skipStep(user.orgId, id)
@@ -234,6 +252,7 @@ export class MessagingController {
 
   @Post('runs/:id/cancel')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   cancelRun(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -249,6 +268,7 @@ export class MessagingController {
    * texto livre pra N customer_ids. Hoje retorna { success: true, message }. */
   @Post('send-bulk')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   sendBulk(@Body() body: { customer_ids?: string[]; message?: string }) {
     const n = Array.isArray(body?.customer_ids) ? body.customer_ids.length : 0
     return { success: true, message: 'Em breve', total: n }
@@ -259,6 +279,7 @@ export class MessagingController {
    * conforme o journey_type. Hoje só ecoa { success, total }. */
   @Post('journeys/start-bulk')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   journeysStartBulk(@Body() body: { customer_ids?: string[]; journey_type?: string }) {
     const n = Array.isArray(body?.customer_ids) ? body.customer_ids.length : 0
     return { success: true, message: 'Em breve', total: n, journey_type: body?.journey_type ?? null }

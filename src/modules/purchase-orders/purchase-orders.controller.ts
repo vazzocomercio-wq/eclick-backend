@@ -5,9 +5,10 @@ import {
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import { PurchaseOrdersService } from './purchase-orders.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 @Controller('purchase-orders')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class PurchaseOrdersController {
   constructor(private readonly svc: PurchaseOrdersService) {}
 
@@ -25,12 +26,14 @@ export class PurchaseOrdersController {
 
   // Must be declared before :id to avoid route conflict
   @Get('timeline')
+  @RequirePermission('settings.view')
   async getTimeline(@Headers('authorization') auth: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getTimeline(orgId)
   }
 
   @Get()
+  @RequirePermission('settings.view')
   async getOrders(
     @Headers('authorization') auth: string,
     @Query('status')      status?:      string,
@@ -43,18 +46,21 @@ export class PurchaseOrdersController {
   }
 
   @Get(':id')
+  @RequirePermission('settings.view')
   async getOrder(@Headers('authorization') auth: string, @Param('id') id: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.getOrder(orgId, id)
   }
 
   @Post()
+  @RequirePermission('settings.update')
   async createOrder(@Headers('authorization') auth: string, @Body() body: Record<string, unknown>) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.createOrder(orgId, body as Parameters<typeof this.svc.createOrder>[1])
   }
 
   @Patch(':id/status')
+  @RequirePermission('settings.update')
   async updateStatus(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -65,6 +71,7 @@ export class PurchaseOrdersController {
   }
 
   @Patch(':id/items/:itemId')
+  @RequirePermission('settings.update')
   async updateItem(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -76,6 +83,7 @@ export class PurchaseOrdersController {
   }
 
   @Patch(':id')
+  @RequirePermission('settings.update')
   async updateOrder(
     @Headers('authorization') auth: string,
     @Param('id') id: string,
@@ -86,6 +94,7 @@ export class PurchaseOrdersController {
   }
 
   @Delete(':id')
+  @RequirePermission('settings.update')
   async deleteOrder(@Headers('authorization') auth: string, @Param('id') id: string) {
     const orgId = await this.resolveOrgId(auth)
     return this.svc.deleteOrder(orgId, id)

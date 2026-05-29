@@ -6,12 +6,13 @@ import { EnrichmentConsentService } from './services/consent.service'
 import { EnrichmentAuditService } from './services/audit.service'
 import { EnrichmentHubService } from './services/hub.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { ReqUser } from '../../common/decorators/user.decorator'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('enrichment')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class EnrichmentController {
   private readonly logger = new Logger(EnrichmentController.name)
 
@@ -35,11 +36,13 @@ export class EnrichmentController {
 
   // ── Providers ──
   @Get('providers')
+  @RequirePermission('crm.view')
   providers(@ReqUser() u: ReqUserPayload) {
     return this.safe('providers.list', () => this.cost.listProviders(u.orgId ?? ''), [])
   }
 
   @Patch('providers/:code')
+  @RequirePermission('crm.manage_pipeline')
   updateProvider(
     @ReqUser() u: ReqUserPayload,
     @Param('code') code: string,
@@ -51,17 +54,20 @@ export class EnrichmentController {
   }
 
   @Post('providers/:code/test')
+  @RequirePermission('crm.manage_pipeline')
   testProvider(@ReqUser() u: ReqUserPayload, @Param('code') code: string) {
     return this.safe('providers.test', () => this.svc.testProvider(u.orgId ?? '', code), { ok: false, message: 'Erro' })
   }
 
   // ── Routing ──
   @Get('routing')
+  @RequirePermission('crm.view')
   routingList(@ReqUser() u: ReqUserPayload) {
     return this.safe('routing.list', () => this.routing.listAll(u.orgId ?? ''), [])
   }
 
   @Patch('routing/:queryType')
+  @RequirePermission('crm.manage_pipeline')
   routingUpdate(
     @ReqUser() u: ReqUserPayload,
     @Param('queryType') queryType: string,
@@ -74,6 +80,7 @@ export class EnrichmentController {
 
   // ── Enrich ──
   @Post('enrich')
+  @RequirePermission('crm.manage_pipeline')
   enrich(@ReqUser() u: ReqUserPayload, @Body() body: Omit<EnrichRequest, 'organization_id' | 'user_id'>) {
     return this.safe('enrich',
       () => this.svc.enrich({ ...body, organization_id: u.orgId ?? '', user_id: u.id }),
@@ -88,6 +95,7 @@ export class EnrichmentController {
    *   3) default — drena pendentes (legacy behavior)
    * Cap 100, serial com sleep 600ms. */
   @Post('batch')
+  @RequirePermission('crm.manage_pipeline')
   batch(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -109,6 +117,7 @@ export class EnrichmentController {
 
   /** Enrich one specific customer (manual button on /clientes detail). */
   @Post('customer/:id')
+  @RequirePermission('crm.manage_pipeline')
   enrichOne(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.safe('customer.enrich',
       () => this.svc.enrichCustomer(u.orgId ?? '', id, u.id),
@@ -118,6 +127,7 @@ export class EnrichmentController {
   /** Re-dispara enrichment forçando refresh de cache. Usado pelo botão
    * "Tentar novamente" inline na lista de Failures recentes. */
   @Post('retry/:customerId')
+  @RequirePermission('crm.manage_pipeline')
   retry(@ReqUser() u: ReqUserPayload, @Param('customerId') id: string) {
     return this.safe('retry',
       () => this.svc.enrichCustomer(u.orgId ?? '', id, u.id, { force_refresh: true }),
@@ -127,6 +137,7 @@ export class EnrichmentController {
   // ── Dashboard (ENRICH-HUB-1) ────────────────────────────────────────────
 
   @Get('dashboard/kpis')
+  @RequirePermission('crm.view')
   kpis(@ReqUser() u: ReqUserPayload) {
     return this.safe('dashboard.kpis',
       () => this.hub.getKpis(u.orgId ?? ''),
@@ -134,6 +145,7 @@ export class EnrichmentController {
   }
 
   @Get('dashboard/timeseries')
+  @RequirePermission('crm.view')
   timeseries(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
     const n = Math.max(1, Math.min(90, Number(days ?? 30)))
     return this.safe('dashboard.timeseries',
@@ -142,6 +154,7 @@ export class EnrichmentController {
   }
 
   @Get('recent-failures')
+  @RequirePermission('crm.view')
   recentFailures(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     const n = Math.max(1, Math.min(50, Number(limit ?? 20)))
     return this.safe('recent-failures',
@@ -150,6 +163,7 @@ export class EnrichmentController {
   }
 
   @Get('queue-stats')
+  @RequirePermission('crm.view')
   queueStats(@ReqUser() u: ReqUserPayload) {
     return this.safe('queue-stats',
       () => this.hub.getQueueStats(u.orgId ?? ''),
@@ -157,6 +171,7 @@ export class EnrichmentController {
   }
 
   @Get('auto-enabled')
+  @RequirePermission('crm.view')
   getAutoEnabled(@ReqUser() u: ReqUserPayload) {
     return this.safe('auto-enabled.get',
       () => this.hub.getSettings(u.orgId ?? ''),
@@ -164,6 +179,7 @@ export class EnrichmentController {
   }
 
   @Patch('auto-enabled')
+  @RequirePermission('crm.manage_pipeline')
   patchAutoEnabled(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { auto_enrichment_enabled?: boolean; post_enrich_delay_minutes?: number },
@@ -174,6 +190,7 @@ export class EnrichmentController {
   }
 
   @Get('post-enrich-template')
+  @RequirePermission('crm.view')
   getPostEnrichTemplate(@ReqUser() u: ReqUserPayload) {
     return this.safe('post-enrich-template.get',
       () => this.hub.getPostEnrichTemplate(u.orgId ?? ''),
@@ -181,6 +198,7 @@ export class EnrichmentController {
   }
 
   @Post('post-enrich-template')
+  @RequirePermission('crm.manage_pipeline')
   upsertPostEnrichTemplate(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { message_body?: string; is_active?: boolean; delay_minutes?: number },
@@ -192,6 +210,7 @@ export class EnrichmentController {
 
   // ── Stats / Log ──
   @Get('log')
+  @RequirePermission('crm.view')
   log(
     @ReqUser() u: ReqUserPayload,
     @Query('customer_id') customerId?: string,
@@ -203,6 +222,7 @@ export class EnrichmentController {
   }
 
   @Get('stats')
+  @RequirePermission('crm.view')
   stats(@ReqUser() u: ReqUserPayload) {
     return this.safe('stats',
       () => this.audit.stats(u.orgId ?? ''),
@@ -211,6 +231,7 @@ export class EnrichmentController {
 
   // ── Consent ──
   @Post('consents')
+  @RequirePermission('crm.manage_pipeline')
   recordConsent(@ReqUser() u: ReqUserPayload, @Body() body: {
     identifier: string; identifier_type: string; customer_id?: string;
     consent_marketing?:           boolean

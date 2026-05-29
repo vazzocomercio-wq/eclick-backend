@@ -2,13 +2,14 @@ import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post,
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { WhatsAppSender } from './whatsapp.sender'
 import { ZapiProvider } from './zapi.provider'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 /** Endpoints de operação do WhatsApp (status, teste). Separado do
  * WhatsAppController (/whatsapp/config) que cuida de CRUD do Meta legado.
  * Quando Z-API está configurado por env, esses endpoints respondem por
  * ele. Caso contrário cai no Meta cfg do banco. */
 @Controller('whatsapp')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class WhatsAppOpsController {
   constructor(
     private readonly sender: WhatsAppSender,
@@ -17,6 +18,7 @@ export class WhatsAppOpsController {
 
   /** GET /whatsapp/status — connected/phone/battery via Z-API. */
   @Get('status')
+  @RequirePermission('integrations.view')
   async status() {
     if (!this.zapi.isConfigured()) {
       return { connected: false, provider: 'none', message: 'Z-API não configurado (env vars ausentes)' }
@@ -35,6 +37,7 @@ export class WhatsAppOpsController {
    * Body: { phone: "5571..." }. Útil pra validar setup de Z-API. */
   @Post('test')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.view')
   async test(@Body() body: { phone?: string; message?: string }) {
     const phone = (body?.phone ?? '').trim()
     if (!phone) throw new BadRequestException('phone obrigatório')

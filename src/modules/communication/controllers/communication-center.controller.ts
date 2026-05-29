@@ -6,6 +6,7 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { CommunicationCenterService, CommunicationSettings } from '../services/communication-center.service'
 import { MessagingTemplate, MessagingJourney } from '../../messaging/messaging.service'
+import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -13,7 +14,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * org-scoped via ReqUser.orgId. Templates reusam MessagingService;
  * journeys/settings/dashboard são lógica nova. */
 @Controller('communication')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CommunicationCenterController {
   constructor(private readonly svc: CommunicationCenterService) {}
 
@@ -21,6 +22,7 @@ export class CommunicationCenterController {
 
   /** GET /communication/journeys?state=&limit= */
   @Get('journeys')
+  @RequirePermission('crm.view')
   listJourneys(
     @ReqUser() user: ReqUserPayload,
     @Query('state') state?: string,
@@ -36,6 +38,7 @@ export class CommunicationCenterController {
   // ── Templates ───────────────────────────────────────────────────────────
 
   @Get('templates')
+  @RequirePermission('crm.view')
   listTemplates(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listTemplates(user.orgId)
@@ -43,6 +46,7 @@ export class CommunicationCenterController {
 
   @Post('templates')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('crm.message')
   createTemplate(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<MessagingTemplate>,
@@ -52,6 +56,7 @@ export class CommunicationCenterController {
   }
 
   @Patch('templates/:id')
+  @RequirePermission('crm.message')
   updateTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -64,6 +69,7 @@ export class CommunicationCenterController {
   /** Soft delete — UPDATE is_active=false. Preserva histórico de runs/sends. */
   @Delete('templates/:id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.message')
   deleteTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -75,6 +81,7 @@ export class CommunicationCenterController {
   // ── Journey Templates (modelos de jornada) ──────────────────────────────
 
   @Get('journeys-templates')
+  @RequirePermission('crm.view')
   listJourneyTemplates(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listJourneyTemplates(user.orgId)
@@ -82,6 +89,7 @@ export class CommunicationCenterController {
 
   @Post('journeys-templates')
   @HttpCode(HttpStatus.CREATED)
+  @RequirePermission('crm.manage_pipeline')
   createJourneyTemplate(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<MessagingJourney>,
@@ -91,6 +99,7 @@ export class CommunicationCenterController {
   }
 
   @Patch('journeys-templates/:id')
+  @RequirePermission('crm.manage_pipeline')
   updateJourneyTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -104,6 +113,7 @@ export class CommunicationCenterController {
    * engine CC-2 skipa journeys inativas. */
   @Delete('journeys-templates/:id')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('crm.manage_pipeline')
   deleteJourneyTemplate(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -115,12 +125,14 @@ export class CommunicationCenterController {
   // ── Settings ────────────────────────────────────────────────────────────
 
   @Get('settings')
+  @RequirePermission('settings.view')
   getSettings(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getSettings(user.orgId)
   }
 
   @Patch('settings')
+  @RequirePermission('settings.update')
   updateSettings(
     @ReqUser() user: ReqUserPayload,
     @Body() body: Partial<CommunicationSettings>,
@@ -133,6 +145,7 @@ export class CommunicationCenterController {
 
   /** GET /communication/dashboard/funnel — contagens últimos 30 dias. */
   @Get('dashboard/funnel')
+  @RequirePermission('crm.view')
   getFunnel(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getFunnel(user.orgId)
@@ -140,6 +153,7 @@ export class CommunicationCenterController {
 
   /** GET /communication/dashboard/timeline?days=30 — agregado por dia. */
   @Get('dashboard/timeline')
+  @RequirePermission('crm.view')
   getTimeline(
     @ReqUser() user: ReqUserPayload,
     @Query('days') days?: string,

@@ -8,11 +8,12 @@ import { ChannelsService } from './channels.service'
 import { BaileysProvider } from './providers/baileys.provider'
 import type { CreateChannelDto } from './dto/create-channel.dto'
 import type { UpdateChannelDto } from './dto/update-channel.dto'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('channels')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ChannelsController {
   constructor(
     private readonly svc: ChannelsService,
@@ -20,24 +21,28 @@ export class ChannelsController {
   ) {}
 
   @Get()
+  @RequirePermission('integrations.view')
   list(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId)
   }
 
   @Get(':id')
+  @RequirePermission('integrations.view')
   findOne(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.findOne(u.orgId, id)
   }
 
   @Post()
+  @RequirePermission('integrations.connect')
   create(@ReqUser() u: ReqUserPayload, @Body() body: CreateChannelDto) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(u.orgId, body)
   }
 
   @Patch(':id')
+  @RequirePermission('integrations.manage_keys')
   update(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -48,6 +53,7 @@ export class ChannelsController {
   }
 
   @Delete(':id')
+  @RequirePermission('integrations.disconnect')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)
@@ -58,6 +64,7 @@ export class ChannelsController {
    * Remove após validação do Intelligence Hub estar usando o BaileysProvider em prod.
    */
   @Post(':id/test-send')
+  @RequirePermission('integrations.manage_keys')
   async testSend(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -88,6 +95,7 @@ export class ChannelsController {
    * a mensagem (= número errado/sem WA).
    */
   @Post(':id/check-number')
+  @RequirePermission('integrations.view')
   async checkNumber(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,

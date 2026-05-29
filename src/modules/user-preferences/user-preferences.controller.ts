@@ -3,15 +3,17 @@ import type { Request } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { UserPreferencesService, PREF_DEFAULTS } from './user-preferences.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('user-preferences')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class UserPreferencesController {
   constructor(private readonly svc: UserPreferencesService) {}
 
   @Get()
+  @RequirePermission('settings.view')
   async getAll(@ReqUser() u: ReqUserPayload) {
     try {
       return await this.svc.getAll(u.id)
@@ -21,6 +23,7 @@ export class UserPreferencesController {
   }
 
   @Patch()
+  @RequirePermission('settings.update')
   async patch(
     @ReqUser() u: ReqUserPayload,
     @Body() body: { key: string; value: string },
@@ -38,6 +41,7 @@ export class UserPreferencesController {
   // disparado pelo <MaskedField>. Fire-and-forget no frontend, retorna 200
   // mesmo em falha pra não bloquear UI.
   @Post('audit-reveal')
+  @RequirePermission('settings.view')
   async auditReveal(
     @ReqUser() u: ReqUserPayload,
     @Req() req: Request,
@@ -57,6 +61,7 @@ export class UserPreferencesController {
   // GET /user-preferences/audit-reveal?limit=50 — alimenta o card
   // "Auditoria" em /configuracoes/preferencias.
   @Get('audit-reveal')
+  @RequirePermission('settings.view')
   async listReveals(
     @ReqUser() u: ReqUserPayload,
     @Query('limit') limit?: string,

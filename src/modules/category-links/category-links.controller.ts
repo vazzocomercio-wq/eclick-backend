@@ -2,6 +2,7 @@ import { Controller, Get, Post, Delete, Body, Param, Query, UseGuards, BadReques
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CategoryLinksService } from './category-links.service'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -18,33 +19,38 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *   DELETE /category-links/:id
  */
 @Controller('category-links')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CategoryLinksController {
   constructor(private readonly svc: CategoryLinksService) {}
 
   @Get()
+  @RequirePermission('products.view')
   list(@ReqUser() u: ReqUserPayload, @Query('target') target?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(u.orgId, target)
   }
 
   @Get('sources')
+  @RequirePermission('products.view')
   sources(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listSourceCategories(u.orgId)
   }
 
   @Get('target/:mkt/browse')
+  @RequirePermission('products.view')
   browse(@Param('mkt') mkt: string, @Query('parent') parent?: string) {
     return this.svc.browseTarget(mkt, parent || null)
   }
 
   @Get('target/:mkt/search')
+  @RequirePermission('products.view')
   search(@Param('mkt') mkt: string, @Query('q') q: string) {
     return this.svc.searchTarget(mkt, q ?? '')
   }
 
   @Post('suggest')
+  @RequirePermission('products.update')
   suggest(@ReqUser() u: ReqUserPayload, @Body() body: { sourceCategoryId?: string; targetMarketplace?: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!body?.sourceCategoryId || !body?.targetMarketplace) {
@@ -54,6 +60,7 @@ export class CategoryLinksController {
   }
 
   @Post()
+  @RequirePermission('products.update')
   upsert(@ReqUser() u: ReqUserPayload, @Body() body: {
     sourceCategoryId?: string; sourceMarketplace?: string
     targetMarketplace?: string; targetCategoryId?: string
@@ -74,6 +81,7 @@ export class CategoryLinksController {
   }
 
   @Delete(':id')
+  @RequirePermission('products.update')
   remove(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(u.orgId, id)
