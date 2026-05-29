@@ -10,6 +10,8 @@ import { MatchScoreService } from './matchmaker/match-score.service'
 import { MatchmakerService } from './matchmaker/matchmaker.service'
 import { MatchmakerController } from './matchmaker/matchmaker.controller'
 import { PonteMetricsService } from './matchmaker/ponte-metrics.service'
+import { AffiliateRegistrationService } from './affiliate-registration.service'
+import { AffiliateRegistrationController } from './affiliate-registration.controller'
 import { AiModule } from '../ai/ai.module'
 
 /** F18 Fase 2 + 4 — Lado Afiliado + A Ponte. Módulo SEPARADO do
@@ -19,11 +21,15 @@ import { AiModule } from '../ai/ai.module'
  *  Studio (IA) + Matchmaker (A Ponte vendedor↔afiliado). */
 @Module({
   imports:     [AiModule], // F2.6 — LlmService pro Content Studio
-  controllers: [ShopeeAffiliateController, LinkRedirectController, MatchmakerController],
+  controllers: [
+    ShopeeAffiliateController, LinkRedirectController, MatchmakerController,
+    AffiliateRegistrationController, // F4.3 — self-signup público com consent
+  ],
   providers:   [
     ShopeeAffiliateService, OpportunityScoreService, LinkStudioService,
     AttributionService, ContentStudioService,
     MatchScoreService, MatchmakerService, PonteMetricsService,
+    AffiliateRegistrationService,
   ],
   exports:     [
     OpportunityScoreService, ShopeeAffiliateService, LinkStudioService,
