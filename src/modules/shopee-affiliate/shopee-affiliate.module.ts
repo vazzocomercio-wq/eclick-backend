@@ -6,24 +6,27 @@ import { LinkStudioService } from './link-studio.service'
 import { LinkRedirectController } from './link-redirect.controller'
 import { AttributionService } from './attribution.service'
 import { ContentStudioService } from './content-studio.service'
+import { MatchScoreService } from './matchmaker/match-score.service'
+import { MatchmakerService } from './matchmaker/matchmaker.service'
+import { MatchmakerController } from './matchmaker/matchmaker.controller'
 import { AiModule } from '../ai/ai.module'
 
-/** F18 Fase 2 — Lado Afiliado. Módulo SEPARADO do marketplace/ (T2):
- *  Affiliate API (affiliate.shopee.com.br) tem auth/escopo distinto do
- *  Open Platform vendedor.
+/** F18 Fase 2 + 4 — Lado Afiliado + A Ponte. Módulo SEPARADO do
+ *  marketplace/ (T2): Affiliate API tem auth/escopo distinto.
  *
  *  Discovery + Opportunity Score + Link Studio + Attribution + Content
- *  Studio (IA). Ingestion real (App ID/Secret) = Sprint 2 com creds. */
+ *  Studio (IA) + Matchmaker (A Ponte vendedor↔afiliado). */
 @Module({
   imports:     [AiModule], // F2.6 — LlmService pro Content Studio
-  controllers: [ShopeeAffiliateController, LinkRedirectController],
+  controllers: [ShopeeAffiliateController, LinkRedirectController, MatchmakerController],
   providers:   [
     ShopeeAffiliateService, OpportunityScoreService, LinkStudioService,
     AttributionService, ContentStudioService,
+    MatchScoreService, MatchmakerService,
   ],
   exports:     [
     OpportunityScoreService, ShopeeAffiliateService, LinkStudioService,
-    AttributionService, ContentStudioService,
+    AttributionService, ContentStudioService, MatchScoreService, MatchmakerService,
   ],
 })
 export class ShopeeAffiliateModule {}
