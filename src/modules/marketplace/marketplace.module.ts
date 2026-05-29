@@ -18,6 +18,8 @@ import { ShopeeCampaignsController } from './shopee-campaigns/shopee-campaigns.c
 import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.service'
 import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
 import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
+import { ShopeeCreativeController } from './shopee-creative/shopee-creative.controller'
+import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creative.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
@@ -27,17 +29,19 @@ import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
     ShopeeQualityController,   // F1.3 — GET /shopee/shop-metrics/{latest,history}
     ShopeeCampaignsController, // F1.4 — GET /shopee/campaigns + /shopee/campaigns/:id
     ShopeeRadarController,     // F1.5 — GET /shopee/radar/signals + /shopee/radar/by-type
+    ShopeeCreativeController,  // F1.7 — POST /shopee/creative/evaluate (guard)
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
     MarketplaceAdapterRegistry, MarketplaceService,
     MarketplaceWebhooksService,
-    ShopThrottleService,       // F0.6 — throttle por shop_id pra ShopeeAdapter
-    ShopeeAlgoScoreService,    // F1.1 — Algorithm Score 4 pilares
-    ShopeeListingsService,     // F1.2 — query da view v_latest_algo_score
-    ShopeeQualityService,      // F1.3 — Quality Center (snapshot + alerts)
-    ShopeeCampaignsService,    // F1.4 — Campaign Center (READ-ONLY Sprint 1)
-    ShopeeRadarService,        // F1.5 — Radar de mercado Shopee
+    ShopThrottleService,             // F0.6 — throttle por shop_id pra ShopeeAdapter
+    ShopeeAlgoScoreService,          // F1.1 — Algorithm Score 4 pilares
+    ShopeeListingsService,           // F1.2 — query da view v_latest_algo_score
+    ShopeeQualityService,            // F1.3 — Quality Center (snapshot + alerts)
+    ShopeeCampaignsService,          // F1.4 — Campaign Center (READ-ONLY Sprint 1)
+    ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
+    ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
