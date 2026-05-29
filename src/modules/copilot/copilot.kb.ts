@@ -3026,7 +3026,183 @@ const ANALYTICS_ENTRIES: KbEntry[] = [
   },
 ]
 
+// ════════════════════════════════════════════════════════════════════════
+// Shopee Engine (F18) — Vendedor + Afiliado + Ponte
+// Identidade cyan #00E5FF. Schema shopee.* (scores/métricas/campanhas/sinais);
+// produto vive em public.products. Telas mostram dados de exemplo até conectar
+// uma loja Shopee real (Open Platform) — ver entry de integração.
+// ════════════════════════════════════════════════════════════════════════
+
+const SHOPEE_ENTRIES: KbEntry[] = [
+  {
+    routes:   ['/dashboard/integracoes/shopee/callback', '/dashboard/integracoes/shopee'],
+    category: 'shopee',
+    title:    'Conectar loja Shopee (Open Platform) — ponto de partida',
+    content: `**Onde tudo começa.** A Shopee Engine só mostra dados reais depois que você **conecta uma loja Shopee** via Open Platform. Antes disso as telas exibem exemplos pra você conhecer a ferramenta.
+
+**Como conectar:**
+1. O backend gera a URL de autorização (\`GET /marketplace/shopee/auth-url\`) e te leva pro login da Shopee.
+2. Você autoriza a loja → a Shopee redireciona de volta pra \`/dashboard/integracoes/shopee/callback\`, que troca o code por tokens (\`POST /marketplace/shopee/callback\`).
+3. Status da conexão fica em \`GET /marketplace/status\`. Multi-conta: dá pra conectar **várias lojas Shopee** na mesma organização (cada uma isolada por \`shop_id\`).
+
+**O que roda por baixo:** autenticação HMAC-SHA256, token de acesso que **expira a cada 4h** (renovação automática), throttle ~10 req/s por loja e webhooks em tempo real (\`/webhooks/shopee\`) pra pedido/anúncio/devolução — você não precisa fazer nada disso na mão.
+
+**Pré-requisito atual:** o app e-Click na Open Platform está em revisão pela Shopee. Enquanto as credenciais de produção não saem, a conexão não fica disponível e as telas seguem em modo exemplo.`,
+    tags: ['shopee', 'integração', 'conectar', 'oauth', 'open platform', 'token', 'multi-conta', 'onboarding'],
+  },
+  {
+    routes:   ['/dashboard/catalogo/anuncios/shopee'],
+    category: 'shopee',
+    title:    'Shopee — Central de Anúncios + Algorithm Score',
+    content: `**Lista os seus anúncios da Shopee** com a nota do algoritmo de cada um — o equivalente Shopee da central de anúncios do Mercado Livre.
+
+**Algorithm Score (0-100):** ao contrário de uma nota única, é montado em **4 pilares com pesos** (espelha como a busca da Shopee rankeia):
+- **Relevância 40%** — título, palavras-chave, categoria, atributos.
+- **Performance 30%** — vendas, cliques, conversão, favoritos.
+- **Qualidade da loja 20%** — reputação, chat, envio no prazo, devoluções.
+- **Preço + marketing 10%** — competitividade de preço, participação em campanhas.
+
+**Como extrair valor:**
+- Cada anúncio traz **issues acionáveis priorizadas** (o que mexer primeiro pra ganhar mais ponto). Foque no pilar mais fraco — é onde o ganho marginal é maior.
+- Clique no anúncio pra abrir o **drawer de detalhe** com o breakdown pilar a pilar.
+- Endpoint: \`GET /shopee/listings/scores\` (lê a view \`v_latest_algo_score\`).
+
+**Importante:** relevância é 40% do peso — título e atributos bem-feitos rendem mais que qualquer outra otimização isolada.`,
+    tags: ['shopee', 'anúncios', 'listings', 'algorithm score', 'algoritmo', 'relevância', 'ranking', 'busca', 'pilares'],
+  },
+  {
+    routes:   ['/dashboard/shopee-quality'],
+    category: 'shopee',
+    title:    'Shopee — Central de Qualidade da loja',
+    content: `**Saúde da sua conta Shopee num lugar só.** A Shopee pune lojas com problema operacional rebaixando seus anúncios na busca — esta tela mostra o risco antes da punição doer.
+
+**Saúde da loja em 4 níveis:** 🟢 saudável · 🟡 atenção · 🟠 alerta · 🔴 crítico. A regra é por **pontos de penalidade**: a partir de **6 pontos** a loja entra em estado **crítico** (risco real de restrição na conta).
+
+**Métricas monitoradas** (\`shopee.shop_metrics\`): taxa de resposta no chat, tempo de preparação do pedido, envios atrasados (late shipment), taxa de devolução/reembolso, pontos de penalidade acumulados.
+
+**Como usar** (\`/dashboard/shopee-quality\`):
+- Veja o **estado atual** (\`GET /shopee/shop-metrics/latest\`) e o **histórico** (\`/history\`) pra saber se está melhorando ou piorando.
+- Métrica em amarelo/vermelho = trate AGORA: chat lento e envio atrasado são os que mais derrubam o pilar "qualidade da loja" (20% do Algorithm Score).
+
+**Nota:** chat/preparação/penalidade não vêm completos da Open Platform — alguns campos dependem da extensão de navegador (roadmap) e podem aparecer vazios até lá.`,
+    tags: ['shopee', 'qualidade', 'saúde', 'reputação', 'chat', 'envio', 'devolução', 'penalidade', 'shop metrics'],
+  },
+  {
+    routes:   ['/dashboard/shopee-campaigns'],
+    category: 'shopee',
+    title:    'Shopee — Campanhas + calculadora de margem',
+    content: `**Suas campanhas Shopee** (vouchers, flash sale, Shopee Ads) com **ROI** e — o diferencial — uma **calculadora de margem pós-comissão** que impede você de promover no prejuízo.
+
+**O que mostra** (\`GET /shopee/campaigns\`): cada campanha com tipo (voucher / flash_sale / ads), investimento, retorno e ROI.
+
+**Calculadora de margem (gate de promoção):** antes de entrar numa campanha, abra a calculadora — ela usa o **motor de margem canônico** (o mesmo do ML, \`computeContributionMargin\`) pra calcular a margem REAL depois do desconto da campanha + comissão Shopee + imposto + frete.
+- Há um **piso de margem** configurável por organização (\`min_campaign_margin_pct\`, padrão **8%**). Se a campanha jogar a margem abaixo do piso, a calculadora **avisa** — você decide com número na mão, não no escuro.
+- Endpoint: \`POST /shopee/campaigns/evaluate-margin\`.
+
+**Como extrair valor:** promoção de Shopee parece barata mas empilha desconto + comissão; produto de margem apertada vira prejuízo fácil. Rode a calculadora ANTES de aceitar qualquer flash sale.`,
+    tags: ['shopee', 'campanhas', 'voucher', 'flash sale', 'ads', 'roi', 'margem', 'calculadora', 'promoção', 'gate'],
+  },
+  {
+    routes:   ['/dashboard/shopee-radar'],
+    category: 'shopee',
+    title:    'Shopee — Radar de mercado',
+    content: `**Inteligência de mercado da Shopee** por sinal — o que está bombando, como seu preço se compara e adoção de logística.
+
+**3 tipos de sinal** (\`shopee.market_signals\`, \`GET /shopee/radar/signals\`):
+- **Trending** — termos/categorias em alta na Shopee (onde a demanda está crescendo).
+- **Price benchmark** — seu preço vs a faixa do mercado pra produtos parecidos (está caro? barato demais?).
+- **FBS adoption** — adoção do Fulfillment by Shopee (logística da Shopee) na sua categoria; vendedores em FBS costumam rankear melhor.
+
+**Como usar:** trate o radar como pauta de decisão — sinal de *trending* vira ideia de anúncio/campanha; *price benchmark* fora da faixa vira ajuste de preço; *FBS adoption* alta na sua categoria é sinal de que entrar no FBS pode destravar visibilidade.`,
+    tags: ['shopee', 'radar', 'mercado', 'tendência', 'trending', 'preço', 'benchmark', 'fbs', 'logística', 'concorrência'],
+  },
+  {
+    routes:   ['/dashboard/shopee-simulator'],
+    category: 'shopee',
+    title:    'Shopee — Simulador de anúncio (guard de IA Criativo)',
+    content: `**Testa um rascunho de anúncio Shopee ANTES de publicar.** Você cola título + descrição + atributos e o simulador devolve o **Algorithm Score previsto** + o que melhorar.
+
+**Guard de publicação:** existe uma **trava de relevância** — o rascunho só passa se o pilar **Relevância ≥ 70** (\`RELEVANCE_GATE\`). Abaixo disso o sistema bloqueia/avisa, porque publicar anúncio mal-indexado na Shopee é queimar visibilidade logo na largada.
+
+**Como usar** (\`/dashboard/shopee-simulator\`):
+1. Preenche o rascunho.
+2. \`POST /shopee/creative/evaluate\` → volta a nota prevista + issues priorizadas.
+3. Ajusta título/atributos até passar dos 70 de relevância → aí sim publica.
+
+**Integração com IA Criativo:** o mesmo guard roda quando você gera anúncio Shopee pela esteira de IA Criativo — só sai pra publicação o que passa no gate. A publicação automática fica disponível quando a loja Shopee estiver conectada.`,
+    tags: ['shopee', 'simulador', 'rascunho', 'ia criativo', 'guard', 'relevância', 'publicar', 'pré-publicação', 'score previsto'],
+  },
+  {
+    routes:   ['/dashboard/shopee-afiliado'],
+    category: 'shopee-afiliado',
+    title:    'Shopee Afiliados — Descoberta + Opportunity Score + Link Studio + Content Studio',
+    content: `**O lado afiliado da Engine.** Descobre quais ofertas Shopee valem a pena promover, gera os links rastreados e cria o conteúdo — tudo numa tela.
+
+**Opportunity Score (qual oferta promover):** ao contrário de listar tudo, ele rankeia por **chance real de comissão** com 4 fatores:
+- Comissão **30%** · conversão **30%** · reputação do vendedor **25%** · tendência **15%**.
+- **Anti-armadilha (filtro de saída):** oferta com **nota < 4,5** ou **reputação do vendedor < 40/100** é **excluída** — produto ruim gera devolução, e devolução **cancela a comissão**. Não adianta comissão alta se o pedido volta.
+
+**Link Studio** (\`POST /shopee-affiliate/links\`): gera o link de afiliado com **sub_id por canal** (Instagram, WhatsApp, TikTok…) pra você saber de onde veio cada venda, + **QR code** (data URL pronto pra baixar) + **encurtador próprio** \`/go/{hash}\` que redireciona (302) e conta cliques.
+
+**Content Studio** (\`POST /shopee-affiliate/content\`): a IA escreve a copy de divulgação adaptada por canal e **já injeta o link rastreado** no texto — copia e posta.
+
+**Como extrair valor:** comece pelo topo do ranking (Opportunity Score alto), gere um link por canal no Link Studio, e use o Content Studio pra produzir o post. Acompanhe o retorno em **Comissões**.`,
+    tags: ['shopee', 'afiliado', 'afiliados', 'opportunity score', 'oportunidade', 'comissão', 'link studio', 'sub_id', 'qr', 'encurtador', 'content studio', 'descoberta'],
+  },
+  {
+    routes:   ['/dashboard/shopee-comissoes'],
+    category: 'shopee-afiliado',
+    title:    'Shopee Afiliados — Comissões & Atribuição',
+    content: `**Quanto você ganhou como afiliado Shopee** — do clique à comissão confirmada.
+
+**Ciclo da conversão** (\`shopee.affiliate_conversions\`): cada venda atribuída passa por **pendente → confirmada → cancelada**. A atribuição respeita a **janela de cookie de 7 dias** da Shopee (clicou hoje, comprou em até 7 dias = sua).
+
+**O que mostra** (\`GET /shopee-affiliate/conversions\` + \`/summary\`):
+- **GMV e comissão por canal** (graças ao sub_id do Link Studio) — qual canal converte de verdade.
+- Comissão **confirmada** vs **pendente** vs **cancelada** (a cancelada some quando o pedido é devolvido — por isso o filtro anti-armadilha lá na Descoberta).
+- **Saque:** a Shopee BR exige **mínimo de R$30** confirmados pra sacar — a tela marca quando você já pode sacar (\`withdrawable\`).
+
+**Como extrair valor:** olhe comissão por canal, corte o que não converte, e dobre no canal campeão. Taxa alta de "cancelada" = você está promovendo produto que volta → reveja o Opportunity Score das ofertas.`,
+    tags: ['shopee', 'afiliado', 'comissões', 'comissao', 'atribuição', 'conversão', 'gmv', 'saque', 'canal', '7 dias', 'cookie'],
+  },
+  {
+    routes:   ['/dashboard/shopee-matchmaker'],
+    category: 'shopee-afiliado',
+    title:    'Shopee — Matchmaker (A Ponte vendedor ↔ afiliado)',
+    content: `**O diferencial da Engine: A Ponte.** Conecta **vendedores Shopee** que querem divulgação com **afiliados** que topam promover — com um score que mede o encaixe, não um mural genérico.
+
+**Match Score (qualidade do encaixe):** 4 fatores —
+- **Nicho 35%** (afiliado fala com o público do produto?) · **histórico 25%** (já converteu nesse nicho?) · **alcance 20%** · **canal 20%** (o canal do afiliado bate com onde o produto vende?).
+
+**3 abas:**
+- **Afiliados** — diretório opt-in de afiliados disponíveis (\`GET /shopee/matchmaker/affiliates\`), rankeado pelo Match Score pro seu produto.
+- **Propostas** — você manda proposta pra um afiliado (\`POST /shopee/matchmaker/offers\`); ele aceita/recusa (\`/offers/:id/respond\`).
+- **Métricas** — o **north-star da Ponte**: GMV gerado via afiliados, matches ativos e taxa de aceitação (\`GET /shopee/matchmaker/metrics\`).
+
+**LGPD:** só aparecem no diretório afiliados que deram **consentimento explícito** (opt-in) — ver a página pública "Sou afiliado Shopee". Match aceito **vira contato/deal no CRM** (Active) automaticamente.
+
+**Como extrair valor:** filtre pelos Match Scores mais altos (nicho + histórico pesam 60%) — proposta pra quem tem fit real converte muito mais que disparo em massa.`,
+    tags: ['shopee', 'matchmaker', 'ponte', 'vendedor', 'afiliado', 'match score', 'nicho', 'alcance', 'proposta', 'crm', 'lgpd', 'north star', 'diferencial'],
+  },
+  {
+    routes:   ['/sou-afiliado-shopee'],
+    category: 'public',
+    title:    'Página pública — Sou afiliado Shopee (cadastro opt-in)',
+    content: `**Página pública sem login** (\`/sou-afiliado-shopee\`) onde um afiliado se cadastra pra entrar no diretório do Matchmaker. É como os vendedores acham afiliados novos.
+
+**O que o afiliado faz:**
+- Preenche nicho(s), canais e alcance estimado.
+- Marca o **checkbox de consentimento** (obrigatório, LGPD) → \`POST /shopee-affiliate/public/register\`.
+
+**Gate de consentimento (LGPD):** o afiliado só fica **ativo/visível no Matchmaker** se tiver **consentido** — há uma trava no banco (\`status='active'\` exige \`consent_at\`). Sem opt-in, não entra no diretório e não recebe proposta. Existe também **opt-out** (\`POST /shopee-affiliate/public/opt-out\`) que revoga o consentimento e tira o afiliado da vitrine. O IP do cadastro é guardado como prova de consentimento.
+
+**Como usar:** divulgue esse link nos seus canais pra captar afiliados; quem se cadastrar (e consentir) aparece pra você no **Matchmaker** rankeado por Match Score.`,
+    tags: ['shopee', 'afiliado', 'público', 'cadastro', 'opt-in', 'consentimento', 'lgpd', 'self-signup', 'matchmaker', 'opt-out'],
+  },
+]
+
 export const KB: KbEntry[] = [
+  ...SHOPEE_ENTRIES,
   ...FULFILLMENT_ENTRIES,
   ...TELEMETRY_ENTRIES,
   ...AI_VISIBILITY_ENTRIES,
