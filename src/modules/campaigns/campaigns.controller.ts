@@ -6,6 +6,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CampaignsService, Campaign, CampaignSegmentType } from './campaigns.service'
 import type { ImageFormat } from '../ai/types'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -17,7 +18,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  * `assets/:id/approve` é seguro mesmo declarado depois porque tem prefixo
  * estático `assets/`. */
 @Controller('campaigns')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CampaignsController {
   constructor(private readonly svc: CampaignsService) {}
 
@@ -28,6 +29,7 @@ export class CampaignsController {
   // ── F5-2: Step 1 wizard ─────────────────────────────────────────────────
 
   @Get('products/search')
+  @RequirePermission('social.view')
   async searchProducts(
     @ReqUser() user: ReqUserPayload,
     @Query('q') q: string,
@@ -39,6 +41,7 @@ export class CampaignsController {
   }
 
   @Post('import-from-url')
+  @RequirePermission('social.create_post')
   importFromUrl(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { url: string },
@@ -48,6 +51,7 @@ export class CampaignsController {
   }
 
   @Get('listing-images')
+  @RequirePermission('social.view')
   listingImages(
     @ReqUser() user: ReqUserPayload,
     @Query('listing_id') listingId: string,
@@ -57,6 +61,7 @@ export class CampaignsController {
   }
 
   @Post('generate-message-text')
+  @RequirePermission('social.create_post')
   generateMessageText(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {
@@ -71,6 +76,7 @@ export class CampaignsController {
   }
 
   @Post('generate-card')
+  @RequirePermission('social.create_post')
   generateCard(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {
@@ -89,6 +95,7 @@ export class CampaignsController {
   }
 
   @Post('refine-image')
+  @RequirePermission('social.create_post')
   refineImage(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { asset_id: string; refinement_prompt: string },
@@ -98,6 +105,7 @@ export class CampaignsController {
   }
 
   @Post('canva/open')
+  @RequirePermission('social.create_post')
   openInCanva(
     @ReqUser() user: ReqUserPayload,
     @Body() body: { asset_id: string },
@@ -108,6 +116,7 @@ export class CampaignsController {
 
   // assets/:id tem prefixo estático — safe vs `:id` puro
   @Post('assets/:id/approve')
+  @RequirePermission('social.create_post')
   approveAsset(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -120,6 +129,7 @@ export class CampaignsController {
   // ── F5-1: audience preview + AI text + cron tick ────────────────────────
 
   @Post('estimate-reach')
+  @RequirePermission('social.create_post')
   estimateReach(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {
@@ -133,6 +143,7 @@ export class CampaignsController {
   }
 
   @Post('generate-content')
+  @RequirePermission('social.create_post')
   generateContent(
     @ReqUser() user: ReqUserPayload,
     @Body() body: {
@@ -148,6 +159,7 @@ export class CampaignsController {
   }
 
   @Post('process-now')
+  @RequirePermission('social.create_post')
   processNow(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.runOnce()
@@ -158,24 +170,28 @@ export class CampaignsController {
   // ════════════════════════════════════════════════════════════════════════
 
   @Get()
+  @RequirePermission('social.view')
   list(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.list(user.orgId)
   }
 
   @Post()
+  @RequirePermission('social.create_post')
   create(@ReqUser() user: ReqUserPayload, @Body() body: Partial<Campaign>) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.create(user.orgId, user.id, body)
   }
 
   @Get(':id')
+  @RequirePermission('social.view')
   getOne(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getOne(user.orgId, id)
   }
 
   @Patch(':id')
+  @RequirePermission('social.create_post')
   update(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,
@@ -186,30 +202,35 @@ export class CampaignsController {
   }
 
   @Delete(':id')
+  @RequirePermission('social.create_post')
   remove(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.remove(user.orgId, id)
   }
 
   @Post(':id/launch')
+  @RequirePermission('social.create_post')
   launch(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.launch(user.orgId, id)
   }
 
   @Post(':id/pause')
+  @RequirePermission('social.create_post')
   pause(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.pause(user.orgId, id)
   }
 
   @Post(':id/resume')
+  @RequirePermission('social.create_post')
   resume(@ReqUser() user: ReqUserPayload, @Param('id') id: string) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.resume(user.orgId, id)
   }
 
   @Get(':id/targets')
+  @RequirePermission('social.view')
   listTargets(
     @ReqUser() user: ReqUserPayload,
     @Param('id') id: string,

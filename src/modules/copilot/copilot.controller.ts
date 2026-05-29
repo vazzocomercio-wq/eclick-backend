@@ -2,11 +2,12 @@ import { Controller, Post, Get, Body, Query, UseGuards, BadRequestException, Htt
 import { CopilotService } from './copilot.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('copilot')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CopilotController {
   constructor(private readonly svc: CopilotService) {}
 
@@ -14,6 +15,7 @@ export class CopilotController {
    *  a tela atual. Usado pela UI pra mostrar tópicos sugeridos antes do
    *  user perguntar. */
   @Get('route-context')
+  @RequirePermission('ai.view_usage')
   routeContext(@Query('pathname') pathname?: string) {
     if (!pathname) throw new BadRequestException('pathname obrigatório')
     return this.svc.getRouteContext(pathname)
@@ -22,6 +24,7 @@ export class CopilotController {
   /** POST /copilot/help — chat principal. */
   @Post('help')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ai.view_usage')
   help(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {
@@ -43,6 +46,7 @@ export class CopilotController {
 
   /** GET /copilot/kb — lista todas as entries por categoria. */
   @Get('kb')
+  @RequirePermission('ai.view_usage')
   listKb() {
     return this.svc.listKbByCategory()
   }
@@ -50,6 +54,7 @@ export class CopilotController {
   /** POST /copilot/feedback — thumbs up/down + comentário opcional. */
   @Post('feedback')
   @HttpCode(HttpStatus.OK)
+  @RequirePermission('ai.view_usage')
   feedback(
     @ReqUser() u: ReqUserPayload,
     @Body() body: {

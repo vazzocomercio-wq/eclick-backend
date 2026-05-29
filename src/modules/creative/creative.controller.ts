@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import {
   CreativeService,
   type CreateProductDto,
@@ -35,7 +36,7 @@ import type { Marketplace } from './creative.marketplace-rules'
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('creative')
-@UseGuards(SupabaseAuthGuard)
+@UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class CreativeController {
   private readonly logger = new Logger(CreativeController.name)
 
@@ -60,11 +61,13 @@ export class CreativeController {
   // ── Products ─────────────────────────────────────────────────────────────
 
   @Post('products')
+  @RequirePermission('products.update')
   createProduct(@ReqUser() u: ReqUserPayload, @Body() body: CreateProductDto) {
     return this.svc.createProduct(this.orgOrThrow(u), u.id, body)
   }
 
   @Get('products')
+  @RequirePermission('products.view')
   listProducts(
     @ReqUser() u: ReqUserPayload,
     @Query('status') status?: string,
@@ -87,32 +90,38 @@ export class CreativeController {
    *  pra pré-preencher o Step 1 (nome/categoria/marca/fotos).
    *  IMPORTANTE: declarado ANTES de products/:id pra não cair no catch-all. */
   @Get('products/catalog-prefill/:catalogId')
+  @RequirePermission('products.view')
   catalogPrefill(@ReqUser() u: ReqUserPayload, @Param('catalogId') catalogId: string) {
     return this.svc.getCatalogPrefill(this.orgOrThrow(u), catalogId)
   }
 
   @Get('products/:id')
+  @RequirePermission('products.view')
   getProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getProductWithSignedUrl(this.orgOrThrow(u), id)
   }
 
   @Patch('products/:id')
+  @RequirePermission('products.update')
   updateProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: UpdateProductDto) {
     return this.svc.updateProduct(this.orgOrThrow(u), id, body)
   }
 
   @Delete('products/:id')
+  @RequirePermission('products.update')
   archiveProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.archiveProduct(this.orgOrThrow(u), id)
   }
 
   @Post('products/:id/analyze')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   analyzeProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.analyzeProduct(this.orgOrThrow(u), id)
   }
 
   @Post('products/:id/to-catalog')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   creativeToCatalog(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.creativeToCatalog(this.orgOrThrow(u), id)
@@ -122,6 +131,7 @@ export class CreativeController {
    *  do catálogo como imagens aprovadas do anúncio (operador publica sem
    *  precisar gerar imagens com IA). Exige briefing_id no body. */
   @Post('products/:id/import-catalog-images')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   importCatalogImages(
     @ReqUser() u: ReqUserPayload,
@@ -135,16 +145,19 @@ export class CreativeController {
   // ── Briefings ────────────────────────────────────────────────────────────
 
   @Post('products/:id/briefings')
+  @RequirePermission('products.update')
   createBriefing(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: CreateBriefingDto) {
     return this.svc.createBriefing(this.orgOrThrow(u), id, body)
   }
 
   @Get('products/:id/briefings')
+  @RequirePermission('products.view')
   listBriefings(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.listBriefings(this.orgOrThrow(u), id)
   }
 
   @Patch('briefings/:id')
+  @RequirePermission('products.update')
   updateBriefing(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -157,6 +170,7 @@ export class CreativeController {
    *  Body opcional aceita { scope, override, imageCount, videoCount,
    *  videoDurationSec, videoAspectRatio }. */
   @Post('briefings/:id/generate-prompts')
+  @RequirePermission('products.update')
   generatePromptsBase(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -182,11 +196,13 @@ export class CreativeController {
   // ── Briefing templates (melhoria #2) ─────────────────────────────────────
 
   @Get('briefing-templates')
+  @RequirePermission('products.view')
   listBriefingTemplates(@ReqUser() u: ReqUserPayload) {
     return this.svc.listBriefingTemplates(this.orgOrThrow(u))
   }
 
   @Post('briefing-templates')
+  @RequirePermission('products.update')
   createBriefingTemplate(@ReqUser() u: ReqUserPayload, @Body() body: {
     name:                string
     description?:        string
@@ -205,6 +221,7 @@ export class CreativeController {
   }
 
   @Patch('briefing-templates/:id')
+  @RequirePermission('products.update')
   updateBriefingTemplate(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -214,11 +231,13 @@ export class CreativeController {
   }
 
   @Delete('briefing-templates/:id')
+  @RequirePermission('products.update')
   deleteBriefingTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.deleteBriefingTemplate(this.orgOrThrow(u), id)
   }
 
   @Get('products/:id/listings')
+  @RequirePermission('products.view')
   listProductListings(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.listListingsByProduct(this.orgOrThrow(u), id)
   }
@@ -226,6 +245,7 @@ export class CreativeController {
   // ── Listings ─────────────────────────────────────────────────────────────
 
   @Post('listings/generate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   generateListing(
     @ReqUser() u: ReqUserPayload,
@@ -237,16 +257,19 @@ export class CreativeController {
   }
 
   @Get('listings/:id')
+  @RequirePermission('products.view')
   getListing(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.getListing(this.orgOrThrow(u), id)
   }
 
   @Patch('listings/:id')
+  @RequirePermission('products.update')
   updateListing(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     return this.svc.updateListing(this.orgOrThrow(u), id, body)
   }
 
   @Post('listings/:id/regenerate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   regenerateListing(
     @ReqUser() u: ReqUserPayload,
@@ -257,6 +280,7 @@ export class CreativeController {
   }
 
   @Post('listings/:id/approve')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   approveListing(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.approveListing(this.orgOrThrow(u), id, u.id)
@@ -269,6 +293,7 @@ export class CreativeController {
    * `images` opcional: count de imagens aprovadas (vindo do contexto de publish).
    */
   @Get('listings/:id/seo-score')
+  @RequirePermission('products.view')
   scoreListingSeo(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -281,6 +306,7 @@ export class CreativeController {
 
   /** POST /listings/:id/refresh-ml-category — força re-predict da categoria ML. */
   @Post('listings/:id/refresh-ml-category')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   refreshMlCategory(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.svc.refreshMlCategory(this.orgOrThrow(u), id)
@@ -289,6 +315,7 @@ export class CreativeController {
   /** GET /ml/categories/:id/attributes-detail — retorna attributes formatados
    *  com flag `required` calculada (sub-sprint B vai usar pra ficha técnica). */
   @Get('ml/categories/:id/attributes-detail')
+  @RequirePermission('products.view')
   getMlCategoryAttributesDetail(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     this.orgOrThrow(u) // só checa que user tem org (endpoint não precisa do orgId)
     return this.svc.getMlCategoryAttributes(id)
@@ -296,12 +323,14 @@ export class CreativeController {
 
   /** GET /ml/listing-types — modalidades de anúncio MLB (Free/Gold Especial/Pro). */
   @Get('ml/listing-types')
+  @RequirePermission('products.view')
   listMlListingTypes(@ReqUser() u: ReqUserPayload) {
     this.orgOrThrow(u)
     return this.svc.listMlListingTypes()
   }
 
   @Post('listings/:id/variant')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   createVariant(
     @ReqUser() u: ReqUserPayload,
@@ -315,6 +344,7 @@ export class CreativeController {
   // ── Usage / cost ─────────────────────────────────────────────────────────
 
   @Get('usage')
+  @RequirePermission('ai.view_usage')
   getUsage(@ReqUser() u: ReqUserPayload, @Query('days') days?: string) {
     return this.svc.getUsage(this.orgOrThrow(u), {
       sinceDays: days ? Math.max(1, Math.min(365, Number(days))) : undefined,
@@ -324,6 +354,7 @@ export class CreativeController {
   // ── Image pipeline (E2) ──────────────────────────────────────────────────
 
   @Post('image-jobs')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   createImageJob(
     @ReqUser() u: ReqUserPayload,
@@ -333,50 +364,59 @@ export class CreativeController {
   }
 
   @Get('image-jobs/:id')
+  @RequirePermission('products.view')
   getImageJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.getJob(this.orgOrThrow(u), id)
   }
 
   @Get('image-jobs/:id/images')
+  @RequirePermission('products.view')
   listJobImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.listImagesByJob(this.orgOrThrow(u), id)
   }
 
   @Get('products/:id/image-jobs')
+  @RequirePermission('products.view')
   listProductImageJobs(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.listJobsByProduct(this.orgOrThrow(u), id)
   }
 
   @Get('products/:id/images')
+  @RequirePermission('products.view')
   listProductImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.listImagesByProduct(this.orgOrThrow(u), id)
   }
 
   @Post('image-jobs/:id/cancel')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   cancelImageJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.cancelJob(this.orgOrThrow(u), id)
   }
 
   @Post('image-jobs/:id/regenerate-rejected')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   regenerateRejectedImages(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.regenerateAllRejected(this.orgOrThrow(u), id)
   }
 
   @Post('images/:id/approve')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   approveImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.approveImage(this.orgOrThrow(u), id, u.id)
   }
 
   @Post('images/:id/reject')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   rejectImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.images.rejectImage(this.orgOrThrow(u), id, u.id)
   }
 
   @Post('images/:id/regenerate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   regenerateImage(
     @ReqUser() u: ReqUserPayload,
@@ -389,6 +429,7 @@ export class CreativeController {
   // ── Video pipeline (E3a) ─────────────────────────────────────────────────
 
   @Post('video-jobs')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   createVideoJob(
     @ReqUser() u: ReqUserPayload,
@@ -415,6 +456,7 @@ export class CreativeController {
    * Pipeline encadeia 2-3 parts Kling automaticamente.
    */
   @Post('video-jobs/from-image')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   createChainedVideoFromImage(
     @ReqUser() u: ReqUserPayload,
@@ -437,26 +479,31 @@ export class CreativeController {
 
   /** F6: lista de modelos de vídeo disponíveis (Kling + Flow se configurado). */
   @Get('video-jobs/models')
+  @RequirePermission('products.view')
   listVideoModels() {
     return this.videoRegistry.listAllModels()
   }
 
   @Get('video-jobs/:id')
+  @RequirePermission('products.view')
   getVideoJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.getJob(this.orgOrThrow(u), id)
   }
 
   @Get('video-jobs/:id/videos')
+  @RequirePermission('products.view')
   listJobVideos(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.listVideosByJob(this.orgOrThrow(u), id)
   }
 
   @Get('products/:id/video-jobs')
+  @RequirePermission('products.view')
   listProductVideoJobs(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.listJobsByProduct(this.orgOrThrow(u), id)
   }
 
   @Post('video-jobs/:id/cancel')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   cancelVideoJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.cancelJob(this.orgOrThrow(u), id)
@@ -467,6 +514,7 @@ export class CreativeController {
    * e reativa pra worker continuar. Body opcional define quanto subir.
    */
   @Post('video-jobs/:id/raise-cost-limit')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   raiseCostLimit(
     @ReqUser() u: ReqUserPayload,
@@ -482,30 +530,35 @@ export class CreativeController {
    * o master row. Útil quando cost-cap travou no meio.
    */
   @Post('video-jobs/:id/force-finalize')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   forceFinalizeJob(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.forceFinalize(this.orgOrThrow(u), id)
   }
 
   @Post('video-jobs/:id/regenerate-rejected')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   regenerateRejectedVideos(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.regenerateAllRejected(this.orgOrThrow(u), id)
   }
 
   @Post('videos/:id/approve')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   approveVideo(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.approveVideo(this.orgOrThrow(u), id, u.id)
   }
 
   @Post('videos/:id/reject')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   rejectVideo(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.videos.rejectVideo(this.orgOrThrow(u), id, u.id)
   }
 
   @Post('videos/:id/regenerate')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   regenerateVideo(
     @ReqUser() u: ReqUserPayload,
@@ -518,11 +571,13 @@ export class CreativeController {
   // ── ML publisher (E3c F1+F2 — preview/mapping, sem publicar) ──────────────
 
   @Get('listings/:id/ml-context')
+  @RequirePermission('products.view')
   getMlContext(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.getPublishContext(this.orgOrThrow(u), id)
   }
 
   @Get('ml/predict-category')
+  @RequirePermission('products.view')
   predictMlCategory(@ReqUser() u: ReqUserPayload, @Query('title') title: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!title)   throw new BadRequestException('title obrigatório')
@@ -530,6 +585,7 @@ export class CreativeController {
   }
 
   @Get('ml/categories/:id/attributes')
+  @RequirePermission('products.view')
   getMlCategoryAttributes(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.mlPub.getRequiredAttributes(id)
@@ -538,6 +594,7 @@ export class CreativeController {
   /** Atributos da categoria separados em obrigatórios + recomendados —
    *  usado pelo painel de atributos (editor de anúncio e publicação). */
   @Get('ml/categories/:id/attributes-split')
+  @RequirePermission('products.view')
   async getMlCategoryAttributesSplit(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const [required, recommended] = await Promise.all([
@@ -548,6 +605,7 @@ export class CreativeController {
   }
 
   @Post('listings/:id/ml-preview')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   buildMlPreview(
     @ReqUser() u: ReqUserPayload,
@@ -567,6 +625,7 @@ export class CreativeController {
   }
 
   @Post('listings/:id/ml-attributes/suggest')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   suggestMlAttributes(
     @ReqUser() u: ReqUserPayload,
@@ -577,6 +636,7 @@ export class CreativeController {
   }
 
   @Post('listings/:id/ml-publish')
+  @RequirePermission('products.publish_ml')
   @HttpCode(HttpStatus.OK)
   publishMl(
     @ReqUser() u: ReqUserPayload,
@@ -601,6 +661,7 @@ export class CreativeController {
   }
 
   @Post('listings/:id/shipping-cost')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   getListingShippingCost(
     @ReqUser() u: ReqUserPayload,
@@ -621,27 +682,32 @@ export class CreativeController {
   }
 
   @Get('listings/:id/publications')
+  @RequirePermission('products.view')
   listListingPublications(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.listPublicationsByListing(this.orgOrThrow(u), id)
   }
 
   @Get('publications/:id')
+  @RequirePermission('products.view')
   getPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.getPublication(this.orgOrThrow(u), id)
   }
 
   @Post('publications/:id/sync')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   syncPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.syncPublicationStatus(this.orgOrThrow(u), id)
   }
 
   @Get('publications/degraded')
+  @RequirePermission('products.view')
   listDegradedPublications(@ReqUser() u: ReqUserPayload) {
     return this.mlPub.listDegradedPublications(this.orgOrThrow(u))
   }
 
   @Post('publications/:id/acknowledge-degradation')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   acknowledgeDegradation(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.mlPub.acknowledgeDegradation(this.orgOrThrow(u), id, u.id)
@@ -657,12 +723,14 @@ export class CreativeController {
 
   /** GET /creative/prompt-templates/variables — lista de {vars} disponíveis (estático). */
   @Get('prompt-templates/variables')
+  @RequirePermission('products.view')
   listTemplateVariables() {
     return { variables: TEMPLATE_VARIABLES }
   }
 
   /** GET /creative/prompt-templates/match?product_id=X — escolhe melhor template pro produto. */
   @Get('prompt-templates/match')
+  @RequirePermission('products.view')
   matchTemplateForProduct(@ReqUser() u: ReqUserPayload, @Query('product_id') productId?: string) {
     if (!productId) throw new BadRequestException('product_id obrigatório')
     return this.resolution.matchTemplateForProduct(this.orgOrThrow(u), productId)
@@ -670,6 +738,7 @@ export class CreativeController {
 
   /** GET /creative/prompt-templates — lista templates da org. */
   @Get('prompt-templates')
+  @RequirePermission('products.view')
   listPromptTemplates(
     @ReqUser() u: ReqUserPayload,
     @Query('search') search?: string,
@@ -680,18 +749,21 @@ export class CreativeController {
 
   /** POST /creative/prompt-templates — cria template. */
   @Post('prompt-templates')
+  @RequirePermission('products.update')
   createPromptTemplate(@ReqUser() u: ReqUserPayload, @Body() body: CreatePromptTemplateDto) {
     return this.templates.create(this.orgOrThrow(u), u.id, body)
   }
 
   /** GET /creative/prompt-templates/:id — pega template por id. */
   @Get('prompt-templates/:id')
+  @RequirePermission('products.view')
   getPromptTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.templates.getById(this.orgOrThrow(u), id)
   }
 
   /** PATCH /creative/prompt-templates/:id — atualiza template. */
   @Patch('prompt-templates/:id')
+  @RequirePermission('products.update')
   updatePromptTemplate(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -702,12 +774,14 @@ export class CreativeController {
 
   /** DELETE /creative/prompt-templates/:id — apaga template (recusa se for default). */
   @Delete('prompt-templates/:id')
+  @RequirePermission('products.update')
   deletePromptTemplate(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.templates.remove(this.orgOrThrow(u), id)
   }
 
   /** POST /creative/prompt-templates/:id/set-default — promove a default da org. */
   @Post('prompt-templates/:id/set-default')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   setPromptTemplateDefault(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.templates.setDefault(this.orgOrThrow(u), id)
@@ -715,6 +789,7 @@ export class CreativeController {
 
   /** POST /creative/prompt-templates/:id/clone — duplica template (cópia não-default). */
   @Post('prompt-templates/:id/clone')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   clonePromptTemplate(
     @ReqUser() u: ReqUserPayload,
@@ -726,6 +801,7 @@ export class CreativeController {
 
   /** POST /creative/prompt-templates/:id/preview — renderiza prompts com vars + refs pra um produto. */
   @Post('prompt-templates/:id/preview')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   previewPromptTemplate(
     @ReqUser() u: ReqUserPayload,
@@ -742,6 +818,7 @@ export class CreativeController {
    * Usado pelo editor de template ("Testar slot") pra iterar visual rápido.
    */
   @Post('prompt-templates/:id/positions/:position/test')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   testPromptTemplatePosition(
     @ReqUser() u: ReqUserPayload,
@@ -765,6 +842,7 @@ export class CreativeController {
 
   /** POST /creative/references/upload-url — gera signed write URL pra upload. */
   @Post('references/upload-url')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   issueReferenceUploadUrl(@ReqUser() u: ReqUserPayload, @Body() body: UploadReferenceDto) {
     return this.references.issueUploadUrl(this.orgOrThrow(u), body)
@@ -772,6 +850,7 @@ export class CreativeController {
 
   /** GET /creative/references/curated — lista somente curated (compartilhados plataforma). */
   @Get('references/curated')
+  @RequirePermission('products.view')
   listCuratedReferences(@ReqUser() u: ReqUserPayload, @Query('limit') limit?: string) {
     return this.references.list(this.orgOrThrow(u), {
       only_curated: true,
@@ -785,6 +864,7 @@ export class CreativeController {
    * Útil pro editor de template ver o que iria entrar como ref dinâmica.
    */
   @Get('references/by-position')
+  @RequirePermission('products.view')
   listReferencesByPosition(
     @ReqUser() u: ReqUserPayload,
     @Query('position')        positionStr?: string,
@@ -809,6 +889,7 @@ export class CreativeController {
 
   /** GET /creative/references — lista refs da org (+ curated se include_curated=1). */
   @Get('references')
+  @RequirePermission('products.view')
   listReferences(
     @ReqUser() u: ReqUserPayload,
     @Query('search')           search?: string,
@@ -834,18 +915,21 @@ export class CreativeController {
 
   /** POST /creative/references — cria row metadata (após upload completar). */
   @Post('references')
+  @RequirePermission('products.update')
   createReference(@ReqUser() u: ReqUserPayload, @Body() body: CreateReferenceDto) {
     return this.references.create(this.orgOrThrow(u), u.id, body)
   }
 
   /** GET /creative/references/:id — pega ref com signed read URL. */
   @Get('references/:id')
+  @RequirePermission('products.view')
   getReference(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.references.getById(this.orgOrThrow(u), id, { allowCurated: true })
   }
 
   /** PATCH /creative/references/:id — atualiza metadata (não curated). */
   @Patch('references/:id')
+  @RequirePermission('products.update')
   updateReference(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -856,12 +940,14 @@ export class CreativeController {
 
   /** DELETE /creative/references/:id — hard delete + remove do Storage. */
   @Delete('references/:id')
+  @RequirePermission('products.update')
   deleteReference(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.references.remove(this.orgOrThrow(u), id)
   }
 
   /** POST /creative/references/:id/toggle-active — alterna is_active. */
   @Post('references/:id/toggle-active')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   toggleReferenceActive(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.references.toggleActive(this.orgOrThrow(u), id)
@@ -876,6 +962,7 @@ export class CreativeController {
 
   /** GET /creative/taxonomy?kind=ambient|product_type[&include_hidden=1] */
   @Get('taxonomy')
+  @RequirePermission('products.view')
   listTaxonomy(
     @ReqUser() u: ReqUserPayload,
     @Query('kind') kind: string,
@@ -891,6 +978,7 @@ export class CreativeController {
 
   /** POST /creative/taxonomy/:id/hide — oculta da org (soft-delete reversível). */
   @Post('taxonomy/:id/hide')
+  @RequirePermission('products.update')
   @HttpCode(HttpStatus.OK)
   hideTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.taxonomy.hideForOrg(this.orgOrThrow(u), u.id, id)
@@ -898,18 +986,21 @@ export class CreativeController {
 
   /** DELETE /creative/taxonomy/:id/hide — desfaz hide (mostra de novo). */
   @Delete('taxonomy/:id/hide')
+  @RequirePermission('products.update')
   unhideTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.taxonomy.unhideForOrg(this.orgOrThrow(u), id)
   }
 
   /** POST /creative/taxonomy — cria custom da org. */
   @Post('taxonomy')
+  @RequirePermission('products.update')
   createTaxonomy(@ReqUser() u: ReqUserPayload, @Body() body: CreateTaxonomyDto) {
     return this.taxonomy.create(this.orgOrThrow(u), u.id, body)
   }
 
   /** PATCH /creative/taxonomy/:id — atualiza. Se default, faz clone-on-modify. */
   @Patch('taxonomy/:id')
+  @RequirePermission('products.update')
   updateTaxonomy(
     @ReqUser() u: ReqUserPayload,
     @Param('id') id: string,
@@ -920,6 +1011,7 @@ export class CreativeController {
 
   /** DELETE /creative/taxonomy/:id — apaga custom da org (não-default). */
   @Delete('taxonomy/:id')
+  @RequirePermission('products.update')
   deleteTaxonomy(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.taxonomy.remove(this.orgOrThrow(u), id)
   }
