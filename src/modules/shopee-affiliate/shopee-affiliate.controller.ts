@@ -1,17 +1,46 @@
 import {
-  Controller, Get, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Body, Query, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { ShopeeAffiliateService } from './shopee-affiliate.service'
+import { LinkStudioService } from './link-studio.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 F2.1+F2.3 — Discovery do lado Afiliado. READ-ONLY Sprint 1. */
+/** F18 F2.1+F2.3 — Discovery do lado Afiliado. F2.4 — Link Studio. */
 @Controller('shopee-affiliate')
 @UseGuards(SupabaseAuthGuard)
 export class ShopeeAffiliateController {
-  constructor(private readonly svc: ShopeeAffiliateService) {}
+  constructor(
+    private readonly svc:        ShopeeAffiliateService,
+    private readonly linkStudio: LinkStudioService,
+  ) {}
+
+  // ── F2.4 Link Studio ──────────────────────────────────────────────────
+
+  /** POST /shopee-affiliate/links — gera link rastreável { item_id, channel }. */
+  @Post('links')
+  generateLink(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { item_id: number; channel: string },
+  ) {
+    if (!user.orgId)         throw new BadRequestException('orgId ausente')
+    if (body?.item_id == null) throw new BadRequestException('item_id obrigatório')
+    if (!body?.channel)      throw new BadRequestException('channel obrigatório')
+    return this.linkStudio.generate({ orgId: user.orgId, itemId: Number(body.item_id), channel: body.channel })
+  }
+
+  /** GET /shopee-affiliate/links?item_id=N — lista links gerados. */
+  @Get('links')
+  listLinks(
+    @ReqUser() user: ReqUserPayload,
+    @Query('item_id') itemIdRaw?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const itemId = itemIdRaw ? Number(itemIdRaw) : undefined
+    return this.linkStudio.list(user.orgId, itemId)
+  }
 
   /** GET /shopee-affiliate/status — conexão Affiliate API configurada? */
   @Get('status')
