@@ -140,10 +140,9 @@ BEGIN
     (NULL, 'DEMO Casa & Luz', ARRAY['iluminacao','eletrica'], ARRAY['whatsapp','blog'], 12000, 0.044,
       '{"iluminacao":0.051}'::jsonb, 'active', now()),
     (NULL, 'DEMO Tech Reviews BR', ARRAY['eletronicos','gadgets'], ARRAY['tiktok','shopee_live'], 210000, 0.038,
-      '{"eletronicos":0.041}'::jsonb, 'active', now())
-  RETURNING id INTO v_aff1;
+      '{"eletronicos":0.041}'::jsonb, 'active', now());
 
-  -- Pega os ids dos 3 demo
+  -- Pega os ids dos demo (re-fetch após insert multi-row)
   SELECT id INTO v_aff1 FROM shopee.affiliate_profiles WHERE display_name = 'DEMO Ju Decora';
   SELECT id INTO v_aff2 FROM shopee.affiliate_profiles WHERE display_name = 'DEMO Casa & Luz';
 
