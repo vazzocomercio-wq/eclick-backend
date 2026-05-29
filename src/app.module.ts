@@ -76,6 +76,7 @@ import { StorefrontVariantsModule } from './modules/storefront-variants/storefro
 import { ProductTelemetryModule } from './modules/product-telemetry/product-telemetry.module'
 import { BannerGeneratorModule } from './modules/banner-generator/banner-generator.module'
 import { StoreBlogModule } from './modules/store-blog/store-blog.module'
+import { BlogNewsletterModule } from './modules/blog-newsletter/blog-newsletter.module'
 import { FulfillmentModule } from './modules/fulfillment/fulfillment.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { MlAiCoreModule } from './modules/ml-ai-core/ml-ai-core.module'
@@ -177,6 +178,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     ProductTelemetryModule,
     BannerGeneratorModule,
     StoreBlogModule,
+    BlogNewsletterModule,
     FulfillmentModule,
     PaymentsModule,
     MlAiCoreModule,
