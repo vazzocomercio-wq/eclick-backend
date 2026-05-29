@@ -30,6 +30,7 @@ import { EnrichmentModule } from './modules/enrichment/enrichment.module'
 import { UserPreferencesModule } from './modules/user-preferences/user-preferences.module'
 import { AdminModule } from './modules/admin/admin.module'
 import { MarketplaceModule } from './modules/marketplace/marketplace.module'
+import { ShopeeAffiliateModule } from './modules/shopee-affiliate/shopee-affiliate.module'
 import { MessagingModule } from './modules/messaging/messaging.module'
 import { EmailSettingsModule } from './modules/email-settings/email-settings.module'
 import { CustomerHubModule } from './modules/customer-hub/customer-hub.module'
@@ -130,6 +131,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     UserPreferencesModule,
     AdminModule,
     MarketplaceModule,
+    ShopeeAffiliateModule,
     MessagingModule,
     EmailSettingsModule,
     CustomerHubModule,
