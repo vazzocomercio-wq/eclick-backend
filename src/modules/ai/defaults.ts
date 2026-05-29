@@ -345,6 +345,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  // F18 F2.6 — Content Studio Afiliado Shopee. Gera roteiro/legenda
+  // persuasivo por canal (WhatsApp/IG/TikTok/Shopee Video/Live/Blog) com
+  // CTA + link rastreável injetado. Sonnet pra qualidade de copy de venda.
+  shopee_affiliate_content: {
+    label:       'Conteúdo de Afiliado Shopee',
+    description: 'Gera roteiro/legenda de venda por canal com CTA e link rastreável injetado, otimizado pro pico BR 19h-22h',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

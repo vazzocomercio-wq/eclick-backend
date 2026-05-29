@@ -6,10 +6,11 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import { ShopeeAffiliateService } from './shopee-affiliate.service'
 import { LinkStudioService } from './link-studio.service'
 import { AttributionService } from './attribution.service'
+import { ContentStudioService } from './content-studio.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 F2.1+F2.3 — Discovery. F2.4 — Link Studio. F2.5 — Attribution. */
+/** F18 Fase 2 — Discovery / Link Studio / Attribution / Content Studio. */
 @Controller('shopee-affiliate')
 @UseGuards(SupabaseAuthGuard)
 export class ShopeeAffiliateController {
@@ -17,7 +18,22 @@ export class ShopeeAffiliateController {
     private readonly svc:         ShopeeAffiliateService,
     private readonly linkStudio:  LinkStudioService,
     private readonly attribution: AttributionService,
+    private readonly content:     ContentStudioService,
   ) {}
+
+  // ── F2.6 Content Studio ───────────────────────────────────────────────
+
+  /** POST /shopee-affiliate/content — gera copy IA + link { item_id, channel, tone? }. */
+  @Post('content')
+  generateContent(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { item_id: number; channel: string; tone?: string },
+  ) {
+    if (!user.orgId)           throw new BadRequestException('orgId ausente')
+    if (body?.item_id == null) throw new BadRequestException('item_id obrigatório')
+    if (!body?.channel)        throw new BadRequestException('channel obrigatório')
+    return this.content.generate({ orgId: user.orgId, itemId: Number(body.item_id), channel: body.channel, tone: body.tone })
+  }
 
   // ── F2.5 Attribution ──────────────────────────────────────────────────
 
