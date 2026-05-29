@@ -5,17 +5,39 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { ShopeeAffiliateService } from './shopee-affiliate.service'
 import { LinkStudioService } from './link-studio.service'
+import { AttributionService } from './attribution.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 F2.1+F2.3 — Discovery do lado Afiliado. F2.4 — Link Studio. */
+/** F18 F2.1+F2.3 — Discovery. F2.4 — Link Studio. F2.5 — Attribution. */
 @Controller('shopee-affiliate')
 @UseGuards(SupabaseAuthGuard)
 export class ShopeeAffiliateController {
   constructor(
-    private readonly svc:        ShopeeAffiliateService,
-    private readonly linkStudio: LinkStudioService,
+    private readonly svc:         ShopeeAffiliateService,
+    private readonly linkStudio:  LinkStudioService,
+    private readonly attribution: AttributionService,
   ) {}
+
+  // ── F2.5 Attribution ──────────────────────────────────────────────────
+
+  /** GET /shopee-affiliate/conversions/summary — totais + por canal. */
+  @Get('conversions/summary')
+  conversionsSummary(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.attribution.summary(user.orgId)
+  }
+
+  /** GET /shopee-affiliate/conversions?state=pending&channel=whatsapp */
+  @Get('conversions')
+  conversions(
+    @ReqUser() user: ReqUserPayload,
+    @Query('state')   state?:   string,
+    @Query('channel') channel?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.attribution.list(user.orgId, state, channel)
+  }
 
   // ── F2.4 Link Studio ──────────────────────────────────────────────────
 
