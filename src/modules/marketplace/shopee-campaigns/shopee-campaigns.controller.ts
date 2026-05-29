@@ -1,19 +1,37 @@
 import {
-  Controller, Get, Param, Query, UseGuards, BadRequestException, NotFoundException,
+  Controller, Get, Post, Body, Param, Query, UseGuards, BadRequestException, NotFoundException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeCampaignsService } from './shopee-campaigns.service'
+import { CampaignMarginService, MarginEvalInput } from './campaign-margin.service'
 import { CampaignKind, CampaignStatus } from './shopee-campaigns.types'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 F1.4 — Campaign Center endpoints READ-ONLY na Sprint 1. */
+/** F18 F1.4 — Campaign Center (READ). F3.1 — gate de margem. */
 @Controller('shopee/campaigns')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeCampaignsController {
-  constructor(private readonly svc: ShopeeCampaignsService) {}
+  constructor(
+    private readonly svc:    ShopeeCampaignsService,
+    private readonly margin: CampaignMarginService,
+  ) {}
+
+  /** POST /shopee/campaigns/evaluate-margin — F3.1 gate de margem.
+   *  Declarado ANTES de @Get(':id') não conflita (método POST), mas mantido
+   *  no topo por clareza. */
+  @Post('evaluate-margin')
+  @RequirePermission('ads.view')
+  evaluateMargin(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: MarginEvalInput,
+  ) {
+    if (!user.orgId)         throw new BadRequestException('orgId ausente')
+    if (body?.price == null) throw new BadRequestException('price obrigatório')
+    return this.margin.evaluate(user.orgId, body)
+  }
 
   /** GET /shopee/campaigns?kind=voucher&status=active&limit=50&offset=0 */
   @Get()

@@ -16,6 +16,7 @@ import { ShopeeQualityController } from './shopee-quality/shopee-quality.control
 import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
 import { ShopeeCampaignsController } from './shopee-campaigns/shopee-campaigns.controller'
 import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.service'
+import { CampaignMarginService } from './shopee-campaigns/campaign-margin.service'
 import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
 import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
 import { ShopeeCreativeController } from './shopee-creative/shopee-creative.controller'
@@ -40,6 +41,7 @@ import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creativ
     ShopeeListingsService,           // F1.2 — query da view v_latest_algo_score
     ShopeeQualityService,            // F1.3 — Quality Center (snapshot + alerts)
     ShopeeCampaignsService,          // F1.4 — Campaign Center (READ-ONLY Sprint 1)
+    CampaignMarginService,           // F3.1 — gate de margem pós-comissão
     ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
     ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
   ],
