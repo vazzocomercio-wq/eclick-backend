@@ -16,6 +16,8 @@ import { ShopeeQualityController } from './shopee-quality/shopee-quality.control
 import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
 import { ShopeeCampaignsController } from './shopee-campaigns/shopee-campaigns.controller'
 import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.service'
+import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
+import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
@@ -24,6 +26,7 @@ import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.serv
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores
     ShopeeQualityController,   // F1.3 — GET /shopee/shop-metrics/{latest,history}
     ShopeeCampaignsController, // F1.4 — GET /shopee/campaigns + /shopee/campaigns/:id
+    ShopeeRadarController,     // F1.5 — GET /shopee/radar/signals + /shopee/radar/by-type
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -34,6 +37,7 @@ import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.serv
     ShopeeListingsService,     // F1.2 — query da view v_latest_algo_score
     ShopeeQualityService,      // F1.3 — Quality Center (snapshot + alerts)
     ShopeeCampaignsService,    // F1.4 — Campaign Center (READ-ONLY Sprint 1)
+    ShopeeRadarService,        // F1.5 — Radar de mercado Shopee
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
