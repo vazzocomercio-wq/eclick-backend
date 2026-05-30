@@ -10,6 +10,7 @@ import { AffiliateAttributionService } from '../affiliates/affiliate-attribution
 import { CartRecoveryService } from '../cart-recovery/cart-recovery.service'
 import { FulfillmentService } from '../fulfillment/fulfillment.service'
 import { CouponsService } from '../coupons/coupons.service'
+import { MetaCapiService } from '../meta-capi/meta-capi.service'
 import type {
   CheckoutCustomer, CheckoutItem, Gateway, StorefrontOrder,
 } from './types'
@@ -47,6 +48,7 @@ export class PaymentsService {
     private readonly cartRecovery:  CartRecoveryService,
     private readonly fulfillment:   FulfillmentService,
     private readonly coupons:       CouponsService,
+    private readonly capi:          MetaCapiService,
   ) {}
 
   /** Hook de cashback — chamado dos dois webhooks quando o pedido vira
@@ -653,6 +655,7 @@ export class PaymentsService {
     await this.bumpKitStatsOnPaid(orderId)
     await this.incrementCouponOnPaid(orderId)
     void this.fulfillment.autoIngestStorefrontOrder(orderId)
+    void this.capi.sendPurchaseForOrder(orderId) // Meta CAPI (best-effort, no-op se não configurado)
   }
 
   /** Contabiliza o uso do cupom (used_count) quando o pedido vira pago.

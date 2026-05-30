@@ -12,9 +12,10 @@ import { AffiliatesModule } from '../affiliates/affiliates.module'
 import { CartRecoveryModule } from '../cart-recovery/cart-recovery.module'
 import { FulfillmentModule } from '../fulfillment/fulfillment.module'
 import { CouponsModule } from '../coupons/coupons.module'
+import { MetaCapiModule } from '../meta-capi/meta-capi.module'
 
 @Module({
-  imports:     [CredentialsModule, CashbackModule, BonusModule, LoyaltyModule, StorefrontNotificationsModule, AffiliatesModule, CartRecoveryModule, FulfillmentModule, CouponsModule],
+  imports:     [CredentialsModule, CashbackModule, BonusModule, LoyaltyModule, StorefrontNotificationsModule, AffiliatesModule, CartRecoveryModule, FulfillmentModule, CouponsModule, MetaCapiModule],
   providers:   [PaymentsService, MercadoPagoService, StripeService],
   controllers: [PaymentsController, StorefrontOrdersAdminController],
   exports:     [PaymentsService],
