@@ -21,6 +21,9 @@ import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
 import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
 import { ShopeeCreativeController } from './shopee-creative/shopee-creative.controller'
 import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creative.service'
+import { ShopeeSyncController } from './shopee-sync/shopee-sync.controller'
+import { ShopeeProductSyncService } from './shopee-sync/shopee-product-sync.service'
+import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 
 @Module({
   imports:     [MercadolivreModule], // pra MlBillingFetcherService
@@ -31,6 +34,7 @@ import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creativ
     ShopeeCampaignsController, // F1.4 — GET /shopee/campaigns + /shopee/campaigns/:id
     ShopeeRadarController,     // F1.5 — GET /shopee/radar/signals + /shopee/radar/by-type
     ShopeeCreativeController,  // F1.7 — POST /shopee/creative/evaluate (guard)
+    ShopeeSyncController,       // F0.7 — POST /shopee/sync/products (sync real)
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -44,6 +48,8 @@ import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creativ
     CampaignMarginService,           // F3.1 — gate de margem pós-comissão
     ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
     ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
+    ShopeeProductSyncService,        // F0.7 — sync de produtos reais → algo score
+    ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,

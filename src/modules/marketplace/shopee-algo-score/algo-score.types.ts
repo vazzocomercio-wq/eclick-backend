@@ -57,6 +57,11 @@ export interface AlgoScoreInput {
   item_id:        number
   product_id?:    string | null              // FK opcional pra hub public.products
 
+  // Display-only — NÃO entram no cálculo do score; persistem no input_snapshot
+  // pra o Listing Center exibir título/foto/SKU reais (toCard lê do snapshot).
+  main_image_url?: string | null
+  item_sku?:       string | null
+
   // Pillar 1 — Relevância
   title?:                string | null
   description?:          string | null

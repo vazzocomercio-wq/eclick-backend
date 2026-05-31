@@ -4,7 +4,7 @@ import * as crypto from 'crypto'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
-  WebhookValidationInput,
+  WebhookValidationInput, RawListing,
 } from './base'
 import { ShopThrottleService } from '../throttle/shop-throttle.service'
 import { retryWithBackoff } from '../throttle/retry-with-backoff'
@@ -251,6 +251,104 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       access_token:  data.access_token,
       refresh_token: data.refresh_token,
       expires_at:    new Date(Date.now() + ttlSec * 1000).toISOString(),
+    }
+  }
+
+  /** F0.7 — Lista anúncios da loja. `get_item_list` (offset/page_size 100,
+   *  item_status=NORMAL) devolve só item_ids → `get_item_base_info` (batch 50)
+   *  hidrata nome/preço/estoque/imagens. Cursor = offset (string); nextCursor =
+   *  next_offset enquanto has_next_page. `image.image_url_list` já são URLs
+   *  exibíveis (capa = [0]). `price_info` é ARRAY (item simples = [0]); estoque
+   *  = `stock_info_v2.summary_info.total_available_stock`. */
+  async listProducts(
+    conn:    MpConnection,
+    cursor?: string | null,
+  ): Promise<{ items: RawListing[]; nextCursor: string | null }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const offset = cursor ? Math.max(0, Number(cursor) || 0) : 0
+
+    // 1) get_item_list — só item_ids + status
+    const listPath = '/api/v2/product/get_item_list'
+    const ts1   = Math.floor(Date.now() / 1000)
+    const sign1 = this.signShop(listPath, ts1, accessToken, shopId)
+    const qs1 = new URLSearchParams({
+      partner_id:   partnerId,
+      timestamp:    String(ts1),
+      access_token: accessToken,
+      shop_id:      String(shopId),
+      sign:         sign1,
+      offset:       String(offset),
+      page_size:    '100',
+      item_status:  'NORMAL',
+    })
+    const { data: listData } = await this.callShopee({
+      key:  `shop:${shopId}`,
+      tag:  'shopee.listProducts.list',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${listPath}?${qs1.toString()}`),
+    })
+    if (listData?.error) throw new Error(`Shopee ${listData.error}: ${listData.message}`)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows: any[] = listData?.response?.item ?? []
+    const itemIds = rows
+      .map(r => r?.item_id)
+      .filter((id): id is number => typeof id === 'number')
+    const hasNext    = !!listData?.response?.has_next_page
+    const nextOffset = listData?.response?.next_offset
+
+    // 2) get_item_base_info — batch 50 → detalhe
+    const items: RawListing[] = []
+    const BATCH = 50
+    for (let i = 0; i < itemIds.length; i += BATCH) {
+      const chunk = itemIds.slice(i, i + BATCH)
+      const infoPath = '/api/v2/product/get_item_base_info'
+      const ts2   = Math.floor(Date.now() / 1000)
+      const sign2 = this.signShop(infoPath, ts2, accessToken, shopId)
+      const qs2 = new URLSearchParams({
+        partner_id:   partnerId,
+        timestamp:    String(ts2),
+        access_token: accessToken,
+        shop_id:      String(shopId),
+        sign:         sign2,
+        item_id_list: chunk.join(','),
+      })
+      const { data: infoData } = await this.callShopee({
+        key:  `shop:${shopId}`,
+        tag:  'shopee.listProducts.info',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${infoPath}?${qs2.toString()}`),
+      })
+      if (infoData?.error) throw new Error(`Shopee ${infoData.error}: ${infoData.message}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const list: any[] = infoData?.response?.item_list ?? []
+      for (const it of list) items.push(this.mapItem(it))
+    }
+
+    return {
+      items,
+      nextCursor: hasNext && nextOffset != null ? String(nextOffset) : null,
+    }
+  }
+
+  /** Mapeia 1 item do get_item_base_info → RawListing. Guarda o item cru em
+   *  `raw` (sync extrai description/image_url_list/create_time/item_sku dali). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private mapItem(it: any): RawListing {
+    const priceArr = Array.isArray(it?.price_info) ? it.price_info : []
+    const price = priceArr.length && priceArr[0]?.current_price != null
+      ? Number(priceArr[0].current_price)
+      : null
+    const stockRaw = it?.stock_info_v2?.summary_info?.total_available_stock
+    return {
+      external_product_id:   String(it?.item_id),
+      external_variation_id: null,
+      title:                 it?.item_name ?? null,
+      price:                 Number.isFinite(price as number) ? price : null,
+      stock:                 stockRaw != null ? Number(stockRaw) : null,
+      status:                it?.item_status ?? null,
+      raw:                   it,
     }
   }
 
