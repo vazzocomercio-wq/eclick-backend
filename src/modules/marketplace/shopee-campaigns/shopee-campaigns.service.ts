@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
 import { CampaignCard, CampaignMetrics, CampaignKind } from './shopee-campaigns.types'
+import { SyncedCampaignRow } from '../adapters/shopee.adapter'
 
 /** F18 F1.4 — Campaign Center service.
  *
@@ -61,6 +62,50 @@ export class ShopeeCampaignsService {
     if (error) throw new Error(error.message)
     if (!data) return null
     return this.toCard(data as unknown as Row)
+  }
+
+  /** F1.4 sync — substitui as campanhas SINCRONIZADAS (external_id NOT NULL) da
+   *  loja pelas atuais. Delete+insert preserva linhas demo/manual (external_id
+   *  null) e evita precisar de constraint única (sem migration). revenue/cost/
+   *  orders = 0 (voucher/flash_sale não têm spend/GMV — só o módulo Ads). */
+  async replaceSyncedCampaigns(orgId: string, shopId: number, rows: SyncedCampaignRow[]): Promise<number> {
+    const del = await supabaseAdmin
+      .schema('shopee')
+      .from('campaigns')
+      .delete()
+      .eq('organization_id', orgId)
+      .eq('shop_id', shopId)
+      .not('external_id', 'is', null)
+    if (del.error) {
+      this.logger.error(`[shopee.campaigns] delete sincronizadas: ${del.error.message}`)
+      throw new Error(del.error.message)
+    }
+    if (!rows.length) return 0
+
+    const payload = rows.map(r => ({
+      organization_id: orgId,
+      shop_id:         shopId,
+      kind:            r.kind,
+      status:          r.status,
+      title:           r.title,
+      config:          r.config,
+      starts_at:       r.starts_at,
+      ends_at:         r.ends_at,
+      revenue_cents:   0,
+      cost_cents:      0,
+      orders:          0,
+      external_id:     r.external_id,
+      raw:             r.raw ?? null,
+    }))
+    const ins = await supabaseAdmin
+      .schema('shopee')
+      .from('campaigns')
+      .insert(payload)
+    if (ins.error) {
+      this.logger.error(`[shopee.campaigns] insert sincronizadas: ${ins.error.message}`)
+      throw new Error(ins.error.message)
+    }
+    return rows.length
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────

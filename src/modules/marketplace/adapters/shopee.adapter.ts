@@ -33,6 +33,25 @@ export interface ShopMetricsApiResult {
   errors:          string[]
 }
 
+/** F1.4 sync — 1 campanha (voucher/flash_sale) normalizada pra shopee.campaigns.
+ *  voucher/flash_sale NÃO têm spend/GMV (só o módulo Ads) → revenue/cost/orders=0
+ *  no caller. status derivado: voucher por tempo, flash_sale pelo campo `type`. */
+export interface SyncedCampaignRow {
+  kind:        'voucher' | 'flash_sale'
+  status:      'ongoing' | 'upcoming' | 'expired'
+  title:       string
+  config:      Record<string, unknown>
+  starts_at:   string        // ISO
+  ends_at:     string | null
+  external_id: string
+  raw:         unknown
+}
+
+export interface CampaignsApiResult {
+  campaigns: SyncedCampaignRow[]
+  errors:    string[]
+}
+
 /** Shopee Open Platform v2 adapter (BR). HMAC-SHA256 hex lowercase em
  * todos os requests. Shop-level sign: partner_id+api_path+timestamp+
  * access_token+shop_id. Auth-level sign (refresh): só partner_id+api_path+
@@ -460,6 +479,132 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
 
     return { metrics, raw_performance: rawPerformance, raw_penalty: rawPenalty, errors }
+  }
+
+  /** F1.4 — Campanhas reais da loja: vouchers (get_voucher_list ongoing+upcoming
+   *  → get_voucher por id, pois o list é magro) + flash sales (get_shop_flash_sale_list
+   *  type 1/2; o list já traz tudo). Datas Unix s. status do voucher = derivado do
+   *  tempo; do flash_sale = campo `type` (1 upcoming/2 ongoing/3 expired). Sem
+   *  spend/GMV (só módulo Ads). Resiliente: error_permission num tipo → errors[]
+   *  sem derrubar o outro. */
+  async getCampaigns(conn: MpConnection): Promise<CampaignsApiResult> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const errors: string[] = []
+    const campaigns: SyncedCampaignRow[] = []
+    const nowSec = Math.floor(Date.now() / 1000)
+
+    const qs = (path: string, extra: Record<string, string>): string => {
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(path, ts, accessToken, shopId)
+      return new URLSearchParams({
+        partner_id: partnerId, timestamp: String(ts),
+        access_token: accessToken, shop_id: String(shopId), sign, ...extra,
+      }).toString()
+    }
+    const toIso = (sec: unknown): string | null => {
+      const n = Number(sec)
+      return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString() : null
+    }
+    const nowIso = new Date().toISOString()
+
+    // ── VOUCHERS (ongoing + upcoming) ──────────────────────────────────────
+    try {
+      const ids = new Set<number>()
+      for (const status of ['ongoing', 'upcoming']) {
+        let page = 1
+        for (;;) {
+          const path = '/api/v2/voucher/get_voucher_list'
+          const { data } = await this.callShopee({
+            key: `shop:${shopId}`, tag: 'shopee.voucherList',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs(path, { status, page_no: String(page), page_size: '100' })}`),
+          })
+          if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          for (const v of (data?.response?.voucher_list ?? []) as any[]) {
+            if (v?.voucher_id != null) ids.add(Number(v.voucher_id))
+          }
+          if (!data?.response?.more || page >= 50) break
+          page++
+        }
+      }
+      for (const vid of ids) {
+        const path = '/api/v2/voucher/get_voucher'
+        const { data } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.voucherGet',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs(path, { voucher_id: String(vid) })}`),
+        })
+        if (data?.error) { errors.push(`voucher ${vid}: ${data.error}`); continue }
+        const v = data?.response
+        if (!v) continue
+        const start = Number(v.start_time)
+        const end   = Number(v.end_time)
+        const status: SyncedCampaignRow['status'] =
+          start && nowSec < start ? 'upcoming' : end && nowSec > end ? 'expired' : 'ongoing'
+        campaigns.push({
+          kind: 'voucher', status,
+          title: v.voucher_name ?? `Voucher ${vid}`,
+          config: {
+            voucher_code: v.voucher_code ?? null, voucher_type: v.voucher_type ?? null,
+            reward_type: v.reward_type ?? null, discount_amount: v.discount_amount ?? null,
+            percentage: v.percentage ?? null, max_price: v.max_price ?? null,
+            min_basket_price: v.min_basket_price ?? null,
+            usage_quantity: v.usage_quantity ?? null, current_usage: v.current_usage ?? null,
+          },
+          starts_at: toIso(start) ?? nowIso, ends_at: toIso(end),
+          external_id: String(vid), raw: v,
+        })
+      }
+    } catch (e: unknown) {
+      errors.push(`vouchers: ${(e as Error)?.message}`)
+    }
+
+    // ── FLASH SALES (upcoming + ongoing) ────────────────────────────────────
+    try {
+      for (const type of [1, 2]) { // 1=upcoming, 2=ongoing
+        let offset = 0
+        for (;;) {
+          const path = '/api/v2/shop_flash_sale/get_shop_flash_sale_list'
+          const { data } = await this.callShopee({
+            key: `shop:${shopId}`, tag: 'shopee.flashList',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs(path, { type: String(type), offset: String(offset), limit: '100' })}`),
+          })
+          if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const list = (data?.response?.flash_sale_list ?? []) as any[]
+          const total = Number(data?.response?.total_count ?? 0)
+          for (const f of list) {
+            if (Number(f?.status) === 0) continue // deleted
+            const start = Number(f.start_time)
+            const end   = Number(f.end_time)
+            const t = Number(f.type)
+            const status: SyncedCampaignRow['status'] =
+              t === 1 ? 'upcoming' : t === 3 ? 'expired' : 'ongoing'
+            campaigns.push({
+              kind: 'flash_sale', status,
+              title: `Flash Sale ${toIso(start)?.slice(0, 10) ?? f.flash_sale_id}`,
+              config: {
+                timeslot_id: f.timeslot_id ?? null, item_count: f.item_count ?? null,
+                enabled_item_count: f.enabled_item_count ?? null,
+                click_count: f.click_count ?? null, remindme_count: f.remindme_count ?? null,
+                fs_status: f.status ?? null, fs_type: f.type ?? null,
+              },
+              starts_at: toIso(start) ?? nowIso, ends_at: toIso(end),
+              external_id: String(f.flash_sale_id), raw: f,
+            })
+          }
+          offset += list.length
+          if (list.length === 0 || offset >= total || offset > 5000) break
+        }
+      }
+    } catch (e: unknown) {
+      errors.push(`flash_sales: ${(e as Error)?.message}`)
+    }
+
+    return { campaigns, errors }
   }
 
   /** F0.3/F0.5 — webhook Push. Shopee envia header `Authorization` com

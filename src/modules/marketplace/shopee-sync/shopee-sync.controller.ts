@@ -5,6 +5,7 @@ import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ShopeeShopMetricsSyncService } from './shopee-metrics-sync.service'
+import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -19,8 +20,9 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeSyncController {
   constructor(
-    private readonly products: ShopeeProductSyncService,
-    private readonly metrics:  ShopeeShopMetricsSyncService,
+    private readonly products:  ShopeeProductSyncService,
+    private readonly metrics:   ShopeeShopMetricsSyncService,
+    private readonly campaigns: ShopeeCampaignsSyncService,
   ) {}
 
   @Post('products')
@@ -37,5 +39,13 @@ export class ShopeeSyncController {
   async syncShopMetrics(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.metrics.syncShopMetrics(user.orgId)
+  }
+
+  @Post('campaigns')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async syncCampaigns(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.campaigns.syncCampaigns(user.orgId)
   }
 }
