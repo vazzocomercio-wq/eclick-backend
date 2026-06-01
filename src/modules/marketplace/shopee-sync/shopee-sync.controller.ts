@@ -6,6 +6,7 @@ import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ShopeeShopMetricsSyncService } from './shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
+import { ShopeeOrdersIngestionService } from './shopee-orders-ingestion.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -23,6 +24,7 @@ export class ShopeeSyncController {
     private readonly products:  ShopeeProductSyncService,
     private readonly metrics:   ShopeeShopMetricsSyncService,
     private readonly campaigns: ShopeeCampaignsSyncService,
+    private readonly orders:    ShopeeOrdersIngestionService,
   ) {}
 
   @Post('products')
@@ -47,5 +49,14 @@ export class ShopeeSyncController {
   async syncCampaigns(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.campaigns.syncCampaigns(user.orgId)
+  }
+
+  /** F1.6 — Ingestão de pedidos Shopee na CENTRAL (source='shopee'). */
+  @Post('orders')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async syncOrders(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.orders.syncOrders(user.orgId)
   }
 }

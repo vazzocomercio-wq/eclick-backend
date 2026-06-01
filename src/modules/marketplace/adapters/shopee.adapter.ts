@@ -208,7 +208,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
         shop_id:                  String(shopId),
         sign,
         order_sn_list:            chunk.join(','),
-        response_optional_fields: 'buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,total_amount,pay_time',
+        response_optional_fields: 'item_list,total_amount,actual_shipping_fee,estimated_shipping_fee,payment_method,buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,pay_time',
       })
       const { data } = await this.callShopee({
         key:  `shop:${shopId}`,
@@ -220,6 +220,13 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       out.push(...(data?.response?.order_list ?? []))
     }
     return out
+  }
+
+  /** F1.6 — Detalhes crus de N pedidos (batch 50) com item_list + financeiro,
+   *  pro ShopeeOrdersIngestionService mapear pra `orders`. Público. */
+  async fetchOrderDetails(conn: MpConnection, sns: string[]): Promise<unknown[]> {
+    if (!sns.length) return []
+    return this.fetchDetailBatch(conn, sns)
   }
 
   /** CPF top-level (raro). Address inline em recipient_address. Phone é

@@ -25,10 +25,12 @@ import { ShopeeSyncController } from './shopee-sync/shopee-sync.controller'
 import { ShopeeProductSyncService } from './shopee-sync/shopee-product-sync.service'
 import { ShopeeShopMetricsSyncService } from './shopee-sync/shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-sync/shopee-campaigns-sync.service'
+import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
+import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
 @Module({
-  imports:     [MercadolivreModule], // pra MlBillingFetcherService
+  imports:     [MercadolivreModule, ChannelSettingsModule], // ML billing + comissão canal (F1.6 orders)
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores
@@ -53,6 +55,7 @@ import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.wor
     ShopeeProductSyncService,        // F0.7 — sync de produtos reais → algo score
     ShopeeShopMetricsSyncService,    // F1.3 — sync de métricas da loja (account_health)
     ShopeeCampaignsSyncService,      // F1.4 — sync de campanhas (voucher + flash_sale)
+    ShopeeOrdersIngestionService,    // F1.6 — ingestão de pedidos Shopee na CENTRAL
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
