@@ -11,8 +11,9 @@ import { ShopeeProductSyncService } from './shopee-product-sync.service'
  *  **físico + virtual_quantity** (NÃO o disponível). Ou seja, NÃO descontamos
  *  segurança nem reservado — a plataforma mostra real + virtual. A fonte é
  *  `product_stock` (platform=null): quantity (físico) + virtual_quantity.
- *  Pausa (estoque 0) só quando físico+virtual = 0. Sem registro de estoque →
- *  pula (não zera o anúncio).
+ *  PAUSA (paridade c/ ML): se `auto_pause_enabled` e (físico+virtual) ≤
+ *  `min_stock_to_pause`, empurra 0 (esgotado). Sem registro de estoque → pula
+ *  (não zera o anúncio).
  *
  *  Dois modos:
  *   - pushStockForProduct(): AUTO, chamado pelo StockService.recalcAndPropagate
@@ -34,31 +35,43 @@ export class ShopeeStockSyncService {
 
   /** Estoque VIRTUAL a refletir na Shopee = físico + virtual_quantity (ledger
    *  product_stock platform=null). Null se não há registro de estoque (→ pula,
-   *  não zera o anúncio). NÃO desconta segurança/reservado (regra Vazzo). */
-  private async virtualStockFor(productId: string): Promise<number | null> {
-    const { data } = await supabaseAdmin
-      .from('product_stock')
-      .select('quantity, virtual_quantity')
-      .eq('product_id', productId)
-      .is('platform', null)
-      .maybeSingle<{ quantity: number | null; virtual_quantity: number | null }>()
-    if (!data) return null
-    return Math.max(0, Math.round(Number(data.quantity || 0) + Number(data.virtual_quantity || 0)))
+   *  não zera o anúncio). NÃO desconta segurança/reservado (regra Vazzo).
+   *
+   *  PAUSA (paridade c/ ML): se `auto_pause_enabled` e (físico+virtual) ≤
+   *  `min_stock_to_pause`, o anúncio é pausado (empurra 0 = esgotado). Ex
+   *  (tooltip da tela): físico 5, virtual 1.000, mínimo 1.000 → pausa quando o
+   *  físico zera (total cai de 1.005 p/ 1.000 ≤ 1.000). */
+  private rowToStock(r: { quantity: number | null; virtual_quantity: number | null; min_stock_to_pause: number | null; auto_pause_enabled: boolean | null }): { qty: number; pause: boolean } {
+    const qty = Math.max(0, Math.round(Number(r.quantity || 0) + Number(r.virtual_quantity || 0)))
+    const min = Math.max(0, Math.round(Number(r.min_stock_to_pause || 0)))
+    const pause = !!r.auto_pause_enabled && qty <= min
+    return { qty, pause }
   }
 
-  /** Versão em lote do virtualStockFor (mapa product_id → físico+virtual). */
-  private async virtualStockForMany(productIds: string[]): Promise<Map<string, number>> {
-    const out = new Map<string, number>()
+  private async virtualStockFor(productId: string): Promise<{ qty: number; pause: boolean } | null> {
+    const { data } = await supabaseAdmin
+      .from('product_stock')
+      .select('quantity, virtual_quantity, min_stock_to_pause, auto_pause_enabled')
+      .eq('product_id', productId)
+      .is('platform', null)
+      .maybeSingle<{ quantity: number | null; virtual_quantity: number | null; min_stock_to_pause: number | null; auto_pause_enabled: boolean | null }>()
+    if (!data) return null
+    return this.rowToStock(data)
+  }
+
+  /** Versão em lote (mapa product_id → {qty físico+virtual, pause}). */
+  private async virtualStockForMany(productIds: string[]): Promise<Map<string, { qty: number; pause: boolean }>> {
+    const out = new Map<string, { qty: number; pause: boolean }>()
     for (let i = 0; i < productIds.length; i += 200) {
       const chunk = productIds.slice(i, i + 200)
       const { data } = await supabaseAdmin
         .from('product_stock')
-        .select('product_id, quantity, virtual_quantity')
+        .select('product_id, quantity, virtual_quantity, min_stock_to_pause, auto_pause_enabled')
         .in('product_id', chunk)
         .is('platform', null)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const r of (data ?? []) as any[]) {
-        out.set(r.product_id, Math.max(0, Math.round(Number(r.quantity || 0) + Number(r.virtual_quantity || 0))))
+        out.set(r.product_id, this.rowToStock(r))
       }
     }
     return out
@@ -156,7 +169,8 @@ export class ShopeeStockSyncService {
 
   /** AUTO — chamado pelo StockService.recalcAndPropagate em toda venda/ajuste.
    *  GATEADO (SHOPEE_STOCK_SYNC). Empurra o estoque VIRTUAL (físico+virtual);
-   *  pausa (0) quando físico+virtual=0. Sem registro de estoque → pula. */
+   *  pausa (0) quando físico+virtual ≤ mínimo p/ pausar (se auto-pausa ligada),
+   *  ou quando físico+virtual=0. Sem registro de estoque → pula. */
   async pushStockForProduct(
     productId: string,
   ): Promise<{ pushed: number; failed?: number; skipped?: string }> {
@@ -180,8 +194,9 @@ export class ShopeeStockSyncService {
     const v = await this.virtualStockFor(productId)
     if (v == null) return { pushed: 0, skipped: 'no_stock_record' }
 
-    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, v, 'recalc_auto')
-    this.logger.log(`[shopee.stock] AUTO product=${productId} virtual_stock=${v} pushed=${pushed} failed=${failed}`)
+    const effQty = v.pause ? 0 : v.qty
+    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, effQty, 'recalc_auto')
+    this.logger.log(`[shopee.stock] AUTO product=${productId} virtual_stock=${v.qty} pause=${v.pause} sent=${effQty} pushed=${pushed} failed=${failed}`)
     return { pushed, failed }
   }
 
@@ -220,10 +235,11 @@ export class ShopeeStockSyncService {
 
     let totalListings = 0, pushed = 0, failed = 0, skippedNoStock = 0
     for (const [pid, listings] of byProduct) {
-      const qty = stockById.get(pid)
-      if (qty == null) { skippedNoStock += listings.length; continue } // sem registro → não zera
+      const v = stockById.get(pid)
+      if (v == null) { skippedNoStock += listings.length; continue } // sem registro → não zera
       totalListings += listings.length
-      const r = await this.pushToListings(conn, adapter, pid, listings, qty, 'manual_bulk')
+      const effQty = v.pause ? 0 : v.qty // respeita mínimo p/ pausar (auto-pausa)
+      const r = await this.pushToListings(conn, adapter, pid, listings, effQty, 'manual_bulk')
       pushed += r.pushed
       failed += r.failed
     }
