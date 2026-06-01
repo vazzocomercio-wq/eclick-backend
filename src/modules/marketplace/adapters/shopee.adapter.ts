@@ -665,6 +665,99 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  /** F18 Fase E — Detalhe editável de 1 item (read). get_item_base_info com
+   *  description/attribute (response_optional_fields). Devolve título,
+   *  descrição + `description_type` (CRÍTICO: 'normal' = texto editável via
+   *  update_item.description; 'extended'/rich = NÃO editável por esse campo),
+   *  category_id e attribute_list cru. Loga p/ auditoria. */
+  async getItemForEdit(conn: MpConnection, itemId: number): Promise<{
+    item_id:          number
+    item_name:        string | null
+    description:      string | null
+    description_type: string | null
+    category_id:      number | null
+    attribute_list:   unknown
+    raw:              unknown
+  }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/product/get_item_base_info'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_id_list: String(itemId),
+      need_tax_info: 'false', need_complaint_policy: 'false',
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.getItemForEdit',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const it = (data?.response?.item_list ?? [])[0] as any
+    const descType = it?.description_type ?? null
+    this.logger.log(`[shopee.getItemForEdit] item=${itemId} name="${it?.item_name}" desc_type=${descType} cat=${it?.category_id} attrs=${Array.isArray(it?.attribute_list) ? it.attribute_list.length : 0}`)
+    return {
+      item_id:          itemId,
+      item_name:        it?.item_name ?? null,
+      description:      typeof it?.description === 'string' ? it.description : null,
+      description_type: descType,
+      category_id:      it?.category_id != null ? Number(it.category_id) : null,
+      attribute_list:   it?.attribute_list ?? null,
+      raw:              it ?? null,
+    }
+  }
+
+  /** F18 Fase E — Edição completa do item (título/descrição/atributos).
+   *  `POST /api/v2/product/update_item`. Só envia os campos fornecidos (partial
+   *  update). ⚠️ description SÓ funciona em item description_type='normal'
+   *  (texto puro) — em 'extended' (rich) a Shopee rejeita; o caller checa via
+   *  getItemForEdit antes. attribute_list é pass-through (shape da Shopee:
+   *  [{ attribute_id, attribute_value_list:[{value_id, original_value_name}] }]).
+   *  Loga o raw. ⚠️ ESCREVE conteúdo REAL na loja. */
+  async updateItem(
+    conn: MpConnection,
+    args: {
+      externalProductId: string
+      itemName?:         string | null
+      description?:      string | null
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      attributeList?:    any[] | null
+    },
+  ): Promise<UpdateResult> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const itemId = Number(args.externalProductId)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body: Record<string, any> = { item_id: itemId }
+    if (args.itemName != null && args.itemName.trim() !== '') body.item_name = args.itemName.trim()
+    if (args.description != null) body.description = args.description
+    if (Array.isArray(args.attributeList) && args.attributeList.length) body.attribute_list = args.attributeList
+    if (Object.keys(body).length <= 1) throw new Error('updateItem: nada para atualizar')
+
+    const apiPath = '/api/v2/product/update_item'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.updateItem',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[shopee.updateItem] item=${itemId} fields=${Object.keys(body).filter(k => k !== 'item_id').join(',')} → ${JSON.stringify(data)?.slice(0, 400)}`)
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+
+    return { ok: true, external_product_id: String(itemId), raw: data }
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.

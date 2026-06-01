@@ -118,4 +118,40 @@ export class ShopeeListingLinkController {
     }
     return this.stock.pushPriceForItem(user.orgId, id, Number(body.price), body.variation_id ?? null)
   }
+
+  /** F18 Fase E — Detalhe editável do item (título/descrição/atributos). */
+  @Get(':itemId/detail')
+  @RequirePermission('products.view')
+  async itemDetail(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    return this.stock.getItemForEdit(user.orgId, id)
+  }
+
+  /** F18 Fase E — Edição completa do item (título/descrição/atributos). ⚠️ loja real. */
+  @Post(':itemId/item')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async setItem(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    @Body() body: { item_name?: string; description?: string; attribute_list?: any[] },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    if (body?.item_name == null && body?.description == null && !body?.attribute_list) {
+      throw new BadRequestException('nada para atualizar')
+    }
+    return this.stock.updateItemContent(user.orgId, id, {
+      itemName:      body.item_name ?? null,
+      description:   body.description ?? null,
+      attributeList: body.attribute_list ?? null,
+    })
+  }
 }

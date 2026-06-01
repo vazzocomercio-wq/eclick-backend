@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
 import { MarketplaceService } from '../marketplace.service'
 import { MpConnection } from '../adapters/base'
@@ -337,5 +337,67 @@ export class ShopeeStockSyncService {
     const resolved = await this.resolveConn(orgId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
     return resolved.adapter.inspectItemStock(resolved.conn, itemId)
+  }
+
+  /** F18 Fase E — Detalhe editável de 1 item (título/descrição/atributos). */
+  async getItemForEdit(orgId: string, itemId: number) {
+    const resolved = await this.resolveConn(orgId)
+    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    return resolved.adapter.getItemForEdit(resolved.conn, itemId)
+  }
+
+  /** F18 Fase E — Edição completa do item (título/descrição/atributos). ⚠️ escreve
+   *  conteúdo REAL. Bloqueia edição de descrição em item 'extended' (rich) com
+   *  mensagem acionável. Loga em stock_sync_logs (channel='shopee_item'). */
+  async updateItemContent(orgId: string, itemId: number, fields: {
+    itemName?: string | null
+    description?: string | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    attributeList?: any[] | null
+  }): Promise<{ ok: boolean }> {
+    const resolved = await this.resolveConn(orgId)
+    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const { conn, adapter } = resolved
+
+    // checa description_type quando vier descrição (rich → rejeita cedo, claro)
+    if (fields.description != null) {
+      const detail = await adapter.getItemForEdit(conn, itemId)
+      if (detail.description_type && detail.description_type !== 'normal') {
+        throw new BadRequestException(
+          'Este anúncio usa descrição rica (com imagens/blocos) na Shopee — a descrição em texto não pode ser editada por aqui. Edite título/atributos normalmente; a descrição rica precisa ser editada no Seller Center.',
+        )
+      }
+    }
+
+    const startTime = Date.now()
+    let status = 'success'
+    let errorMsg: string | null = null
+    let httpStatus = 200
+    try {
+      await adapter.updateItem(conn, {
+        externalProductId: String(itemId),
+        itemName:          fields.itemName ?? null,
+        description:       fields.description ?? null,
+        attributeList:     fields.attributeList ?? null,
+      })
+    } catch (e: unknown) {
+      status = 'error'
+      errorMsg = (e as Error)?.message ?? 'erro desconhecido'
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      httpStatus = (e as any)?.response?.status ?? 500
+    }
+    await supabaseAdmin.from('stock_sync_logs').insert({
+      product_id:    itemId.toString(),
+      channel:       'shopee_item',
+      listing_id:    String(itemId),
+      sent_quantity: 0,
+      status,
+      error_message: errorMsg,
+      http_status:   httpStatus,
+      triggered_by:  'manual_item_edit',
+      duration_ms:   Date.now() - startTime,
+    })
+    if (status === 'error') throw new BadRequestException(errorMsg ?? 'Falha ao atualizar o anúncio')
+    return { ok: true }
   }
 }
