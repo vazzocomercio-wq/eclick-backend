@@ -132,6 +132,20 @@ export class ShopeeListingLinkController {
     return this.stock.getItemForEdit(user.orgId, id)
   }
 
+  /** F18 Fase C — Propaga o estoque (real+virtual, respeitando mínimo-pausa) de
+   *  1 PRODUTO pros seus anúncios Shopee. Manual (ungated). ⚠️ loja real. */
+  @Post('product/:productId/push-stock')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async pushProductStock(
+    @ReqUser() user: ReqUserPayload,
+    @Param('productId') productId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    if (!productId) throw new BadRequestException('productId ausente')
+    return this.stock.pushStockForProduct(productId, { bypassGate: true })
+  }
+
   /** F18 Fase E — Edição completa do item (título/descrição/atributos). ⚠️ loja real. */
   @Post(':itemId/item')
   @HttpCode(HttpStatus.OK)

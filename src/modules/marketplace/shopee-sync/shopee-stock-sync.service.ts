@@ -173,8 +173,11 @@ export class ShopeeStockSyncService {
    *  ou quando físico+virtual=0. Sem registro de estoque → pula. */
   async pushStockForProduct(
     productId: string,
-  ): Promise<{ pushed: number; failed?: number; skipped?: string }> {
-    if (!this.isStockSyncEnabled()) return { pushed: 0, skipped: 'gate_off' }
+    opts?: { bypassGate?: boolean },
+  ): Promise<{ pushed: number; failed?: number; skipped?: string; virtual_stock?: number; paused?: boolean }> {
+    // bypassGate = ação manual explícita do user (botão/teste por produto); o
+    // gate só protege o push AUTOMÁTICO do recalcAndPropagate.
+    if (!opts?.bypassGate && !this.isStockSyncEnabled()) return { pushed: 0, skipped: 'gate_off' }
 
     const { data: prod } = await supabaseAdmin
       .from('products')
@@ -195,9 +198,10 @@ export class ShopeeStockSyncService {
     if (v == null) return { pushed: 0, skipped: 'no_stock_record' }
 
     const effQty = v.pause ? 0 : v.qty
-    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, effQty, 'recalc_auto')
-    this.logger.log(`[shopee.stock] AUTO product=${productId} virtual_stock=${v.qty} pause=${v.pause} sent=${effQty} pushed=${pushed} failed=${failed}`)
-    return { pushed, failed }
+    const trig = opts?.bypassGate ? 'manual_product' : 'recalc_auto'
+    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, effQty, trig)
+    this.logger.log(`[shopee.stock] ${trig} product=${productId} virtual_stock=${v.qty} pause=${v.pause} sent=${effQty} pushed=${pushed} failed=${failed}`)
+    return { pushed, failed, virtual_stock: v.qty, paused: v.pause }
   }
 
   /** MANUAL — propaga o estoque VIRTUAL (físico+virtual) de TODOS os produtos
