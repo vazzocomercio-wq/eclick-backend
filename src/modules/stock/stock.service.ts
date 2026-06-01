@@ -644,16 +644,12 @@ export class StockService {
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return
 
-      // F18 Fase C — empurra pros anúncios Shopee vinculados. Se existe
-      // distribuição 'shopee' (com majoração virtual/markup + pausa por min),
-      // usa o qty/pausa dela; senão, empurra o disponível cru (paridade c/ ML).
-      // Gateado dentro de pushStockForProduct (SHOPEE_STOCK_SYNC); OFF = noop.
-      // Fora do loop do ML, não-fatal: nunca quebra o sync do ML.
-      const shopeeCq = channelQtys.find(c => c.channel === 'shopee')
-      const shopeeQty   = shopeeCq ? shopeeCq.qty : Math.max(0, Math.round(calc.available))
-      const shopeePause = shopeeCq ? shopeeCq.should_pause : calc.available <= 0
+      // F18 Fase C — empurra pros anúncios Shopee vinculados o ESTOQUE VIRTUAL
+      // (físico+virtual, regra Vazzo — pushStockForProduct calcula sozinho do
+      // ledger). Gateado dentro (SHOPEE_STOCK_SYNC); OFF = noop. Fora do loop do
+      // ML, não-fatal: nunca quebra o sync do ML.
       void this.shopeeStock
-        .pushStockForProduct(productId, shopeeQty, shopeePause)
+        .pushStockForProduct(productId)
         .catch((e) =>
           this.logger.warn(`[stock.shopee] product=${productId}: ${e instanceof Error ? e.message : String(e)}`),
         )

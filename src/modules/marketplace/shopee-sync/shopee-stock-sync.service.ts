@@ -7,19 +7,17 @@ import { ShopeeProductSyncService } from './shopee-product-sync.service'
 
 /** F18 Fase C — Propagação de ESTOQUE do ledger unificado → anúncio Shopee.
  *
- *  O Estoque Unificado (`product_stock` platform=null) é a fonte da verdade:
- *  disponível = físico + virtual − reservado − segurança (StockService.
- *  calculateAvailable), espelhado em `products.stock`. Aqui empurramos esse
- *  MESMO disponível pros anúncios Shopee vinculados (product_listings
- *  platform='shopee'), igual o ML/TikTok fazem — respeitando a regra de
- *  estoque virtual (o virtual já está embutido no disponível; a majoração por
- *  canal `virtual_markup` chega via qtyOverride do recalcAndPropagate quando
- *  existe distribuição 'shopee').
+ *  REGRA DE ESTOQUE (decisão Vazzo): a Shopee reflete o ESTOQUE VIRTUAL =
+ *  **físico + virtual_quantity** (NÃO o disponível). Ou seja, NÃO descontamos
+ *  segurança nem reservado — a plataforma mostra real + virtual. A fonte é
+ *  `product_stock` (platform=null): quantity (físico) + virtual_quantity.
+ *  Pausa (estoque 0) só quando físico+virtual = 0. Sem registro de estoque →
+ *  pula (não zera o anúncio).
  *
  *  Dois modos:
  *   - pushStockForProduct(): AUTO, chamado pelo StockService.recalcAndPropagate
  *     em toda venda/reserva/ajuste. GATEADO por SHOPEE_STOCK_SYNC=on (OFF por
- *     padrão — não toca a loja real até o user optar). Igual TikTok.
+ *     padrão — não toca a loja real até o user optar).
  *   - pushStockForOrg()/pushStockForItem(): MANUAL (ação explícita do user na
  *     tela), IGNORA o gate. Pra propagação em lote e edição inline (Fase D).
  *
@@ -33,6 +31,38 @@ export class ShopeeStockSyncService {
     private readonly mp:          MarketplaceService,
     private readonly productSync: ShopeeProductSyncService,
   ) {}
+
+  /** Estoque VIRTUAL a refletir na Shopee = físico + virtual_quantity (ledger
+   *  product_stock platform=null). Null se não há registro de estoque (→ pula,
+   *  não zera o anúncio). NÃO desconta segurança/reservado (regra Vazzo). */
+  private async virtualStockFor(productId: string): Promise<number | null> {
+    const { data } = await supabaseAdmin
+      .from('product_stock')
+      .select('quantity, virtual_quantity')
+      .eq('product_id', productId)
+      .is('platform', null)
+      .maybeSingle<{ quantity: number | null; virtual_quantity: number | null }>()
+    if (!data) return null
+    return Math.max(0, Math.round(Number(data.quantity || 0) + Number(data.virtual_quantity || 0)))
+  }
+
+  /** Versão em lote do virtualStockFor (mapa product_id → físico+virtual). */
+  private async virtualStockForMany(productIds: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>()
+    for (let i = 0; i < productIds.length; i += 200) {
+      const chunk = productIds.slice(i, i + 200)
+      const { data } = await supabaseAdmin
+        .from('product_stock')
+        .select('product_id, quantity, virtual_quantity')
+        .in('product_id', chunk)
+        .is('platform', null)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const r of (data ?? []) as any[]) {
+        out.set(r.product_id, Math.max(0, Math.round(Number(r.quantity || 0) + Number(r.virtual_quantity || 0))))
+      }
+    }
+    return out
+  }
 
   /** Gate do push AUTOMÁTICO (firehose do recalcAndPropagate). Default OFF.
    *  Não afeta os pushes MANUAIS (lote/item), que são ação explícita do user. */
@@ -124,21 +154,19 @@ export class ShopeeStockSyncService {
     return { pushed, failed }
   }
 
-  /** AUTO — chamado pelo StockService.recalcAndPropagate. GATEADO.
-   *  qtyOverride = disponível já calculado (ou qty da distribuição c/ markup);
-   *  shouldPause força estoque 0 (out-of-stock = pausa de fato na Shopee). */
+  /** AUTO — chamado pelo StockService.recalcAndPropagate em toda venda/ajuste.
+   *  GATEADO (SHOPEE_STOCK_SYNC). Empurra o estoque VIRTUAL (físico+virtual);
+   *  pausa (0) quando físico+virtual=0. Sem registro de estoque → pula. */
   async pushStockForProduct(
-    productId:   string,
-    qtyOverride?: number,
-    shouldPause = false,
+    productId: string,
   ): Promise<{ pushed: number; failed?: number; skipped?: string }> {
     if (!this.isStockSyncEnabled()) return { pushed: 0, skipped: 'gate_off' }
 
     const { data: prod } = await supabaseAdmin
       .from('products')
-      .select('organization_id, stock')
+      .select('organization_id')
       .eq('id', productId)
-      .maybeSingle<{ organization_id: string | null; stock: number | null }>()
+      .maybeSingle<{ organization_id: string | null }>()
     const orgId = prod?.organization_id ?? null
     if (!orgId) return { pushed: 0, skipped: 'no_org' }
 
@@ -149,17 +177,19 @@ export class ShopeeStockSyncService {
     const listings = await this.listingsForProduct(productId, conn.shop_id!)
     if (!listings.length) return { pushed: 0, skipped: 'no_shopee_links' }
 
-    const qtyBase = Math.max(0, Math.round(qtyOverride ?? prod?.stock ?? 0))
-    const qty = shouldPause ? 0 : qtyBase
-    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, qty, 'recalc_auto')
-    this.logger.log(`[shopee.stock] AUTO product=${productId} qty=${qty} pause=${shouldPause} pushed=${pushed} failed=${failed}`)
+    const v = await this.virtualStockFor(productId)
+    if (v == null) return { pushed: 0, skipped: 'no_stock_record' }
+
+    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, v, 'recalc_auto')
+    this.logger.log(`[shopee.stock] AUTO product=${productId} virtual_stock=${v} pushed=${pushed} failed=${failed}`)
     return { pushed, failed }
   }
 
-  /** MANUAL — propaga o disponível (products.stock) de TODOS os produtos com
-   *  anúncio Shopee vinculado da org. Ignora o gate (ação explícita do user). */
+  /** MANUAL — propaga o estoque VIRTUAL (físico+virtual) de TODOS os produtos
+   *  com anúncio Shopee vinculado da org. Ignora o gate (ação explícita do
+   *  user). Produto sem registro de estoque é PULADO (não zera o anúncio). */
   async pushStockForOrg(orgId: string): Promise<{
-    shop_id: number; products: number; listings: number; pushed: number; failed: number
+    shop_id: number; products: number; listings: number; pushed: number; failed: number; skipped_no_stock: number
   }> {
     const resolved = await this.resolveConn(orgId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
@@ -183,31 +213,22 @@ export class ShopeeStockSyncService {
       if (!byProduct.has(pid)) byProduct.set(pid, [])
       byProduct.get(pid)!.push({ listing_id: String(pl.listing_id), variation_id: pl.variation_id ?? null })
     }
-    if (!byProduct.size) return { shop_id: shopId, products: 0, listings: 0, pushed: 0, failed: 0 }
+    if (!byProduct.size) return { shop_id: shopId, products: 0, listings: 0, pushed: 0, failed: 0, skipped_no_stock: 0 }
 
-    // disponível por produto = products.stock (espelho do calculateAvailable)
-    const pidList = [...byProduct.keys()]
-    const stockById = new Map<string, number>()
-    for (let i = 0; i < pidList.length; i += 200) {
-      const chunk = pidList.slice(i, i + 200)
-      const { data: prods } = await supabaseAdmin
-        .from('products')
-        .select('id, stock')
-        .in('id', chunk)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const p of (prods ?? []) as any[]) stockById.set(p.id, Math.max(0, Math.round(Number(p.stock) || 0)))
-    }
+    // estoque virtual (físico+virtual) por produto, em lote
+    const stockById = await this.virtualStockForMany([...byProduct.keys()])
 
-    let totalListings = 0, pushed = 0, failed = 0
+    let totalListings = 0, pushed = 0, failed = 0, skippedNoStock = 0
     for (const [pid, listings] of byProduct) {
+      const qty = stockById.get(pid)
+      if (qty == null) { skippedNoStock += listings.length; continue } // sem registro → não zera
       totalListings += listings.length
-      const qty = stockById.get(pid) ?? 0
       const r = await this.pushToListings(conn, adapter, pid, listings, qty, 'manual_bulk')
       pushed += r.pushed
       failed += r.failed
     }
-    this.logger.log(`[shopee.stock] MANUAL org=${orgId} products=${byProduct.size} listings=${totalListings} pushed=${pushed} failed=${failed}`)
-    return { shop_id: shopId, products: byProduct.size, listings: totalListings, pushed, failed }
+    this.logger.log(`[shopee.stock] MANUAL org=${orgId} products=${byProduct.size} listings=${totalListings} pushed=${pushed} failed=${failed} skipped_no_stock=${skippedNoStock}`)
+    return { shop_id: shopId, products: byProduct.size, listings: totalListings, pushed, failed, skipped_no_stock: skippedNoStock }
   }
 
   /** MANUAL — escreve estoque de 1 anúncio. Ignora o gate (edição inline Fase D
