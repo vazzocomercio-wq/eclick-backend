@@ -11,9 +11,10 @@ import { CanvaOauthModule } from '../canva-oauth/canva-oauth.module'
 import { CreativeModule } from '../creative/creative.module'
 import { AiModule } from '../ai/ai.module'
 import { EnrichmentModule } from '../enrichment/enrichment.module'
+import { MlAdsModule } from '../ml-ads/ml-ads.module'
 
 @Module({
-  imports:     [IntelligenceHubModule, MercadolivreModule, CanvaOauthModule, CreativeModule, AiModule, EnrichmentModule],
+  imports:     [IntelligenceHubModule, MercadolivreModule, CanvaOauthModule, CreativeModule, AiModule, EnrichmentModule, MlAdsModule],
   controllers: [InternalController, InternalEnrichmentController],
   providers:   [InternalKeyGuard, SocialVideoBridgeService, InternalProductsSignalsService, DidAvatarService],
 })

@@ -8,5 +8,6 @@ import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
   imports: [MercadolivreModule, ActiveBridgeModule],
   controllers: [MlAdsController],
   providers: [MlAdsService],
+  exports: [MlAdsService],
 })
 export class MlAdsModule {}

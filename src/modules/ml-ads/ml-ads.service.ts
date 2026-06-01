@@ -337,9 +337,19 @@ export class MlAdsService {
   async updateCampaign(
     orgId:      string,
     campaignId: string,
-    patch:      { status?: 'active' | 'paused'; daily_budget?: number },
-  ): Promise<{ id: string; status: string | null; daily_budget: number | null }> {
-    if (patch.status === undefined && patch.daily_budget === undefined) {
+    patch:      {
+      status?:       'active' | 'paused'
+      daily_budget?: number
+      /** ACOS-alvo (%) — alavanca de lance do Product Ads. ML exige > 3 e < 500. */
+      acos_target?:  number
+      /** Estratégia do PADS: PROFITABILITY | GROWTH | VISIBILITY. */
+      strategy?:     string
+    },
+  ): Promise<{ id: string; status: string | null; daily_budget: number | null; acos_target: number | null }> {
+    if (
+      patch.status === undefined && patch.daily_budget === undefined &&
+      patch.acos_target === undefined && patch.strategy === undefined
+    ) {
       throw new HttpException('patch vazio', 400)
     }
     if (patch.status && !['active', 'paused'].includes(patch.status)) {
@@ -347,6 +357,12 @@ export class MlAdsService {
     }
     if (patch.daily_budget !== undefined && (patch.daily_budget < 0 || !Number.isFinite(patch.daily_budget))) {
       throw new HttpException('daily_budget inválido', 400)
+    }
+    // ML exige ACOS-alvo > 3 e < 500 (Product Ads). Clamp duro de segurança —
+    // o motor (Active) já clampa por margem, isto é a 2ª linha de defesa.
+    if (patch.acos_target !== undefined &&
+        (!Number.isFinite(patch.acos_target) || patch.acos_target <= 3 || patch.acos_target >= 500)) {
+      throw new HttpException('acos_target deve ser > 3 e < 500', 400)
     }
 
     // 1. Pega campaign do DB pra resolver advertiser_id + type
@@ -364,11 +380,14 @@ export class MlAdsService {
     const headers = await this.authHeaders(orgId)
     const url     = `${ML_BASE}/advertising/advertisers/${camp.advertiser_id}/${segment}/campaigns/${campaignId}`
 
-    // 2. Body do PATCH ML
-    //    Brand/Product Ads aceita status (active/paused) e budget (objeto com amount).
+    // 2. Body do PUT ML.
+    //    Product/Brand Ads aceita status (active/paused), budget (objeto amount),
+    //    acos_target (número) e strategy (PROFITABILITY/GROWTH/VISIBILITY).
     const body: Record<string, unknown> = {}
-    if (patch.status !== undefined) body.status = patch.status
-    if (patch.daily_budget !== undefined) body.budget = { amount: patch.daily_budget, currency: 'BRL' }
+    if (patch.status !== undefined)       body.status      = patch.status
+    if (patch.daily_budget !== undefined) body.budget      = { amount: patch.daily_budget, currency: 'BRL' }
+    if (patch.acos_target !== undefined)  body.acos_target = patch.acos_target
+    if (patch.strategy !== undefined)     body.strategy    = patch.strategy
 
     try {
       await axios.put(url, body, { headers })
@@ -381,20 +400,22 @@ export class MlAdsService {
 
     // 3. Espelha no DB local (sem esperar próximo sync)
     const dbPatch: Record<string, unknown> = { synced_at: new Date().toISOString() }
-    if (patch.status !== undefined)        dbPatch.status        = patch.status
-    if (patch.daily_budget !== undefined)  dbPatch.daily_budget  = patch.daily_budget
+    if (patch.status !== undefined)       dbPatch.status       = patch.status
+    if (patch.daily_budget !== undefined) dbPatch.daily_budget = patch.daily_budget
+    if (patch.acos_target !== undefined)  dbPatch.acos_target  = patch.acos_target
+    if (patch.strategy !== undefined)     dbPatch.strategy     = patch.strategy
 
     const { data: updated, error: uErr } = await supabaseAdmin
       .from('ml_ads_campaigns')
       .update(dbPatch)
       .eq('organization_id', orgId)
       .eq('id', campaignId)
-      .select('id, status, daily_budget')
+      .select('id, status, daily_budget, acos_target')
       .single()
     if (uErr) throw new HttpException(uErr.message, 500)
 
     this.logger.log(`[ml-ads.update] org=${orgId} ${campaignId} ${JSON.stringify(patch)}`)
-    return updated as { id: string; status: string | null; daily_budget: number | null }
+    return updated as { id: string; status: string | null; daily_budget: number | null; acos_target: number | null }
   }
 
   /**
@@ -529,14 +550,20 @@ export class MlAdsService {
 
       // Real shape (Brand/Product Ads):
       //   { campaign_id, campaign_type, name, headline, status,
-      //     budget: { amount, currency }, items: [{ item_id }, ...] }
+      //     budget: { amount, currency } | <number>, strategy, acos_target,
+      //     items: [{ item_id }, ...] }
       const campaignRows = campaigns
         .map(c => {
           const rawId = c.campaign_id ?? c.id
           if (rawId == null) return null
           const sId = String(rawId)
           if (sId === 'undefined' || sId === 'null' || !sId.trim()) return null
-          const budget = c.budget as { amount?: number } | undefined
+          // budget vem como objeto {amount} no sync legado OU número cru no GET v1.
+          const budgetRaw = c.budget as { amount?: number } | number | undefined
+          const dailyBudget = typeof budgetRaw === 'number'
+            ? budgetRaw
+            : (budgetRaw?.amount ?? null)
+          const acosTarget = typeof c.acos_target === 'number' ? c.acos_target : null
           const items  = Array.isArray(c.items) ? c.items : []
           return {
             id:               sId,
@@ -544,7 +571,9 @@ export class MlAdsService {
             advertiser_id:    adv.advertiser_id,
             name:             (c.name ?? c.headline ?? '(sem nome)') as string,
             status:           (c.status ?? 'active') as string,
-            daily_budget:     (budget?.amount ?? null) as number | null,
+            daily_budget:     dailyBudget as number | null,
+            acos_target:      acosTarget as number | null,
+            strategy:         (c.strategy ?? null) as string | null,
             type:             (c.campaign_type ?? c.type ?? adv.product) as string | null,
             start_date:       (c.start_date ?? null) as string | null,
             end_date:         (c.end_date ?? null) as string | null,

@@ -13,6 +13,7 @@ import {
   CandidateStrategy,
 } from './internal-products-signals.service'
 import { DidAvatarService, StartAvatarDto } from './did-avatar.service'
+import { MlAdsService } from '../ml-ads/ml-ads.service'
 
 interface RealtimeBody {
   org_id: string
@@ -58,6 +59,7 @@ export class InternalController {
     private readonly socialVideo:   SocialVideoBridgeService,
     private readonly signals:       InternalProductsSignalsService,
     private readonly didAvatar:     DidAvatarService,
+    private readonly mlAds:         MlAdsService,
   ) {}
 
   @Post('realtime')
@@ -265,5 +267,39 @@ export class InternalController {
   ) {
     if (!orgId) throw new BadRequestException('org_id obrigatório')
     return this.didAvatar.getAvatarVideo(orgId, jobId)
+  }
+
+  // ─── ML Ads write (Ads Performance Agent — Fase 3) ──────────────────────
+
+  /**
+   * Aplica uma mudança real numa campanha de Mercado Livre Ads. Consumido pelo
+   * MercadoLivreAdsProvider do Active (motor) quando o usuário aprova uma
+   * decisão na Central de Ads. Reusa MlAdsService.updateCampaign (PUT na API ML
+   * + espelho no DB). org_id = ID da org NO SAAS (resolvido no Active).
+   *
+   * Alavancas: status (pause/activate), daily_budget (campanhas com orçamento),
+   * acos_target (lance/ACOS-alvo — alavanca primária do PADS), strategy.
+   */
+  @Post('ml-ads/campaign-update')
+  @HttpCode(HttpStatus.OK)
+  async mlAdsCampaignUpdate(
+    @Body()
+    body: {
+      org_id?:       string
+      campaign_id?:  string
+      status?:       'active' | 'paused'
+      daily_budget?: number
+      acos_target?:  number
+      strategy?:     string
+    },
+  ) {
+    if (!body?.org_id)      throw new BadRequestException('org_id obrigatório')
+    if (!body?.campaign_id) throw new BadRequestException('campaign_id obrigatório')
+    return this.mlAds.updateCampaign(body.org_id, body.campaign_id, {
+      status:       body.status,
+      daily_budget: body.daily_budget,
+      acos_target:  body.acos_target,
+      strategy:     body.strategy,
+    })
   }
 }
