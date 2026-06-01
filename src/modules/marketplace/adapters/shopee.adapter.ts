@@ -758,6 +758,164 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return { ok: true, external_product_id: String(itemId), raw: data }
   }
 
+  // ── F18 Fase F — Publicar novo anúncio (esteira IA Criativo → add_item) ─────
+
+  /** Sobe 1 imagem (por URL) pro media space da Shopee e devolve o image_id.
+   *  `POST /api/v2/media_space/upload_image` (multipart, campo `image`).
+   *  add_item exige image_id (NÃO URL). scene='normal' (capa/galeria). */
+  async uploadImage(conn: MpConnection, imageUrl: string): Promise<string> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/media_space/upload_image'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+
+    // baixa a imagem → Blob → multipart
+    const imgResp = await axios.get<ArrayBuffer>(imageUrl, { responseType: 'arraybuffer' })
+    const form = new FormData()
+    form.append('image', new Blob([imgResp.data]), 'image.jpg')
+    form.append('scene', 'normal')
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.uploadImage',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, form),
+    })
+    if (data?.error) throw new Error(`Shopee uploadImage ${data.error}: ${data.message}`)
+    const imageId = data?.response?.image_info?.image_id
+      ?? data?.response?.image_info_list?.[0]?.image_info?.image_id
+    if (!imageId) throw new Error(`Shopee uploadImage sem image_id: ${JSON.stringify(data)?.slice(0, 200)}`)
+    return String(imageId)
+  }
+
+  /** Recomenda category_id da Shopee a partir do nome do produto.
+   *  `GET /api/v2/product/category_recommend`. add_item exige category_id. */
+  async recommendCategory(conn: MpConnection, itemName: string): Promise<number | null> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/product/category_recommend'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_name: itemName.slice(0, 120),
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.categoryRecommend',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee categoryRecommend ${data.error}: ${data.message}`)
+    const ids: unknown[] = data?.response?.category_id ?? []
+    const first = ids.find(x => Number.isFinite(Number(x)))
+    return first != null ? Number(first) : null
+  }
+
+  /** Atributos (obrigatórios/opcionais) de uma categoria.
+   *  `GET /api/v2/product/get_attributes` (language pt-br). add_item precisa
+   *  preencher os mandatórios. Devolve o raw pro caller montar attribute_list. */
+  async getCategoryAttributes(conn: MpConnection, categoryId: number): Promise<unknown> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/product/get_attributes'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      category_id: String(categoryId), language: 'pt-br',
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.getAttributes',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee getAttributes ${data.error}: ${data.message}`)
+    return data?.response ?? null
+  }
+
+  /** Canais de logística habilitados da loja. `GET /api/v2/logistics/get_channel_list`.
+   *  add_item exige logistic_info com os channel_id habilitados. */
+  async getLogisticsChannels(conn: MpConnection): Promise<Array<{ channel_id: number; enabled: boolean; name: string }>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/logistics/get_channel_list'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.logisticsChannels',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee getChannelList ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const list = (data?.response?.logistics_channel_list ?? []) as any[]
+    return list.map(c => ({
+      channel_id: Number(c?.logistics_channel_id ?? c?.channel_id),
+      enabled:    !!c?.enabled,
+      name:       c?.logistics_channel_name ?? '',
+    }))
+  }
+
+  /** Cria um novo anúncio. `POST /api/v2/product/add_item`. Body montado pelo
+   *  caller (publish service) com category_id, imagens (image_id), preço,
+   *  estoque, peso, dimensão, logística e atributos. ⚠️ CRIA listing REAL
+   *  (entra em review da Shopee). Loga raw + devolve item_id. */
+  async addItem(
+    conn: MpConnection,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    payload: Record<string, any>,
+  ): Promise<{ item_id: number; raw: unknown }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/add_item'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.addItem',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, payload),
+    })
+    this.logger.log(`[shopee.addItem] → ${JSON.stringify(data)?.slice(0, 500)}`)
+    if (data?.error) throw new Error(`Shopee addItem ${data.error}: ${data.message}`)
+    const itemId = data?.response?.item_id
+    if (!itemId) throw new Error(`Shopee addItem sem item_id: ${JSON.stringify(data)?.slice(0, 200)}`)
+    return { item_id: Number(itemId), raw: data }
+  }
+
+  /** F18 Fase F — Remove um anúncio (rollback do teste de publish). */
+  async deleteItem(conn: MpConnection, itemId: number): Promise<void> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/delete_item'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.deleteItem',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, { item_id: itemId }),
+    })
+    if (data?.error) throw new Error(`Shopee deleteItem ${data.error}: ${data.message}`)
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.

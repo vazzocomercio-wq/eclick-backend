@@ -1,24 +1,32 @@
-import { Injectable, Logger, NotImplementedException } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
+import { supabaseAdmin } from '../../../common/supabase'
 import { ShopeeAlgoScoreService } from '../shopee-algo-score/shopee-algo-score.service'
 import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
+import { MarketplaceService } from '../marketplace.service'
+import { ShopeeAdapter } from '../adapters/shopee.adapter'
+import { ShopeeProductSyncService } from '../shopee-sync/shopee-product-sync.service'
 import {
   ShopeeDraftListing, ShopeeEvaluateResponse, RELEVANCE_GATE,
 } from './shopee-creative.types'
 
-/** F18 F1.7 — IA Criativo Shopee: guard de pré-publicação.
+/** F18 F1.7 + Fase F — IA Criativo Shopee: guard de pré-publicação + publish.
  *
- *  evaluateDraft() — funciona 100% agora. Roda o Algorithm Score (F1.1)
- *  no rascunho e decide se libera publish (relevância >= gate). Compute
- *  puro, sem I/O externo.
+ *  evaluateDraft() — guard puro: roda o Algorithm Score (F1.1) no rascunho e
+ *  decide se libera publish (relevância >= gate). Sem I/O.
  *
- *  publish() — stub. Precisa de creds Open Platform (Sprint 2). Quando
- *  ativar, vai: upload imagens (image_id, não URL) → /api/v2/product/
- *  add_item → grava em product_listings platform=shopee. */
+ *  publish() (Fase F) — esteira real: gate → upload imagens (image_id) →
+ *  categoria recomendada → atributos obrigatórios → logística → add_item →
+ *  grava em product_listings platform='shopee'. ⚠️ cria anúncio REAL (review
+ *  Shopee). Suporta dry-run (só monta o payload) e delete_after (teste). */
 @Injectable()
 export class ShopeeCreativePublisherService {
   private readonly logger = new Logger(ShopeeCreativePublisherService.name)
 
-  constructor(private readonly algoScore: ShopeeAlgoScoreService) {}
+  constructor(
+    private readonly algoScore:   ShopeeAlgoScoreService,
+    private readonly mp:          MarketplaceService,
+    private readonly productSync: ShopeeProductSyncService,
+  ) {}
 
   /** Avalia rascunho em dry-run. Performance/qualidade de loja entram
    *  neutros (rascunho não tem vendas nem é shop-level), então só
@@ -72,17 +80,170 @@ export class ShopeeCreativePublisherService {
     }
   }
 
-  /** Publica de fato no Shopee. STUB — precisa de creds (Sprint 2). */
-  async publish(_draft: ShopeeDraftListing): Promise<never> {
-    throw new NotImplementedException(
-      'Publish no Shopee ainda não disponível — aguardando aprovação das ' +
-      'credenciais Open Platform (F0.1). Use evaluateDraft pra pré-avaliar ' +
-      'o rascunho enquanto isso.',
-    )
+  /** F18 Fase F — Publica de fato no Shopee (esteira IA Criativo → add_item).
+   *  Monta o anúncio a partir do rascunho + dados do produto do catálogo
+   *  (peso/dimensão/fotos/descrição/marca). Sobe imagens, recomenda categoria,
+   *  preenche atributos obrigatórios (best-effort), resolve logística e cria via
+   *  add_item. ⚠️ cria anúncio REAL (entra em review da Shopee).
+   *
+   *  opts.dryRun → só monta e devolve o payload (não cria). opts.deleteAfter →
+   *  cria e deleta logo em seguida (validação ao vivo sem deixar lixo). */
+  async publish(orgId: string, draft: ShopeeDraftListing, opts?: { dryRun?: boolean; deleteAfter?: boolean }): Promise<{
+    ok: boolean
+    item_id?: number
+    category_id?: number | null
+    images?: number
+    dry_run?: boolean
+    deleted?: boolean
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    payload?: Record<string, any>
+    blockers?: string[]
+  }> {
+    if (!this.isPublishEnabled()) {
+      throw new BadRequestException('Publicação Shopee desabilitada (credenciais Open Platform ausentes).')
+    }
+    if (!draft.product_id) throw new BadRequestException('product_id obrigatório para publicar (puxa peso/dimensão/fotos do catálogo).')
+
+    // 1) gate de relevância (mesmo do evaluateDraft)
+    const evalRes = this.evaluateDraft(draft)
+    if (!evalRes.ready) return { ok: false, blockers: evalRes.blockers }
+
+    // 2) produto do catálogo (org-scoped)
+    const { data: prod, error: pErr } = await supabaseAdmin
+      .from('products')
+      .select('id, name, description, ai_long_description, brand, weight_kg, width_cm, length_cm, height_cm, photo_urls, images, price, sku')
+      .eq('id', draft.product_id)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (pErr) throw new Error(`products: ${pErr.message}`)
+    if (!prod) throw new BadRequestException('Produto não encontrado nesta organização')
+
+    // 3) conn Shopee + token fresco
+    const resolved = await this.mp.resolve(orgId, 'shopee')
+    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    const adapter = resolved.adapter as ShopeeAdapter
+
+    const name = (draft.title ?? prod.name ?? '').toString().trim()
+    if (!name) throw new BadRequestException('Título obrigatório')
+    const description = (draft.description ?? prod.ai_long_description ?? prod.description ?? '').toString().trim()
+    if (description.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
+
+    // 4) categoria (do rascunho ou recomendada pelo nome)
+    const categoryId = await adapter.recommendCategory(conn, name)
+    if (!categoryId) throw new BadRequestException('Não foi possível recomendar uma categoria Shopee para este produto. Informe a categoria manualmente.')
+
+    // 5) imagens: photo_urls/images → upload → image_id (máx 9, capa = [0])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const photoUrls: string[] = (Array.isArray(prod.photo_urls) ? prod.photo_urls : (Array.isArray(prod.images) ? prod.images : []))
+      .map((x: unknown) => typeof x === 'string' ? x : (x as { url?: string })?.url)
+      .filter((u: unknown): u is string => typeof u === 'string' && u.startsWith('http'))
+      .slice(0, 9)
+    if (!photoUrls.length) throw new BadRequestException('Produto sem fotos (https) para publicar.')
+    const imageIds: string[] = []
+    for (const u of photoUrls) {
+      try { imageIds.push(await adapter.uploadImage(conn, u)) }
+      catch (e) { this.logger.warn(`[shopee.publish] upload falhou ${u}: ${(e as Error)?.message}`) }
+    }
+    if (!imageIds.length) throw new BadRequestException('Falha ao subir as imagens pro media space da Shopee.')
+
+    // 6) atributos obrigatórios (best-effort: marca + enums com 1ª opção)
+    const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
+    const attributeList = this.buildMandatoryAttributes(attrRaw)
+
+    // 7) logística: canais habilitados
+    const channels = await adapter.getLogisticsChannels(conn)
+    const enabled = channels.filter(c => c.enabled && Number.isFinite(c.channel_id))
+    if (!enabled.length) throw new BadRequestException('Nenhum canal de logística habilitado na loja Shopee.')
+    const logisticInfo = enabled.map(c => ({ logistic_id: c.channel_id, enabled: true }))
+
+    // 8) preço/estoque/peso/dimensão
+    const price = Number(draft.price ?? prod.price ?? 0)
+    if (!(price > 0)) throw new BadRequestException('Preço inválido')
+    const weight = Number(prod.weight_kg) > 0 ? Number(prod.weight_kg) : 0.5 // kg (default leve)
+    const dimension = {
+      package_length: Math.max(1, Math.round(Number(prod.length_cm) || 20)),
+      package_width:  Math.max(1, Math.round(Number(prod.width_cm)  || 20)),
+      package_height: Math.max(1, Math.round(Number(prod.height_cm) || 10)),
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const payload: Record<string, any> = {
+      original_price: price,
+      description,
+      weight,
+      item_name: name.slice(0, 255),
+      category_id: categoryId,
+      image: { image_id_list: imageIds },
+      logistic_info: logisticInfo,
+      attribute_list: attributeList,
+      dimension,
+      normal_stock: 0, // estoque entra depois via update_stock (Fase C, real+virtual)
+      brand: { brand_id: 0, original_brand_name: (prod.brand ?? 'No Brand').toString().slice(0, 60) },
+      item_status: 'NORMAL',
+      seller_stock: [{ stock: 0 }],
+    }
+
+    if (opts?.dryRun) {
+      return { ok: true, dry_run: true, category_id: categoryId, images: imageIds.length, payload }
+    }
+
+    // 9) cria o anúncio
+    const { item_id } = await adapter.addItem(conn, payload)
+
+    // teste ao vivo: cria e remove (não deixa lixo no catálogo Shopee)
+    if (opts?.deleteAfter) {
+      try { await adapter.deleteItem(conn, item_id) }
+      catch (e) { this.logger.warn(`[shopee.publish] deleteAfter falhou item=${item_id}: ${(e as Error)?.message}`) }
+      return { ok: true, item_id, category_id: categoryId, images: imageIds.length, deleted: true }
+    }
+
+    // 10) grava vínculo anúncio↔produto (mesmo padrão da Fase A)
+    await supabaseAdmin.from('product_listings').upsert({
+      platform:      'shopee',
+      account_id:    String(conn.shop_id),
+      listing_id:    String(item_id),
+      variation_id:  '',
+      product_id:    prod.id,
+      listing_title: name,
+      listing_price: price,
+      is_active:     true,
+    }, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+
+    this.logger.log(`[shopee.publish] org=${orgId} product=${prod.id} → item=${item_id} cat=${categoryId} imgs=${imageIds.length}`)
+    return { ok: true, item_id, category_id: categoryId, images: imageIds.length }
   }
 
-  /** Feature flag: só libera publish quando creds Shopee estiverem setadas.
-   *  Por ora SHOPEE_PARTNER_ID/KEY de prod ainda não existem (só TEST). */
+  /** Best-effort dos atributos OBRIGATÓRIOS de uma categoria: pra cada
+   *  mandatório com lista de valores, pega a 1ª opção; texto/numérico livre é
+   *  pulado (pode bloquear o add_item — a Shopee dirá qual falta). Shape de
+   *  saída = o que o add_item espera em attribute_list. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildMandatoryAttributes(attrRaw: any): any[] {
+    const list: unknown[] = attrRaw?.attribute_list ?? attrRaw?.attributes ?? []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out: any[] = []
+    for (const a of list as any[]) {
+      const mandatory = a?.is_mandatory ?? a?.mandatory ?? false
+      if (!mandatory) continue
+      const attrId = a?.attribute_id
+      const values = a?.attribute_value_list ?? a?.value_list ?? []
+      if (attrId != null && Array.isArray(values) && values.length) {
+        const v = values[0]
+        out.push({
+          attribute_id: Number(attrId),
+          attribute_value_list: [{
+            value_id: Number(v?.value_id ?? 0),
+            original_value_name: v?.original_value_name ?? v?.display_value_name ?? v?.value_name ?? '',
+          }],
+        })
+      }
+    }
+    return out
+  }
+
+  /** Feature flag: só libera publish quando creds Shopee de prod estiverem
+   *  setadas (já estão em prod). */
   private isPublishEnabled(): boolean {
     return Boolean(process.env.SHOPEE_PARTNER_ID && process.env.SHOPEE_PARTNER_KEY)
   }
