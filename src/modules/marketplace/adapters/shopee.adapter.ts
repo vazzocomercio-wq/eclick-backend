@@ -421,13 +421,18 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       rawPerformance = data?.response ?? null
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const list: any[] = data?.response?.metric_list ?? []
+      // metric_ids confirmados no ar (loja Vazzo, get_shop_performance):
+      //  1=late_shipment_rate(%), 43=return_refund_rate(%), 2033/4=avg_prep_time(dia),
+      //  11=response_rate chat(%), 22=shop_rating(0-5). unit % → fração via toRate.
       for (const m of list) {
         const id = m?.metric_id
         const v  = m?.current_period
         if (v == null) continue
-        if (id === 1 || id === 85)       metrics.late_ship_rate     = toRate(v)
-        else if (id === 43 || id === 92) metrics.return_refund_rate = toRate(v)
-        else if (id === 4)               metrics.prep_time_days      = Number(v)
+        if (id === 1 || id === 85)         metrics.late_ship_rate     = toRate(v)
+        else if (id === 43 || id === 92)   metrics.return_refund_rate = toRate(v)
+        else if (id === 2033 || id === 4)  metrics.prep_time_days     = Number(v)
+        else if (id === 11)                metrics.chat_response_rate = toRate(v)
+        else if (id === 22)                metrics.rating             = Number(v)
       }
     } catch (e: unknown) {
       errors.push(`performance: ${(e as Error)?.message}`)
