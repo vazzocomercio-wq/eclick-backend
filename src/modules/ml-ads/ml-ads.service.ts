@@ -376,16 +376,34 @@ export class MlAdsService {
     if (!camp) throw new HttpException('campanha não encontrada', 404)
 
     const product = this.productFromType(camp.type as string | null)
-    const segment = this.productPath(product)
-    const headers = await this.authHeaders(orgId)
-    const url     = `${ML_BASE}/advertising/advertisers/${camp.advertiser_id}/${segment}/campaigns/${campaignId}`
 
-    // 2. Body do PUT ML.
-    //    Product/Brand Ads aceita status (active/paused), budget (objeto amount),
-    //    acos_target (número) e strategy (PROFITABILITY/GROWTH/VISIBILITY).
+    // 2. Resolve a CONEXÃO ML (token) DONA do advertiser desta campanha + o site.
+    //    Multi-conta: a org pode ter vários sellers ML; só o dono pode escrever
+    //    (senão a API nova devolve 401 "not authorized to access advertiser").
+    const auth = await this.resolveAdvertiserAuth(orgId, String(camp.advertiser_id), product)
+    if (!auth) {
+      throw new HttpException(
+        `Nenhuma conexão ML da org é dona do advertiser ${camp.advertiser_id} — reconecte a conta certa.`,
+        404,
+      )
+    }
+
+    // 3. WRITE usa a API NOVA (api-version 2). A rota antiga
+    //    /advertising/advertisers/{adv}/{seg}/campaigns/{id} foi DEPRECADA
+    //    (jun/2025) e devolve 404. Update = PUT em
+    //    /marketplace/advertising/{site}/product_ads/campaigns/{id}.
+    const url = `${ML_BASE}/marketplace/advertising/${auth.siteId}/product_ads/campaigns/${campaignId}`
+    const headers = {
+      Authorization: `Bearer ${auth.token}`,
+      'api-version': '2',
+      Accept: 'application/json',
+    }
+
+    // Body do PUT: status (active/paused), budget (número decimal),
+    // acos_target (número, alavanca do PADS), strategy.
     const body: Record<string, unknown> = {}
     if (patch.status !== undefined)       body.status      = patch.status
-    if (patch.daily_budget !== undefined) body.budget      = { amount: patch.daily_budget, currency: 'BRL' }
+    if (patch.daily_budget !== undefined) body.budget      = patch.daily_budget
     if (patch.acos_target !== undefined)  body.acos_target = patch.acos_target
     if (patch.strategy !== undefined)     body.strategy    = patch.strategy
 
@@ -395,6 +413,14 @@ export class MlAdsService {
       const status = e?.response?.status ?? '?'
       const detail = e?.response?.data?.message ?? e?.response?.data?.error ?? e?.message ?? ''
       this.logger.warn(`[ml-ads.update.${status}] ${product}/${campaignId}: ${detail}`)
+      // 401 "User does not have permission to write" = app SEM permissão de Ads write.
+      if (status === 401 && /permission to write|UnauthorizedException/i.test(String(detail))) {
+        throw new HttpException(
+          'O app e-Click ainda não tem permissão de ESCRITA em Product Ads no Mercado Livre. ' +
+            'Autorize o gerenciamento de Ads (operador com escrita) no painel do Mercado Ads e reconecte a conta.',
+          403,
+        )
+      }
       throw new HttpException(`ML rejeitou: ${detail}`, status === 401 ? 401 : 400)
     }
 
@@ -416,6 +442,34 @@ export class MlAdsService {
 
     this.logger.log(`[ml-ads.update] org=${orgId} ${campaignId} ${JSON.stringify(patch)}`)
     return updated as { id: string; status: string | null; daily_budget: number | null; acos_target: number | null }
+  }
+
+  /**
+   * Acha a conexão ML (token) DONA do advertiser + o site_id, pra escrever na
+   * API nova. Multi-conta: itera as conexões da org e pergunta ao ML quais
+   * advertisers cada token possui (endpoint de leitura, barato). Retorna o
+   * token + site (MLB/…) do dono, ou null se nenhuma conexão for dona.
+   */
+  private async resolveAdvertiserAuth(
+    orgId: string,
+    advertiserId: string,
+    product: 'PADS' | 'BADS' | 'DISPLAY',
+  ): Promise<{ token: string; siteId: string } | null> {
+    const conns = await this.ml.getAllConnectionsForOrg(orgId)
+    for (const c of conns) {
+      try {
+        const { data } = await axios.get(`${ML_BASE}/advertising/advertisers`, {
+          headers: { Authorization: `Bearer ${c.access_token}`, 'Api-Version': '1' },
+          params: { product_id: product },
+        })
+        const arr = Array.isArray(data?.advertisers) ? data.advertisers : []
+        const adv = arr.find((a: any) => String(a.advertiser_id) === advertiserId)
+        if (adv) return { token: c.access_token, siteId: (adv.site_id as string) || 'MLB' }
+      } catch {
+        // token expirado/sem acesso → tenta a próxima conexão
+      }
+    }
+    return null
   }
 
   /**
