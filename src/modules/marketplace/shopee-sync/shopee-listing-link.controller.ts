@@ -90,7 +90,7 @@ export class ShopeeListingLinkController {
   async setStock(
     @ReqUser() user: ReqUserPayload,
     @Param('itemId') itemId: string,
-    @Body() body: { quantity?: number },
+    @Body() body: { quantity?: number; variation_id?: string | null },
   ) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const id = Number(itemId)
@@ -98,6 +98,6 @@ export class ShopeeListingLinkController {
     if (body?.quantity == null || !Number.isFinite(Number(body.quantity))) {
       throw new BadRequestException('quantity ausente ou inválido')
     }
-    return this.stock.pushStockForItem(user.orgId, id, Number(body.quantity))
+    return this.stock.pushStockForItem(user.orgId, id, Number(body.quantity), body.variation_id ?? null)
   }
 }

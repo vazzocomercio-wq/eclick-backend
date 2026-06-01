@@ -210,10 +210,11 @@ export class ShopeeStockSyncService {
     return { shop_id: shopId, products: byProduct.size, listings: totalListings, pushed, failed }
   }
 
-  /** MANUAL — escreve estoque de 1 anúncio (todas as variações vinculadas).
-   *  Usado no teste controlado da Fase C e na edição inline (Fase D). Ignora
-   *  o gate. Valida que o item pertence a um produto vinculado da org. */
-  async pushStockForItem(orgId: string, itemId: number, quantity: number): Promise<{
+  /** MANUAL — escreve estoque de 1 anúncio. Ignora o gate (edição inline Fase D
+   *  / teste controlado Fase C). Se `variationId` for dado, escreve SÓ aquele
+   *  model (cirúrgico); senão, aplica `quantity` a todas as variações do item.
+   *  Sem vínculo no DB, escreve item-level (model 0) — útil pro teste. */
+  async pushStockForItem(orgId: string, itemId: number, quantity: number, variationId?: string | null): Promise<{
     ok: boolean; pushed: number; failed: number
   }> {
     const resolved = await this.resolveConn(orgId)
@@ -228,10 +229,15 @@ export class ShopeeStockSyncService {
       .eq('account_id', String(shopId))
       .eq('listing_id', String(itemId))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const listings = ((pls ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null }))
+    let listings = ((pls ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null }))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const productId = ((pls ?? [])[0] as any)?.product_id ?? null
 
+    // escopo cirúrgico: só a variação pedida
+    if (variationId != null) {
+      listings = listings.filter(l => String(l.variation_id ?? '') === String(variationId))
+      if (!listings.length) listings = [{ listing_id: String(itemId), variation_id: String(variationId) }]
+    }
     // se não há vínculo, ainda escreve item-level (model 0) — útil pro teste
     const targets = listings.length ? listings : [{ listing_id: String(itemId), variation_id: null }]
     const qty = Math.max(0, Math.round(Number(quantity) || 0))
