@@ -7,6 +7,7 @@ import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ShopeeShopMetricsSyncService } from './shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-orders-ingestion.service'
+import { ShopeeStockSyncService } from './shopee-stock-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -25,6 +26,7 @@ export class ShopeeSyncController {
     private readonly metrics:   ShopeeShopMetricsSyncService,
     private readonly campaigns: ShopeeCampaignsSyncService,
     private readonly orders:    ShopeeOrdersIngestionService,
+    private readonly stock:     ShopeeStockSyncService,
   ) {}
 
   @Post('products')
@@ -58,5 +60,15 @@ export class ShopeeSyncController {
   async syncOrders(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.orders.syncOrders(user.orgId)
+  }
+
+  /** F18 Fase C — Propaga o disponível do ledger (products.stock) pros anúncios
+   *  Shopee vinculados (lote, manual). ⚠️ escreve estoque REAL na loja. */
+  @Post('stock')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async syncStock(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.stock.pushStockForOrg(user.orgId)
   }
 }

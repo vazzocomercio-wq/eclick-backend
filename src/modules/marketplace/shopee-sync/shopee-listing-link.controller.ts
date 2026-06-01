@@ -5,6 +5,7 @@ import {
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeListingLinkService } from './shopee-listing-link.service'
+import { ShopeeStockSyncService } from './shopee-stock-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -21,7 +22,10 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @Controller('shopee/listings')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class ShopeeListingLinkController {
-  constructor(private readonly link: ShopeeListingLinkService) {}
+  constructor(
+    private readonly link:  ShopeeListingLinkService,
+    private readonly stock: ShopeeStockSyncService,
+  ) {}
 
   @Post('auto-link')
   @HttpCode(HttpStatus.OK)
@@ -64,5 +68,36 @@ export class ShopeeListingLinkController {
     const id = Number(itemId)
     if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
     return this.link.unlink(user.orgId, id)
+  }
+
+  /** F18 Fase C — AUDITORIA read-only do estoque cru de 1 item (pré-mapeamento). */
+  @Get(':itemId/stock-inspect')
+  @RequirePermission('products.view')
+  async stockInspect(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    return this.stock.inspectStock(user.orgId, id)
+  }
+
+  /** F18 Fase C/D — Escreve estoque de 1 anúncio (write-back inline). ⚠️ loja real. */
+  @Post(':itemId/stock')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async setStock(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    @Body() body: { quantity?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    if (body?.quantity == null || !Number.isFinite(Number(body.quantity))) {
+      throw new BadRequestException('quantity ausente ou inválido')
+    }
+    return this.stock.pushStockForItem(user.orgId, id, Number(body.quantity))
   }
 }

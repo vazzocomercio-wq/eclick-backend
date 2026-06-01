@@ -28,6 +28,7 @@ import { ShopeeCampaignsSyncService } from './shopee-sync/shopee-campaigns-sync.
 import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
 import { ShopeeListingLinkService } from './shopee-sync/shopee-listing-link.service'
 import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.controller'
+import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
@@ -60,12 +61,14 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeCampaignsSyncService,      // F1.4 — sync de campanhas (voucher + flash_sale)
     ShopeeOrdersIngestionService,    // F1.6 — ingestão de pedidos Shopee na CENTRAL
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
+    ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
     ShopeeAlgoScoreService,    // F1.1 — exporta pra outros módulos (Listing Center)
     ShopeeQualityService,      // F1.3 — exporta pro Algorithm Score Pillar 3 reusar
+    ShopeeStockSyncService,    // F18 Fase C — StockService chama no recalcAndPropagate
   ],
 })
 export class MarketplaceModule {}

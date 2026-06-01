@@ -4,7 +4,7 @@ import * as crypto from 'crypto'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
-  WebhookValidationInput, RawListing,
+  WebhookValidationInput, RawListing, UpdateResult,
 } from './base'
 import { ShopThrottleService } from '../throttle/shop-throttle.service'
 import { retryWithBackoff } from '../throttle/retry-with-backoff'
@@ -454,6 +454,116 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       }
     }
     return out
+  }
+
+  /** F18 Fase C — AUDITORIA read-only do estoque de 1 item: devolve o
+   *  `stock_info_v2` cru do get_item_base_info + os models do get_model_list
+   *  (com stock_info por model). Usado pra CONFIRMAR a estrutura real
+   *  (seller_stock vs normal_stock, location_id/multi-armazém, model_id) ANTES
+   *  de mapear o update_stock. Loga o raw. Não escreve nada. */
+  async inspectItemStock(conn: MpConnection, itemId: number): Promise<{
+    item_id:        number
+    base_stock_info: unknown
+    models:          unknown
+  }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+
+    // 1) get_item_base_info — stock_info_v2 do item
+    const infoPath = '/api/v2/product/get_item_base_info'
+    const ts1   = Math.floor(Date.now() / 1000)
+    const sign1 = this.signShop(infoPath, ts1, accessToken, shopId)
+    const qs1 = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts1),
+      access_token: accessToken, shop_id: String(shopId), sign: sign1,
+      item_id_list: String(itemId),
+    })
+    const { data: info } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.inspectStock.base',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${infoPath}?${qs1.toString()}`),
+    })
+    if (info?.error) throw new Error(`Shopee ${info.error}: ${info.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const item0 = (info?.response?.item_list ?? [])[0] as any
+    const baseStockInfo = item0?.stock_info_v2 ?? item0?.stock_info ?? null
+
+    // 2) get_model_list — stock por model (variação)
+    const mPath = '/api/v2/product/get_model_list'
+    const ts2   = Math.floor(Date.now() / 1000)
+    const sign2 = this.signShop(mPath, ts2, accessToken, shopId)
+    const qs2 = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts2),
+      access_token: accessToken, shop_id: String(shopId), sign: sign2,
+      item_id: String(itemId),
+    })
+    const { data: models } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.inspectStock.models',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${mPath}?${qs2.toString()}`),
+    })
+    if (models?.error) throw new Error(`Shopee ${models.error}: ${models.message}`)
+
+    this.logger.log(`[shopee.inspectStock] item=${itemId} base_stock_info=${JSON.stringify(baseStockInfo)} models=${JSON.stringify(models?.response ?? null)}`)
+    return { item_id: itemId, base_stock_info: baseStockInfo, models: models?.response ?? null }
+  }
+
+  /** F18 Fase C/D — Atualiza o estoque de 1 anúncio/variação Shopee.
+   *  `POST /api/v2/product/update_stock` (sign shop-level). Estrutura v2:
+   *  `stock_list: [{ model_id, seller_stock: [{ stock }] }]`. model_id=0 quando
+   *  o item não tem variação (variation_id ''). `seller_stock` SEM location_id
+   *  = armazém único default (BR). ⚠️ ESCREVE estoque REAL na loja.
+   *  Loga o raw da resposta + trata failure_list (a API devolve 200 mas pode
+   *  ter falha por model). */
+  async updateStock(
+    conn: MpConnection,
+    args: {
+      externalProductId:    string
+      externalVariationId?: string | null
+      quantity:             number
+    },
+  ): Promise<UpdateResult> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const itemId  = Number(args.externalProductId)
+    const modelId = args.externalVariationId ? Number(args.externalVariationId) : 0
+    const stock   = Math.max(0, Math.round(Number(args.quantity) || 0))
+
+    const apiPath = '/api/v2/product/update_stock'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = {
+      item_id: itemId,
+      stock_list: [
+        { model_id: modelId, seller_stock: [{ stock }] },
+      ],
+    }
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.updateStock',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[shopee.updateStock] item=${itemId} model=${modelId} stock=${stock} → ${JSON.stringify(data)}`)
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+
+    // A API pode devolver 200 com falha por model em failure_list.
+    const failures = data?.response?.failure_list ?? data?.response?.failed_list ?? []
+    if (Array.isArray(failures) && failures.length) {
+      const f0 = failures[0]
+      throw new Error(`Shopee update_stock falhou model=${f0?.model_id}: ${f0?.failed_reason ?? f0?.reason ?? 'desconhecido'}`)
+    }
+
+    return {
+      ok: true,
+      external_product_id:   String(itemId),
+      external_variation_id: modelId ? String(modelId) : null,
+      raw: data,
+    }
   }
 
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).

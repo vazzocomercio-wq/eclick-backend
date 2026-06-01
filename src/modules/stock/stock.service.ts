@@ -2,6 +2,7 @@ import { Injectable, Logger, HttpException, Inject, forwardRef } from '@nestjs/c
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
+import { ShopeeStockSyncService } from '../marketplace/shopee-sync/shopee-stock-sync.service'
 
 @Injectable()
 export class StockService {
@@ -12,6 +13,8 @@ export class StockService {
     // forwardRef: ciclo StockModule ↔ TikTokShopModule (TT-4a push / TT-4b pull).
     @Inject(forwardRef(() => TikTokShopService))
     private readonly tiktokService: TikTokShopService,
+    // F18 Fase C — propaga o disponível pros anúncios Shopee (gateado SHOPEE_STOCK_SYNC).
+    private readonly shopeeStock: ShopeeStockSyncService,
   ) {}
 
   // ── Central calculation ───────────────────────────────────────────────────
@@ -640,6 +643,20 @@ export class StockService {
 
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return
+
+      // F18 Fase C — empurra pros anúncios Shopee vinculados. Se existe
+      // distribuição 'shopee' (com majoração virtual/markup + pausa por min),
+      // usa o qty/pausa dela; senão, empurra o disponível cru (paridade c/ ML).
+      // Gateado dentro de pushStockForProduct (SHOPEE_STOCK_SYNC); OFF = noop.
+      // Fora do loop do ML, não-fatal: nunca quebra o sync do ML.
+      const shopeeCq = channelQtys.find(c => c.channel === 'shopee')
+      const shopeeQty   = shopeeCq ? shopeeCq.qty : Math.max(0, Math.round(calc.available))
+      const shopeePause = shopeeCq ? shopeeCq.should_pause : calc.available <= 0
+      void this.shopeeStock
+        .pushStockForProduct(productId, shopeeQty, shopeePause)
+        .catch((e) =>
+          this.logger.warn(`[stock.shopee] product=${productId}: ${e instanceof Error ? e.message : String(e)}`),
+        )
 
       for (const cq of channelQtys) {
         if (cq.channel === 'mercadolivre') {
