@@ -2,9 +2,11 @@ import {
   Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
+import { computeContributionMargin, round2 } from '../../../common/margin'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
+import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
 
 /** F18 Fase A — Vínculo anúncio Shopee ↔ produto do catálogo (keystone).
  *
@@ -26,8 +28,9 @@ export class ShopeeListingLinkService {
   private readonly logger = new Logger(ShopeeListingLinkService.name)
 
   constructor(
-    private readonly mp:          MarketplaceService,
-    private readonly productSync: ShopeeProductSyncService,
+    private readonly mp:              MarketplaceService,
+    private readonly productSync:     ShopeeProductSyncService,
+    private readonly channelSettings: ChannelSettingsService,
   ) {}
 
   /** Resolve só o shop_id da loja conectada (sem refresh — operação de leitura). */
@@ -168,12 +171,13 @@ export class ShopeeListingLinkService {
   /** Status de vínculo de TODOS os anúncios (pra UI: linkado? qual produto?).
    *  Fonte da verdade = product_listings (não o breakdown). */
   async getLinkStatus(orgId: string): Promise<{
-    shop_id: number
-    total:   number
-    linked:  number
-    unlinked: number
+    shop_id:     number
+    total:       number
+    linked:      number
+    unlinked:    number
+    with_margin: number
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    items:   any[]
+    items:       any[]
   }> {
     const shopId = await this.resolveShopId(orgId)
 
@@ -206,23 +210,56 @@ export class ShopeeListingLinkService {
       const chunk = pidList.slice(i, i + 200)
       const { data: prods, error: pErr } = await supabaseAdmin
         .from('products')
-        .select('id, sku, name, cost_price, price, stock')
+        .select('id, sku, name, cost_price, price, stock, tax_percentage, tax_on_freight')
         .in('id', chunk)
       if (pErr) throw new Error(`products: ${pErr.message}`)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const p of (prods ?? []) as any[]) prodById.set(p.id, p)
     }
 
+    // F18 Fase B — comissão Shopee da org (igual ao sync de pedidos) p/ margem.
+    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const items = ((rows ?? []) as any[]).map(r => {
       const pid  = linkByItem.get(String(r.item_id)) ?? null
       const prod = pid ? prodById.get(pid) : null
       const snap = r.input_snapshot ?? {}
+      // preço do anúncio Shopee (snapshot); fallback p/ preço do produto.
+      const price = snap.price != null ? Number(snap.price)
+        : (prod?.price != null ? Number(prod.price) : null)
+
+      // F18 Fase B — margem de contribuição ESTIMADA do anúncio (motor canônico
+      // margin.ts, mesmo dos pedidos). shipping=0: frete Shopee varia por pedido
+      // (comprador costuma pagar) — é estimativa "se vender a esse preço".
+      let margin: {
+        price: number; commission_pct: number; sale_fee: number; cost: number
+        tax_amount: number; contribution_margin: number; contribution_margin_pct: number
+      } | null = null
+      if (prod && prod.cost_price != null && price != null && price > 0) {
+        const saleFee = round2(price * commissionPct / 100)
+        const m = computeContributionMargin({
+          price, saleFee, shipping: 0,
+          cost:          Number(prod.cost_price),
+          taxPercentage: prod.tax_percentage ?? 0,
+          taxOnFreight:  prod.tax_on_freight ?? false,
+        })
+        margin = {
+          price,
+          commission_pct:          commissionPct,
+          sale_fee:                saleFee,
+          cost:                    round2(Number(prod.cost_price)),
+          tax_amount:              m.taxAmount,
+          contribution_margin:     m.contributionMargin,
+          contribution_margin_pct: m.contributionMarginPct,
+        }
+      }
+
       return {
         item_id:    Number(r.item_id),
         title:      snap.title          ?? null,
         thumbnail:  snap.main_image_url ?? null,
-        price:      snap.price          ?? null,
+        price,
         algo_score: r.algo_score        ?? null,
         linked:     !!prod,
         product:    prod ? {
@@ -233,10 +270,15 @@ export class ShopeeListingLinkService {
           price:      prod.price,
           stock:      prod.stock,
         } : null,
+        margin,
       }
     })
     const linked = items.filter(i => i.linked).length
-    return { shop_id: shopId, total: items.length, linked, unlinked: items.length - linked, items }
+    const withMargin = items.filter(i => i.margin != null).length
+    return {
+      shop_id: shopId, total: items.length, linked,
+      unlinked: items.length - linked, with_margin: withMargin, items,
+    }
   }
 
   /** Vínculo manual item → produto (substitui qualquer vínculo anterior do item).
