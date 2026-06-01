@@ -508,19 +508,55 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return { item_id: itemId, base_stock_info: baseStockInfo, models: models?.response ?? null }
   }
 
+  /** F18 Fase C — Resolve o `location_id` do seller_stock da loja a partir de 1
+   *  item (read-only, via get_model_list). Sellers BR têm armazém nomeado (ex
+   *  "BRZ") — o update_stock precisa do MESMO location_id, senão a escrita não
+   *  bate no armazém certo. Devolve o 1º location_id encontrado (uniforme por
+   *  loja) ou null (omitir → armazém default). */
+  async resolveSellerLocationId(conn: MpConnection, itemId: number): Promise<string | null> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/product/get_model_list'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_id: String(itemId),
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.resolveLocation',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const models: any[] = data?.response?.model ?? []
+    for (const m of models) {
+      const seller = m?.stock_info_v2?.seller_stock
+      if (Array.isArray(seller)) {
+        for (const s of seller) {
+          if (s?.location_id) return String(s.location_id)
+        }
+      }
+    }
+    return null
+  }
+
   /** F18 Fase C/D — Atualiza o estoque de 1 anúncio/variação Shopee.
    *  `POST /api/v2/product/update_stock` (sign shop-level). Estrutura v2:
-   *  `stock_list: [{ model_id, seller_stock: [{ stock }] }]`. model_id=0 quando
-   *  o item não tem variação (variation_id ''). `seller_stock` SEM location_id
-   *  = armazém único default (BR). ⚠️ ESCREVE estoque REAL na loja.
-   *  Loga o raw da resposta + trata failure_list (a API devolve 200 mas pode
-   *  ter falha por model). */
+   *  `stock_list: [{ model_id, seller_stock: [{ location_id?, stock }] }]`.
+   *  model_id=0 quando o item não tem variação (variation_id ''). location_id
+   *  (ex "BRZ") DEVE bater com o armazém do seller — auditado via
+   *  resolveSellerLocationId; omitido = armazém default. ⚠️ ESCREVE estoque
+   *  REAL na loja. Loga o raw + trata failure_list (200 mas falha por model). */
   async updateStock(
     conn: MpConnection,
     args: {
       externalProductId:    string
       externalVariationId?: string | null
       quantity:             number
+      locationId?:          string | null
     },
   ): Promise<UpdateResult> {
     const { accessToken, shopId } = this.requireShop(conn)
@@ -536,10 +572,13 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       partner_id: partnerId, timestamp: String(ts),
       access_token: accessToken, shop_id: String(shopId), sign,
     }).toString()
+    const sellerStock = args.locationId
+      ? [{ location_id: args.locationId, stock }]
+      : [{ stock }]
     const body = {
       item_id: itemId,
       stock_list: [
-        { model_id: modelId, seller_stock: [{ stock }] },
+        { model_id: modelId, seller_stock: sellerStock },
       ],
     }
 

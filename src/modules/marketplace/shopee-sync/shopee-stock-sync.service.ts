@@ -61,7 +61,9 @@ export class ShopeeStockSyncService {
     return ((data ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null }))
   }
 
-  /** Empurra `qty` pros anúncios dados, logando cada push em stock_sync_logs. */
+  /** Empurra `qty` pros anúncios dados, logando cada push em stock_sync_logs.
+   *  Resolve o location_id do seller_stock UMA vez por item (armazém nomeado,
+   *  ex "BRZ" — uniforme por loja; o update_stock precisa do mesmo). */
   private async pushToListings(
     conn:        MpConnection,
     adapter:     ShopeeAdapter,
@@ -72,7 +74,20 @@ export class ShopeeStockSyncService {
   ): Promise<{ pushed: number; failed: number }> {
     let pushed = 0
     let failed = 0
+    const locationByItem = new Map<string, string | null>()
     for (const l of listings) {
+      // resolve (e cacheia) o location_id do item antes de escrever
+      if (!locationByItem.has(l.listing_id)) {
+        let loc: string | null = null
+        try {
+          loc = await adapter.resolveSellerLocationId(conn, Number(l.listing_id))
+        } catch (e: unknown) {
+          this.logger.warn(`[shopee.stock] resolveLocation item=${l.listing_id} falhou: ${(e as Error)?.message}`)
+        }
+        locationByItem.set(l.listing_id, loc)
+      }
+      const locationId = locationByItem.get(l.listing_id) ?? null
+
       const startTime = Date.now()
       let status = 'success'
       let errorMsg: string | null = null
@@ -82,6 +97,7 @@ export class ShopeeStockSyncService {
           externalProductId:   l.listing_id,
           externalVariationId: l.variation_id || null,
           quantity:            qty,
+          locationId,
         })
         pushed++
       } catch (e: unknown) {
