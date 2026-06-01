@@ -26,6 +26,8 @@ import { ShopeeProductSyncService } from './shopee-sync/shopee-product-sync.serv
 import { ShopeeShopMetricsSyncService } from './shopee-sync/shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-sync/shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
+import { ShopeeListingLinkService } from './shopee-sync/shopee-listing-link.service'
+import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.controller'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
@@ -39,6 +41,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeRadarController,     // F1.5 — GET /shopee/radar/signals + /shopee/radar/by-type
     ShopeeCreativeController,  // F1.7 — POST /shopee/creative/evaluate (guard)
     ShopeeSyncController,       // F0.7 — POST /shopee/sync/products (sync real)
+    ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -56,6 +59,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeShopMetricsSyncService,    // F1.3 — sync de métricas da loja (account_health)
     ShopeeCampaignsSyncService,      // F1.4 — sync de campanhas (voucher + flash_sale)
     ShopeeOrdersIngestionService,    // F1.6 — ingestão de pedidos Shopee na CENTRAL
+    ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [

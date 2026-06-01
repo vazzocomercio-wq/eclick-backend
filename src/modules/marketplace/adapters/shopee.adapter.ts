@@ -406,6 +406,56 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  /** F18 Fase A — SKUs no nível de VARIAÇÃO por item. Na Shopee o SKU do vendedor
+   *  vive no model (variação), NÃO no item — `item_sku` do base_info vem vazio pra
+   *  lojas que só preencheram o SKU da variação (caso Vazzo). get_model_list (1 item
+   *  por call) → `response.model[].model_sku`. Item simples sem variação real ainda
+   *  costuma trazer 1 model com o SKU. Resiliente: erro num item não derruba o lote.
+   *  Retorna Map<item_id, [{ model_id, sku }]> pra casar com products.sku no link. */
+  async getItemSkus(
+    conn:    MpConnection,
+    itemIds: number[],
+  ): Promise<Map<number, Array<{ model_id: number; sku: string }>>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const out = new Map<number, Array<{ model_id: number; sku: string }>>()
+
+    for (const itemId of itemIds) {
+      const path = '/api/v2/product/get_model_list'
+      const ts   = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(path, ts, accessToken, shopId)
+      const qs = new URLSearchParams({
+        partner_id:   partnerId,
+        timestamp:    String(ts),
+        access_token: accessToken,
+        shop_id:      String(shopId),
+        sign,
+        item_id:      String(itemId),
+      })
+      try {
+        const { data } = await this.callShopee({
+          key:  `shop:${shopId}`,
+          tag:  'shopee.getModelList',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+        })
+        if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const models: any[] = data?.response?.model ?? []
+        const pairs: Array<{ model_id: number; sku: string }> = []
+        for (const m of models) {
+          const sku = (m?.model_sku ?? '').toString().trim()
+          if (sku) pairs.push({ model_id: Number(m?.model_id ?? 0), sku })
+        }
+        out.set(itemId, pairs)
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.getItemSkus] item=${itemId} falhou: ${(e as Error)?.message}`)
+        out.set(itemId, [])
+      }
+    }
+    return out
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.
