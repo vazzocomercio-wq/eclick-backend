@@ -3,7 +3,8 @@ import { MarketplaceService } from '../marketplace.service'
 import { MarketplaceAdapterRegistry } from '../adapters/registry'
 import { MpConnection, RawListing } from '../adapters/base'
 import { ShopeeAlgoScoreService } from '../shopee-algo-score/shopee-algo-score.service'
-import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
+import { AlgoScoreInput, ShopMetricsInput } from '../shopee-algo-score/algo-score.types'
+import { ShopeeQualityService } from '../shopee-quality/shopee-quality.service'
 
 /** F18 F0.7 — Sync inicial de produtos Shopee.
  *
@@ -32,6 +33,7 @@ export class ShopeeProductSyncService {
     private readonly mp:       MarketplaceService,
     private readonly registry: MarketplaceAdapterRegistry,
     private readonly algo:     ShopeeAlgoScoreService,
+    private readonly quality:  ShopeeQualityService,
   ) {}
 
   /** Sincroniza todos os anúncios NORMAL da loja Shopee conectada da org.
@@ -55,6 +57,10 @@ export class ShopeeProductSyncService {
     if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
     const shopId = conn.shop_id
 
+    // Métricas da loja (shop-level, iguais p/ todos os anúncios) → pilar
+    // seller_quality REAL no Algorithm Score. Null-safe: sem snapshot → neutro.
+    const shopMetrics = await this.loadShopMetrics(orgId, shopId)
+
     let pages = 0
     let items = 0
     let scored = 0
@@ -67,7 +73,7 @@ export class ShopeeProductSyncService {
       for (const listing of page.items) {
         items++
         try {
-          await this.algo.computeAndPersist(this.toAlgoInput(listing, shopId), orgId)
+          await this.algo.computeAndPersist(this.toAlgoInput(listing, shopId, shopMetrics), orgId)
           scored++
         } catch (e: unknown) {
           failed++
@@ -109,7 +115,11 @@ export class ShopeeProductSyncService {
    *  detalhe do anúncio; sinais de performance/loja ficam null (score neutro,
    *  sem issue falsa). main_image_url/item_sku são display-only (vão no snapshot
    *  pro Listing Center exibir). */
-  private toAlgoInput(listing: RawListing, shopId: number): AlgoScoreInput {
+  private toAlgoInput(
+    listing:     RawListing,
+    shopId:      number,
+    shopMetrics: ShopMetricsInput | null,
+  ): AlgoScoreInput {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = (listing.raw ?? {}) as any
     const imageUrls: string[] = Array.isArray(raw?.image?.image_url_list)
@@ -127,8 +137,33 @@ export class ShopeeProductSyncService {
       image_count:    imageUrls.length || null,
       price:          listing.price ?? null,
       created_at:     createTime,
+      shop_metrics:   shopMetrics,        // pilar seller_quality real (shop-level)
       main_image_url: imageUrls[0] ?? null,
       item_sku:       raw?.item_sku ?? null,
+    }
+  }
+
+  /** Snapshot mais recente de shop_metrics da loja → ShopMetricsInput pro pilar
+   *  seller_quality (shop-level, igual p/ todos os anúncios). Null-safe: sem
+   *  snapshot (loja sem sync de métricas ainda) → null → pilar fica neutro 50
+   *  (sem issue falsa). Lê via QualityService (mesma fonte da tela). */
+  private async loadShopMetrics(orgId: string, shopId: number): Promise<ShopMetricsInput | null> {
+    try {
+      const cards = await this.quality.getLatest(orgId, shopId)
+      const m = cards[0]?.metrics
+      if (!m) return null
+      return {
+        chat_response_rate:     m.chat_response_rate     ?? null,
+        chat_response_time_min: m.chat_response_time_min ?? null,
+        prep_time_days:         m.prep_time_days         ?? null,
+        late_ship_rate:         m.late_ship_rate         ?? null,
+        return_refund_rate:     m.return_refund_rate     ?? null,
+        rating:                 m.rating                 ?? null,
+        penalty_points:         m.penalty_points         ?? null,
+      }
+    } catch (e: unknown) {
+      this.logger.warn(`[shopee.sync] loadShopMetrics falhou: ${(e as Error)?.message}`)
+      return null
     }
   }
 }
