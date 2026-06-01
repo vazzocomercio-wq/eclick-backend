@@ -11,6 +11,28 @@ import { retryWithBackoff } from '../throttle/retry-with-backoff'
 
 const SHOPEE_BASE = 'https://openplatform.shopee.com.br' // BR prod
 
+/** F1.3 sync — métricas de loja parseadas do módulo account_health.
+ *  rating(0-5) e chat NÃO são expostos pela Open Platform v2 → null
+ *  (preencher via F12 Chrome Extension no futuro). */
+export interface ShopMetricsParsed {
+  penalty_points:         number | null
+  late_ship_rate:         number | null
+  return_refund_rate:     number | null
+  prep_time_days:         number | null
+  rating:                 number | null
+  chat_response_rate:     number | null
+  chat_response_time_min: number | null
+}
+
+/** Resultado de getShopMetrics — métricas + raw (inspeção) + erros por chamada
+ *  (resiliente: falha de permissão num endpoint não derruba o outro). */
+export interface ShopMetricsApiResult {
+  metrics:         ShopMetricsParsed
+  raw_performance: unknown
+  raw_penalty:     unknown
+  errors:          string[]
+}
+
 /** Shopee Open Platform v2 adapter (BR). HMAC-SHA256 hex lowercase em
  * todos os requests. Shop-level sign: partner_id+api_path+timestamp+
  * access_token+shop_id. Auth-level sign (refresh): só partner_id+api_path+
@@ -350,6 +372,89 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       status:                it?.item_status ?? null,
       raw:                   it,
     }
+  }
+
+  /** F1.3 — Snapshot de métricas da loja (módulo account_health).
+   *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
+   *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.
+   *  - get_shop_penalty → penalty_points.overall_penalty_points (fallback path
+   *    `shop_penalty` se o 1º der error_param).
+   *  rating(0-5)/chat = null (NÃO expostos na v2 — F12 Chrome Ext no futuro).
+   *  Resiliente: erro num endpoint (ex: módulo não autorizado) vai pra errors[]
+   *  sem derrubar o outro. Retorna raw p/ inspeção dos metric_id/units reais. */
+  async getShopMetrics(conn: MpConnection): Promise<ShopMetricsApiResult> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const errors: string[] = []
+    const metrics: ShopMetricsParsed = {
+      penalty_points: null, late_ship_rate: null, return_refund_rate: null,
+      prep_time_days: null, rating: null, chat_response_rate: null,
+      chat_response_time_min: null,
+    }
+    let rawPerformance: unknown = null
+    let rawPenalty: unknown = null
+
+    const buildQs = (path: string): string => {
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(path, ts, accessToken, shopId)
+      return new URLSearchParams({
+        partner_id: partnerId, timestamp: String(ts),
+        access_token: accessToken, shop_id: String(shopId), sign,
+      }).toString()
+    }
+    // % → fração 0-1: a API pode mandar 0.012 (fração) ou 1.2 (percentual).
+    const toRate = (v: unknown): number | null => {
+      const n = Number(v)
+      if (!Number.isFinite(n)) return null
+      return n > 1 ? n / 100 : n
+    }
+
+    // 1) get_shop_performance
+    try {
+      const path = '/api/v2/account_health/get_shop_performance'
+      const { data } = await this.callShopee({
+        key: `shop:${shopId}`, tag: 'shopee.shopPerformance',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${buildQs(path)}`),
+      })
+      if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+      rawPerformance = data?.response ?? null
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const list: any[] = data?.response?.metric_list ?? []
+      for (const m of list) {
+        const id = m?.metric_id
+        const v  = m?.current_period
+        if (v == null) continue
+        if (id === 1 || id === 85)       metrics.late_ship_rate     = toRate(v)
+        else if (id === 43 || id === 92) metrics.return_refund_rate = toRate(v)
+        else if (id === 4)               metrics.prep_time_days      = Number(v)
+      }
+    } catch (e: unknown) {
+      errors.push(`performance: ${(e as Error)?.message}`)
+    }
+
+    // 2) get_shop_penalty (fallback path `shop_penalty`)
+    for (const path of [
+      '/api/v2/account_health/get_shop_penalty',
+      '/api/v2/account_health/shop_penalty',
+    ]) {
+      try {
+        const { data } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.shopPenalty',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${buildQs(path)}`),
+        })
+        if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+        rawPenalty = data?.response ?? null
+        const pp = data?.response?.penalty_points?.overall_penalty_points
+        if (pp != null) metrics.penalty_points = Number(pp)
+        break // sucesso → não tenta o fallback
+      } catch (e: unknown) {
+        if (path.endsWith('shop_penalty')) errors.push(`penalty: ${(e as Error)?.message}`)
+      }
+    }
+
+    return { metrics, raw_performance: rawPerformance, raw_penalty: rawPenalty, errors }
   }
 
   /** F0.3/F0.5 — webhook Push. Shopee envia header `Authorization` com

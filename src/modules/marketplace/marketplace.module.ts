@@ -23,6 +23,7 @@ import { ShopeeCreativeController } from './shopee-creative/shopee-creative.cont
 import { ShopeeCreativePublisherService } from './shopee-creative/shopee-creative.service'
 import { ShopeeSyncController } from './shopee-sync/shopee-sync.controller'
 import { ShopeeProductSyncService } from './shopee-sync/shopee-product-sync.service'
+import { ShopeeShopMetricsSyncService } from './shopee-sync/shopee-metrics-sync.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 
 @Module({
@@ -49,6 +50,7 @@ import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.wor
     ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
     ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
     ShopeeProductSyncService,        // F0.7 — sync de produtos reais → algo score
+    ShopeeShopMetricsSyncService,    // F1.3 — sync de métricas da loja (account_health)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
