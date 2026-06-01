@@ -605,6 +605,66 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  /** F18 Fase D — Atualiza o PREÇO de 1 anúncio/variação Shopee.
+   *  `POST /api/v2/product/update_price` (sign shop-level). Estrutura v2:
+   *  `price_list: [{ model_id, original_price }]`. O preço setado é o
+   *  ORIGINAL (preço de lista); promoções/flash da Shopee aplicam desconto
+   *  POR CIMA dele (current_price = original − desconto). model_id=0 quando o
+   *  item não tem variação. ⚠️ ESCREVE PREÇO REAL ($) na loja. Loga o raw +
+   *  trata failure_list (200 mas falha por model). */
+  async updatePrice(
+    conn: MpConnection,
+    args: {
+      externalProductId:    string
+      externalVariationId?: string | null
+      price:                number
+    },
+  ): Promise<UpdateResult> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const itemId  = Number(args.externalProductId)
+    const modelId = args.externalVariationId ? Number(args.externalVariationId) : 0
+    const price   = Number(args.price)
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`Shopee update_price: preço inválido (${args.price})`)
+    }
+
+    const apiPath = '/api/v2/product/update_price'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = {
+      item_id: itemId,
+      price_list: [
+        { model_id: modelId, original_price: price },
+      ],
+    }
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.updatePrice',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[shopee.updatePrice] item=${itemId} model=${modelId} price=${price} → ${JSON.stringify(data)}`)
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+
+    const failures = data?.response?.failure_list ?? data?.response?.failed_list ?? []
+    if (Array.isArray(failures) && failures.length) {
+      const f0 = failures[0]
+      throw new Error(`Shopee update_price falhou model=${f0?.model_id}: ${f0?.failed_reason ?? f0?.reason ?? 'desconhecido'}`)
+    }
+
+    return {
+      ok: true,
+      external_product_id:   String(itemId),
+      external_variation_id: modelId ? String(modelId) : null,
+      raw: data,
+    }
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.

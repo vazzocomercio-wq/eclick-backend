@@ -100,4 +100,22 @@ export class ShopeeListingLinkController {
     }
     return this.stock.pushStockForItem(user.orgId, id, Number(body.quantity), body.variation_id ?? null)
   }
+
+  /** F18 Fase D — Escreve PREÇO de 1 anúncio (write-back inline). ⚠️ $ real. */
+  @Post(':itemId/price')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async setPrice(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    @Body() body: { price?: number; variation_id?: string | null },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    if (body?.price == null || !Number.isFinite(Number(body.price)) || Number(body.price) <= 0) {
+      throw new BadRequestException('price ausente ou inválido')
+    }
+    return this.stock.pushPriceForItem(user.orgId, id, Number(body.price), body.variation_id ?? null)
+  }
 }

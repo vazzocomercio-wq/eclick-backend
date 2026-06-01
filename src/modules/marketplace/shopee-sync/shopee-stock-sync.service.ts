@@ -266,6 +266,72 @@ export class ShopeeStockSyncService {
     return { ok: failed === 0, pushed, failed }
   }
 
+  /** F18 Fase D — MANUAL — escreve o PREÇO (original_price) de 1 anúncio.
+   *  Edição inline (ação explícita do user, $ real). Se `variationId` dado,
+   *  escreve só aquele model; senão, aplica a todas as variações do item.
+   *  ⚠️ ESCREVE PREÇO REAL. Loga em stock_sync_logs (channel='shopee_price'). */
+  async pushPriceForItem(orgId: string, itemId: number, price: number, variationId?: string | null): Promise<{
+    ok: boolean; pushed: number; failed: number
+  }> {
+    const resolved = await this.resolveConn(orgId)
+    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const { conn, adapter } = resolved
+    const shopId = conn.shop_id!
+
+    const { data: pls } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id, listing_id, variation_id')
+      .eq('platform', 'shopee')
+      .eq('account_id', String(shopId))
+      .eq('listing_id', String(itemId))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let listings = ((pls ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null }))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const productId = ((pls ?? [])[0] as any)?.product_id ?? null
+
+    if (variationId != null) {
+      listings = listings.filter(l => String(l.variation_id ?? '') === String(variationId))
+      if (!listings.length) listings = [{ listing_id: String(itemId), variation_id: String(variationId) }]
+    }
+    const targets = listings.length ? listings : [{ listing_id: String(itemId), variation_id: null }]
+    const p = Number(price)
+
+    let pushed = 0, failed = 0
+    for (const l of targets) {
+      const startTime = Date.now()
+      let status = 'success'
+      let errorMsg: string | null = null
+      let httpStatus = 200
+      try {
+        await adapter.updatePrice(conn, {
+          externalProductId:   l.listing_id,
+          externalVariationId: l.variation_id || null,
+          price:               p,
+        })
+        pushed++
+      } catch (e: unknown) {
+        failed++
+        status = 'error'
+        errorMsg = (e as Error)?.message ?? 'erro desconhecido'
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        httpStatus = (e as any)?.response?.status ?? 500
+        this.logger.warn(`[shopee.price] item=${l.listing_id} model=${l.variation_id ?? ''} falhou: ${errorMsg}`)
+      }
+      await supabaseAdmin.from('stock_sync_logs').insert({
+        product_id:    productId ?? itemId.toString(),
+        channel:       'shopee_price',
+        listing_id:    l.listing_id,
+        sent_quantity: Math.round(p), // reusa coluna p/ registrar o valor enviado
+        status,
+        error_message: errorMsg,
+        http_status:   httpStatus,
+        triggered_by:  'manual_price',
+        duration_ms:   Date.now() - startTime,
+      })
+    }
+    return { ok: failed === 0, pushed, failed }
+  }
+
   /** AUDITORIA read-only — dump do estoque cru de 1 item (Fase C, pré-mapeamento). */
   async inspectStock(orgId: string, itemId: number) {
     const resolved = await this.resolveConn(orgId)
