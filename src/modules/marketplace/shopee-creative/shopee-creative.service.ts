@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { ShopeeAlgoScoreService } from '../shopee-algo-score/shopee-algo-score.service'
 import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
@@ -130,7 +131,7 @@ export class ShopeeCreativePublisherService {
     if (description.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
 
     // 4) categoria (do rascunho ou recomendada pelo nome)
-    const categoryId = await adapter.recommendCategory(conn, name)
+    const categoryId = await this.step('categoria (category_recommend)', () => adapter.recommendCategory(conn, name))
     if (!categoryId) throw new BadRequestException('Não foi possível recomendar uma categoria Shopee para este produto. Informe a categoria manualmente.')
 
     // 5) imagens: photo_urls/images → upload → image_id (máx 9, capa = [0])
@@ -141,18 +142,21 @@ export class ShopeeCreativePublisherService {
       .slice(0, 9)
     if (!photoUrls.length) throw new BadRequestException('Produto sem fotos (https) para publicar.')
     const imageIds: string[] = []
+    let uploadErr: string | null = null
     for (const u of photoUrls) {
       try { imageIds.push(await adapter.uploadImage(conn, u)) }
-      catch (e) { this.logger.warn(`[shopee.publish] upload falhou ${u}: ${(e as Error)?.message}`) }
+      catch (e) { uploadErr = (e as Error)?.message ?? null; this.logger.warn(`[shopee.publish] upload falhou ${u}: ${uploadErr}`) }
     }
-    if (!imageIds.length) throw new BadRequestException('Falha ao subir as imagens pro media space da Shopee.')
+    if (!imageIds.length) {
+      throw new BadRequestException(this.scopeMsg('upload de imagem (media_space)', uploadErr) ?? 'Falha ao subir as imagens pro media space da Shopee.')
+    }
 
     // 6) atributos obrigatórios (best-effort: marca + enums com 1ª opção)
-    const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
+    const attrRaw = await this.step('atributos (get_attributes)', () => adapter.getCategoryAttributes(conn, categoryId))
     const attributeList = this.buildMandatoryAttributes(attrRaw)
 
     // 7) logística: canais habilitados
-    const channels = await adapter.getLogisticsChannels(conn)
+    const channels = await this.step('logística (get_channel_list)', () => adapter.getLogisticsChannels(conn))
     const enabled = channels.filter(c => c.enabled && Number.isFinite(c.channel_id))
     if (!enabled.length) throw new BadRequestException('Nenhum canal de logística habilitado na loja Shopee.')
     const logisticInfo = enabled.map(c => ({ logistic_id: c.channel_id, enabled: true }))
@@ -189,7 +193,7 @@ export class ShopeeCreativePublisherService {
     }
 
     // 9) cria o anúncio
-    const { item_id } = await adapter.addItem(conn, payload)
+    const { item_id } = await this.step('criar anúncio (add_item)', () => adapter.addItem(conn, payload))
 
     // teste ao vivo: cria e remove (não deixa lixo no catálogo Shopee)
     if (opts?.deleteAfter) {
@@ -212,6 +216,30 @@ export class ShopeeCreativePublisherService {
 
     this.logger.log(`[shopee.publish] org=${orgId} product=${prod.id} → item=${item_id} cat=${categoryId} imgs=${imageIds.length}`)
     return { ok: true, item_id, category_id: categoryId, images: imageIds.length }
+  }
+
+  /** Executa um passo da esteira convertendo erro 403/Forbidden da Shopee numa
+   *  mensagem ACIONÁVEL (= escopo de API não autorizado no app, ação do user no
+   *  Open Platform Console + re-OAuth), igual o bloqueio do módulo Ads. */
+  private async step<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn()
+    } catch (e: unknown) {
+      const msg = this.scopeMsg(label, (e as Error)?.message ?? null, e)
+      if (msg) throw new BadRequestException(msg)
+      throw e
+    }
+  }
+
+  /** Monta mensagem de escopo se o erro for 403/Forbidden; senão null. */
+  private scopeMsg(label: string, message: string | null, raw?: unknown): string | null {
+    const status = axios.isAxiosError(raw) ? raw.response?.status : undefined
+    const is403 = status === 403 || /403|forbidden|no permission|not authorized/i.test(message ?? '')
+    if (!is403) return null
+    return `Shopee bloqueou "${label}" com 403 (Forbidden) — o app e-Click não tem esse escopo de API ` +
+      `autorizado pra publicação. É autorização no Open Platform Console (habilitar o módulo de ` +
+      `gestão de produtos/logística + re-OAuth da loja) — ação no painel Shopee, não no código. ` +
+      `(igual ao destravamento do módulo Ads).`
   }
 
   /** Best-effort dos atributos OBRIGATÓRIOS de uma categoria: pra cada
