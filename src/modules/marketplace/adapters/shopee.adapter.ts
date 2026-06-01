@@ -38,7 +38,8 @@ export interface ShopMetricsApiResult {
  *  no caller. status derivado: voucher por tempo, flash_sale pelo campo `type`. */
 export interface SyncedCampaignRow {
   kind:        'voucher' | 'flash_sale'
-  status:      'ongoing' | 'upcoming' | 'expired'
+  // valores da CHECK constraint shopee.campaigns: ongoing→active, upcoming→planned, expired→ended
+  status:      'active' | 'planned' | 'ended'
   title:       string
   config:      Record<string, unknown>
   starts_at:   string        // ISO
@@ -542,7 +543,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
         const start = Number(v.start_time)
         const end   = Number(v.end_time)
         const status: SyncedCampaignRow['status'] =
-          start && nowSec < start ? 'upcoming' : end && nowSec > end ? 'expired' : 'ongoing'
+          start && nowSec < start ? 'planned' : end && nowSec > end ? 'ended' : 'active'
         campaigns.push({
           kind: 'voucher', status,
           title: v.voucher_name ?? `Voucher ${vid}`,
@@ -582,7 +583,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
             const end   = Number(f.end_time)
             const t = Number(f.type)
             const status: SyncedCampaignRow['status'] =
-              t === 1 ? 'upcoming' : t === 3 ? 'expired' : 'ongoing'
+              t === 1 ? 'planned' : t === 3 ? 'ended' : 'active'
             campaigns.push({
               kind: 'flash_sale', status,
               title: `Flash Sale ${toIso(start)?.slice(0, 10) ?? f.flash_sale_id}`,
