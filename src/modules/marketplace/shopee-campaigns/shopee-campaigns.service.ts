@@ -91,9 +91,9 @@ export class ShopeeCampaignsService {
       config:          r.config,
       starts_at:       r.starts_at,
       ends_at:         r.ends_at,
-      revenue_cents:   0,
-      cost_cents:      0,
-      orders:          0,
+      revenue_cents:   r.revenue_cents ?? 0,   // só ads preenche (GMV)
+      cost_cents:      r.cost_cents    ?? 0,   // só ads preenche (spend)
+      orders:          r.orders        ?? 0,   // só ads preenche
       external_id:     r.external_id,
       raw:             r.raw ?? null,
     }))

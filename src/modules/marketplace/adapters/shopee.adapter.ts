@@ -33,19 +33,24 @@ export interface ShopMetricsApiResult {
   errors:          string[]
 }
 
-/** F1.4 sync — 1 campanha (voucher/flash_sale) normalizada pra shopee.campaigns.
- *  voucher/flash_sale NÃO têm spend/GMV (só o módulo Ads) → revenue/cost/orders=0
- *  no caller. status derivado: voucher por tempo, flash_sale pelo campo `type`. */
+/** F1.4 sync — 1 campanha (voucher/flash_sale/ads) normalizada pra shopee.campaigns.
+ *  voucher/flash_sale NÃO têm spend/GMV (revenue/cost/orders=undefined → 0). SÓ ADS
+ *  traz métricas reais (do módulo de performance). status derivado: voucher por
+ *  tempo, flash_sale pelo campo `type`, ads pelo status da campanha. */
 export interface SyncedCampaignRow {
-  kind:        'voucher' | 'flash_sale'
+  kind:           'voucher' | 'flash_sale' | 'ads'
   // valores da CHECK constraint shopee.campaigns: ongoing→active, upcoming→planned, expired→ended
-  status:      'active' | 'planned' | 'ended'
-  title:       string
-  config:      Record<string, unknown>
-  starts_at:   string        // ISO
-  ends_at:     string | null
-  external_id: string
-  raw:         unknown
+  status:         'active' | 'planned' | 'ended' | 'paused'
+  title:          string
+  config:         Record<string, unknown>
+  starts_at:      string        // ISO
+  ends_at:        string | null
+  external_id:    string
+  raw:            unknown
+  // só ADS preenche (spend/GMV/orders). Default 0 no caller pra voucher/flash.
+  revenue_cents?: number
+  cost_cents?:    number
+  orders?:        number
 }
 
 export interface CampaignsApiResult {
@@ -603,6 +608,127 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       }
     } catch (e: unknown) {
       errors.push(`flash_sales: ${(e as Error)?.message}`)
+    }
+
+    // ── ADS (módulo 105 — ESCOPO SEPARADO, pode dar error_auth/permission) ──
+    // Único com spend/GMV/orders reais. Probe get_total_balance primeiro pra
+    // não varrer se o escopo não estiver autorizado (precisa re-OAuth se foi
+    // habilitado depois de conectar). Dinheiro = float BRL → *100 = centavos.
+    try {
+      // probe de permissão
+      const balPath = '/api/v2/ads/get_total_balance'
+      const { data: bal } = await this.callShopee({
+        key: `shop:${shopId}`, tag: 'shopee.adsBalance',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${balPath}?${qs(balPath, {})}`),
+      })
+      if (bal?.error) throw new Error(`${bal.error}: ${bal.message}`)
+
+      // 1) índice de campanhas (paginação has_next_page)
+      const adList: Array<{ id: number; ad_type: string }> = []
+      let offset = 0
+      for (;;) {
+        const path = '/api/v2/ads/get_product_level_campaign_id_list'
+        const { data } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.adsIdList',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs(path, { ad_type: 'all', offset: String(offset), limit: '1000' })}`),
+        })
+        if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const list = (data?.response?.campaign_list ?? []) as any[]
+        for (const c of list) if (c?.campaign_id != null) adList.push({ id: Number(c.campaign_id), ad_type: String(c.ad_type ?? '') })
+        if (!data?.response?.has_next_page || list.length === 0) break
+        offset += list.length
+        if (offset > 10000) break
+      }
+
+      if (adList.length) {
+        // janela de performance: últimos 30 dias, formato DD-MM-YYYY (≤31d)
+        const pad = (n: number) => String(n).padStart(2, '0')
+        const ddmmyyyy = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`
+        const endD = new Date()
+        const startD = new Date(Date.now() - 30 * 86400 * 1000)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const settingById = new Map<number, any>()
+        const perfById = new Map<number, { spend: number; gmv: number; orders: number; impr: number; clk: number; name?: string }>()
+
+        const ids = adList.map(a => a.id)
+        for (let i = 0; i < ids.length; i += 100) {
+          const chunk = ids.slice(i, i + 100).join(',')
+          // settings (info_type 1 = common_info)
+          const sPath = '/api/v2/ads/get_product_level_campaign_setting_info'
+          const { data: sData } = await this.callShopee({
+            key: `shop:${shopId}`, tag: 'shopee.adsSetting',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            exec: () => axios.get<any>(`${SHOPEE_BASE}${sPath}?${qs(sPath, { info_type_list: '1', campaign_id_list: chunk })}`),
+          })
+          if (sData?.error) throw new Error(`${sData.error}: ${sData.message}`)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          for (const c of (sData?.response?.campaign_list ?? []) as any[]) {
+            if (c?.campaign_id != null) settingById.set(Number(c.campaign_id), c.common_info ?? {})
+          }
+          // performance diária (agregada na janela)
+          const pPath = '/api/v2/ads/get_product_campaign_daily_performance'
+          const { data: pData } = await this.callShopee({
+            key: `shop:${shopId}`, tag: 'shopee.adsPerf',
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            exec: () => axios.get<any>(`${SHOPEE_BASE}${pPath}?${qs(pPath, { start_date: ddmmyyyy(startD), end_date: ddmmyyyy(endD), campaign_id_list: chunk })}`),
+          })
+          if (pData?.error) throw new Error(`${pData.error}: ${pData.message}`)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          for (const sh of (pData?.response ?? []) as any[]) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            for (const c of (sh?.campaign_list ?? []) as any[]) {
+              let spend = 0, gmv = 0, orders = 0, impr = 0, clk = 0
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              for (const m of (c?.metrics_list ?? []) as any[]) {
+                spend += Number(m.expense) || 0
+                gmv   += Number(m.broad_gmv) || 0
+                orders += Number(m.broad_order) || 0
+                impr  += Number(m.impression) || 0
+                clk   += Number(m.clicks) || 0
+              }
+              perfById.set(Number(c.campaign_id), { spend, gmv, orders, impr, clk, name: c?.ad_name })
+            }
+          }
+        }
+
+        for (const { id, ad_type } of adList) {
+          const ci = settingById.get(id) ?? {}
+          const perf = perfById.get(id) ?? { spend: 0, gmv: 0, orders: 0, impr: 0, clk: 0 }
+          const cs = String(ci.campaign_status ?? '')
+          const status: SyncedCampaignRow['status'] =
+            cs === 'scheduled' ? 'planned'
+              : cs === 'paused' ? 'paused'
+                : (cs === 'ended' || cs === 'closed' || cs === 'deleted') ? 'ended'
+                  : 'active'
+          const dur = ci.campaign_duration ?? {}
+          const startSec = Number(dur.start_time)
+          const endSec   = Number(dur.end_time)
+          const roas = perf.spend > 0 ? perf.gmv / perf.spend : null
+          campaigns.push({
+            kind: 'ads', status,
+            title: ci.ad_name ?? perf.name ?? `Ads ${id}`,
+            config: {
+              ad_type, bidding_method: ci.bidding_method ?? null,
+              campaign_placement: ci.campaign_placement ?? null,
+              budget: ci.campaign_budget ?? null,
+              roas: roas != null ? Number(roas.toFixed(2)) : null,
+              impressions: perf.impr, clicks: perf.clk, window_days: 30,
+            },
+            starts_at: startSec > 0 ? new Date(startSec * 1000).toISOString() : nowIso,
+            ends_at:   endSec > 0 ? new Date(endSec * 1000).toISOString() : null,
+            external_id: String(id),
+            raw: { setting: ci, perf },
+            revenue_cents: Math.round(perf.gmv * 100),
+            cost_cents:    Math.round(perf.spend * 100),
+            orders:        perf.orders,
+          })
+        }
+      }
+    } catch (e: unknown) {
+      errors.push(`ads: ${(e as Error)?.message}`)
     }
 
     return { campaigns, errors }
