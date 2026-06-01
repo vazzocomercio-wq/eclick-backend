@@ -8,6 +8,12 @@ import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
+/** Coerção numérica tolerante (0 é válido; ausente/NaN → null). */
+const toNum = (v: unknown): number | null => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 interface AdvertiserRaw {
   advertiser_id: string | number
   account_name?: string
@@ -286,6 +292,142 @@ export class MlAdsService {
 
     this.logger.log(`[ml-ads.pads.search] ${advertiserId}: ${out.length} campanhas-dias gerados (${processedDays}/${dates.length} dias ok${failedDays ? `, ${failedDays} falharam` : ''})`)
     return out
+  }
+
+  // ── ML Ads NÍVEL-ANÚNCIO (F12 Fase 4, copiloto — read-only) ───────────────
+
+  /**
+   * Snapshot por ANÚNCIO (item) do Product Ads, com métricas AGREGADAS da
+   * janela [dateFrom, dateTo]. Usa o MESMO endpoint do getPadsMetrics
+   * (product_ads/items/search, api-version 2) mas guarda os campos POR ITEM
+   * (status, recommended, permalink, métricas) — o motor do Active decide no
+   * nível de anúncio a partir disso. Confirmado ao vivo: passar um RANGE
+   * (date_from < date_to) com metrics= devolve os totais AGREGADOS do período
+   * por item numa só chamada paginada (não precisa varrer dia a dia como o
+   * getPadsMetrics, que quer breakdown diário). Read-only — escrita no Product
+   * Ads do ML está bloqueada (401 mclics).
+   */
+  private async fetchAdItemsForAdvertiser(
+    orgId:        string,
+    advertiserId: string,
+    dateFrom:     string,
+    dateTo:       string,
+    metricsDays:  number,
+  ): Promise<Array<Record<string, unknown>>> {
+    const { token } = await this.ml.getTokenForOrg(orgId)
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Api-Version': '2',
+      Accept: 'application/json',
+    }
+    const url = `${ML_BASE}/advertising/MLB/advertisers/${advertiserId}/product_ads/items/search`
+    const nowIso = new Date().toISOString()
+    const rows: Array<Record<string, unknown>> = []
+    const limit = 50
+    let offset = 0
+    while (true) {
+      const { data } = await axios.get(url, {
+        headers,
+        params: { date_from: dateFrom, date_to: dateTo, metrics: this.PADS_METRIC_FIELDS, limit, offset },
+      })
+      const results: Array<Record<string, unknown>> = Array.isArray(data?.results) ? data.results : []
+      for (const it of results) {
+        const itemId = String(it.item_id ?? '')
+        if (!itemId) continue
+        const cid = it.campaign_id != null ? String(it.campaign_id) : null
+        const m = (it.metrics ?? {}) as Record<string, unknown>
+        rows.push({
+          organization_id: orgId,
+          item_id:         itemId,
+          advertiser_id:   String(advertiserId),
+          campaign_id:     cid && cid !== '0' ? cid : null,
+          ad_group_id:     it.ad_group_id != null ? String(it.ad_group_id) : null,
+          title:           (it.title ?? null) as string | null,
+          price:           toNum(it.price),
+          permalink:       (it.permalink ?? null) as string | null,
+          thumbnail:       (it.thumbnail ?? null) as string | null,
+          status:          (it.status ?? null) as string | null,
+          recommended:     it.recommended === true,
+          domain_id:       (it.domain_id ?? null) as string | null,
+          clicks:          toNum(m.clicks),
+          prints:          toNum(m.prints),
+          cost:            toNum(m.cost),
+          units_quantity:  toNum(m.units_quantity),
+          total_amount:    toNum(m.total_amount),
+          acos:            toNum(m.acos),
+          roas:            toNum(m.roas),
+          ctr:             toNum(m.ctr),
+          metrics_days:    metricsDays,
+          synced_at:       nowIso,
+        })
+      }
+      if (results.length < limit) break
+      offset += limit
+      if (offset > 5000) break // safety cap
+    }
+    return rows
+  }
+
+  /**
+   * Sincroniza o snapshot de anúncios (items) de TODOS os advertisers PADS da
+   * org → public.ml_ads_items. Fail-isolated (best-effort): nunca derruba o
+   * sync de campanhas. Replace-por-advertiser: apaga os anúncios que não vieram
+   * neste sync (saíram do advertiser) comparando synced_at.
+   */
+  private async syncAdItems(
+    orgId:       string,
+    advertisers: Array<{ advertiser_id: string; product: string }>,
+    dateFrom:    string,
+    dateTo:      string,
+    metricsDays: number,
+  ): Promise<number> {
+    const pads = advertisers.filter(a => a.product === 'PADS')
+    if (pads.length === 0) return 0
+    let total = 0
+    for (const adv of pads) {
+      const runStart = new Date().toISOString()
+      let rows: Array<Record<string, unknown>> = []
+      try {
+        rows = await this.fetchAdItemsForAdvertiser(orgId, adv.advertiser_id, dateFrom, dateTo, metricsDays)
+      } catch (e: any) {
+        this.logger.warn(`[ml-ads.items] fetch ${adv.advertiser_id}: ${e?.response?.status ?? ''} ${e?.message}`)
+        continue
+      }
+      if (rows.length === 0) continue
+      // synced_at uniforme p/ esta passada — permite apagar o que sumiu depois.
+      for (const r of rows) r.synced_at = runStart
+
+      let ok = true
+      const CHUNK = 500
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const slice = rows.slice(i, i + CHUNK)
+        const { error } = await supabaseAdmin
+          .from('ml_ads_items')
+          .upsert(slice, { onConflict: 'organization_id,item_id' })
+        if (error) {
+          if (this.isMissingTableError(error)) {
+            this.logger.warn('[ml-ads.items] tabela ml_ads_items ausente — rode a migration 20260688')
+            return total
+          }
+          this.logger.warn(`[ml-ads.items] upsert ${adv.advertiser_id}: ${error.message}`)
+          ok = false
+          break
+        }
+      }
+      if (!ok) continue
+      total += rows.length
+
+      // anúncios que não vieram nesta passada saíram do advertiser → remove.
+      const { error: delErr } = await supabaseAdmin
+        .from('ml_ads_items')
+        .delete()
+        .eq('organization_id', orgId)
+        .eq('advertiser_id', String(adv.advertiser_id))
+        .lt('synced_at', runStart)
+      if (delErr) this.logger.warn(`[ml-ads.items] cleanup ${adv.advertiser_id}: ${delErr.message}`)
+    }
+    this.logger.log(`[ml-ads.items] org=${orgId} ${total} anúncios sincronizados (${pads.length} advertisers PADS)`)
+    return total
   }
 
   /** Per-campaign daily metrics — fallback when the bulk endpoint returns
@@ -721,6 +863,14 @@ export class MlAdsService {
     }
 
     this.logger.log(`[ml-ads.sync] org=${orgId} ${advertisers.length} advertisers, ${totalCampaigns} campanhas, ${totalReports} reports`)
+
+    // F12 Fase 4: snapshot por ANÚNCIO (items) p/ o copiloto nível-anúncio do
+    // Active. Fail-isolated — nunca derruba o sync de campanhas/reports acima.
+    try {
+      await this.syncAdItems(orgId, advertisers, dateFrom, dateTo, 30)
+    } catch (e: any) {
+      this.logger.warn(`[ml-ads.items] sync falhou: ${e?.message}`)
+    }
 
     // F4: anúncios que entraram numa campanha ADS desde o último sync →
     // avança o card do funil "Anúncios ML" pra "Concluído". Fail-isolated.
