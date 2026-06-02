@@ -114,12 +114,16 @@ export class ShopeeMarketingService {
     const nowSec = Math.floor(Date.now() / 1000)
     const startTime = nowSec + 3600
     const endTime = startTime + 7 * 86400
-    let discountId: number
+    let discountId: number | null = null
     try {
       const created = await adapter.addDiscount(conn, { name: `e-Click ${d}%OFF ${itemId}`.slice(0, 25), startTime, endTime })
       discountId = created.discount_id
       await adapter.addDiscountItems(conn, { discountId, itemId, models: models.map(m => ({ model_id: m.model_id, promotion_price: m.promotion_price })) })
     } catch (e: unknown) {
+      // falha parcial: se o desconto foi criado mas os itens falharam, remove o órfão
+      if (discountId != null) {
+        try { await adapter.deleteDiscount(conn, discountId) } catch (de) { this.logger.warn(`[shopee.mkt] limpeza órfão discount=${discountId} falhou: ${(de as Error)?.message}`) }
+      }
       const status = axios.isAxiosError(e) ? e.response?.status : undefined
       const msg = (e as Error)?.message ?? ''
       if (status === 403 || /403|forbidden|no permission|not authorized/i.test(msg)) {
@@ -139,6 +143,17 @@ export class ShopeeMarketingService {
 
     this.logger.log(`[shopee.mkt] APLICOU desconto org=${orgId} item=${itemId} d=${d}% discount_id=${discountId}`)
     return { ok: true, vehicle: 'discount', discount_id: discountId, models }
+  }
+
+  /** F18 Bloco 3 — cancela/remove um Desconto (rollback de promoção). */
+  async cancelDiscount(orgId: string, discountId: number): Promise<{ ok: true }> {
+    const resolved = await this.mp.resolve(orgId, 'shopee')
+    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    const adapter = resolved.adapter as ShopeeAdapter
+    await adapter.deleteDiscount(conn, discountId)
+    this.logger.log(`[shopee.mkt] desconto cancelado org=${orgId} discount_id=${discountId}`)
+    return { ok: true }
   }
 
   /** Recomendações de marketing. objectives = subconjunto de OBJECTIVES (default

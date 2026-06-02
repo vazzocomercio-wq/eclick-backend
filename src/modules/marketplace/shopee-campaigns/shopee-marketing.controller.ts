@@ -57,4 +57,18 @@ export class ShopeeMarketingController {
     }
     return this.svc.applyDiscount(user.orgId, itemId, Number(body.discount_pct), { dryRun: body.dry_run, deleteAfter: body.delete_after })
   }
+
+  /** F18 Bloco 3 — cancela/remove um Desconto (rollback). */
+  @Post('cancel-discount')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async cancelDiscount(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { discount_id?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(body?.discount_id)
+    if (!Number.isFinite(id)) throw new BadRequestException('discount_id inválido')
+    return this.svc.cancelDiscount(user.orgId, id)
+  }
 }
