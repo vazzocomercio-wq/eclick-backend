@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import * as crypto from 'crypto'
+import sharp from 'sharp'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
@@ -774,10 +775,23 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       access_token: accessToken, shop_id: String(shopId), sign,
     }).toString()
 
-    // baixa a imagem → Blob → multipart
+    // baixa a imagem e CONVERTE pra JPEG. O media_space da Shopee aceita
+    // JPG/PNG mas NÃO WEBP — as imagens do IA Criativo são WEBP, então sem
+    // converter a Shopee devolve error_param "image is invalid or not supported".
+    // sharp normaliza qualquer formato (webp/png/jpg) → JPEG com content-type certo.
     const imgResp = await axios.get<ArrayBuffer>(imageUrl, { responseType: 'arraybuffer' })
+    let jpeg: Buffer
+    try {
+      jpeg = await sharp(Buffer.from(imgResp.data))
+        .rotate() // respeita orientação EXIF
+        .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 90 })
+        .toBuffer()
+    } catch (e) {
+      throw new Error(`Shopee uploadImage: falha ao converter imagem pra JPEG (${(e as Error)?.message})`)
+    }
     const form = new FormData()
-    form.append('image', new Blob([imgResp.data]), 'image.jpg')
+    form.append('image', new Blob([new Uint8Array(jpeg)], { type: 'image/jpeg' }), 'image.jpg')
     form.append('scene', 'normal')
 
     const { data } = await this.callShopee({
