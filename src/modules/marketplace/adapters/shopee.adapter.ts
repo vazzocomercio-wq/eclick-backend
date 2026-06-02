@@ -916,6 +916,38 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     if (data?.error) throw new Error(`Shopee deleteItem ${data.error}: ${data.message}`)
   }
 
+  // ── F18 Marketing inteligente — probe de escopo do módulo Flash Sale ────────
+  /** Lê os time slots de Oferta Relâmpago da loja (próximos dias). Serve de
+   *  PROBE de escopo do módulo shop_flash_sale: se devolver 403, o app não tem
+   *  permissão de gestão de promoções (igual ao bloqueio do Ads). Read-only. */
+  async getFlashSaleTimeSlots(conn: MpConnection): Promise<{ ok: boolean; slots: unknown[]; error?: string }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/shop_flash_sale/get_shop_flash_sale_time_slot_id'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const startTime = ts
+    const endTime   = ts + 7 * 86400
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      start_time: String(startTime), end_time: String(endTime),
+    })
+    try {
+      const { data } = await this.callShopee({
+        key: `shop:${shopId}`, tag: 'shopee.flashTimeSlots',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+      })
+      if (data?.error) return { ok: false, slots: [], error: `${data.error}: ${data.message}` }
+      return { ok: true, slots: data?.response ?? [] }
+    } catch (e: unknown) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const status = (e as any)?.response?.status
+      return { ok: false, slots: [], error: status === 403 ? '403 Forbidden' : ((e as Error)?.message ?? 'erro') }
+    }
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.

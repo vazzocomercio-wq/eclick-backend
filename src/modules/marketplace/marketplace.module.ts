@@ -17,6 +17,8 @@ import { ShopeeQualityService } from './shopee-quality/shopee-quality.service'
 import { ShopeeCampaignsController } from './shopee-campaigns/shopee-campaigns.controller'
 import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.service'
 import { CampaignMarginService } from './shopee-campaigns/campaign-margin.service'
+import { ShopeeMarketingService } from './shopee-campaigns/shopee-marketing.service'
+import { ShopeeMarketingController } from './shopee-campaigns/shopee-marketing.controller'
 import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
 import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
 import { ShopeeCreativeController } from './shopee-creative/shopee-creative.controller'
@@ -43,6 +45,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeCreativeController,  // F1.7 — POST /shopee/creative/evaluate (guard)
     ShopeeSyncController,       // F0.7 — POST /shopee/sync/products (sync real)
     ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
+    ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -54,6 +57,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeQualityService,            // F1.3 — Quality Center (snapshot + alerts)
     ShopeeCampaignsService,          // F1.4 — Campaign Center (READ-ONLY Sprint 1)
     CampaignMarginService,           // F3.1 — gate de margem pós-comissão
+    ShopeeMarketingService,          // F18 Marketing inteligente — motor de recomendação
     ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
     ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
     ShopeeProductSyncService,        // F0.7 — sync de produtos reais → algo score
