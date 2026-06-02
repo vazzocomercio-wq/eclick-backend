@@ -948,6 +948,80 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  /** F18 Marketing — cria um Desconto (promoção) e devolve discount_id.
+   *  `POST /api/v2/discount/add_discount`. Datas Unix (s). ⚠️ cria promo REAL. */
+  async addDiscount(conn: MpConnection, args: { name: string; startTime: number; endTime: number }): Promise<{ discount_id: number; raw: unknown }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/discount/add_discount'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = { discount_name: args.name.slice(0, 25), start_time: args.startTime, end_time: args.endTime }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.addDiscount',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[shopee.addDiscount] → ${JSON.stringify(data)?.slice(0, 300)}`)
+    if (data?.error) throw new Error(`Shopee addDiscount ${data.error}: ${data.message}`)
+    const id = data?.response?.discount_id
+    if (!id) throw new Error(`Shopee addDiscount sem discount_id: ${JSON.stringify(data)?.slice(0, 200)}`)
+    return { discount_id: Number(id), raw: data }
+  }
+
+  /** Adiciona itens/variações a um Desconto. `POST /api/v2/discount/add_discount_item`.
+   *  model_promotion_price = preço promocional por model. ⚠️ promo REAL. */
+  async addDiscountItems(conn: MpConnection, args: {
+    discountId: number
+    itemId:     number
+    models:     Array<{ model_id: number; promotion_price: number }>
+  }): Promise<{ raw: unknown }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/discount/add_discount_item'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const model_list = args.models.filter(m => m.model_id > 0).map(m => ({ model_id: m.model_id, model_promotion_price: m.promotion_price }))
+    const item: Record<string, unknown> = { item_id: args.itemId }
+    if (model_list.length) item.model_list = model_list
+    else item.item_promotion_price = args.models[0]?.promotion_price
+    const body = { discount_id: args.discountId, item_list: [item] }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.addDiscountItem',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[shopee.addDiscountItems] discount=${args.discountId} item=${args.itemId} → ${JSON.stringify(data)?.slice(0, 300)}`)
+    if (data?.error) throw new Error(`Shopee addDiscountItem ${data.error}: ${data.message}`)
+    const fail = data?.response?.error_list ?? data?.response?.fail_list ?? []
+    if (Array.isArray(fail) && fail.length) throw new Error(`Shopee addDiscountItem falha: ${JSON.stringify(fail[0])?.slice(0, 150)}`)
+    return { raw: data }
+  }
+
+  /** Remove um Desconto (rollback do teste). `POST /api/v2/discount/delete_discount`. */
+  async deleteDiscount(conn: MpConnection, discountId: number): Promise<void> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/discount/delete_discount'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.deleteDiscount',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, { discount_id: discountId }),
+    })
+    if (data?.error) throw new Error(`Shopee deleteDiscount ${data.error}: ${data.message}`)
+  }
+
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).
    *  - get_shop_performance → metric_list: id 1/85 = late_ship_rate, 43/92 =
    *    return_refund_rate, 4 = prep_time_days. unit % normalizado p/ 0-1.

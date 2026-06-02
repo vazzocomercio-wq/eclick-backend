@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
@@ -35,5 +35,26 @@ export class ShopeeMarketingController {
   async scopeProbe(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.scopeProbe(user.orgId)
+  }
+
+  /** F18 Bloco 3 — APLICAR de verdade (cria a promoção na Shopee). ⚠️ promo real.
+   *  vehicle='discount' suportado; flash_sale/voucher = próximos. dry_run só
+   *  simula (margem guard); delete_after cria+remove pro teste de escopo. */
+  @Post('apply')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  async apply(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { item_id?: number; discount_pct?: number; vehicle?: string; dry_run?: boolean; delete_after?: boolean },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const itemId = Number(body?.item_id)
+    if (!Number.isFinite(itemId)) throw new BadRequestException('item_id inválido')
+    if (body?.discount_pct == null) throw new BadRequestException('discount_pct ausente')
+    const vehicle = body.vehicle ?? 'discount'
+    if (vehicle !== 'discount') {
+      throw new BadRequestException(`Aplicar via "${vehicle}" ainda não disponível — por ora só Desconto. (Flash Sale/Cupom: próxima fase)`)
+    }
+    return this.svc.applyDiscount(user.orgId, itemId, Number(body.discount_pct), { dryRun: body.dry_run, deleteAfter: body.delete_after })
   }
 }

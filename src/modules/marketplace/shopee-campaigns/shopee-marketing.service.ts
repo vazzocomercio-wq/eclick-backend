@@ -1,6 +1,7 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
-import { round2 } from '../../../common/margin'
+import { round2, computeContributionMargin } from '../../../common/margin'
 import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
 import { ShopeeListingLinkService } from '../shopee-sync/shopee-listing-link.service'
 import { CampaignMarginService } from './campaign-margin.service'
@@ -51,6 +52,93 @@ export class ShopeeMarketingService {
           : `Bloqueado (${r.error}). Habilite o módulo de promoções no Open Platform Console + re-OAuth da loja (igual ao Ads).`,
       },
     }
+  }
+
+  /** F18 Bloco 3 — APLICAR de verdade: cria um Desconto na Shopee pro anúncio,
+   *  com `discountPct` de OFF por variação. Guard de margem (nunca abaixo do
+   *  piso). 403-aware (escopo write → msg acionável). dryRun só simula; o
+   *  desconto nasce AGENDADO (start +1h) — deleteAfter cria+remove pro teste. */
+  async applyDiscount(orgId: string, itemId: number, discountPct: number, opts?: { dryRun?: boolean; deleteAfter?: boolean }): Promise<{
+    ok: boolean; vehicle: 'discount'; discount_id?: number; deleted?: boolean
+    models: Array<{ model_id: number; original_price: number; promotion_price: number; margin_pct: number }>
+    dry_run?: boolean
+  }> {
+    const d = Math.round(Number(discountPct))
+    if (!(d >= 1 && d <= 95)) throw new BadRequestException('Desconto inválido (1-95%)')
+
+    const resolved = await this.mp.resolve(orgId, 'shopee')
+    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    const adapter = resolved.adapter as ShopeeAdapter
+    const shopId = conn.shop_id!
+
+    // produto vinculado (custo/imposto) p/ o guard de margem
+    const { data: pl } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id')
+      .eq('platform', 'shopee').eq('account_id', String(shopId)).eq('listing_id', String(itemId))
+      .limit(1).maybeSingle<{ product_id: string }>()
+    if (!pl?.product_id) throw new BadRequestException('Anúncio sem produto vinculado — vincule antes de promover (pra garantir a margem).')
+    const { data: prod } = await supabaseAdmin
+      .from('products').select('cost_price, tax_percentage, tax_on_freight')
+      .eq('id', pl.product_id).maybeSingle<{ cost_price: number | null; tax_percentage: number | null; tax_on_freight: boolean | null }>()
+    const cost = prod?.cost_price != null ? Number(prod.cost_price) : null
+    if (cost == null || cost <= 0) throw new BadRequestException('Produto sem custo cadastrado — sem custo não dá pra garantir a margem da promoção.')
+
+    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const { data: org } = await supabaseAdmin.from('organizations').select('min_campaign_margin_pct').eq('id', orgId).maybeSingle<{ min_campaign_margin_pct: number | null }>()
+    const floorPct = org?.min_campaign_margin_pct ?? 8
+
+    // models reais (preço de lista) via inspect
+    const inspect = await adapter.inspectItemStock(conn, itemId)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawModels = ((inspect.models as any)?.model ?? []) as any[]
+    const models = rawModels.map(m => {
+      const original = Number(m?.price_info?.[0]?.original_price ?? m?.price_info?.[0]?.current_price ?? 0)
+      const promo = round2(original * (1 - d / 100))
+      const mm = computeContributionMargin({
+        price: promo, saleFee: round2(promo * commissionPct / 100), shipping: 0,
+        cost, taxPercentage: prod?.tax_percentage ?? 0, taxOnFreight: prod?.tax_on_freight ?? false,
+      })
+      return { model_id: Number(m?.model_id ?? 0), original_price: original, promotion_price: promo, margin_pct: mm.contributionMarginPct }
+    }).filter(m => m.original_price > 0)
+
+    if (!models.length) throw new BadRequestException('Não foi possível ler os preços das variações na Shopee.')
+    // GUARD: nenhuma variação pode ficar abaixo do piso de margem
+    const below = models.find(m => m.margin_pct < floorPct)
+    if (below) throw new BadRequestException(`Desconto ${d}% derruba a margem de uma variação pra ${below.margin_pct.toFixed(1)}% (piso ${floorPct}%). Reduza o desconto.`)
+
+    if (opts?.dryRun) return { ok: true, vehicle: 'discount', models, dry_run: true }
+
+    // cria o desconto (agendado: +1h, dura 7 dias) — wrap 403-aware
+    const nowSec = Math.floor(Date.now() / 1000)
+    const startTime = nowSec + 3600
+    const endTime = startTime + 7 * 86400
+    let discountId: number
+    try {
+      const created = await adapter.addDiscount(conn, { name: `e-Click ${d}%OFF ${itemId}`.slice(0, 25), startTime, endTime })
+      discountId = created.discount_id
+      await adapter.addDiscountItems(conn, { discountId, itemId, models: models.map(m => ({ model_id: m.model_id, promotion_price: m.promotion_price })) })
+    } catch (e: unknown) {
+      const status = axios.isAxiosError(e) ? e.response?.status : undefined
+      const msg = (e as Error)?.message ?? ''
+      if (status === 403 || /403|forbidden|no permission|not authorized/i.test(msg)) {
+        throw new BadRequestException(
+          'Shopee bloqueou a criação de promoções com 403 — o app e-Click não tem escopo de gestão de Marketing/Promoções autorizado. ' +
+          'É autorização no Open Platform Console (habilitar Marketing + re-OAuth da loja), igual ao Ads. ' +
+          'Enquanto isso, use o plano recomendado e aplique na tela da Shopee.',
+        )
+      }
+      throw new BadRequestException(`Falha ao criar o desconto na Shopee: ${msg}`)
+    }
+
+    if (opts?.deleteAfter) {
+      try { await adapter.deleteDiscount(conn, discountId) } catch (e) { this.logger.warn(`[shopee.mkt] deleteAfter falhou discount=${discountId}: ${(e as Error)?.message}`) }
+      return { ok: true, vehicle: 'discount', discount_id: discountId, deleted: true, models }
+    }
+
+    this.logger.log(`[shopee.mkt] APLICOU desconto org=${orgId} item=${itemId} d=${d}% discount_id=${discountId}`)
+    return { ok: true, vehicle: 'discount', discount_id: discountId, models }
   }
 
   /** Recomendações de marketing. objectives = subconjunto de OBJECTIVES (default
