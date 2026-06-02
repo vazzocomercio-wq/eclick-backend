@@ -71,4 +71,12 @@ export class ShopeeMarketingController {
     if (!Number.isFinite(id)) throw new BadRequestException('discount_id inválido')
     return this.svc.cancelDiscount(user.orgId, id)
   }
+
+  /** F18 Bloco 5 — outcomes das promoções aplicadas (venda × custo de margem). */
+  @Get('outcomes')
+  @RequirePermission('products.view')
+  async outcomes(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getOutcomes(user.orgId)
+  }
 }

@@ -141,6 +141,22 @@ export class ShopeeMarketingService {
       return { ok: true, vehicle: 'discount', discount_id: discountId, deleted: true, models }
     }
 
+    // Bloco 5 — registra a promoção aplicada (pro loop de outcome)
+    const minMargin = Math.min(...models.map(m => m.margin_pct))
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (supabaseAdmin.schema('shopee') as any).from('applied_promotions').insert({
+        organization_id: orgId, shop_id: shopId, item_id: itemId, product_id: pl.product_id,
+        vehicle: 'discount', discount_pct: d,
+        effective_price: models[0]?.promotion_price ?? null,
+        projected_margin_pct: round2(minMargin),
+        external_id: String(discountId),
+        window_start: new Date(startTime * 1000).toISOString(),
+        window_end:   new Date(endTime * 1000).toISOString(),
+        status: 'active',
+      })
+    } catch (e) { this.logger.warn(`[shopee.mkt] registro applied_promotions falhou: ${(e as Error)?.message}`) }
+
     this.logger.log(`[shopee.mkt] APLICOU desconto org=${orgId} item=${itemId} d=${d}% discount_id=${discountId}`)
     return { ok: true, vehicle: 'discount', discount_id: discountId, models }
   }
@@ -152,6 +168,13 @@ export class ShopeeMarketingService {
     const conn = await this.productSync.ensureFreshToken(resolved.conn)
     const adapter = resolved.adapter as ShopeeAdapter
     await adapter.deleteDiscount(conn, discountId)
+    // marca a promoção como cancelada (loop de outcome)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (supabaseAdmin.schema('shopee') as any).from('applied_promotions')
+        .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+        .eq('organization_id', orgId).eq('external_id', String(discountId))
+    } catch (e) { this.logger.warn(`[shopee.mkt] update cancel applied_promotions falhou: ${(e as Error)?.message}`) }
     this.logger.log(`[shopee.mkt] desconto cancelado org=${orgId} discount_id=${discountId}`)
     return { ok: true }
   }
@@ -307,6 +330,83 @@ export class ShopeeMarketingService {
     }
   }
 
+  /** F18 Bloco 5 — Loop de outcome: mede o efeito de cada promoção aplicada
+   *  (venda na janela × baseline da janela equivalente anterior) + custo de
+   *  margem (desconto concedido × unidades vendidas). Persiste o outcome e
+   *  devolve o ranking. "melhora sempre": alimenta as próximas recomendações. */
+  async getOutcomes(orgId: string): Promise<{ outcomes: PromoOutcome[] }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: rows } = await (supabaseAdmin.schema('shopee') as any)
+      .from('applied_promotions')
+      .select('*')
+      .eq('organization_id', orgId)
+      .order('applied_at', { ascending: false })
+      .limit(100)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const promos = (rows ?? []) as any[]
+    const nowMs = Date.now()
+    const out: PromoOutcome[] = []
+
+    for (const p of promos) {
+      const pStart = p.window_start ? new Date(p.window_start).getTime() : new Date(p.applied_at).getTime()
+      const pEnd   = Math.min(p.window_end ? new Date(p.window_end).getTime() : nowMs, nowMs)
+      const dur    = Math.max(pEnd - pStart, 86400000) // mín 1 dia p/ baseline
+      const bEnd   = pStart
+      const bStart = pStart - dur
+
+      const started = pEnd > pStart // a janela já começou?
+      const promoUnits    = started ? await this.sumShopeeSales(p.product_id, new Date(pStart).toISOString(), new Date(pEnd).toISOString()) : 0
+      const baselineUnits = await this.sumShopeeSales(p.product_id, new Date(bStart).toISOString(), new Date(bEnd).toISOString())
+
+      const liftUnits = promoUnits - baselineUnits
+      const liftPct = baselineUnits > 0 ? round2((liftUnits / baselineUnits) * 100) : (promoUnits > 0 ? 100 : 0)
+      // custo de margem ≈ desconto por unidade × unidades vendidas na promo
+      const eff = Number(p.effective_price) || 0
+      const d = Number(p.discount_pct) || 0
+      const perUnitDiscount = d > 0 && d < 100 ? round2(eff * (d / 100) / (1 - d / 100)) : 0
+      const marginCost = round2(perUnitDiscount * promoUnits)
+
+      const verdict: PromoOutcome['verdict'] =
+        !started ? 'pending'
+          : liftUnits > 0 ? 'positive'
+            : liftUnits < 0 ? 'negative'
+              : 'neutral'
+
+      const outcome: PromoOutcome = {
+        id: p.id, item_id: Number(p.item_id), product_id: p.product_id, vehicle: p.vehicle,
+        discount_pct: d, status: p.status,
+        window_start: p.window_start, window_end: p.window_end, applied_at: p.applied_at,
+        baseline_units: baselineUnits, promo_units: promoUnits, lift_units: liftUnits, lift_pct: liftPct,
+        margin_cost: marginCost, verdict,
+      }
+      out.push(outcome)
+
+      // persiste o outcome medido (não-fatal)
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (supabaseAdmin.schema('shopee') as any).from('applied_promotions')
+          .update({ outcome: { baseline_units: baselineUnits, promo_units: promoUnits, lift_pct: liftPct, margin_cost: marginCost, verdict, measured_at: new Date(nowMs).toISOString() }, updated_at: new Date(nowMs).toISOString() })
+          .eq('id', p.id)
+      } catch { /* noop */ }
+    }
+    return { outcomes: out }
+  }
+
+  /** Soma unidades vendidas (orders source='shopee') de um produto numa janela. */
+  private async sumShopeeSales(productId: string | null, fromIso: string, toIso: string): Promise<number> {
+    if (!productId) return 0
+    const { data } = await supabaseAdmin
+      .from('orders')
+      .select('quantity, created_at')
+      .eq('source', 'shopee')
+      .eq('product_id', productId)
+      .gte('created_at', fromIso)
+      .lt('created_at', toIso)
+      .limit(2000)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return ((data ?? []) as any[]).reduce((s, r) => s + (Number(r.quantity) || 0), 0)
+  }
+
   private rationale(vehicle: PromoVehicle, dominant: string, x: {
     recommendedPct: number; maxSafePct: number; monthsStock: number; score: number | null; projMargin: number; floorPct: number
   }): string {
@@ -345,6 +445,24 @@ export interface MarketingRecommendation {
   objective_scores: { overstock: number; visibility: number; profit: number; opportunity: number }
   priority:   number
   rationale:  string
+}
+
+export interface PromoOutcome {
+  id:            string
+  item_id:       number
+  product_id:    string | null
+  vehicle:       string
+  discount_pct:  number
+  status:        string
+  window_start:  string | null
+  window_end:    string | null
+  applied_at:    string
+  baseline_units: number
+  promo_units:   number
+  lift_units:    number
+  lift_pct:      number
+  margin_cost:   number
+  verdict:       'pending' | 'positive' | 'neutral' | 'negative'
 }
 
 function clamp(n: number, lo: number, hi: number): number {
