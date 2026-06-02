@@ -103,21 +103,35 @@ export class ShopeeCreativePublisherService {
     if (!this.isPublishEnabled()) {
       throw new BadRequestException('Publicação Shopee desabilitada (credenciais Open Platform ausentes).')
     }
-    if (!draft.product_id) throw new BadRequestException('product_id obrigatório para publicar (puxa peso/dimensão/fotos do catálogo).')
+    // Fonte do conteúdo: catálogo (product_id) OU direto do AI Criativo
+    // (image_urls + título/desc/preço no draft). Sem nenhum dos dois, nada a publicar.
+    const fromCatalog = !!draft.product_id
+    if (!fromCatalog && !(draft.image_urls && draft.image_urls.length)) {
+      throw new BadRequestException('Informe product_id (catálogo) ou image_urls (AI Criativo) para publicar.')
+    }
 
     // 1) gate de relevância (mesmo do evaluateDraft)
     const evalRes = this.evaluateDraft(draft)
     if (!evalRes.ready) return { ok: false, blockers: evalRes.blockers }
 
-    // 2) produto do catálogo (org-scoped)
-    const { data: prod, error: pErr } = await supabaseAdmin
-      .from('products')
-      .select('id, name, description, ai_long_description, brand, weight_kg, width_cm, length_cm, height_cm, photo_urls, images, price, sku')
-      .eq('id', draft.product_id)
-      .eq('organization_id', orgId)
-      .maybeSingle()
-    if (pErr) throw new Error(`products: ${pErr.message}`)
-    if (!prod) throw new BadRequestException('Produto não encontrado nesta organização')
+    // 2) produto do catálogo (org-scoped) — OPCIONAL no fluxo AI Criativo
+    type ProdRow = {
+      id: string; name: string | null; description: string | null; ai_long_description: string | null
+      brand: string | null; weight_kg: number | null; width_cm: number | null; length_cm: number | null
+      height_cm: number | null; photo_urls: unknown; images: unknown; price: number | null; sku: string | null
+    }
+    let prod: ProdRow | null = null
+    if (fromCatalog) {
+      const { data, error: pErr } = await supabaseAdmin
+        .from('products')
+        .select('id, name, description, ai_long_description, brand, weight_kg, width_cm, length_cm, height_cm, photo_urls, images, price, sku')
+        .eq('id', draft.product_id as string)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      if (pErr) throw new Error(`products: ${pErr.message}`)
+      if (!data) throw new BadRequestException('Produto não encontrado nesta organização')
+      prod = data as unknown as ProdRow
+    }
 
     // 3) conn Shopee + token fresco
     const resolved = await this.mp.resolve(orgId, 'shopee')
@@ -125,22 +139,29 @@ export class ShopeeCreativePublisherService {
     const conn = await this.productSync.ensureFreshToken(resolved.conn)
     const adapter = resolved.adapter as ShopeeAdapter
 
-    const name = (draft.title ?? prod.name ?? '').toString().trim()
+    const name = (draft.title ?? prod?.name ?? '').toString().trim()
     if (!name) throw new BadRequestException('Título obrigatório')
-    const description = (draft.description ?? prod.ai_long_description ?? prod.description ?? '').toString().trim()
+    const description = (draft.description ?? prod?.ai_long_description ?? prod?.description ?? '').toString().trim()
     if (description.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
 
     // 4) categoria (do rascunho ou recomendada pelo nome)
     const categoryId = await this.step('categoria (category_recommend)', () => adapter.recommendCategory(conn, name))
     if (!categoryId) throw new BadRequestException('Não foi possível recomendar uma categoria Shopee para este produto. Informe a categoria manualmente.')
 
-    // 5) imagens: photo_urls/images → upload → image_id (máx 9, capa = [0])
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const photoUrls: string[] = (Array.isArray(prod.photo_urls) ? prod.photo_urls : (Array.isArray(prod.images) ? prod.images : []))
-      .map((x: unknown) => typeof x === 'string' ? x : (x as { url?: string })?.url)
+    // 5) imagens: image_urls (AI Criativo) OU photo_urls/images (catálogo) → upload → image_id (máx 9)
+    const rawPhotos: unknown[] =
+      draft.image_urls && draft.image_urls.length
+        ? draft.image_urls
+        : Array.isArray(prod?.photo_urls)
+          ? (prod!.photo_urls as unknown[])
+          : Array.isArray(prod?.images)
+            ? (prod!.images as unknown[])
+            : []
+    const photoUrls: string[] = rawPhotos
+      .map((x: unknown) => (typeof x === 'string' ? x : (x as { url?: string })?.url))
       .filter((u: unknown): u is string => typeof u === 'string' && u.startsWith('http'))
       .slice(0, 9)
-    if (!photoUrls.length) throw new BadRequestException('Produto sem fotos (https) para publicar.')
+    if (!photoUrls.length) throw new BadRequestException('Sem fotos (https) para publicar.')
     const imageIds: string[] = []
     let uploadErr: string | null = null
     for (const u of photoUrls) {
@@ -161,15 +182,17 @@ export class ShopeeCreativePublisherService {
     if (!enabled.length) throw new BadRequestException('Nenhum canal de logística habilitado na loja Shopee.')
     const logisticInfo = enabled.map(c => ({ logistic_id: c.channel_id, enabled: true }))
 
-    // 8) preço/estoque/peso/dimensão
-    const price = Number(draft.price ?? prod.price ?? 0)
+    // 8) preço/estoque/peso/dimensão (draft tem prioridade; catálogo/defaults completam)
+    const price = Number(draft.price ?? prod?.price ?? 0)
     if (!(price > 0)) throw new BadRequestException('Preço inválido')
-    const weight = Number(prod.weight_kg) > 0 ? Number(prod.weight_kg) : 0.5 // kg (default leve)
+    const weightSrc = Number(draft.weight_kg ?? prod?.weight_kg)
+    const weight = weightSrc > 0 ? weightSrc : 0.5 // kg (default leve)
     const dimension = {
-      package_length: Math.max(1, Math.round(Number(prod.length_cm) || 20)),
-      package_width:  Math.max(1, Math.round(Number(prod.width_cm)  || 20)),
-      package_height: Math.max(1, Math.round(Number(prod.height_cm) || 10)),
+      package_length: Math.max(1, Math.round(Number(draft.package_length_cm ?? prod?.length_cm) || 20)),
+      package_width:  Math.max(1, Math.round(Number(draft.package_width_cm  ?? prod?.width_cm)  || 20)),
+      package_height: Math.max(1, Math.round(Number(draft.package_height_cm ?? prod?.height_cm) || 10)),
     }
+    const brandName = (draft.brand ?? prod?.brand ?? 'No Brand').toString().slice(0, 60)
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const payload: Record<string, any> = {
@@ -183,7 +206,7 @@ export class ShopeeCreativePublisherService {
       attribute_list: attributeList,
       dimension,
       normal_stock: 0, // estoque entra depois via update_stock (Fase C, real+virtual)
-      brand: { brand_id: 0, original_brand_name: (prod.brand ?? 'No Brand').toString().slice(0, 60) },
+      brand: { brand_id: 0, original_brand_name: brandName },
       item_status: 'NORMAL',
       seller_stock: [{ stock: 0 }],
     }
@@ -202,19 +225,22 @@ export class ShopeeCreativePublisherService {
       return { ok: true, item_id, category_id: categoryId, images: imageIds.length, deleted: true }
     }
 
-    // 10) grava vínculo anúncio↔produto (mesmo padrão da Fase A)
-    await supabaseAdmin.from('product_listings').upsert({
-      platform:      'shopee',
-      account_id:    String(conn.shop_id),
-      listing_id:    String(item_id),
-      variation_id:  '',
-      product_id:    prod.id,
-      listing_title: name,
-      listing_price: price,
-      is_active:     true,
-    }, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+    // 10) grava vínculo anúncio↔produto (mesmo padrão da Fase A). Só quando há
+    // produto de catálogo — no fluxo AI Criativo não há row em `products`.
+    if (prod) {
+      await supabaseAdmin.from('product_listings').upsert({
+        platform:      'shopee',
+        account_id:    String(conn.shop_id),
+        listing_id:    String(item_id),
+        variation_id:  '',
+        product_id:    prod.id,
+        listing_title: name,
+        listing_price: price,
+        is_active:     true,
+      }, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+    }
 
-    this.logger.log(`[shopee.publish] org=${orgId} product=${prod.id} → item=${item_id} cat=${categoryId} imgs=${imageIds.length}`)
+    this.logger.log(`[shopee.publish] org=${orgId} product=${prod?.id ?? '(criativo)'} → item=${item_id} cat=${categoryId} imgs=${imageIds.length}`)
     return { ok: true, item_id, category_id: categoryId, images: imageIds.length }
   }
 

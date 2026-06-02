@@ -31,6 +31,17 @@ export interface ShopeeDraftListing {
    *  competitividade já no rascunho. */
   price?:                 number | null
   market_median_price?:   number | null
+
+  // ── Fonte AI CRIATIVO (publish sem produto de catálogo) ──────────────
+  /** URLs https das fotos (vindas do AI Criativo). Quando presente, o publish
+   *  NÃO exige product_id no catálogo — usa o conteúdo do rascunho direto. */
+  image_urls?:            string[] | null
+  /** Peso/dimensão/marca do pacote (defaults aplicados se ausentes). */
+  weight_kg?:             number | null
+  package_length_cm?:     number | null
+  package_width_cm?:      number | null
+  package_height_cm?:     number | null
+  brand?:                 string | null
 }
 
 /** Resposta do guard. Espelha o PreviewResponse do ML publisher:
