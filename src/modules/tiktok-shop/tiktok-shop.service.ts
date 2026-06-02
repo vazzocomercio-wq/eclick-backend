@@ -1252,10 +1252,14 @@ export class TikTokShopService {
   private async getWarehouseId(orgId: string): Promise<string | null> {
     const accessToken = await this.getAccessToken(orgId)
     if (!accessToken) return null
+    // /logistics/202309/warehouses EXIGE shop_cipher (erro 106013 sem ele),
+    // igual aos endpoints de pedido/produto — o ttsRequest não injeta sozinho.
+    const shopCipher = await this.getShopCipher(orgId)
     const data = await this.ttsRequest<{ warehouses?: Array<{ id: string; type?: string }> }>({
       method: 'GET',
       path: '/logistics/202309/warehouses',
       accessToken,
+      query: { shop_cipher: shopCipher },
     })
     const whs = data.warehouses ?? []
     return whs.find((w) => w.type === 'SALES_WAREHOUSE')?.id ?? whs[0]?.id ?? null
