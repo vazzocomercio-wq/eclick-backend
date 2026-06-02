@@ -247,6 +247,32 @@ export class CreativeMlPublisherService {
       }
     }
 
+    // Fallback de preço: se não veio preço do match em `products` (produto do
+    // fluxo criativo pode não existir no legacy), reusa o preço da ÚLTIMA
+    // publicação no Mercado Livre deste listing — o usuário já definiu o preço
+    // ali. É o que alimenta o publish do TikTok (que lê sku_suggestion.price).
+    if (!skuSuggestion || skuSuggestion.price == null) {
+      const { data: lastPub } = await supabaseAdmin
+        .from('creative_publications')
+        .select('price, stock')
+        .eq('organization_id', orgId)
+        .eq('listing_id', listingId)
+        .eq('marketplace', 'mercado_livre')
+        .not('price', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const lp = lastPub as { price: number | null; stock: number | null } | null
+      if (lp?.price != null) {
+        skuSuggestion = {
+          product_id: skuSuggestion?.product_id ?? product.id,
+          sku:        skuSuggestion?.sku ?? (product.sku ?? ''),
+          price:      lp.price,
+          stock:      skuSuggestion?.stock ?? lp.stock,
+        }
+      }
+    }
+
     return {
       listing,
       product,
