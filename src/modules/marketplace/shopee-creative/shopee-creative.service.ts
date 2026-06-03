@@ -261,7 +261,9 @@ export class ShopeeCreativePublisherService {
     } catch (e: unknown) {
       const msg = this.scopeMsg(label, (e as Error)?.message ?? null, e)
       if (msg) throw new BadRequestException(msg)
-      throw e
+      // Erro de negócio da Shopee (ex.: atributo obrigatório no add_item) →
+      // 400 acionável em vez de 500 cru, com o passo e a mensagem da Shopee.
+      throw new BadRequestException(`${label}: ${(e as Error)?.message ?? 'falhou'}`)
     }
   }
 
