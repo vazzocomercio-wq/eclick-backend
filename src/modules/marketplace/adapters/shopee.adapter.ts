@@ -867,12 +867,14 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   }
 
   /** Atributos (obrigatórios/opcionais) de uma categoria.
-   *  `GET /api/v2/product/get_attributes` (language pt-br). add_item precisa
-   *  preencher os mandatórios. Devolve o raw pro caller montar attribute_list. */
+   *  `GET /api/v2/product/get_attribute_tree` (language pt-br). ⚠️ o antigo
+   *  `get_attributes` foi DEPRECADO/removido (dava HTTP 403 "request path is
+   *  incorrect"); o atual é get_attribute_tree. add_item precisa preencher os
+   *  mandatórios. Devolve o raw pro caller montar attribute_list. */
   async getCategoryAttributes(conn: MpConnection, categoryId: number): Promise<unknown> {
     const { accessToken, shopId } = this.requireShop(conn)
     const { partnerId } = this.partnerEnv()
-    const path = '/api/v2/product/get_attributes'
+    const path = '/api/v2/product/get_attribute_tree'
     const ts   = Math.floor(Date.now() / 1000)
     const sign = this.signShop(path, ts, accessToken, shopId)
     const qs = new URLSearchParams({
@@ -881,11 +883,11 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       category_id: String(categoryId), language: 'pt-br',
     })
     const { data } = await this.callShopee({
-      key: `shop:${shopId}`, tag: 'shopee.getAttributes',
+      key: `shop:${shopId}`, tag: 'shopee.getAttributeTree',
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
     })
-    if (data?.error) throw new Error(`Shopee getAttributes ${data.error}: ${data.message}`)
+    if (data?.error) throw new Error(`Shopee getAttributeTree ${data.error}: ${data.message}`)
     return data?.response ?? null
   }
 

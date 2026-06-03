@@ -172,9 +172,17 @@ export class ShopeeCreativePublisherService {
       throw new BadRequestException(this.scopeMsg('upload de imagem (media_space)', uploadErr) ?? 'Falha ao subir as imagens pro media space da Shopee.')
     }
 
-    // 6) atributos obrigatórios (best-effort: marca + enums com 1ª opção)
-    const attrRaw = await this.step('atributos (get_attributes)', () => adapter.getCategoryAttributes(conn, categoryId))
-    const attributeList = this.buildMandatoryAttributes(attrRaw)
+    // 6) atributos obrigatórios (best-effort: marca + enums com 1ª opção).
+    // NÃO-FATAL: se get_attribute_tree falhar, segue sem atributos — o add_item
+    // dirá exatamente quais mandatórios faltam (em vez de travar tudo aqui).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let attributeList: any[] = []
+    try {
+      const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
+      attributeList = this.buildMandatoryAttributes(attrRaw)
+    } catch (e) {
+      this.logger.warn(`[shopee.publish] atributos (get_attribute_tree) falhou — segue sem: ${(e as Error)?.message}`)
+    }
 
     // 7) logística: canais habilitados
     const channels = await this.step('logística (get_channel_list)', () => adapter.getLogisticsChannels(conn))
@@ -274,7 +282,17 @@ export class ShopeeCreativePublisherService {
    *  saída = o que o add_item espera em attribute_list. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private buildMandatoryAttributes(attrRaw: any): any[] {
-    const list: unknown[] = attrRaw?.attribute_list ?? attrRaw?.attributes ?? []
+    // get_attribute_tree vem aninhado ({ list: [{ attribute_tree: [...] }] } ou
+    // { list: [...attrs] }); o legado get_attributes vinha flat (attribute_list/
+    // attributes). Achata recursivamente até os nós que têm attribute_id.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const collect = (node: any): any[] => {
+      if (!node) return []
+      if (Array.isArray(node)) return node.flatMap(collect)
+      if (node.attribute_id != null) return [node]
+      return collect(node.attribute_tree ?? node.attribute_list ?? node.attributes ?? node.list ?? node.children ?? [])
+    }
+    const list = collect(attrRaw)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const out: any[] = []
     for (const a of list as any[]) {
