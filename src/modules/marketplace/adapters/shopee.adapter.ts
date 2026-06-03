@@ -4,7 +4,7 @@ import * as crypto from 'crypto'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
-  WebhookValidationInput, RawListing, UpdateResult,
+  WebhookValidationInput, RawListing, UpdateResult, EscrowDetail,
 } from './base'
 import { ShopThrottleService } from '../throttle/shop-throttle.service'
 import { retryWithBackoff } from '../throttle/retry-with-backoff'
@@ -232,6 +232,38 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   async fetchOrderDetails(conn: MpConnection, sns: string[]): Promise<unknown[]> {
     if (!sns.length) return []
     return this.fetchDetailBatch(conn, sns)
+  }
+
+  /** Repasse REAL (escrow) de 1 pedido concluído — a fonte da verdade das
+   *  taxas Shopee. Devolve o EscrowDetail normalizado (cross-plataforma) E o
+   *  order_income cru em `raw` (de onde o ingest lê service_fee/seller_transaction_fee,
+   *  que não cabem no shape normalizado). Só funciona em pedidos liquidados. */
+  async getEscrowDetail(conn: MpConnection, externalOrderId: string): Promise<EscrowDetail> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/payment/get_escrow_detail'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign, order_sn: externalOrderId,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`,
+      tag: 'shopee.getEscrowDetail',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    const inc = (data?.response?.order_income ?? data?.response ?? {}) as Record<string, unknown>
+    return {
+      external_order_id: externalOrderId,
+      gross_amount:      Number(inc.order_selling_price ?? 0) || null,
+      net_amount:        Number(inc.escrow_amount ?? 0) || null,
+      commission_amount: Number(inc.commission_fee ?? 0) || null,
+      shipping_fee:      Number(inc.actual_shipping_fee ?? 0) || null,
+      raw:               inc,
+    }
   }
 
   /** CPF top-level (raro). Address inline em recipient_address. Phone é

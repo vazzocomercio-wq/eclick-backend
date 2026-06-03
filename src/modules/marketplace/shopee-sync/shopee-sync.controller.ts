@@ -7,6 +7,7 @@ import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ShopeeShopMetricsSyncService } from './shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-orders-ingestion.service'
+import { ShopeeEscrowIngestService } from './shopee-escrow-ingest.service'
 import { ShopeeStockSyncService } from './shopee-stock-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
@@ -26,6 +27,7 @@ export class ShopeeSyncController {
     private readonly metrics:   ShopeeShopMetricsSyncService,
     private readonly campaigns: ShopeeCampaignsSyncService,
     private readonly orders:    ShopeeOrdersIngestionService,
+    private readonly escrow:    ShopeeEscrowIngestService,
     private readonly stock:     ShopeeStockSyncService,
   ) {}
 
@@ -60,6 +62,19 @@ export class ShopeeSyncController {
   async syncOrders(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.orders.syncOrders(user.orgId)
+  }
+
+  /** Fase 2.3 — Ingere o repasse real (escrow) dos pedidos concluídos →
+   *  platform_charges (taxas reais Shopee). Fire-and-forget: 1 call/pedido +
+   *  throttle, roda além do timeout do proxy. Acompanhar via /financeiro/charges/summary. */
+  @Post('escrow')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async syncEscrow(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const orgId = user.orgId
+    void this.escrow.ingest(orgId, { limit: 600 }).catch(() => { /* logado no service */ })
+    return { started: true }
   }
 
   /** F18 Fase C — Propaga o disponível do ledger (products.stock) pros anúncios

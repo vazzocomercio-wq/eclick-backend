@@ -28,6 +28,7 @@ import { ShopeeProductSyncService } from './shopee-sync/shopee-product-sync.serv
 import { ShopeeShopMetricsSyncService } from './shopee-sync/shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-sync/shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
+import { ShopeeEscrowIngestService } from './shopee-sync/shopee-escrow-ingest.service'
 import { ShopeeListingLinkService } from './shopee-sync/shopee-listing-link.service'
 import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.controller'
 import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
@@ -64,6 +65,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeShopMetricsSyncService,    // F1.3 — sync de métricas da loja (account_health)
     ShopeeCampaignsSyncService,      // F1.4 — sync de campanhas (voucher + flash_sale)
     ShopeeOrdersIngestionService,    // F1.6 — ingestão de pedidos Shopee na CENTRAL
+    ShopeeEscrowIngestService,       // Fase 2.3 — escrow real → platform_charges
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
