@@ -179,11 +179,30 @@ export class ShopeeCreativePublisherService {
     // travar. NÃO-FATAL: se get_attribute_tree falhar, segue sem.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let attributeList: any[] = []
+    let attrNeedsInput: Array<{ attribute_id: number; name: string }> = []
     try {
       const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
-      attributeList = this.buildMandatoryAttributes(attrRaw, draft.ml_attributes ?? [], name)
+      const built = this.buildMandatoryAttributes(attrRaw, draft.ml_attributes ?? [], {
+        fallbackText: name,
+        regNumber: draft.registration_number ?? undefined,
+      })
+      attributeList = built.list
+      attrNeedsInput = built.needsInput
     } catch (e) {
       this.logger.warn(`[shopee.publish] atributos (get_attribute_tree) falhou — segue sem: ${(e as Error)?.message}`)
+    }
+    // Campo numérico obrigatório (ex.: Registration ID / nº Inmetro) sem valor:
+    // bloqueia com mensagem acionável em vez de mandar texto e tomar 400
+    // "Invalid Registration ID. Please provide a valid number.".
+    if (attrNeedsInput.length) {
+      const nomes = attrNeedsInput.map((a) => `"${a.name}"`).join(', ')
+      return {
+        ok: false,
+        blockers: [
+          `A categoria Shopee exige ${attrNeedsInput.length === 1 ? 'o campo numérico' : 'os campos numéricos'} ${nomes} ` +
+          `(número de registro, ex.: Inmetro). Preencha o campo "Número de registro" e publique de novo.`,
+        ],
+      }
     }
 
     // 7) logística: canais habilitados
@@ -297,19 +316,25 @@ export class ShopeeCreativePublisherService {
     MODEL: ['model', 'modelo'],
   }
 
-  /** Monta o attribute_list do add_item a partir da árvore da categoria Shopee
-   *  ({ list: [{ attribute_tree: [ATTR] }] }, ATTR com mandatory/name/
-   *  attribute_value_list/child_attribute_list condicionais). Pra cada
-   *  OBRIGATÓRIO: mapeia o valor dos atributos do IA Criativo (de-para por nome
-   *  + match de valor, igual o publish do TikTok). Onde não há atributo do IA:
-   *  dropdown → 1ª opção; free-text → nome do produto (pra não travar o
-   *  add_item). Filhos condicionais do valor escolhido são preenchidos também.
-   *  O usuário revisa/ajusta no Seller Center depois. */
+  /** Monta o attribute_list do add_item a partir da árvore da categoria Shopee.
+   *  Pra cada OBRIGATÓRIO: mapeia o valor dos atributos do IA Criativo (de-para
+   *  por nome + match de valor, igual o publish do TikTok). Onde não há atributo
+   *  do IA: dropdown → 1ª opção; free-text de TEXTO → nome do produto; free-text
+   *  NUMÉRICO (ex.: "Registration ID"/Inmetro) → número de registro informado
+   *  pelo usuário. Campo numérico obrigatório sem valor cai em `needsInput` — o
+   *  publish bloqueia com mensagem acionável em vez de mandar texto e tomar 400
+   *  ("provide a valid number"). Filhos condicionais do valor escolhido também
+   *  são preenchidos. O usuário revisa/ajusta no Seller Center depois. */
   private buildMandatoryAttributes(
     attrRaw: unknown,
     mlAttributes: Array<{ id: string; value_name?: string; value_id?: string }> = [],
-    fallbackText = '',
-  ): Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> {
+    opts: { fallbackText?: string; regNumber?: string } = {},
+  ): {
+    list: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }>
+    needsInput: Array<{ attribute_id: number; name: string }>
+  } {
+    const fallbackText = opts.fallbackText ?? ''
+    const regDigits = (opts.regNumber ?? '').replace(/\D/g, '')
     const mls = (mlAttributes ?? []).filter((m) => m.value_name && m.value_id !== '-1')
     const findMl = (shopeeName: string) => {
       const sn = this.norm(shopeeName)
@@ -319,10 +344,11 @@ export class ShopeeCreativePublisherService {
       }
       return null
     }
-    const out: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> = []
+    const list: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> = []
+    const needsInput: Array<{ attribute_id: number; name: string }> = []
     const seen = new Set<number>()
     const push = (attrId: number, valueId: number, valueName: string) =>
-      out.push({ attribute_id: attrId, attribute_value_list: [{ value_id: valueId, original_value_name: (valueName ?? '').slice(0, 100) }] })
+      list.push({ attribute_id: attrId, attribute_value_list: [{ value_id: valueId, original_value_name: (valueName ?? '').slice(0, 100) }] })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fill = (attr: any, depth: number): void => {
       if (!attr || depth > 6) return
@@ -331,9 +357,11 @@ export class ShopeeCreativePublisherService {
       if (!mandatory || !Number.isFinite(attrId) || seen.has(attrId)) return
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const values: any[] = attr.attribute_value_list ?? attr.value_list ?? []
-      const ml = findMl(attr.name ?? attr.original_attribute_name ?? '')
+      const attrName = String(attr.name ?? attr.original_attribute_name ?? '')
+      const ml = findMl(attrName)
       seen.add(attrId)
       if (Array.isArray(values) && values.length) {
+        // dropdown: casa o valor do IA Criativo; senão 1ª opção.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const vname = (x: any) => x?.original_value_name ?? x?.name ?? x?.value_name ?? ''
         let v = values[0]
@@ -345,9 +373,20 @@ export class ShopeeCreativePublisherService {
         }
         push(attrId, Number(v?.value_id ?? 0), vname(v))
         for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
+        return
+      }
+      // free-text obrigatório (sem lista de valores): texto vs numérico.
+      const ivt = String(attr.input_validation_type ?? attr.input_type ?? attr.format_type ?? '').toUpperCase()
+      const numeric = /INT|FLOAT|NUMBER|NUMERIC|QUANTITATIVE/.test(ivt)
+        || /(registration|registro|\bid\b|numero|number|cpf|cnpj|codigo|ncm|gtin|ean|barcode|phone|telefone)/.test(this.norm(attrName))
+      const mlVal = ml?.value_name?.trim()
+      if (numeric) {
+        const mlDigits = (mlVal ?? '').replace(/\D/g, '')
+        const val = regDigits || mlDigits // ambos só dígitos
+        if (val) push(attrId, 0, val)
+        else needsInput.push({ attribute_id: attrId, name: attrName || `atributo ${attrId}` })
       } else {
-        // free-text obrigatório: valor do IA Criativo, senão nome do produto.
-        push(attrId, 0, ml?.value_name ?? fallbackText ?? 'N/A')
+        push(attrId, 0, mlVal || fallbackText || 'N/A')
       }
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -356,7 +395,7 @@ export class ShopeeCreativePublisherService {
       const tree = node?.attribute_tree ?? node?.attribute_list ?? node?.attributes ?? (node?.attribute_id != null ? [node] : [])
       for (const a of (Array.isArray(tree) ? tree : [])) fill(a, 0)
     }
-    return out
+    return { list, needsInput }
   }
 
   /** Feature flag: só libera publish quando creds Shopee de prod estiverem
