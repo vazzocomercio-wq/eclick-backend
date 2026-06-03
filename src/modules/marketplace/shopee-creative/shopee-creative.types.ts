@@ -61,6 +61,11 @@ export interface ShopeeDraftListing {
    *  product_listings. Resolvido no front via contexto (product_id direto ou
    *  match de SKU). null = anúncio standalone do AI Criativo (sem estoque). */
   catalog_product_id?:    string | null
+  /** IDs do anúncio do IA Criativo (creative_listings.id + creative_products.id)
+   *  pra registrar a publicação em creative_publications e aparecer na lista
+   *  "Publicações desse anúncio" junto com o ML. */
+  listing_id?:            string | null
+  creative_product_id?:   string | null
 }
 
 /** Resposta do guard. Espelha o PreviewResponse do ML publisher:

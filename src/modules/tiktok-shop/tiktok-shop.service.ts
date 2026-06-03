@@ -1176,15 +1176,35 @@ export class TikTokShopService {
       accessToken,
       query: { shop_cipher: shopCipher, category_version: 'v2', locale: 'pt-BR' },
     })
-    let cats = (data.categories ?? []).map((c) => ({
+    const all = (data.categories ?? []).map((c) => ({
       id: c.id,
       name: c.local_name,
       is_leaf: c.is_leaf,
       parent_id: c.parent_id,
     }))
-    if (opts.leafOnly) cats = cats.filter((c) => c.is_leaf)
+    let cats = all
     const kw = opts.keyword?.trim().toLowerCase()
-    if (kw) cats = cats.filter((c) => (c.name ?? '').toLowerCase().includes(kw))
+    if (kw) {
+      // casa o nome (folha OU PAI) e inclui também os DESCENDENTES das categorias
+      // que casaram. Assim "ilumi" casa o pai "Iluminação" e traz as folhas
+      // embaixo dele (antes o filtro de folhas escondia o pai → "nada encontrado").
+      const childrenByParent = new Map<string, typeof all>()
+      for (const c of all) {
+        const arr = childrenByParent.get(c.parent_id) ?? []
+        arr.push(c)
+        childrenByParent.set(c.parent_id, arr)
+      }
+      const keep = new Set<string>(all.filter((c) => (c.name ?? '').toLowerCase().includes(kw)).map((c) => c.id))
+      const queue = [...keep]
+      while (queue.length) {
+        const pid = queue.shift() as string
+        for (const child of childrenByParent.get(pid) ?? []) {
+          if (!keep.has(child.id)) { keep.add(child.id); queue.push(child.id) }
+        }
+      }
+      cats = all.filter((c) => keep.has(c.id))
+    }
+    if (opts.leafOnly) cats = cats.filter((c) => c.is_leaf)
     return cats.slice(0, opts.limit ?? 50)
   }
 
@@ -1381,6 +1401,9 @@ export class TikTokShopService {
       // mapeados pros atributos/marca do TikTok. Opcional.
       ml_attributes?: Array<{ id: string; value_name?: string; value_id?: string }>
       brand_name?: string
+      // IDs do anúncio do IA Criativo pra registrar em creative_publications.
+      listing_id?: string
+      creative_product_id?: string
       dry_run?: boolean
     },
   ): Promise<{
@@ -1465,6 +1488,25 @@ export class TikTokShopService {
     this.logger.log(
       `[tts.publish] produto criado ${data.product_id} (${uris.length} imgs, ${productAttributes.length} attrs, brand=${brandId ?? '-'})`,
     )
+    // Registra em creative_publications (NÃO-FATAL) → aparece na lista
+    // "Publicações desse anúncio" junto com o ML. Precisa dos FKs do front.
+    if (input.listing_id && input.creative_product_id && data.product_id) {
+      try {
+        await supabaseAdmin.from('creative_publications').insert({
+          organization_id: orgId,
+          listing_id:      input.listing_id,
+          product_id:      input.creative_product_id,
+          marketplace:     'tiktok_shop',
+          status:          'published',
+          idempotency_key: crypto.randomUUID(),
+          price:           input.price > 0 ? input.price : null,
+          external_id:     String(data.product_id),
+          published_at:    new Date().toISOString(),
+        })
+      } catch (e) {
+        this.logger.warn(`[tts.publish] registro creative_publications falhou: ${(e as Error)?.message}`)
+      }
+    }
     return {
       product_id: data.product_id,
       uploaded_images: uris.length,

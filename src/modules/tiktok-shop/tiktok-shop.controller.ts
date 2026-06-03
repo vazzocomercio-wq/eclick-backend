@@ -223,6 +223,8 @@ export class TikTokShopController {
       brand_name?: string
       bullets?: string[]
       faq?: Array<{ q?: string; a?: string }>
+      listing_id?: string
+      creative_product_id?: string
       dry_run?: boolean
     },
   ) {

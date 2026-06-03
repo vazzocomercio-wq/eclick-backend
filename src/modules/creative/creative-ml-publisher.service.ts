@@ -1237,6 +1237,43 @@ export class CreativeMlPublisherService {
     return (data ?? []) as CreativePublication[]
   }
 
+  /** Envia o anúncio pra Loja própria (vitrine): resolve o produto de catálogo
+   *  (vínculo direto OU match de SKU), sincroniza descrição + destaques + FAQ no
+   *  produto e o torna visível na loja. A vitrine tem seções próprias de
+   *  bullets/FAQ, então sincronizamos como CAMPOS (não na descrição). */
+  async sendToStorefront(orgId: string, listingId: string): Promise<{ product_id: string }> {
+    const listing = await this.creative.getListing(orgId, listingId)
+    const product = await this.creative.getProduct(orgId, listing.product_id)
+    let catalogId = product.product_id
+    if (!catalogId && product.sku) {
+      const { data: m } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('sku', product.sku)
+        .limit(1)
+        .maybeSingle<{ id: string }>()
+      catalogId = m?.id ?? null
+    }
+    if (!catalogId) {
+      throw new BadRequestException('Este anúncio não está vinculado a um produto do catálogo (nem por SKU). Cadastre/vincule o produto no catálogo antes de enviar pra Loja.')
+    }
+    const { error } = await supabaseAdmin
+      .from('products')
+      .update({
+        description:        listing.description,
+        bullets:           listing.bullets,
+        faq:               listing.faq,
+        storefront_visible: true,
+        updated_at:        new Date().toISOString(),
+      })
+      .eq('id', catalogId)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Falha ao enviar pra Loja: ${error.message}`)
+    this.logger.log(`[creative.storefront] listing=${listingId} → produto ${catalogId} enviado pra Loja (desc+bullets+faq+visible)`)
+    return { product_id: catalogId }
+  }
+
   async listPublicationsByListing(orgId: string, listingId: string): Promise<CreativePublication[]> {
     await this.creative.getListing(orgId, listingId) // tenant check
     const { data, error } = await supabaseAdmin

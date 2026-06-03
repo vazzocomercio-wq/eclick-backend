@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
+import { randomUUID } from 'crypto'
 import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { composeListingDescription } from '../../../common/listing-description'
@@ -311,6 +312,28 @@ export class ShopeeCreativePublisherService {
         this.logger.log(`[shopee.publish] estoque virtual product=${catalogProductId} item=${item_id} virtual=${r.virtual_stock ?? '—'} paused=${r.paused ?? '—'} skipped=${r.skipped ?? ''}`)
       } catch (e) {
         this.logger.warn(`[shopee.publish] push estoque virtual falhou item=${item_id}: ${(e as Error)?.message}`)
+      }
+    }
+
+    // Registra a publicação em creative_publications pra aparecer na lista
+    // "PUBLICAÇÕES DESSE ANÚNCIO" junto com o ML (NÃO-FATAL). Precisa do listing
+    // + creative_product (FKs) que o front manda. external_url = link da loja.
+    if (draft.listing_id && draft.creative_product_id) {
+      try {
+        await supabaseAdmin.from('creative_publications').insert({
+          organization_id: orgId,
+          listing_id:      draft.listing_id,
+          product_id:      draft.creative_product_id,
+          marketplace:     'shopee',
+          status:          'published',
+          idempotency_key: randomUUID(),
+          price:           price > 0 ? price : null,
+          external_id:     String(item_id),
+          external_url:    `https://shopee.com.br/product/${conn.shop_id}/${item_id}`,
+          published_at:    new Date().toISOString(),
+        })
+      } catch (e) {
+        this.logger.warn(`[shopee.publish] registro creative_publications falhou item=${item_id}: ${(e as Error)?.message}`)
       }
     }
 

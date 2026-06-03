@@ -687,6 +687,15 @@ export class CreativeController {
     return this.mlPub.listPublicationsByListing(this.orgOrThrow(u), id)
   }
 
+  /** Envia este anúncio pra Loja própria (vitrine): sincroniza conteúdo no
+   *  produto de catálogo + torna visível. */
+  @Post('listings/:id/send-to-storefront')
+  @RequirePermission('products.update')
+  @HttpCode(HttpStatus.OK)
+  sendToStorefront(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.mlPub.sendToStorefront(this.orgOrThrow(u), id)
+  }
+
   @Get('publications/:id')
   @RequirePermission('products.view')
   getPublication(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
