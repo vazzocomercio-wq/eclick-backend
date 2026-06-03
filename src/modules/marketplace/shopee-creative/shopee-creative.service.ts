@@ -172,14 +172,16 @@ export class ShopeeCreativePublisherService {
       throw new BadRequestException(this.scopeMsg('upload de imagem (media_space)', uploadErr) ?? 'Falha ao subir as imagens pro media space da Shopee.')
     }
 
-    // 6) atributos obrigatórios (best-effort: marca + enums com 1ª opção).
-    // NÃO-FATAL: se get_attribute_tree falhar, segue sem atributos — o add_item
-    // dirá exatamente quais mandatórios faltam (em vez de travar tudo aqui).
+    // 6) atributos obrigatórios. Mapeia os atributos do IA Criativo (marca,
+    // tensão, potência, cor, material) pros campos da categoria Shopee (de-para
+    // por nome+valor, igual o publish do TikTok). Onde não há atributo do IA,
+    // cai pra 1ª opção (dropdown) ou pro nome do produto (free-text), pra não
+    // travar. NÃO-FATAL: se get_attribute_tree falhar, segue sem.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let attributeList: any[] = []
     try {
       const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
-      attributeList = this.buildMandatoryAttributes(attrRaw)
+      attributeList = this.buildMandatoryAttributes(attrRaw, draft.ml_attributes ?? [], name)
     } catch (e) {
       this.logger.warn(`[shopee.publish] atributos (get_attribute_tree) falhou — segue sem: ${(e as Error)?.message}`)
     }
@@ -278,42 +280,78 @@ export class ShopeeCreativePublisherService {
       `(igual ao destravamento do módulo Ads).`
   }
 
-  /** Best-effort dos atributos OBRIGATÓRIOS de uma categoria: pra cada
-   *  mandatório com lista de valores, pega a 1ª opção; texto/numérico livre é
-   *  pulado (pode bloquear o add_item — a Shopee dirá qual falta). Shape de
-   *  saída = o que o add_item espera em attribute_list. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private buildMandatoryAttributes(attrRaw: any): any[] {
-    // Shape real do get_attribute_tree: { list: [{ category_id, attribute_tree:
-    // [ATTR] }] }, onde ATTR = { attribute_id, mandatory, name,
-    // attribute_value_list: [{ value_id, name, child_attribute_list: [ATTR
-    // condicional] }] }. Pra cada obrigatório com valores, pega a 1ª opção; se
-    // esse valor revelar filhos obrigatórios, preenche também (árvore
-    // condicional). Free-text obrigatório (sem lista de valores) é pulado.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const out: any[] = []
+  /** normaliza p/ comparar nomes (lower + sem acento). */
+  private norm(s?: string): string {
+    return (s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+  }
+
+  /** De-para: id de atributo do IA Criativo (formato ML) → palavras-chave do
+   *  nome do atributo na Shopee. Mesma ideia do ML_TO_TT_ATTR do TikTok. */
+  private static readonly ML_TO_SHOPEE_ATTR: Record<string, string[]> = {
+    BRAND: ['marca', 'brand'],
+    VOLTAGE: ['tensao', 'voltagem', 'voltage'],
+    POWER: ['potencia', 'power', 'watt'],
+    MATERIALS: ['material'],
+    COLOR: ['cor', 'color'],
+    MAIN_COLOR: ['cor', 'color'],
+    MODEL: ['model', 'modelo'],
+  }
+
+  /** Monta o attribute_list do add_item a partir da árvore da categoria Shopee
+   *  ({ list: [{ attribute_tree: [ATTR] }] }, ATTR com mandatory/name/
+   *  attribute_value_list/child_attribute_list condicionais). Pra cada
+   *  OBRIGATÓRIO: mapeia o valor dos atributos do IA Criativo (de-para por nome
+   *  + match de valor, igual o publish do TikTok). Onde não há atributo do IA:
+   *  dropdown → 1ª opção; free-text → nome do produto (pra não travar o
+   *  add_item). Filhos condicionais do valor escolhido são preenchidos também.
+   *  O usuário revisa/ajusta no Seller Center depois. */
+  private buildMandatoryAttributes(
+    attrRaw: unknown,
+    mlAttributes: Array<{ id: string; value_name?: string; value_id?: string }> = [],
+    fallbackText = '',
+  ): Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> {
+    const mls = (mlAttributes ?? []).filter((m) => m.value_name && m.value_id !== '-1')
+    const findMl = (shopeeName: string) => {
+      const sn = this.norm(shopeeName)
+      for (const ml of mls) {
+        const kws = ShopeeCreativePublisherService.ML_TO_SHOPEE_ATTR[ml.id] ?? [this.norm(ml.id)]
+        if (kws.some((kw) => sn.includes(this.norm(kw)))) return ml
+      }
+      return null
+    }
+    const out: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> = []
     const seen = new Set<number>()
+    const push = (attrId: number, valueId: number, valueName: string) =>
+      out.push({ attribute_id: attrId, attribute_value_list: [{ value_id: valueId, original_value_name: (valueName ?? '').slice(0, 100) }] })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fill = (attr: any, depth: number): void => {
       if (!attr || depth > 6) return
       const attrId = Number(attr.attribute_id)
       const mandatory = attr.mandatory ?? attr.is_mandatory ?? false
-      const values = attr.attribute_value_list ?? attr.value_list ?? []
       if (!mandatory || !Number.isFinite(attrId) || seen.has(attrId)) return
-      if (!Array.isArray(values) || !values.length) return // livre: não dá pra auto-preencher
-      const v = values[0]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const values: any[] = attr.attribute_value_list ?? attr.value_list ?? []
+      const ml = findMl(attr.name ?? attr.original_attribute_name ?? '')
       seen.add(attrId)
-      out.push({
-        attribute_id: attrId,
-        attribute_value_list: [{
-          value_id: Number(v?.value_id ?? 0),
-          original_value_name: v?.original_value_name ?? v?.name ?? v?.value_name ?? '',
-        }],
-      })
-      for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
+      if (Array.isArray(values) && values.length) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const vname = (x: any) => x?.original_value_name ?? x?.name ?? x?.value_name ?? ''
+        let v = values[0]
+        if (ml?.value_name) {
+          const mlv = this.norm(ml.value_name)
+          v = values.find((x) => this.norm(vname(x)) === mlv)
+            ?? values.find((x) => { const n = this.norm(vname(x)); return n !== '' && (n.includes(mlv) || mlv.includes(n)) })
+            ?? values[0]
+        }
+        push(attrId, Number(v?.value_id ?? 0), vname(v))
+        for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
+      } else {
+        // free-text obrigatório: valor do IA Criativo, senão nome do produto.
+        push(attrId, 0, ml?.value_name ?? fallbackText ?? 'N/A')
+      }
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const nodes: any[] = Array.isArray(attrRaw?.list) ? attrRaw.list : Array.isArray(attrRaw) ? attrRaw : [attrRaw]
+    const nodes: any[] = Array.isArray((attrRaw as any)?.list) ? (attrRaw as any).list : Array.isArray(attrRaw) ? (attrRaw as any[]) : [attrRaw]
     for (const node of nodes) {
       const tree = node?.attribute_tree ?? node?.attribute_list ?? node?.attributes ?? (node?.attribute_id != null ? [node] : [])
       for (const a of (Array.isArray(tree) ? tree : [])) fill(a, 0)

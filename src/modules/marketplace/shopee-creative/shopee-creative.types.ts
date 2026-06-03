@@ -42,6 +42,9 @@ export interface ShopeeDraftListing {
   package_width_cm?:      number | null
   package_height_cm?:     number | null
   brand?:                 string | null
+  /** Atributos do IA Criativo (formato ML: [{id, value_name, value_id}]) —
+   *  mapeados pros atributos da categoria Shopee por nome+valor (de-para). */
+  ml_attributes?:         Array<{ id: string; value_name?: string; value_id?: string }> | null
 }
 
 /** Resposta do guard. Espelha o PreviewResponse do ML publisher:
