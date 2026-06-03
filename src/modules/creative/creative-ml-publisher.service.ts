@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
+import { randomUUID } from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { composeListingDescription } from '../../common/listing-description'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
@@ -1270,6 +1271,34 @@ export class CreativeMlPublisherService {
       .eq('id', catalogId)
       .eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Falha ao enviar pra Loja: ${error.message}`)
+
+    // Registra a Loja como "publicação" (NÃO-FATAL, sem duplicar) pra aparecer
+    // na lista "Publicações desse anúncio" junto com ML/Shopee/TikTok.
+    try {
+      const { data: existing } = await supabaseAdmin
+        .from('creative_publications')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('listing_id', listingId)
+        .eq('marketplace', 'loja_propria')
+        .limit(1)
+        .maybeSingle<{ id: string }>()
+      if (!existing) {
+        await supabaseAdmin.from('creative_publications').insert({
+          organization_id: orgId,
+          listing_id:      listingId,
+          product_id:      listing.product_id,
+          marketplace:     'loja_propria',
+          status:          'published',
+          idempotency_key: randomUUID(),
+          external_id:     catalogId,
+          published_at:    new Date().toISOString(),
+        })
+      }
+    } catch (e) {
+      this.logger.warn(`[creative.storefront] registro creative_publications (loja) falhou: ${(e as Error)?.message}`)
+    }
+
     this.logger.log(`[creative.storefront] listing=${listingId} → produto ${catalogId} enviado pra Loja (desc+bullets+faq+visible)`)
     return { product_id: catalogId }
   }
