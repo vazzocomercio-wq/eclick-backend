@@ -7,10 +7,14 @@ import { ResultDreController } from './result-dre.controller'
 import { ResultDreService } from './result-dre.service'
 import { ShippingRatesController } from './shipping-rates.controller'
 import { ShippingRatesService } from './shipping-rates.service'
+import { ChargesController } from './charges.controller'
+import { MlBillingIngestService } from './ml-billing-ingest.service'
+import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 
 @Module({
-  controllers: [FinanceiroController, OperatingCostsController, ResultDreController, ShippingRatesController],
-  providers: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService],
-  exports: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService],
+  imports: [MercadolivreModule],
+  controllers: [FinanceiroController, OperatingCostsController, ResultDreController, ShippingRatesController, ChargesController],
+  providers: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService],
+  exports: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService],
 })
 export class FinanceiroModule {}
