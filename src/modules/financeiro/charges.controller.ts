@@ -26,15 +26,24 @@ export class ChargesController {
     return data.organization_id as string
   }
 
-  /** Backfill on-demand: ingere 1 período (?period=YYYY-MM-01) ou os 2 mais recentes. */
+  /** Backfill on-demand: ingere 1 período (?period=YYYY-MM-01) ou os 2 mais
+   *  recentes. Dispara em BACKGROUND (fire-and-forget) — a fatura tem milhares
+   *  de linhas + rate-limit, então roda além do timeout do proxy. Acompanhe via
+   *  GET /financeiro/charges/summary. */
   @Post('charges/ingest-ml')
   async ingestMl(
     @Headers('authorization') auth: string,
     @Body() body: { period?: string; recent?: number } = {},
   ) {
     const orgId = await this.resolveOrgId(auth)
-    if (body.period) return this.mlBilling.ingestPeriod(orgId, body.period)
-    return this.mlBilling.ingestRecent(orgId, body.recent ?? 2)
+    if (body.period) {
+      void this.mlBilling.ingestPeriod(orgId, body.period)
+        .catch((e) => { /* logado no service */ void e })
+      return { started: true, period: body.period }
+    }
+    void this.mlBilling.ingestRecent(orgId, body.recent ?? 2)
+      .catch((e) => { void e })
+    return { started: true, recent: body.recent ?? 2 }
   }
 
   /** Resumo dos custos reais por categoria, no mês calendário (charge_date). */

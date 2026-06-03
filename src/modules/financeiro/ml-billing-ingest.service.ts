@@ -79,18 +79,26 @@ export class MlBillingIngestService {
       let offset = 0, total = Infinity, pages = 0
       while (offset < total && pages < 60) {
         let data: { total?: number; results?: BillingLine[] } | null = null
-        for (let attempt = 0; attempt < 5; attempt++) {
+        // Retry paciente: a API de faturamento tem rate-limit agressivo (429).
+        // Backoff exponencial (3s→24s, 8 tentativas) pra a página eventualmente
+        // passar — quebrar a paginação no meio perderia o resto do mês.
+        for (let attempt = 0; attempt < 8; attempt++) {
           try {
             const res = await axios.get(
               `${ML_BASE}/billing/integration/periods/key/${periodKey}/group/ML/details`,
-              { headers: { Authorization: `Bearer ${token}`, 'x-version': '2' }, params: { document_type: 'BILL', offset, limit: 1000 }, timeout: 20_000 },
+              { headers: { Authorization: `Bearer ${token}`, 'x-version': '2' }, params: { document_type: 'BILL', offset, limit: 1000 }, timeout: 25_000 },
             )
             data = res.data
             break
           } catch (e) {
             const status = (e as { response?: { status?: number } })?.response?.status
-            if (status === 429) { await new Promise(r => setTimeout(r, 2500)); continue }
-            this.logger.warn(`[ml-billing] ${periodKey} offset=${offset} falhou: ${(e as Error).message}`)
+            const wait = Math.min(3000 * Math.pow(1.6, attempt), 24_000)
+            if (status === 429 || status === undefined || (status >= 500)) {
+              this.logger.warn(`[ml-billing] ${periodKey} offset=${offset} status=${status ?? 'net'} retry ${attempt + 1}/8 em ${Math.round(wait / 1000)}s`)
+              await new Promise(r => setTimeout(r, wait))
+              continue
+            }
+            this.logger.warn(`[ml-billing] ${periodKey} offset=${offset} falhou def: ${(e as Error).message}`)
             break
           }
         }
