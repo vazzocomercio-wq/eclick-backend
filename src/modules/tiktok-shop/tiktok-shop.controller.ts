@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common'
 import type { Response } from 'express'
 import { TikTokShopService } from './tiktok-shop.service'
+import { composeListingDescription } from '../../common/listing-description'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -220,11 +221,16 @@ export class TikTokShopController {
       package_dimensions_cm?: { length: number; width: number; height: number }
       ml_attributes?: Array<{ id: string; value_name?: string; value_id?: string }>
       brand_name?: string
+      bullets?: string[]
+      faq?: Array<{ q?: string; a?: string }>
       dry_run?: boolean
     },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    return this.svc.publishProduct(u.orgId, body)
+    // TikTok não tem campo de destaques/FAQ → junta tudo na descrição (mesma
+    // função do ML/Shopee). A descrição editável do anúncio fica limpa.
+    const description = composeListingDescription(body.description, body.bullets, body.faq)
+    return this.svc.publishProduct(u.orgId, { ...body, description })
   }
 
   /** Contadores por aba (Ativos/Pausados/Finalizados/Em revisão). Estático

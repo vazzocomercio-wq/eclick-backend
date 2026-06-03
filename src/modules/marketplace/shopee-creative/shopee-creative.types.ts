@@ -45,6 +45,10 @@ export interface ShopeeDraftListing {
   /** Atributos do IA Criativo (formato ML: [{id, value_name, value_id}]) —
    *  mapeados pros atributos da categoria Shopee por nome+valor (de-para). */
   ml_attributes?:         Array<{ id: string; value_name?: string; value_id?: string }> | null
+  /** Destaques (bullets) e FAQ do anúncio — a Shopee não tem campo próprio,
+   *  então são juntados na descrição na hora de publicar. */
+  bullets?:               string[] | null
+  faq?:                   Array<{ q?: string; a?: string }> | null
   /** Número de registro p/ campos numéricos obrigatórios da categoria
    *  (ex.: "Registration ID" = nº Inmetro). Só dígitos são usados. */
   registration_number?:   string | null

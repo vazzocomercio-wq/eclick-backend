@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
+import { composeListingDescription } from '../../../common/listing-description'
 import { ShopeeAlgoScoreService } from '../shopee-algo-score/shopee-algo-score.service'
 import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
 import { MarketplaceService } from '../marketplace.service'
@@ -148,8 +149,11 @@ export class ShopeeCreativePublisherService {
 
     const name = (draft.title ?? prod?.name ?? '').toString().trim()
     if (!name) throw new BadRequestException('Título obrigatório')
-    const description = (draft.description ?? prod?.ai_long_description ?? prod?.description ?? '').toString().trim()
-    if (description.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
+    // Shopee não tem campo de destaques/FAQ → junta tudo na descrição (a
+    // descrição editável do anúncio fica limpa; a composição é só aqui).
+    const baseDescription = (draft.description ?? prod?.ai_long_description ?? prod?.description ?? '').toString().trim()
+    const description = composeListingDescription(baseDescription, draft.bullets, draft.faq)
+    if (baseDescription.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
 
     // 4) categoria (do rascunho ou recomendada pelo nome)
     const categoryId = await this.step('categoria (category_recommend)', () => adapter.recommendCategory(conn, name))

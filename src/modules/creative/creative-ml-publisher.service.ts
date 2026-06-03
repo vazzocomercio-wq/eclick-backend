@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
+import { composeListingDescription } from '../../common/listing-description'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { MlShippingCostService, type ShippingCostResult } from '../mercadolivre/ml-shipping-cost.service'
 import { CreativeService, type CreativeListing, type CreativeProduct } from './creative.service'
@@ -534,7 +535,8 @@ export class CreativeMlPublisherService {
       pictures,
       attributes:          attributesPayload,
       description: {
-        plain_text: listing.description,
+        // ML não tem campo de destaques/FAQ → junta tudo na descrição.
+        plain_text: composeListingDescription(listing.description, listing.bullets, listing.faq),
       },
       // F3 vai colocar status=paused; F1+F2 só mostra
       status: 'paused',
@@ -1017,7 +1019,7 @@ export class CreativeMlPublisherService {
   private async syncCatalogProductAfterPublish(
     orgId:           string,
     creativeProduct: { id: string; product_id: string | null },
-    listing:         { title: string; description: string },
+    listing:         { title: string; description: string; bullets?: string[]; faq?: Array<{ q: string; a: string }> },
     mlItem:          { pictures?: Array<{ url?: string; secure_url?: string }> },
   ): Promise<void> {
     const catalogId = creativeProduct.product_id
@@ -1034,8 +1036,13 @@ export class CreativeMlPublisherService {
       ml_title:   listing.title,
       updated_at: new Date().toISOString(),
     }
-    if (listing.description?.trim()) patch.description = listing.description
-    if (photoUrls.length > 0)        patch.photo_urls  = photoUrls
+    // Descrição fica LIMPA no catálogo — a Loja própria tem seções próprias de
+    // destaques/FAQ, que sincronizamos como CAMPOS (não na descrição) pra não
+    // duplicar na vitrine.
+    if (listing.description?.trim())      patch.description = listing.description
+    if (photoUrls.length > 0)            patch.photo_urls  = photoUrls
+    if (Array.isArray(listing.bullets))  patch.bullets     = listing.bullets
+    if (Array.isArray(listing.faq))      patch.faq         = listing.faq
 
     const { error } = await supabaseAdmin
       .from('products')
@@ -1045,7 +1052,7 @@ export class CreativeMlPublisherService {
     if (error) {
       this.logger.warn(`[creative.ml.publish] sync catálogo ${catalogId} falhou: ${error.message}`)
     } else {
-      this.logger.log(`[creative.ml.publish] catálogo ${catalogId} sincronizado — título + ${photoUrls.length} foto(s)`)
+      this.logger.log(`[creative.ml.publish] catálogo ${catalogId} sincronizado — título + ${photoUrls.length} foto(s) + ${(listing.bullets?.length ?? 0)} destaques + ${(listing.faq?.length ?? 0)} FAQ`)
     }
   }
 
