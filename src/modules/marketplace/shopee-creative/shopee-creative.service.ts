@@ -6,6 +6,7 @@ import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from '../shopee-sync/shopee-product-sync.service'
+import { ShopeeStockSyncService } from '../shopee-sync/shopee-stock-sync.service'
 import {
   ShopeeDraftListing, ShopeeEvaluateResponse, RELEVANCE_GATE,
 } from './shopee-creative.types'
@@ -27,6 +28,7 @@ export class ShopeeCreativePublisherService {
     private readonly algoScore:   ShopeeAlgoScoreService,
     private readonly mp:          MarketplaceService,
     private readonly productSync: ShopeeProductSyncService,
+    private readonly stockSync:   ShopeeStockSyncService,
   ) {}
 
   /** Avalia rascunho em dry-run. Performance/qualidade de loja entram
@@ -99,6 +101,11 @@ export class ShopeeCreativePublisherService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     payload?: Record<string, any>
     blockers?: string[]
+    /** estoque virtual (físico+virtual) aplicado no anúncio pós-publish (regra
+     *  Vazzo). undefined quando não há produto de catálogo/estoque vinculado. */
+    virtual_stock?: number
+    stock_paused?: boolean
+    attributes_count?: number
   }> {
     if (!this.isPublishEnabled()) {
       throw new BadRequestException('Publicação Shopee desabilitada (credenciais Open Platform ausentes).')
@@ -178,7 +185,9 @@ export class ShopeeCreativePublisherService {
     // cai pra 1ª opção (dropdown) ou pro nome do produto (free-text), pra não
     // travar. NÃO-FATAL: se get_attribute_tree falhar, segue sem.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let attributeList: any[] = []
+    let attributeList: any[] = []      // obrigatórios + opcionais (enriquecido)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mandatoryList: any[] = []      // só obrigatórios (fallback do retry)
     let attrNeedsInput: Array<{ attribute_id: number; name: string }> = []
     try {
       const attrRaw = await adapter.getCategoryAttributes(conn, categoryId)
@@ -188,6 +197,7 @@ export class ShopeeCreativePublisherService {
         notApplicable: draft.registration_not_applicable ?? false,
       })
       attributeList = built.list
+      mandatoryList = built.mandatoryList
       attrNeedsInput = built.needsInput
     } catch (e) {
       this.logger.warn(`[shopee.publish] atributos (get_attribute_tree) falhou — segue sem: ${(e as Error)?.message}`)
@@ -246,8 +256,19 @@ export class ShopeeCreativePublisherService {
       return { ok: true, dry_run: true, category_id: categoryId, images: imageIds.length, payload }
     }
 
-    // 9) cria o anúncio
-    const { item_id } = await this.step('criar anúncio (add_item)', () => adapter.addItem(conn, payload))
+    // 9) cria o anúncio. Tenta com enriquecimento (obrigatórios + opcionais); se
+    // a Shopee rejeitar (provável atributo opcional), refaz só com os
+    // obrigatórios — nunca quebra um publish que funcionaria. this.step converte
+    // o erro final (403/escopo ou negócio) em 400 acionável.
+    const { item_id } = await this.step('criar anúncio (add_item)', async () => {
+      try {
+        return await adapter.addItem(conn, payload)
+      } catch (e) {
+        if (mandatoryList.length >= attributeList.length) throw e // não havia opcionais
+        this.logger.warn(`[shopee.publish] add_item falhou com opcionais — retry só obrigatórios: ${(e as Error)?.message}`)
+        return await adapter.addItem(conn, { ...payload, attribute_list: mandatoryList })
+      }
+    })
 
     // teste ao vivo: cria e remove (não deixa lixo no catálogo Shopee)
     if (opts?.deleteAfter) {
@@ -256,23 +277,44 @@ export class ShopeeCreativePublisherService {
       return { ok: true, item_id, category_id: categoryId, images: imageIds.length, deleted: true }
     }
 
-    // 10) grava vínculo anúncio↔produto (mesmo padrão da Fase A). Só quando há
-    // produto de catálogo — no fluxo AI Criativo não há row em `products`.
-    if (prod) {
+    // 10) vínculo anúncio↔produto de catálogo (`products.id`). Vem do fluxo
+    // catálogo (prod) OU do AI Criativo via product_id/SKU resolvido no front
+    // (draft.catalog_product_id). Sem catálogo (anúncio standalone) → não há
+    // estoque/ledger a vincular.
+    const catalogProductId = prod?.id ?? (draft.catalog_product_id ? String(draft.catalog_product_id) : null)
+    let virtualStock: number | undefined
+    let stockPaused: boolean | undefined
+    if (catalogProductId) {
       await supabaseAdmin.from('product_listings').upsert({
         platform:      'shopee',
         account_id:    String(conn.shop_id),
         listing_id:    String(item_id),
         variation_id:  '',
-        product_id:    prod.id,
+        product_id:    catalogProductId,
         listing_title: name,
         listing_price: price,
         is_active:     true,
       }, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+
+      // 11) ESTOQUE VIRTUAL (regra Vazzo): aplica físico+virtual e respeita o
+      // mínimo p/ pausar — reusa o motor operacional (resolve location BRZ, loga
+      // em stock_sync_logs). bypassGate = ação explícita do user (publish). Sem
+      // registro de estoque (produto fora do catálogo) → pula, anúncio fica 0.
+      try {
+        const r = await this.stockSync.pushStockForProduct(catalogProductId, { bypassGate: true })
+        virtualStock = r.virtual_stock
+        stockPaused = r.paused
+        this.logger.log(`[shopee.publish] estoque virtual product=${catalogProductId} item=${item_id} virtual=${r.virtual_stock ?? '—'} paused=${r.paused ?? '—'} skipped=${r.skipped ?? ''}`)
+      } catch (e) {
+        this.logger.warn(`[shopee.publish] push estoque virtual falhou item=${item_id}: ${(e as Error)?.message}`)
+      }
     }
 
-    this.logger.log(`[shopee.publish] org=${orgId} product=${prod?.id ?? '(criativo)'} → item=${item_id} cat=${categoryId} imgs=${imageIds.length}`)
-    return { ok: true, item_id, category_id: categoryId, images: imageIds.length }
+    this.logger.log(`[shopee.publish] org=${orgId} product=${catalogProductId ?? '(criativo)'} → item=${item_id} cat=${categoryId} imgs=${imageIds.length} attrs=${attributeList.length}`)
+    return {
+      ok: true, item_id, category_id: categoryId, images: imageIds.length,
+      virtual_stock: virtualStock, stock_paused: stockPaused, attributes_count: attributeList.length,
+    }
   }
 
   /** Executa um passo da esteira convertendo erro 403/Forbidden da Shopee numa
@@ -313,9 +355,18 @@ export class ShopeeCreativePublisherService {
     VOLTAGE: ['tensao', 'voltagem', 'voltage'],
     POWER: ['potencia', 'power', 'watt'],
     MATERIALS: ['material'],
-    COLOR: ['cor', 'color'],
-    MAIN_COLOR: ['cor', 'color'],
+    STRUCTURE_MATERIAL: ['material'],
+    SCREEN_MATERIAL: ['material'],
+    COLOR: ['cor', 'color', 'colour'],
+    MAIN_COLOR: ['cor', 'color', 'colour'],
+    STRUCTURE_COLOR: ['cor', 'color', 'colour'],
+    SCREEN_COLOR: ['light colour', 'light color', 'cor da luz'],
     MODEL: ['model', 'modelo'],
+    PIECES_NUMBER: ['quantity', 'quantidade', 'pieces', 'unidades', 'qty'],
+    LIGHTING_TECHNOLOGY: ['light bulb type', 'bulb type', 'tipo de lampada', 'lighting type'],
+    FITTING_TYPES: ['fitting', 'soquete', 'base', 'bocal'],
+    WITH_BATTERY: ['battery', 'bateria', 'pilha'],
+    ENERGY_EFFICIENCY: ['energy', 'eficiencia', 'energetica'],
   }
 
   /** Monta o attribute_list do add_item a partir da árvore da categoria Shopee.
@@ -333,6 +384,7 @@ export class ShopeeCreativePublisherService {
     opts: { fallbackText?: string; regNumber?: string; notApplicable?: boolean } = {},
   ): {
     list: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }>
+    mandatoryList: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }>
     needsInput: Array<{ attribute_id: number; name: string }>
   } {
     const fallbackText = opts.fallbackText ?? ''
@@ -357,8 +409,13 @@ export class ShopeeCreativePublisherService {
     const list: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }> = []
     const needsInput: Array<{ attribute_id: number; name: string }> = []
     const seen = new Set<number>()
-    const push = (attrId: number, valueId: number, valueName: string) =>
+    const optionalIds = new Set<number>() // atributos OPCIONAIS preenchidos (enriquecimento)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const vname = (x: any): string => x?.original_value_name ?? x?.name ?? x?.value_name ?? ''
+    const push = (attrId: number, valueId: number, valueName: string, optional = false) => {
       list.push({ attribute_id: attrId, attribute_value_list: [{ value_id: valueId, original_value_name: (valueName ?? '').slice(0, 100) }] })
+      if (optional) optionalIds.add(attrId)
+    }
     // ── custo de uma opção de dropdown ──────────────────────────────────────
     // = nº de campos OBRIGATÓRIOS free-text (sem lista de valores, ex.:
     // "Registration ID"/"Model Name") que essa opção destrava nos filhos
@@ -390,17 +447,38 @@ export class ShopeeCreativePublisherService {
     const fill = (attr: any, depth: number): void => {
       if (!attr || depth > 6) return
       const attrId = Number(attr.attribute_id)
-      const mandatory = attr.mandatory ?? attr.is_mandatory ?? false
-      if (!mandatory || !Number.isFinite(attrId) || seen.has(attrId)) return
+      if (!Number.isFinite(attrId) || seen.has(attrId)) return
+      const mandatory = Boolean(attr.mandatory ?? attr.is_mandatory ?? false)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const values: any[] = attr.attribute_value_list ?? attr.value_list ?? []
       const attrName = String(attr.name ?? attr.original_attribute_name ?? '')
       const ml = findMl(attrName)
+
+      // OPCIONAL: enriquece SÓ quando há dado do IA Criativo que casa — sem dado
+      // deixa em branco (preencher opcional com 1ª opção = lixo). Mais atributos
+      // preenchidos = melhor ranking/qualidade na Shopee. Marcado optional=true
+      // pro publish poder refazer só com obrigatórios se a Shopee rejeitar.
+      if (!mandatory) {
+        if (!ml?.value_name) return
+        seen.add(attrId)
+        if (Array.isArray(values) && values.length) {
+          const mlv = this.norm(ml.value_name)
+          const m = values.find((x) => this.norm(vname(x)) === mlv)
+            ?? values.find((x) => { const n = this.norm(vname(x)); return n !== '' && (n.includes(mlv) || mlv.includes(n)) })
+          if (m) {
+            push(attrId, Number(m.value_id ?? 0), vname(m), true)
+            for (const child of (m.child_attribute_list ?? [])) fill(child, depth + 1)
+          }
+          // dropdown opcional sem valor casado → não força (deixa vazio)
+        } else {
+          push(attrId, 0, ml.value_name, true) // free-text opcional
+        }
+        return
+      }
+
       seen.add(attrId)
       if (Array.isArray(values) && values.length) {
-        // dropdown: casa o valor do IA Criativo; senão 1ª opção.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const vname = (x: any) => x?.original_value_name ?? x?.name ?? x?.value_name ?? ''
+        // dropdown OBRIGATÓRIO: casa o valor do IA Criativo; senão menor custo.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let v: any = undefined
         if (ml?.value_name) {
@@ -446,7 +524,7 @@ export class ShopeeCreativePublisherService {
       const tree = node?.attribute_tree ?? node?.attribute_list ?? node?.attributes ?? (node?.attribute_id != null ? [node] : [])
       for (const a of (Array.isArray(tree) ? tree : [])) fill(a, 0)
     }
-    return { list, needsInput }
+    return { list, mandatoryList: list.filter((x) => !optionalIds.has(x.attribute_id)), needsInput }
   }
 
   /** Feature flag: só libera publish quando creds Shopee de prod estiverem

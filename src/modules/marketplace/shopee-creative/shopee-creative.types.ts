@@ -52,6 +52,11 @@ export interface ShopeeDraftListing {
    *  em dropdowns de certificação escolhe a opção de isento/não-aplicável e
    *  em campo numérico obrigatório manda 0 em vez de bloquear. */
   registration_not_applicable?: boolean | null
+  /** Produto de catálogo (`products.id`) vinculado a este anúncio — usado pra
+   *  aplicar o ESTOQUE VIRTUAL (físico+virtual) pós-publish e vincular em
+   *  product_listings. Resolvido no front via contexto (product_id direto ou
+   *  match de SKU). null = anúncio standalone do AI Criativo (sem estoque). */
+  catalog_product_id?:    string | null
 }
 
 /** Resposta do guard. Espelha o PreviewResponse do ML publisher:
