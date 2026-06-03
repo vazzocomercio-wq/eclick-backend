@@ -342,7 +342,9 @@ export class ShopeeCreativePublisherService {
     // numérico obrigatório manda 0 como sentinela em vez de bloquear.
     const notApplicable = opts.notApplicable ?? false
     const REG_ATTR = /(inmetro|certif|registr|registration|anatel|homolog|licen)/
-    const NA_VALUE = /(nao aplic|n\/?a\b|^na$|isento|isenc|exempt|sem registro|nao possu|nao certif|^nao$|nenhum|none)/
+    // valores de "isento/não-aplicável" (dados Shopee vêm em inglês: "N/A – NBR
+    // not applicable", "None", "Not certified"…). PT + EN.
+    const NA_VALUE = /(nao aplic|not applic|n\/?a\b|isento|isenc|exempt|sem registro|nao possu|nao certif|not certif|nenhum|none)/
     const mls = (mlAttributes ?? []).filter((m) => m.value_name && m.value_id !== '-1')
     const findMl = (shopeeName: string) => {
       const sn = this.norm(shopeeName)
@@ -357,6 +359,33 @@ export class ShopeeCreativePublisherService {
     const seen = new Set<number>()
     const push = (attrId: number, valueId: number, valueName: string) =>
       list.push({ attribute_id: attrId, attribute_value_list: [{ value_id: valueId, original_value_name: (valueName ?? '').slice(0, 100) }] })
+    // ── custo de uma opção de dropdown ──────────────────────────────────────
+    // = nº de campos OBRIGATÓRIOS free-text (sem lista de valores, ex.:
+    // "Registration ID"/"Model Name") que essa opção destrava nos filhos
+    // condicionais. Dropdown filho escolhe seu próprio valor mais barato. Assim
+    // o parser evita "Connection Type=Wireless" (que torna Registration ID
+    // obrigatório) e prefere "Others" (custo 0) — mais barato E correto p/ uma
+    // luminária. Free-text obrigatório = custo 1 (precisa de dado que não temos).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const valsOf = (a: any): any[] => a?.attribute_value_list ?? a?.value_list ?? []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const isMand = (a: any): boolean => Boolean(a?.mandatory ?? a?.is_mandatory ?? false)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const costValue = (val: any, depth: number): number => {
+      if (!val || depth > 8) return 0
+      let c = 0
+      for (const child of (val.child_attribute_list ?? [])) c += costAttr(child, depth + 1)
+      return c
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const costAttr = (attr: any, depth: number): number => {
+      if (!attr || depth > 8 || !isMand(attr)) return 0
+      const cv = valsOf(attr)
+      if (!Array.isArray(cv) || !cv.length) return 1 // free-text obrigatório
+      let min = Infinity
+      for (const val of cv) min = Math.min(min, costValue(val, depth + 1))
+      return min === Infinity ? 0 : min
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fill = (attr: any, depth: number): void => {
       if (!attr || depth > 6) return
@@ -379,13 +408,19 @@ export class ShopeeCreativePublisherService {
           v = values.find((x) => this.norm(vname(x)) === mlv)
             ?? values.find((x) => { const n = this.norm(vname(x)); return n !== '' && (n.includes(mlv) || mlv.includes(n)) })
         }
-        // "não se aplica": em atributo de certificação/registro, prefere a
-        // opção de isento/não-aplicável (em vez da 1ª opção, que costuma ser
-        // "Certificado" e mantém o nº de registro obrigatório).
-        if (!v && notApplicable && REG_ATTR.test(this.norm(attrName))) {
-          v = values.find((x) => NA_VALUE.test(this.norm(vname(x))))
+        if (!v) {
+          // sem match do IA Criativo: escolhe a opção que destrava MENOS campos
+          // obrigatórios free-text (evita Wireless→Registration ID; prefere
+          // Others, custo 0). Empate → opção de isento/não-aplicável só quando
+          // o user marcou "não se aplica" (senão a 1ª, p/ não mislabel).
+          let min = Infinity
+          for (const cand of values) { const c = costValue(cand, depth); if (c < min) min = c }
+          const cheapest = values.filter((cand) => costValue(cand, depth) === min)
+          if (notApplicable && REG_ATTR.test(this.norm(attrName))) {
+            v = cheapest.find((x) => NA_VALUE.test(this.norm(vname(x))))
+          }
+          v = v ?? cheapest[0] ?? values[0]
         }
-        v = v ?? values[0]
         push(attrId, Number(v?.value_id ?? 0), vname(v))
         for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
         return
