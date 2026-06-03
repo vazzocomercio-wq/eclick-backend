@@ -133,7 +133,9 @@ export class MlBillingIngestService {
           byCat[category] = Math.round(((byCat[category] ?? 0) + signed) * 100) / 100
         }
         offset += 1000; pages++
-        await new Promise(r => setTimeout(r, 1200))
+        // A API de faturamento limita ~5 req/janela curta → espaça 2,5s entre
+        // páginas pra a janela recuperar e a paginação não perder o tail.
+        await new Promise(r => setTimeout(r, 2500))
       }
     }
 
