@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import * as crypto from 'crypto'
-import sharp from 'sharp'
 import {
   MarketplaceAdapter, MarketplacePlatform, MpConnection,
   RawOrder, BuyerBilling, AddressShape, TokenPair,
@@ -9,6 +8,11 @@ import {
 } from './base'
 import { ShopThrottleService } from '../throttle/shop-throttle.service'
 import { retryWithBackoff } from '../throttle/retry-with-backoff'
+
+// sharp é CommonJS (export =) — require evita o runtime error "sharp_1.default
+// is not a function" (o tsconfig não tem esModuleInterop). Mesmo padrão do
+// creative/image-adapter.ts.
+const sharp = require('sharp') as typeof import('sharp')
 
 const SHOPEE_BASE = 'https://openplatform.shopee.com.br' // BR prod
 
