@@ -38,7 +38,11 @@ export class ShopeeCreativeController {
     @Body() body: ShopeeDraftListing & { dry_run?: boolean; delete_after?: boolean },
   ) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    if (!body?.product_id) throw new BadRequestException('product_id obrigatório')
+    // Aceita produto de catálogo (product_id) OU conteúdo do AI Criativo
+    // (image_urls + título/desc/preço). O service valida o resto.
+    if (!body?.product_id && !(body?.image_urls && body.image_urls.length)) {
+      throw new BadRequestException('Informe product_id (catálogo) ou image_urls (AI Criativo) para publicar.')
+    }
     return this.svc.publish(user.orgId, body, { dryRun: body.dry_run, deleteAfter: body.delete_after })
   }
 }
