@@ -31,6 +31,7 @@ import { computeContributionMargin, round2 } from '../../common/margin'
 
 const TTS_AUTHORIZE = 'https://services.tiktokshop.com/open/authorize'
 const TTS_TOKEN = 'https://auth.tiktok-shops.com/api/v2/token/get'
+const TTS_TOKEN_REFRESH = 'https://auth.tiktok-shops.com/api/v2/token/refresh'
 const TTS_API_BASE = 'https://open-api.tiktokglobalshop.com'
 
 interface TtsTokenData {
@@ -346,13 +347,69 @@ export class TikTokShopService {
   async getAccessToken(orgId: string): Promise<string | null> {
     const { data } = await supabaseAdmin
       .from('tiktok_shop_credentials')
-      .select('credentials_encrypted')
+      .select('credentials_encrypted, access_expires_at, refresh_expires_at')
       .eq('organization_id', orgId)
-      .maybeSingle<{ credentials_encrypted: string }>()
+      .maybeSingle<{ credentials_encrypted: string; access_expires_at: string | null; refresh_expires_at: string | null }>()
     if (!data?.credentials_encrypted) return null
     const dec = decryptConfig(data.credentials_encrypted)
-    const token = dec?.access_token
-    return typeof token === 'string' ? token : null
+    const token = typeof dec?.access_token === 'string' ? dec.access_token : null
+    const refreshToken = typeof dec?.refresh_token === 'string' ? dec.refresh_token : null
+
+    // RENOVA on-demand: o access token do TikTok Shop dura ~7 dias; sem refresh
+    // ele morre e TODAS as chamadas (categorias/publish) voltam vazias/erro.
+    // Se está vencido (ou vence em <5min) e há refresh_token válido, renova.
+    const accessExp = data.access_expires_at ? new Date(data.access_expires_at).getTime() : 0
+    const nearExpiry = !accessExp || accessExp - Date.now() < 5 * 60 * 1000
+    const refreshExp = data.refresh_expires_at ? new Date(data.refresh_expires_at).getTime() : 0
+    const refreshValid = !!refreshToken && (!refreshExp || refreshExp > Date.now())
+    if (nearExpiry && refreshValid) {
+      try {
+        return await this.refreshAccessToken(orgId, refreshToken as string)
+      } catch (e) {
+        this.logger.warn(`[tiktok] refresh do token falhou — usa o atual: ${(e as Error)?.message}`)
+      }
+    }
+    return token
+  }
+
+  /** Renova o access token via refresh_token (TikTok Shop). Atualiza SÓ os
+   *  campos de token — NÃO mexe em open_id/shop_cipher/seller (o refresh pode
+   *  não devolvê-los, e zerá-los quebraria a resolução da loja). */
+  private async refreshAccessToken(orgId: string, refreshToken: string): Promise<string | null> {
+    const { appKey, appSecret } = this.env()
+    const params = new URLSearchParams({
+      app_key: appKey,
+      app_secret: appSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    })
+    const res = await fetch(`${TTS_TOKEN_REFRESH}?${params.toString()}`, {
+      signal: AbortSignal.timeout(20_000),
+    })
+    const json = (await res.json()) as TtsTokenResponse
+    if (!res.ok || json.code !== 0 || !json.data?.access_token) {
+      throw new BadRequestException(`TikTok Shop refresh falhou: ${json.message ?? `HTTP ${res.status}`} (code ${json.code ?? '?'})`)
+    }
+    const d = json.data
+    const credentials_encrypted = encryptConfig({
+      access_token: d.access_token,
+      refresh_token: d.refresh_token ?? refreshToken, // mantém o atual se não vier novo
+    })
+    if (!credentials_encrypted) throw new BadRequestException('Falha ao cifrar credenciais TikTok renovadas')
+    const patch: Record<string, unknown> = {
+      credentials_encrypted,
+      status: 'connected',
+      updated_at: new Date().toISOString(),
+    }
+    if (d.access_token_expire_in)  patch.access_expires_at  = new Date(d.access_token_expire_in * 1000).toISOString()
+    if (d.refresh_token_expire_in) patch.refresh_expires_at = new Date(d.refresh_token_expire_in * 1000).toISOString()
+    const { error } = await supabaseAdmin
+      .from('tiktok_shop_credentials')
+      .update(patch)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Falha ao salvar token TikTok renovado: ${error.message}`)
+    this.logger.log(`[tiktok] access token renovado p/ org=${orgId}`)
+    return d.access_token ?? null
   }
 
   // ── Fase 2: chamadas de negócio (assinadas HMAC) ──────────────────────────
