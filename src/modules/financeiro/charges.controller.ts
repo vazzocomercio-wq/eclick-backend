@@ -58,32 +58,40 @@ export class ChargesController {
     const from = `${ym}-01`
     const to = endOfMonth(ym)
 
-    let q = supabaseAdmin
-      .from('platform_charges')
-      .select('platform, charge_category, detail_type, amount')
-      .eq('organization_id', orgId)
-      .gte('charge_date', from)
-      .lte('charge_date', to)
-    if (platform) q = q.eq('platform', platform)
-    const { data, error } = await q
-    if (error) throw new HttpException(error.message, 500)
-
-    // net por categoria (charge − credit) e por plataforma
+    // Pagina o select — PostgREST limita 1000 linhas/página; sem isso a
+    // agregação trunca e o net fica subestimado.
     const byCat: Record<string, number> = {}
     const byPlatform: Record<string, number> = {}
     let net = 0
-    for (const r of (data ?? []) as Array<{ platform: string; charge_category: string; detail_type: string; amount: number }>) {
-      const signed = r.detail_type === 'credit' ? -Number(r.amount) : Number(r.amount)
-      byCat[r.charge_category] = Math.round(((byCat[r.charge_category] ?? 0) + signed) * 100) / 100
-      byPlatform[r.platform] = Math.round(((byPlatform[r.platform] ?? 0) + signed) * 100) / 100
-      net += signed
+    let lines = 0
+    const PAGE = 1000
+    for (let offset = 0; ; offset += PAGE) {
+      let q = supabaseAdmin
+        .from('platform_charges')
+        .select('platform, charge_category, detail_type, amount')
+        .eq('organization_id', orgId)
+        .gte('charge_date', from)
+        .lte('charge_date', to)
+        .range(offset, offset + PAGE - 1)
+      if (platform) q = q.eq('platform', platform)
+      const { data, error } = await q
+      if (error) throw new HttpException(error.message, 500)
+      const rows = (data ?? []) as Array<{ platform: string; charge_category: string; detail_type: string; amount: number }>
+      for (const r of rows) {
+        const signed = r.detail_type === 'credit' ? -Number(r.amount) : Number(r.amount)
+        byCat[r.charge_category] = Math.round(((byCat[r.charge_category] ?? 0) + signed) * 100) / 100
+        byPlatform[r.platform] = Math.round(((byPlatform[r.platform] ?? 0) + signed) * 100) / 100
+        net += signed
+      }
+      lines += rows.length
+      if (rows.length < PAGE) break
     }
     return {
       month: ym,
       net_total: Math.round(net * 100) / 100,
       by_category: byCat,
       by_platform: byPlatform,
-      lines: (data ?? []).length,
+      lines,
     }
   }
 }
