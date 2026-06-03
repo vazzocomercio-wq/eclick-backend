@@ -185,6 +185,7 @@ export class ShopeeCreativePublisherService {
       const built = this.buildMandatoryAttributes(attrRaw, draft.ml_attributes ?? [], {
         fallbackText: name,
         regNumber: draft.registration_number ?? undefined,
+        notApplicable: draft.registration_not_applicable ?? false,
       })
       attributeList = built.list
       attrNeedsInput = built.needsInput
@@ -200,7 +201,8 @@ export class ShopeeCreativePublisherService {
         ok: false,
         blockers: [
           `A categoria Shopee exige ${attrNeedsInput.length === 1 ? 'o campo numérico' : 'os campos numéricos'} ${nomes} ` +
-          `(número de registro, ex.: Inmetro). Preencha o campo "Número de registro" e publique de novo.`,
+          `(número de registro, ex.: Inmetro). Preencha o campo "Número de registro" — ou marque ` +
+          `"não se aplica / não tenho" — e publique de novo.`,
         ],
       }
     }
@@ -328,13 +330,19 @@ export class ShopeeCreativePublisherService {
   private buildMandatoryAttributes(
     attrRaw: unknown,
     mlAttributes: Array<{ id: string; value_name?: string; value_id?: string }> = [],
-    opts: { fallbackText?: string; regNumber?: string } = {},
+    opts: { fallbackText?: string; regNumber?: string; notApplicable?: boolean } = {},
   ): {
     list: Array<{ attribute_id: number; attribute_value_list: Array<{ value_id: number; original_value_name: string }> }>
     needsInput: Array<{ attribute_id: number; name: string }>
   } {
     const fallbackText = opts.fallbackText ?? ''
     const regDigits = (opts.regNumber ?? '').replace(/\D/g, '')
+    // "não se aplica" (espelho do value_id -1 do ML): em dropdowns de
+    // certificação/registro escolhe a opção de isento/não-aplicável; em campo
+    // numérico obrigatório manda 0 como sentinela em vez de bloquear.
+    const notApplicable = opts.notApplicable ?? false
+    const REG_ATTR = /(inmetro|certif|registr|registration|anatel|homolog|licen)/
+    const NA_VALUE = /(nao aplic|n\/?a\b|^na$|isento|isenc|exempt|sem registro|nao possu|nao certif|^nao$|nenhum|none)/
     const mls = (mlAttributes ?? []).filter((m) => m.value_name && m.value_id !== '-1')
     const findMl = (shopeeName: string) => {
       const sn = this.norm(shopeeName)
@@ -364,13 +372,20 @@ export class ShopeeCreativePublisherService {
         // dropdown: casa o valor do IA Criativo; senão 1ª opção.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const vname = (x: any) => x?.original_value_name ?? x?.name ?? x?.value_name ?? ''
-        let v = values[0]
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let v: any = undefined
         if (ml?.value_name) {
           const mlv = this.norm(ml.value_name)
           v = values.find((x) => this.norm(vname(x)) === mlv)
             ?? values.find((x) => { const n = this.norm(vname(x)); return n !== '' && (n.includes(mlv) || mlv.includes(n)) })
-            ?? values[0]
         }
+        // "não se aplica": em atributo de certificação/registro, prefere a
+        // opção de isento/não-aplicável (em vez da 1ª opção, que costuma ser
+        // "Certificado" e mantém o nº de registro obrigatório).
+        if (!v && notApplicable && REG_ATTR.test(this.norm(attrName))) {
+          v = values.find((x) => NA_VALUE.test(this.norm(vname(x))))
+        }
+        v = v ?? values[0]
         push(attrId, Number(v?.value_id ?? 0), vname(v))
         for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
         return
@@ -384,6 +399,7 @@ export class ShopeeCreativePublisherService {
         const mlDigits = (mlVal ?? '').replace(/\D/g, '')
         const val = regDigits || mlDigits // ambos só dígitos
         if (val) push(attrId, 0, val)
+        else if (notApplicable) push(attrId, 0, '0') // sentinela "não se aplica"
         else needsInput.push({ attribute_id: attrId, name: attrName || `atributo ${attrId}` })
       } else {
         push(attrId, 0, mlVal || fallbackText || 'N/A')

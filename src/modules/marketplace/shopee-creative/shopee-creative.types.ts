@@ -48,6 +48,10 @@ export interface ShopeeDraftListing {
   /** Número de registro p/ campos numéricos obrigatórios da categoria
    *  (ex.: "Registration ID" = nº Inmetro). Só dígitos são usados. */
   registration_number?:   string | null
+  /** "Não se aplica / não tenho esse dado" (espelho do value_id -1 do ML):
+   *  em dropdowns de certificação escolhe a opção de isento/não-aplicável e
+   *  em campo numérico obrigatório manda 0 em vez de bloquear. */
+  registration_not_applicable?: boolean | null
 }
 
 /** Resposta do guard. Espelha o PreviewResponse do ML publisher:
