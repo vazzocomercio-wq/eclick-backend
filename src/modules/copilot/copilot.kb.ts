@@ -1847,6 +1847,31 @@ UNIQUE (source_type, source_id) garante idempotência.
 **Cancelar** rejeita se já paga.`,
     tags: ['financeiro', 'contas-a-pagar', 'payable', 'dropship'],
   },
+  {
+    routes:   ['/dashboard/financeiro/resultado'],
+    category: 'financeiro',
+    title:    'Central de Resultado (DRE viva por fatura/escrow)',
+    content: `**Central de Resultado** é a DRE viva do negócio: Receita − CMV − Taxas de plataforma − ADS − Custo fixo = Lucro líquido, consolidado e por anúncio/SKU.
+
+**A taxa de plataforma é REAL, não estimada.** A fonte é o **ledger oficial** (tabela \`platform_charges\`):
+- **Mercado Livre** — a **fatura** (\`/billing/integration\`): comissão, frete/envios, parcelamento, cobrança no Mercado Pago, publicidade (Ads), impostos, e os cancelamentos (créditos). Cron diário ingere; backfill via \`POST /financeiro/charges/ingest-ml\`.
+- **Shopee** — o **escrow** (\`get_escrow_detail\`) dos pedidos entregues: comissão + taxa de serviço (programa de frete grátis). Backfill via \`POST /shopee/sync/escrow\`.
+
+⚠️ Isso substitui o cálculo antigo por pedido (\`orders.platform_fee\`/\`shipping_cost\`), que **superestimava comissão/frete e era cego a Ads, parcelamento, cobrança e à comissão inteira da Shopee**.
+
+**Take real auditado (Vazzo):** ML ≈ **18,99%** de taxa obrigatória (comissão 7,3% + frete 7,3% + parcelamento 2,4% + cobrança 1,7%) **+ 5,5% de Ads**; Shopee ≈ **31,59%** (comissão 13,2% + serviço 18,4%). Shopee é ~66% mais cara em taxa; item barato (<R$50) na Shopee tem take ~38%.
+
+**Como ler a tela:**
+- **KPIs**: Receita, Margem de contribuição, TACOS (peso do ADS), Custo fixo, Lucro líquido (vs meta), Gap pra meta.
+- **DRE do mês** (cascata) + **"Para onde vai o dinheiro"**: a quebra real das taxas por categoria (comissão / frete / serviço Shopee / parcelamento / cobrança / **ADS = marketing** / imposto), em R$ e % da receita.
+- **Cobertura de custo**: % da receita com custo cadastrado. O resto tem **CMV estimado pela média** dos que têm — cadastre mais custos (em Produtos) pra precisão total. Badge fica amarelo abaixo de 90%.
+- **Custos fixos**: cadastre aluguel/folha/etc (rateados por margem). Define a meta de líquido consolidado.
+- **Frete pago por fora (Flex)**: cadastre o valor fixo que você paga à transportadora por venda Flex (não aparece em API do ML/MP). Quando houver **reajuste de tabela**, cadastre o novo valor com a data — os pedidos antigos mantêm a tarifa da época.
+- **Lucro por anúncio**: pior líquido primeiro (onde está sangrando), com taxa real rateada por produto.
+
+**Notas:** ADS entra como linha de **marketing** (não taxa). Fechamento por **mês civil (1–31)**. Shopee só tem taxa após a entrega (escrow pós-entrega) → mês corrente fica parcial e converge. A bonificação do Flex (crédito do ML) ainda não é capturada (depende de escopo Mercado Pago).`,
+    tags: ['financeiro', 'resultado', 'dre', 'lucro', 'margem', 'taxa', 'comissao', 'comissão', 'frete', 'ads', 'publicidade', 'parcelamento', 'shopee', 'mercado livre', 'escrow', 'fatura', 'flex', 'take', 'cmv', 'custo'],
+  },
 ]
 
 // ════════════════════════════════════════════════════════════════════════
