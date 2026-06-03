@@ -8,6 +8,38 @@
 import { getMarketplaceRules, type Marketplace } from './creative.marketplace-rules'
 
 // ============================================================
+// 0. Trava de imutabilidade do produto (vídeo)
+// ============================================================
+
+/**
+ * 🔒 Banner de IMUTABILIDADE DO PRODUTO — vai na CABEÇA de TODO prompt de vídeo
+ * (gerado por LLM, custom do user, default por movimento ou parte de chain).
+ *
+ * Motivo: o produto exibido é o produto REAL que o cliente recebe. Modelos de
+ * vídeo (Kling/Veo/Sora), principalmente em sequência/chain, tendem a DERIVAR o
+ * produto entre frames/partes — mudam formato, cor, proporção. Isso é propaganda
+ * enganosa. A trava precisa ser a PRIMEIRA coisa que o modelo lê, em tom
+ * imperativo e inegociável.
+ */
+export const PRODUCT_LOCK_BANNER = `🔒🔒 PRODUCT LOCK — READ THIS FIRST. IT OVERRIDES EVERYTHING ELSE IN THIS PROMPT. 🔒🔒
+The product shown in the source frame is a REAL physical product that a real paying customer will receive. Under NO circumstances — zero exceptions — may you alter the product in ANY way:
+• DO NOT change its SHAPE, FORM, GEOMETRY, SILHOUETTE, OUTLINE or PROPORTIONS.
+• DO NOT change its COLOR, tone, hue, shade or saturation.
+• DO NOT change its MATERIAL, TEXTURE, PATTERN or FINISH.
+• DO NOT add, remove, grow, shrink, bend, merge, split, duplicate or morph ANY part, edge, handle, button, label, leg or detail.
+• DO NOT redesign, restyle, "improve", beautify, stylize or reinterpret the product.
+The product MUST stay 100% IDENTICAL to the source frame — faithful in shape, proportion and color — from the very first frame to the very last. ONLY the camera and the surrounding scene may move. If ANY creative idea would change the product even slightly, DISCARD that idea immediately. A frame where the product looks different from the source frame is a FAILED, REJECTED video.
+`
+
+/**
+ * 🔗 Trava extra pra partes ENCADEADAS (vídeo longo montado por várias partes).
+ * O frame-fonte da parte N>1 é o ÚLTIMO frame da parte anterior — sem isso, a
+ * deriva do produto ACUMULA parte após parte.
+ */
+export const CHAIN_CONTINUITY_LOCK = `🔗 SEQUENCE CONTINUITY: this clip is part of a longer video assembled from multiple clips. The source frame is the EXACT continuation point of the previous clip — the SAME product, in the SAME scene, in the SAME state. It must remain perfectly continuous: no drift, no re-rendering, no gradual reshaping or recoloring of the product across the cut. Treat the product as a frozen, locked object that the camera merely moves around.
+`
+
+// ============================================================
 // 1. Análise da imagem (Vision)
 // ============================================================
 
@@ -384,7 +416,8 @@ export function buildVideoPromptsRequest(input: VideoPromptsBuilderInput): strin
   const productDescriptors = [colorVal, materialVal].filter(Boolean).join(' ')
   const targetSubject = productDescriptors ? `the ${productDescriptors} ${p.category}` : `the ${p.category}`
 
-  return `You are a senior motion-graphics director crafting short product videos for marketplace listings.
+  return `${PRODUCT_LOCK_BANNER}
+You are a senior motion-graphics director crafting short product videos for marketplace listings.
 
 The product image will be passed as the FIRST FRAME (image2video). Your prompts describe what HAPPENS during the ${input.durationSec}-second clip — camera motion, ambient lighting changes, micro-actions.
 
@@ -453,6 +486,7 @@ ${b.custom_prompt ? `\n## ADDITIONAL USER INSTRUCTION\n${b.custom_prompt.slice(0
 
 ## RULES
 - Each prompt: 1-3 sentences, English, optimized for image2video
+- EVERY prompt MUST BEGIN with a short product-lock clause, e.g. "The ${targetSubject} stays 100% identical in shape, proportion and color to the source frame; only the camera moves —" and THEN describe the motion.
 - EVERY prompt must EXPLICITLY name "${p.name}" or "${targetSubject}" as the focus subject
 - ALWAYS describe motion explicitly (camera move, lighting shift, action)
 - Specify pace: "slow", "smooth", "gentle" — avoid frenetic motion

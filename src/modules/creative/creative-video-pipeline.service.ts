@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, type CreativeProduct } from './creative.service'
-import { buildVideoPromptsRequest } from './creative.prompts'
+import { buildVideoPromptsRequest, PRODUCT_LOCK_BANNER, CHAIN_CONTINUITY_LOCK } from './creative.prompts'
 import { KlingClient } from './kling.client'
 import { VideoProviderRegistry } from './providers/video-provider.registry'
 import type { Marketplace } from './creative.marketplace-rules'
@@ -32,7 +32,14 @@ const VIDEO_NEGATIVE_PROMPT = [
   'color shifting light', 'floating bokeh', 'drifting particles unrelated to scene',
   'magical mist', 'atmospheric haze added artificially', 'fake sparkle',
   'unrealistic light beams', 'cgi effects', 'fantasy effects',
+  // ── Mutação do produto (problema crítico em chain/sequência) ──
   'changing product shape', 'changing product color', 'modified product',
+  'product morphing', 'morphing', 'deforming product', 'product deformation',
+  'reshaping product', 'product changing form', 'product transforming',
+  'warping product', 'product distortion', 'distorted product',
+  'product proportions changing', 'product color drift', 'color shift on product',
+  'different product', 'product redesign', 'restyled product',
+  'extra parts', 'missing parts', 'product details changing', 'inconsistent product',
   'text overlay', 'watermark', 'logo overlay', 'caption',
   // Kling (modelo chinês) tende a cravar texto/legenda chinesa — reforço:
   'text', 'subtitles', 'captions', 'on-screen text', 'letters', 'words',
@@ -339,9 +346,12 @@ export class CreativeVideoPipelineService {
     //    aplica wrap "CAMERA FOCUS LOCK" pra evitar IA focar em outros itens da cena.
     const baseVideoPrompts = briefing.video_prompts ?? []
     const rawPrompt = dto.prompt?.trim() || baseVideoPrompts[0]
+    // chained=true: vídeo longo montado por partes — adiciona o lock de
+    // continuidade (cada parte N>1 nasce do último frame da anterior, deriva
+    // do produto ACUMULA). O prompt é herdado por todas as partes via advance.
     const promptText = rawPrompt
-      ? this.wrapWithProductFocus(rawPrompt, product)
-      : this.defaultMotionPrompt(cameraMotion, product)
+      ? this.wrapWithProductFocus(rawPrompt, product, true)
+      : this.defaultMotionPrompt(cameraMotion, product, true)
 
     // 3. Cria SÓ a 1ª part (próximas viram criadas conforme advance)
     const { error: vidErr } = await supabaseAdmin
@@ -371,8 +381,9 @@ export class CreativeVideoPipelineService {
   }
 
   /** Prompt padrão por movimento de câmera (usado quando user não passa custom). */
-  private defaultMotionPrompt(motion: string, product?: CreativeProduct): string {
+  private defaultMotionPrompt(motion: string, product?: CreativeProduct, chained = false): string {
     const subject = product ? this.describeTargetSubject(product) : 'the product'
+    const head = PRODUCT_LOCK_BANNER + (chained ? CHAIN_CONTINUITY_LOCK : '') + '\n'
     const base = `The camera focus stays locked on ${subject} throughout the entire clip — never panning to, zooming into, or shifting focus onto any other furniture, fixtures, lamps, appliances, plants, or decor visible in the scene. ${subject.charAt(0).toUpperCase() + subject.slice(1)} remains perfectly still and identical to the source image — same shape, color, material, finish. The product behaves realistically as in real life — NO invented effects like prismatic refractions, rainbow scatter, sparkles, floating bokeh particles, light pulsing, glowing halos, color-shifting light, or magical atmospheric mist. Only natural specular highlights and shadows shifting from camera motion. Subtle parallax on background elements. Photorealistic, marketplace-accurate quality.`
     const motionMap: Record<string, string> = {
       'dolly-in':  `Smooth camera dolly forward toward ${subject}, gradual zoom-in revealing its detail. ` + base,
@@ -384,7 +395,7 @@ export class CreativeVideoPipelineService {
       'orbit':     `Smooth orbital camera movement around ${subject}. ` + base,
       'static':    `Subtle ambient motion, camera holds steady on ${subject}. ` + base,
     }
-    return motionMap[motion] ?? motionMap['dolly-in']
+    return head + (motionMap[motion] ?? motionMap['dolly-in'])
   }
 
   /**
@@ -406,10 +417,13 @@ export class CreativeVideoPipelineService {
    * mesmo quando o user mandou prompt custom ou veio do briefing.video_prompts,
    * a primeira linha lembra a IA de manter foco no produto-alvo.
    */
-  private wrapWithProductFocus(promptText: string, product: CreativeProduct): string {
+  private wrapWithProductFocus(promptText: string, product: CreativeProduct, chained = false): string {
     const subject = this.describeTargetSubject(product)
+    // 🔒 Banner de imutabilidade SEMPRE primeiro (a coisa nº 1 que o modelo lê),
+    // + lock de continuidade quando a parte vem de uma sequência (chain).
+    const banner = PRODUCT_LOCK_BANNER + (chained ? CHAIN_CONTINUITY_LOCK : '')
     const prefix = `[CAMERA FOCUS LOCK] The target product is "${product.name}" — ${subject}, centered in the source frame. The camera must keep this exact item as the SOLE focal subject for the entire clip. Do not pan or focus on other items visible in the scene. [REALISM LOCK] Show the product behaving as it actually does in real life. NO invented effects: no prismatic refractions or rainbow scatter, no sparkles or magical bokeh particles, no light pulsing on its own, no glowing halos, no color-shifting light, no atmospheric mist not present in the source. Only realistic specular highlights and natural shadow shifts from the camera motion. Marketplace-accurate. `
-    return prefix + promptText
+    return banner + '\n' + prefix + promptText
   }
 
   async getJob(orgId: string, jobId: string): Promise<CreativeVideoJob> {
@@ -693,6 +707,14 @@ export class CreativeVideoPipelineService {
     if (job.total_cost_usd >= job.max_cost_usd) {
       throw new BadRequestException('limite de custo do job atingido — crie um novo job')
     }
+    // 🔒 Se o user mandou um prompt custom no retry, ele NÃO tem o banner de
+    // imutabilidade — envolve aqui. Sem custom, original.prompt_text já tem.
+    let resolvedPrompt = original.prompt_text
+    if (customPrompt?.trim()) {
+      const product = await this.creative.getProduct(orgId, original.product_id)
+      const isChained = (original.chain_total ?? 1) > 1
+      resolvedPrompt = this.wrapWithProductFocus(customPrompt.trim(), product, isChained)
+    }
     // Preserva campos de chain — sem isso, regenerar uma parte de chain
     // virava vídeo standalone e quebrava o concat final.
     const { data, error } = await supabaseAdmin
@@ -702,7 +724,7 @@ export class CreativeVideoPipelineService {
         product_id:          original.product_id,
         organization_id:     orgId,
         position:            original.position,
-        prompt_text:         customPrompt?.trim() || original.prompt_text,
+        prompt_text:         resolvedPrompt,
         status:              'pending',
         duration_seconds:    original.duration_seconds,
         aspect_ratio:        original.aspect_ratio,
@@ -898,7 +920,8 @@ export class CreativeVideoPipelineService {
       product_id:       job.product_id,
       organization_id:  job.organization_id,
       position:         i + 1,
-      prompt_text:      prompt,
+      // 🔒 Sempre com o banner de imutabilidade na cabeça (choke-point único).
+      prompt_text:      this.wrapWithProductFocus(prompt, product),
       status:           'pending' as const,
       duration_seconds: job.duration_seconds,
       aspect_ratio:     job.aspect_ratio,
