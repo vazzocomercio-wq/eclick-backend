@@ -880,7 +880,9 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     const qs = new URLSearchParams({
       partner_id: partnerId, timestamp: String(ts),
       access_token: accessToken, shop_id: String(shopId), sign,
-      category_id: String(categoryId), language: 'pt-br',
+      // ⚠️ o param é category_id_LIST (não category_id singular) — com o nome
+      // errado a Shopee IGNORA e devolve response:{} vazio. Confirmado ao vivo.
+      category_id_list: String(categoryId), language: 'pt-br',
     })
     const { data } = await this.callShopee({
       key: `shop:${shopId}`, tag: 'shopee.getAttributeTree',

@@ -284,34 +284,39 @@ export class ShopeeCreativePublisherService {
    *  saída = o que o add_item espera em attribute_list. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private buildMandatoryAttributes(attrRaw: any): any[] {
-    // get_attribute_tree vem aninhado ({ list: [{ attribute_tree: [...] }] } ou
-    // { list: [...attrs] }); o legado get_attributes vinha flat (attribute_list/
-    // attributes). Achata recursivamente até os nós que têm attribute_id.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const collect = (node: any): any[] => {
-      if (!node) return []
-      if (Array.isArray(node)) return node.flatMap(collect)
-      if (node.attribute_id != null) return [node]
-      return collect(node.attribute_tree ?? node.attribute_list ?? node.attributes ?? node.list ?? node.children ?? [])
-    }
-    const list = collect(attrRaw)
+    // Shape real do get_attribute_tree: { list: [{ category_id, attribute_tree:
+    // [ATTR] }] }, onde ATTR = { attribute_id, mandatory, name,
+    // attribute_value_list: [{ value_id, name, child_attribute_list: [ATTR
+    // condicional] }] }. Pra cada obrigatório com valores, pega a 1ª opção; se
+    // esse valor revelar filhos obrigatórios, preenche também (árvore
+    // condicional). Free-text obrigatório (sem lista de valores) é pulado.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const out: any[] = []
-    for (const a of list as any[]) {
-      const mandatory = a?.is_mandatory ?? a?.mandatory ?? false
-      if (!mandatory) continue
-      const attrId = a?.attribute_id
-      const values = a?.attribute_value_list ?? a?.value_list ?? []
-      if (attrId != null && Array.isArray(values) && values.length) {
-        const v = values[0]
-        out.push({
-          attribute_id: Number(attrId),
-          attribute_value_list: [{
-            value_id: Number(v?.value_id ?? 0),
-            original_value_name: v?.original_value_name ?? v?.display_value_name ?? v?.value_name ?? '',
-          }],
-        })
-      }
+    const seen = new Set<number>()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fill = (attr: any, depth: number): void => {
+      if (!attr || depth > 6) return
+      const attrId = Number(attr.attribute_id)
+      const mandatory = attr.mandatory ?? attr.is_mandatory ?? false
+      const values = attr.attribute_value_list ?? attr.value_list ?? []
+      if (!mandatory || !Number.isFinite(attrId) || seen.has(attrId)) return
+      if (!Array.isArray(values) || !values.length) return // livre: não dá pra auto-preencher
+      const v = values[0]
+      seen.add(attrId)
+      out.push({
+        attribute_id: attrId,
+        attribute_value_list: [{
+          value_id: Number(v?.value_id ?? 0),
+          original_value_name: v?.original_value_name ?? v?.name ?? v?.value_name ?? '',
+        }],
+      })
+      for (const child of (v?.child_attribute_list ?? [])) fill(child, depth + 1)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nodes: any[] = Array.isArray(attrRaw?.list) ? attrRaw.list : Array.isArray(attrRaw) ? attrRaw : [attrRaw]
+    for (const node of nodes) {
+      const tree = node?.attribute_tree ?? node?.attribute_list ?? node?.attributes ?? (node?.attribute_id != null ? [node] : [])
+      for (const a of (Array.isArray(tree) ? tree : [])) fill(a, 0)
     }
     return out
   }
