@@ -31,6 +31,9 @@ export interface DispatchInput {
   due_date?:          string         // ISO 8601
   task_priority?:     'low' | 'normal' | 'high' | 'urgent'
   notes?:             string
+  /** Canais que o operador deve anunciar (mercado_livre/shopee/tiktok_shop/
+   *  loja_propria). O produto vira "Anunciado" quando TODOS estiverem publicados. */
+  target_channels?:   string[]
 }
 
 export interface DispatchResult {
@@ -203,7 +206,7 @@ export class ProductsCadastroDispatchService {
           title:           `Completar cadastro: ${(p as any).name} ${(p as any).sku ? `(${(p as any).sku})` : ''}`.trim(),
           task_title:      taskBody.slice(0, 200),
           due_date:        dueDate,
-          tags:            ['cadastro_pendente', ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
+          tags:            ['cadastro_pendente', ...(input.target_channels ?? []).map(c => `canal_${c}`), ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
           metadata: {
             source:          'saas_cadastro',
             // Marcador estável usado pelo Active pra detectar card de cadastro
@@ -236,6 +239,7 @@ export class ProductsCadastroDispatchService {
             active_task_id:          bridgeRes.task_id ?? null,
             due_date:                dueDate,
             missing_fields_snapshot: missingFields,
+            target_channels:         input.target_channels ?? [],
             status:                  'open',
             dedup_key:               dedupKey,
           })
@@ -396,12 +400,14 @@ export class ProductsCadastroDispatchService {
     }
   }
 
-  /** Lista assignments do org (filtros opcionais). Usado pela tela do gestor. */
+  /** Lista assignments do org (filtros opcionais). Usado pela tela do gestor.
+   *  Enriquece cada um com `announced` (todos os canais-alvo publicados) +
+   *  `catalog_complete` → a tela separa Despachado / Anunciado / Incompleto. */
   async list(orgId: string, opts: { status?: string; operator?: string; limit?: number } = {}): Promise<Array<Record<string, unknown>>> {
     const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500)
     let q = supabaseAdmin
       .from('product_operator_assignments')
-      .select('id, product_id, operator_user_id, active_deal_id, active_task_id, due_date, status, missing_fields_snapshot, created_at, completed_at, products:product_id(id, name, sku, photo_urls)')
+      .select('id, product_id, operator_user_id, active_deal_id, active_task_id, due_date, status, missing_fields_snapshot, target_channels, announced_at, created_at, completed_at, products:product_id(id, name, sku, photo_urls, catalog_status, tags)')
       .eq('organization_id', orgId)
       .order('created_at', { ascending: false })
       .limit(limit)
@@ -409,7 +415,48 @@ export class ProductsCadastroDispatchService {
     if (opts.operator) q = q.eq('operator_user_id', opts.operator)
     const { data, error } = await q
     if (error) throw new BadRequestException(error.message)
-    return data ?? []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (data ?? []) as Array<Record<string, any>>
+    const published = await this.publishedChannelsFor(orgId, rows.map(r => r.product_id as string))
+    return rows.map(r => {
+      const target = Array.isArray(r.target_channels) ? (r.target_channels as string[]) : []
+      const pub = published.get(r.product_id as string) ?? new Set<string>()
+      // "Anunciado" = TODOS os canais selecionados publicados. Sem canais
+      // definidos (despacho antigo) → qualquer publicação já conta.
+      const announced = target.length ? target.every(c => pub.has(c)) : pub.size > 0
+      const tags = Array.isArray(r.products?.tags) ? (r.products.tags as string[]) : []
+      const catalog_complete = !(r.products?.catalog_status === 'incomplete' || tags.includes('cadastro_pendente'))
+      return { ...r, announced, announced_channels: [...pub], catalog_complete }
+    })
+  }
+
+  /** Canais já PUBLICADOS de cada produto de catálogo (via creative_publications
+   *  → creative_products). Map<catalog_product_id, Set<marketplace>>. */
+  private async publishedChannelsFor(orgId: string, catalogIds: string[]): Promise<Map<string, Set<string>>> {
+    const out = new Map<string, Set<string>>()
+    const ids = [...new Set(catalogIds.filter(Boolean))]
+    if (!ids.length) return out
+    const { data: cps } = await supabaseAdmin
+      .from('creative_products')
+      .select('id, product_id')
+      .eq('organization_id', orgId)
+      .in('product_id', ids)
+    const cpToCatalog = new Map<string, string>()
+    for (const c of (cps ?? []) as Array<{ id: string; product_id: string }>) cpToCatalog.set(c.id, c.product_id)
+    if (!cpToCatalog.size) return out
+    const { data: pubs } = await supabaseAdmin
+      .from('creative_publications')
+      .select('product_id, marketplace')
+      .eq('organization_id', orgId)
+      .eq('status', 'published')
+      .in('product_id', [...cpToCatalog.keys()])
+    for (const p of (pubs ?? []) as Array<{ product_id: string; marketplace: string }>) {
+      const catalog = cpToCatalog.get(p.product_id)
+      if (!catalog) continue
+      if (!out.has(catalog)) out.set(catalog, new Set())
+      out.get(catalog)!.add(p.marketplace)
+    }
+    return out
   }
 
   /** Callback do Active quando task fica completed (POST /products/cadastro-callback). */
