@@ -206,7 +206,11 @@ export class ProductsCadastroDispatchService {
           title:           `Completar cadastro: ${(p as any).name} ${(p as any).sku ? `(${(p as any).sku})` : ''}`.trim(),
           task_title:      taskBody.slice(0, 200),
           due_date:        dueDate,
-          tags:            ['cadastro_pendente', ...(input.target_channels ?? []).map(c => `canal_${c}`), ...missingFields.slice(0, 5).map(m => toMlTagSlug(m.label))],
+          tags:            [
+            'cadastro_pendente',  // marcador funcional (automação) — mantém slug
+            ...(input.target_channels ?? []).map(c => `Canal ${CHANNEL_TAG_LABEL[c] ?? c}`),
+            ...missingFields.slice(0, 5).map(m => m.label),  // nome legível do campo faltando
+          ],
           metadata: {
             source:          'saas_cadastro',
             // Marcador estável usado pelo Active pra detectar card de cadastro
@@ -689,6 +693,14 @@ const ML_TAG_SLUG_MAP: Record<string, string> = {
   'condição do item':          'condicao',
   'unidades por embalagem':    'unidades',
   'is_kit':                    'kit',
+}
+
+/** Nome legível do canal pra exibir como tag no card (ex.: "Canal Shopee"). */
+const CHANNEL_TAG_LABEL: Record<string, string> = {
+  mercado_livre: 'Mercado Livre',
+  shopee:        'Shopee',
+  tiktok_shop:   'TikTok',
+  loja_propria:  'Loja própria',
 }
 
 function toMlTagSlug(label: string): string {
