@@ -443,12 +443,15 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
-  /** F18 Fase A — SKUs no nível de VARIAÇÃO por item. Na Shopee o SKU do vendedor
-   *  vive no model (variação), NÃO no item — `item_sku` do base_info vem vazio pra
-   *  lojas que só preencheram o SKU da variação (caso Vazzo). get_model_list (1 item
-   *  por call) → `response.model[].model_sku`. Item simples sem variação real ainda
-   *  costuma trazer 1 model com o SKU. Resiliente: erro num item não derruba o lote.
-   *  Retorna Map<item_id, [{ model_id, sku }]> pra casar com products.sku no link. */
+  /** F18 Fase A — SKUs do vendedor por item, SEMPRE da API (nunca por título).
+   *  Dois lugares na Shopee:
+   *   - anúncio COM variação (has_model=true): SKU vive em cada model (`model_sku`),
+   *     via get_model_list → [{ model_id, sku }].
+   *   - anúncio SEM variação (has_model=false): SKU vive no ITEM (`item_sku`) do
+   *     get_item_base_info → [{ model_id: 0, sku }] (item-level, variation '').
+   *  Bug antigo lia só model_sku → anúncios sem variação (com item_sku preenchido)
+   *  ficavam "sem SKU" e não vinculavam. Agora cobre os dois. Retorna
+   *  Map<item_id, [{ model_id, sku }]> pra casar com products.sku no link. */
   async getItemSkus(
     conn:    MpConnection,
     itemIds: number[],
@@ -457,22 +460,58 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     const { partnerId } = this.partnerEnv()
     const out = new Map<number, Array<{ model_id: number; sku: string }>>()
 
+    // 1) base info em lote (50/call) → item_sku + has_model por item
+    const baseInfo = new Map<number, { item_sku: string; has_model: boolean }>()
+    const BATCH = 50
+    for (let i = 0; i < itemIds.length; i += BATCH) {
+      const chunk = itemIds.slice(i, i + BATCH)
+      const infoPath = '/api/v2/product/get_item_base_info'
+      const ts   = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(infoPath, ts, accessToken, shopId)
+      const qs = new URLSearchParams({
+        partner_id: partnerId, timestamp: String(ts),
+        access_token: accessToken, shop_id: String(shopId), sign,
+        item_id_list: chunk.join(','),
+      })
+      try {
+        const { data } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.getItemSkus.base',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${infoPath}?${qs.toString()}`),
+        })
+        if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const it of (data?.response?.item_list ?? []) as any[]) {
+          baseInfo.set(Number(it?.item_id), {
+            item_sku: (it?.item_sku ?? '').toString().trim(),
+            has_model: !!it?.has_model,
+          })
+        }
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.getItemSkus] base_info lote falhou: ${(e as Error)?.message}`)
+      }
+    }
+
+    // 2) por item: model_sku (com variação) OU item_sku (sem variação)
     for (const itemId of itemIds) {
+      const base = baseInfo.get(itemId)
+      // sem variação → SKU do item
+      if (base && !base.has_model) {
+        out.set(itemId, base.item_sku ? [{ model_id: 0, sku: base.item_sku }] : [])
+        continue
+      }
+      // com variação (ou desconhecido) → SKU por model
       const path = '/api/v2/product/get_model_list'
       const ts   = Math.floor(Date.now() / 1000)
       const sign = this.signShop(path, ts, accessToken, shopId)
       const qs = new URLSearchParams({
-        partner_id:   partnerId,
-        timestamp:    String(ts),
-        access_token: accessToken,
-        shop_id:      String(shopId),
-        sign,
-        item_id:      String(itemId),
+        partner_id: partnerId, timestamp: String(ts),
+        access_token: accessToken, shop_id: String(shopId), sign,
+        item_id: String(itemId),
       })
       try {
         const { data } = await this.callShopee({
-          key:  `shop:${shopId}`,
-          tag:  'shopee.getModelList',
+          key:  `shop:${shopId}`, tag: 'shopee.getModelList',
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
         })
@@ -484,10 +523,12 @@ export class ShopeeAdapter extends MarketplaceAdapter {
           const sku = (m?.model_sku ?? '').toString().trim()
           if (sku) pairs.push({ model_id: Number(m?.model_id ?? 0), sku })
         }
+        // fallback: model sem model_sku mas item tem item_sku → usa item_sku
+        if (!pairs.length && base?.item_sku) pairs.push({ model_id: 0, sku: base.item_sku })
         out.set(itemId, pairs)
       } catch (e: unknown) {
         this.logger.warn(`[shopee.getItemSkus] item=${itemId} falhou: ${(e as Error)?.message}`)
-        out.set(itemId, [])
+        out.set(itemId, base?.item_sku ? [{ model_id: 0, sku: base.item_sku }] : [])
       }
     }
     return out
