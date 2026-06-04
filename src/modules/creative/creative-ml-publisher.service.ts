@@ -11,6 +11,7 @@ import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { ShopeeCreativePublisherService } from '../marketplace/shopee-creative/shopee-creative.service'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
+import { resolveCatalogProductIdBySku, linkProductListing } from '../../common/product-listing-link'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -984,6 +985,30 @@ export class CreativeMlPublisherService {
         await this.syncCatalogProductAfterPublish(orgId, creativeProduct, listing, item)
       } catch (e) {
         this.logger.warn(`[creative.ml.publish] sync catálogo pós-publish falhou: ${(e as Error).message}`)
+      }
+
+      // Pós-publicação: VÍNCULO anúncio↔produto em product_listings (CHAVE = SKU)
+      // — é o que o motor de estoque unificado lê pra propagar estoque/preço pro
+      // MLB. Sem isso, o anúncio nasce solto do catálogo. Fail-isolated.
+      try {
+        const cp = await this.creative.getProduct(orgId, listing.product_id)
+        const catalogId = await resolveCatalogProductIdBySku(orgId, { directProductId: cp.product_id, sku: cp.sku })
+        if (catalogId) {
+          const res = await linkProductListing({
+            platform:    'mercadolivre',
+            listingId:   item.id,
+            productId:   catalogId,
+            accountId:   opts.seller_id != null ? String(opts.seller_id) : null,
+            variationId: null,
+            title:       listing.title,
+            price:       opts.price,
+          })
+          this.logger.log(`[creative.ml.publish] vínculo product_listings ${res}: ${item.id} → produto ${catalogId}`)
+        } else {
+          this.logger.log(`[creative.ml.publish] sem catálogo por SKU — anúncio ${item.id} fica sem vínculo de estoque`)
+        }
+      } catch (e) {
+        this.logger.warn(`[creative.ml.publish] vínculo product_listings falhou: ${(e as Error).message}`)
       }
 
       // Pós-publicação: avança o card do funil "Anúncios ML" no Active CRM

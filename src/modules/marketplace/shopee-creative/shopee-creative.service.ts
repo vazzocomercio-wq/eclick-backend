@@ -126,6 +126,26 @@ export class ShopeeCreativePublisherService {
     if (!this.isPublishEnabled()) {
       throw new BadRequestException('Publicação Shopee desabilitada (credenciais Open Platform ausentes).')
     }
+
+    // Idempotência: se este anúncio (listing) já tem uma publicação Shopee
+    // 'published', NÃO cria outro item — evita duplicar por duplo-clique /
+    // reenvio. Só no publish real (dry-run e teste deleteAfter passam direto).
+    if (draft.listing_id && !opts?.dryRun && !opts?.deleteAfter) {
+      const { data: dup } = await supabaseAdmin
+        .from('creative_publications')
+        .select('external_id')
+        .eq('listing_id', draft.listing_id)
+        .eq('marketplace', 'shopee')
+        .eq('status', 'published')
+        .limit(1)
+        .maybeSingle<{ external_id: string | null }>()
+      if (dup?.external_id) {
+        throw new BadRequestException(
+          `Este anúncio já foi publicado na Shopee (item ${dup.external_id}). Recarregue a página para ver a publicação.`,
+        )
+      }
+    }
+
     // Fonte do conteúdo: catálogo (product_id) OU direto do AI Criativo
     // (image_urls + título/desc/preço no draft). Sem nenhum dos dois, nada a publicar.
     const fromCatalog = !!draft.product_id

@@ -14,6 +14,7 @@ import { signTikTokShop } from './tiktok-shop-sign.util'
 import { StockService } from '../stock/stock.service'
 import { ChannelSettingsService } from '../channel-settings/channel-settings.service'
 import { computeContributionMargin, round2 } from '../../common/margin'
+import { resolveCatalogProductIdBySku, linkProductListing } from '../../common/product-listing-link'
 
 /**
  * TikTok Shop (app Personalizado) — Fase 1: OAuth da loja.
@@ -1448,6 +1449,24 @@ export class TikTokShopService {
     if (!input.image_urls?.length) throw new BadRequestException('pelo menos 1 imagem é obrigatória')
     if (input.price == null) throw new BadRequestException('preço é obrigatório')
 
+    // Idempotência: se este anúncio (listing) já tem publicação TikTok
+    // 'published', NÃO cria outro produto — evita duplicar por duplo-clique.
+    if (input.listing_id && !input.dry_run) {
+      const { data: dup } = await supabaseAdmin
+        .from('creative_publications')
+        .select('external_id')
+        .eq('listing_id', input.listing_id)
+        .eq('marketplace', 'tiktok_shop')
+        .eq('status', 'published')
+        .limit(1)
+        .maybeSingle<{ external_id: string | null }>()
+      if (dup?.external_id) {
+        throw new BadRequestException(
+          `Este anúncio já foi publicado no TikTok Shop (produto ${dup.external_id}). Recarregue a página.`,
+        )
+      }
+    }
+
     const shopCipher = await this.getShopCipher(orgId)
     const warehouseId = await this.getWarehouseId(orgId)
     if (!warehouseId) throw new BadRequestException('Nenhum armazém encontrado na loja')
@@ -1515,6 +1534,31 @@ export class TikTokShopService {
     this.logger.log(
       `[tts.publish] produto criado ${data.product_id} (${uris.length} imgs, ${productAttributes.length} attrs, brand=${brandId ?? '-'})`,
     )
+    // VÍNCULO anúncio↔produto em product_listings (CHAVE = SKU) — o motor de
+    // estoque unificado propaga estoque pro TikTok por aqui. Sem isso, o anúncio
+    // nasce solto do catálogo. Fail-isolated.
+    if (data.product_id) {
+      try {
+        const catalogId = await resolveCatalogProductIdBySku(orgId, { sku: input.sku })
+        if (catalogId) {
+          const res = await linkProductListing({
+            platform:    'tiktok_shop',
+            listingId:   String(data.product_id),
+            productId:   catalogId,
+            accountId:   null,
+            variationId: null,
+            title:       input.title,
+            price:       input.price,
+          })
+          this.logger.log(`[tts.publish] vínculo product_listings ${res}: ${data.product_id} → produto ${catalogId}`)
+        } else {
+          this.logger.log(`[tts.publish] sem catálogo por SKU (${input.sku ?? '—'}) — anúncio ${data.product_id} fica sem vínculo de estoque`)
+        }
+      } catch (e) {
+        this.logger.warn(`[tts.publish] vínculo product_listings falhou: ${(e as Error)?.message}`)
+      }
+    }
+
     // Registra em creative_publications (NÃO-FATAL) → aparece na lista
     // "Publicações desse anúncio" junto com o ML. Precisa dos FKs do front.
     if (input.listing_id && input.creative_product_id && data.product_id) {
