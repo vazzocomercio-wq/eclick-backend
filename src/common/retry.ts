@@ -37,15 +37,50 @@ export async function retryWithBackoff<T>(
 }
 
 function isRetryable(e: unknown): boolean {
-  if (!axios.isAxiosError(e)) return false
-  const ax = e as AxiosError
-  // Network / timeout — sem response é candidato perfeito a retry
-  if (!ax.response) return true
-  const status = ax.response.status
+  // Aceita tanto AxiosError cru quanto erros "enriquecidos": o LlmService
+  // re-lança axios errors como Error comum (pra anexar response.data na
+  // mensagem), preservando `.response`. Se olhássemos só axios.isAxiosError,
+  // TODO erro de imagem viraria não-retryable → o retry ficava morto.
+  const resp = extractResponse(e)
+  if (!resp) {
+    // Sem response: network/timeout (só dá pra afirmar em AxiosError cru).
+    return axios.isAxiosError(e)
+  }
+  const status = resp.status
   // 429 Too Many Requests (rate limit), 5xx servidor, 408 timeout
   if (status === 429 || status === 408) return true
   if (status >= 500 && status < 600)    return true
+  // gpt-image-1 às vezes devolve 401 "Not authorized" com type=server_error:
+  // é HICCUP de servidor da OpenAI disfarçado de 401 (a chave está OK), não
+  // auth real. Auth real (chave inválida) vem com type=invalid_request_error
+  // / code=invalid_api_key → NÃO bate aqui e continua falhando rápido.
+  if (status === 401 && bodyIsServerError(resp.data)) return true
   return false
+}
+
+/** Extrai {status,data} de um AxiosError OU de um Error enriquecido com
+ *  `.response` anexado (padrão do LlmService.enrichAxiosError). */
+function extractResponse(e: unknown): { status: number; data?: unknown } | null {
+  if (axios.isAxiosError(e)) {
+    const ax = e as AxiosError
+    return ax.response ? { status: ax.response.status, data: ax.response.data } : null
+  }
+  const anyE = e as { response?: { status?: number; data?: unknown } }
+  if (anyE?.response && typeof anyE.response.status === 'number') {
+    return { status: anyE.response.status, data: anyE.response.data }
+  }
+  return null
+}
+
+/** O corpo do erro indica erro de servidor (transitório)? Cobre o body como
+ *  objeto ({error:{type:'server_error'}}) ou já serializado em string. */
+function bodyIsServerError(data: unknown): boolean {
+  try {
+    const s = typeof data === 'string' ? data : JSON.stringify(data ?? '')
+    return /server_error/i.test(s) || /not authorized/i.test(s)
+  } catch {
+    return false
+  }
 }
 
 function sleep(ms: number): Promise<void> {

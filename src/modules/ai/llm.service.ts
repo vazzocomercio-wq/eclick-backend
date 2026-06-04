@@ -673,10 +673,12 @@ export class LlmService {
     }
 
     // Cada callOne ganha retry com backoff exponencial pra absorver
-    // 429/5xx/timeouts transientes (tipico em horários de pico do OpenAI).
+    // 429/5xx/timeouts E o 401 "server_error" transitório do gpt-image-1
+    // (típico em horários de pico do OpenAI). 4 tentativas (maxRetries=3) com
+    // base 2s → num lote de 10, sobrevive a vários soluços seguidos da OpenAI.
     const settled = await Promise.allSettled(
       Array.from({ length: args.n }, () =>
-        retryWithBackoff(callOne, { maxRetries: 2, baseMs: 1500, label: 'openai.image' }),
+        retryWithBackoff(callOne, { maxRetries: 3, baseMs: 2000, label: 'openai.image' }),
       ),
     )
     const images = settled
