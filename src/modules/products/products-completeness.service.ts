@@ -154,11 +154,16 @@ export class ProductsCompletenessService {
     stock_max?:   number
     search?:      string
     sort?:        'stock_desc' | 'stock_asc' | 'name'
+    page?:       number
+    page_size?:  number
   } = 500): Promise<{
     total:                number
     incomplete_count:     number
+    total_pending:        number   // total REAL de pendentes (count, sem teto do scan)
     by_missing:           Record<string, number>  // campo → quantos produtos faltam ele
     sample_incomplete:    Array<{ id: string; sku: string | null; name: string; missing: string[]; stock: number | null }>
+    page:                 number
+    page_size:            number
   }> {
     // Compat: assinatura antiga `evaluateBulk(orgId, 500)` continua válida.
     const opts = typeof optsOrLimit === 'number' ? { limit: optsOrLimit } : optsOrLimit
@@ -233,11 +238,65 @@ export class ProductsCompletenessService {
       }
     }
 
+    // Aplica os MESMOS filtros (tag pendente + estoque + busca) numa query — usado
+    // pelo count total e pela página.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const applyFilters = (qb: any) => {
+      let x = qb.eq('organization_id', orgId).or('tags.cs.{cadastro_pendente},catalog_status.eq.incomplete')
+      if (opts.stock_min != null && Number.isFinite(opts.stock_min)) x = x.gte('stock', opts.stock_min)
+      if (opts.stock_max != null && Number.isFinite(opts.stock_max)) x = x.lte('stock', opts.stock_max)
+      if (opts.search?.trim()) {
+        const s = opts.search.trim().replace(/%/g, '')
+        x = x.or(`name.ilike.%${s}%,sku.ilike.%${s}%,brand.ilike.%${s}%`)
+      }
+      return x
+    }
+
+    // Total REAL de pendentes (count exato, sem o teto do scan) — pro KPI do dash.
+    const { count: totalPending } = await applyFilters(
+      supabaseAdmin.from('products').select('id', { count: 'exact', head: true }),
+    )
+
+    // Paginação real (range): quando page_size vem, a lista = a página pedida.
+    const page = Math.max(opts.page ?? 1, 1)
+    const pageSize = opts.page_size ? Math.min(Math.max(opts.page_size, 1), 200) : 0
+    let pageList = sample
+    if (pageSize > 0) {
+      const offset = (page - 1) * pageSize
+      let pq = applyFilters(
+        supabaseAdmin.from('products').select('id, sku, name, brand, cost_price, my_price, price, stock, weight_kg, width_cm, length_cm, height_cm, photo_urls, description, category_ml_id, gtin, attributes, ml_title, tags'),
+      )
+      if (opts.sort === 'stock_desc')      pq = pq.order('stock', { ascending: false, nullsFirst: false })
+      else if (opts.sort === 'stock_asc')  pq = pq.order('stock', { ascending: true,  nullsFirst: true  })
+      else if (opts.sort === 'name')       pq = pq.order('name',  { ascending: true })
+      else                                  pq = pq.order('updated_at', { ascending: false })
+      pq = pq.range(offset, offset + pageSize - 1)
+      const { data: pageRows } = await pq
+      const prows = (pageRows ?? []) as Array<ProductForCheck & { stock?: number | null }>
+      const pcats = [...new Set(prows.map(p => p.category_ml_id).filter((c): c is string => !!c))]
+      const pcatMap = await this.mlReq.getRequiredAttrsBulk(pcats)
+      pageList = prows.map(p => {
+        const mu = this.checkUniversal(p)
+        const ra = p.category_ml_id ? (pcatMap.get(p.category_ml_id) ?? []) : []
+        const mm = this.compareMlAttrs(p.attributes ?? {}, ra)
+        return {
+          id:      p.id ?? '',
+          sku:     p.sku ?? null,
+          name:    p.name ?? '',
+          missing: [...mu.map(k => UNIVERSAL_LABELS[k] ?? k), ...mm.map(a => a.name)],
+          stock:   (p.stock ?? null) as number | null,
+        }
+      })
+    }
+
     return {
       total:             rows.length,
       incomplete_count:  incomplete,
+      total_pending:     totalPending ?? incomplete,
       by_missing:        byMissing,
-      sample_incomplete: sample,
+      sample_incomplete: pageList,
+      page,
+      page_size:         pageSize || sampleSize,
     }
   }
 

@@ -181,6 +181,8 @@ export class ProductsController {
     @Query('stock_max')   stockMaxRaw?:   string,
     @Query('search')      search?:        string,
     @Query('sort')        sortRaw?:       string,
+    @Query('page')        pageRaw?:       string,
+    @Query('page_size')   pageSizeRaw?:   string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const parseOpt = (s?: string): number | undefined => {
@@ -199,6 +201,8 @@ export class ProductsController {
       stock_max:   parseOpt(stockMaxRaw),
       search:      search?.trim() || undefined,
       sort,
+      page:        parseOpt(pageRaw),
+      page_size:   parseOpt(pageSizeRaw),
     })
   }
 
