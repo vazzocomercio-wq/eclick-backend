@@ -25,13 +25,12 @@ const IMAGE_PRICING: Record<string, number> = {
 /**
  * Modelos Gemini em ordem de preferência (model_fallback_chain interna).
  *
- * 2026-05-12: NB2 (gemini-3.1-flash-image-preview) está com 503/timeout
- * crônico ("high demand"). NB1 (gemini-2.5-flash-image) responde em 6-7s
- * com inlineData camelCase. Chain coloca NB1 primeiro até NB2 estabilizar
- * em prod no Google. NB2 fica como upgrade futuro (4K nativo, preço extra
- * de $0.006/img).
+ * 2026-06-04: NB2 (gemini-3.1-flash-image-preview) promovido a PRIMARY —
+ * 4K nativo, melhor qualidade. NB1 (gemini-2.5-flash-image) vira fallback
+ * interno: se o NB2 der 429/503/404 (preview pode picar "high demand"), o
+ * chain cai pro NB1 automaticamente; só depois vai pro OpenAI (cross-provider).
  */
-const GEMINI_MODEL_CHAIN = ['gemini-2.5-flash-image', 'gemini-3.1-flash-image-preview'] as const
+const GEMINI_MODEL_CHAIN = ['gemini-3.1-flash-image-preview', 'gemini-2.5-flash-image'] as const
 
 const FORMAT_SIZE: Record<Exclude<ImageFormat, 'custom'>, string> = {
   square: '1024x1024',  // 1:1  — 1080×1080 lógico
@@ -830,10 +829,13 @@ export class LlmService {
      * Erros não-recuperáveis (auth, payload) são repassados direto.
      */
     const callOne = async (): Promise<{ b64: string; modelUsed: string }> => {
-      // Se user pediu um modelo específico não-default, usa só ele (sem chain)
+      // Modelo pedido SEMPRE primeiro; os outros do chain entram como fallback
+      // interno (ordem-independente). Assim NB2-primary vira [NB2, NB1] e
+      // NB1-primary segue [NB1, NB2] — ninguém perde o outro modelo de reserva.
+      // Modelo fora do chain (custom) → usa só ele.
       const chain: readonly string[] =
         GEMINI_MODEL_CHAIN.includes(args.model as typeof GEMINI_MODEL_CHAIN[number])
-          ? GEMINI_MODEL_CHAIN.slice(GEMINI_MODEL_CHAIN.indexOf(args.model as typeof GEMINI_MODEL_CHAIN[number]))
+          ? [args.model, ...GEMINI_MODEL_CHAIN.filter(m => m !== args.model)]
           : [args.model]
 
       let lastError: unknown
