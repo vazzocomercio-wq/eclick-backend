@@ -24,6 +24,7 @@ export class StockService {
     safety: number; available: number; total_platform: number
     stock_id: string | null
     safety_mode: string; safety_percentage: number; safety_quantity: number
+    min_stock_to_pause: number; auto_pause_enabled: boolean
     no_stock_record?: true
   }> {
     const { data: stock } = await supabaseAdmin
@@ -38,6 +39,7 @@ export class StockService {
         physical: 0, virtual: 0, reserved: 0,
         safety: 0, available: 0, total_platform: 0, stock_id: null,
         safety_mode: 'percentage', safety_percentage: 10, safety_quantity: 0,
+        min_stock_to_pause: 0, auto_pause_enabled: false,
         no_stock_record: true,
       }
     }
@@ -59,6 +61,8 @@ export class StockService {
       physical, virtual: virtual_, reserved, safety, available, total_platform,
       stock_id: stock.id,
       safety_mode: mode, safety_percentage: safetyPct, safety_quantity: safetyFix,
+      min_stock_to_pause: Number(stock.min_stock_to_pause || 0),
+      auto_pause_enabled: !!stock.auto_pause_enabled,
     }
   }
 
@@ -622,21 +626,30 @@ export class StockService {
 
   async recalcAndPropagate(productId: string, triggeredBy = 'system_distribution') {
     try {
-      // products.stock = espelho do disponível calculado — catálogo, loja e
-      // margem leem essa coluna; mantemos ela sempre sincronizada.
       const calc = await this.calculateAvailable(productId)
+
+      // ── REGRA CENTRAL DE ESTOQUE VIRTUAL (opt-in por produto via
+      //    auto_pause_enabled) — vale pra TODOS os canais (ML/TikTok/Shopee).
+      //    Quando ativa: o canal reflete FÍSICO + VIRTUAL (sem descontar
+      //    segurança) e PAUSA quando (físico+virtual) ≤ min_stock_to_pause
+      //    (com min = virtual ⇒ pausa quando o físico zera). Quando inativa:
+      //    comportamento clássico (disponível c/ segurança + distribuição). ──
+      const ruleActive = calc.auto_pause_enabled
+      const ruleQty    = Math.max(0, Math.round(calc.total_platform)) // físico + virtual
+      const rulePause  = ruleActive && calc.total_platform <= calc.min_stock_to_pause
+      // valor que vai pros canais sob a regra (0 = pausado/esgotado)
+      const ruleChannelQty = rulePause ? 0 : ruleQty
+
+      // products.stock = espelho — catálogo/loja/margem leem essa coluna.
+      // Sob a regra, espelha físico+virtual (ou 0 pausado); senão, o disponível.
+      const mirrorQty = ruleActive ? ruleChannelQty : Math.max(0, Math.round(calc.available))
       if (!calc.no_stock_record) {
-        await supabaseAdmin
-          .from('products')
-          .update({ stock: Math.max(0, Math.round(calc.available)) })
-          .eq('id', productId)
+        await supabaseAdmin.from('products').update({ stock: mirrorQty }).eq('id', productId)
       }
-      // TT-4: empurra o MESMO disponível do catálogo pros SKUs TikTok vinculados.
-      // Gateado dentro de pushStockForProduct (TIKTOK_STOCK_SYNC); OFF = noop.
-      // Fora do loop de canais do ML (TikTok assume o estoque do catálogo, não
-      // entra na distribuição por canal). Não-fatal: nunca quebra o sync do ML.
+
+      // TikTok (gateado TIKTOK_STOCK_SYNC). Sob a regra recebe físico+virtual+pausa.
       void this.tiktokService
-        .pushStockForProduct(productId, Math.max(0, Math.round(calc.available)))
+        .pushStockForProduct(productId, mirrorQty)
         .catch((e) =>
           this.logger.warn(`[stock.tts] product=${productId}: ${e instanceof Error ? e.message : String(e)}`),
         )
@@ -644,10 +657,8 @@ export class StockService {
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return
 
-      // F18 Fase C — empurra pros anúncios Shopee vinculados o ESTOQUE VIRTUAL
-      // (físico+virtual, regra Vazzo — pushStockForProduct calcula sozinho do
-      // ledger). Gateado dentro (SHOPEE_STOCK_SYNC); OFF = noop. Fora do loop do
-      // ML, não-fatal: nunca quebra o sync do ML.
+      // Shopee (gateado SHOPEE_STOCK_SYNC) — pushStockForProduct lê o ledger e já
+      // aplica a MESMA regra (físico+virtual + min-pause). Consistente.
       void this.shopeeStock
         .pushStockForProduct(productId)
         .catch((e) =>
@@ -656,13 +667,69 @@ export class StockService {
 
       for (const cq of channelQtys) {
         if (cq.channel === 'mercadolivre') {
-          await this.syncToMl(productId, cq.qty, cq.should_pause, cq.distribution_id, triggeredBy)
+          // sob a regra, ML usa físico+virtual + pausa-no-físico-zero; senão,
+          // a qty/pausa clássica (disponível + distribuição por canal).
+          const q = ruleActive ? ruleChannelQty : cq.qty
+          const p = ruleActive ? rulePause : cq.should_pause
+          await this.syncToMl(productId, q, p, cq.distribution_id, triggeredBy)
         }
       }
     } catch (e: any) {
       console.error(`[stock.sync] product=${productId}:`, e?.message)
       throw e
     }
+  }
+
+  /** Regra CENTRAL de estoque virtual (todos os canais). Aplica a TODOS os
+   *  produtos com anúncio vinculado (qualquer canal) da org: virtual_quantity =
+   *  N, min_stock_to_pause = N (⇒ pausa quando o físico zera), auto_pause = true.
+   *  clear=true zera a regra (virtual 0, min 0, auto off → volta ao clássico).
+   *  Re-propaga em background. Retorna quantos produtos foram afetados. */
+  async applyVirtualRule(orgId: string, opts: { virtualUnits: number; clear?: boolean }): Promise<{
+    affected: number; products: number; rule: { virtual_quantity: number; min_stock_to_pause: number; auto_pause_enabled: boolean }
+  }> {
+    const N = opts.clear ? 0 : Math.max(0, Math.round(Number(opts.virtualUnits) || 0))
+    const rule = { virtual_quantity: N, min_stock_to_pause: N, auto_pause_enabled: !opts.clear, updated_at: new Date().toISOString() }
+
+    // produtos da org com pelo menos 1 anúncio vinculado ATIVO (qualquer canal).
+    // cast p/ any: o embed products!inner estoura o type-checker (TS2589).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const plQuery: any = supabaseAdmin
+      .from('product_listings')
+      .select('product_id, products!inner(organization_id)')
+      .eq('is_active', true)
+      .eq('products.organization_id', orgId)
+      .limit(20000)
+    const { data: pls } = await plQuery
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const productIds = [...new Set(((pls ?? []) as any[]).map(r => r.product_id).filter(Boolean))] as string[]
+    if (!productIds.length) return { affected: 0, products: 0, rule }
+
+    // aplica nos product_stock (platform=null) desses produtos, em chunks
+    let affected = 0
+    for (let i = 0; i < productIds.length; i += 200) {
+      const chunk = productIds.slice(i, i + 200)
+      const { data, error } = await supabaseAdmin
+        .from('product_stock')
+        .update(rule)
+        .in('product_id', chunk)
+        .is('platform', null)
+        .select('id')
+      if (error) throw new Error(`product_stock update: ${error.message}`)
+      affected += (data ?? []).length
+    }
+
+    // re-propaga em background (não bloqueia a resposta; cada um é não-fatal)
+    void (async () => {
+      for (const pid of productIds) {
+        await this.recalcAndPropagate(pid, opts.clear ? 'virtual_rule_clear' : 'virtual_rule_apply')
+          .catch(e => this.logger.warn(`[stock.vrule] recalc ${pid}: ${e?.message}`))
+      }
+      this.logger.log(`[stock.vrule] org=${orgId} re-propagado ${productIds.length} produtos (N=${N}, clear=${!!opts.clear})`)
+    })()
+
+    this.logger.log(`[stock.vrule] org=${orgId} regra aplicada: N=${N} clear=${!!opts.clear} produtos=${productIds.length} stock_rows=${affected}`)
+    return { affected, products: productIds.length, rule }
   }
 
   async syncToMl(

@@ -6,7 +6,10 @@ import {
 } from '@nestjs/common'
 import { StockService } from './stock.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
+
+interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('stock')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
@@ -158,6 +161,27 @@ export class StockController {
       this.logger.error(`[sync-all] ${e?.message}`)
       if (e?.stack) this.logger.error(`[sync-all] STACK: ${e.stack}`)
       throw new HttpException(e?.message ?? 'Erro ao sincronizar', 400)
+    }
+  }
+
+  /** Regra CENTRAL de estoque virtual (todos os canais). Aplica a todos os
+   *  produtos com anúncio vinculado da org: físico + N virtual, pausa quando o
+   *  físico zera. body { virtual_units } ou { clear:true } pra remover a regra. */
+  @Post('virtual-rule')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.adjust')
+  async applyVirtualRule(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { virtual_units?: number; clear?: boolean },
+  ) {
+    if (!user.orgId) throw new HttpException('orgId ausente', 400)
+    if (!body?.clear && (body?.virtual_units == null || !Number.isFinite(Number(body.virtual_units)) || Number(body.virtual_units) < 0)) {
+      throw new HttpException('virtual_units inválido', 400)
+    }
+    try {
+      return await this.svc.applyVirtualRule(user.orgId, { virtualUnits: Number(body.virtual_units), clear: body.clear })
+    } catch (e: any) {
+      throw new HttpException(e?.message ?? 'Erro ao aplicar regra', 400)
     }
   }
 
