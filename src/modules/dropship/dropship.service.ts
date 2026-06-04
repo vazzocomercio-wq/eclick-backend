@@ -1195,7 +1195,9 @@ export class DropshipService {
 
     const now = new Date().toISOString()
     let promoted = 0, awaiting = 0, cancelled = 0
-    const updates: Array<Promise<unknown>> = []
+    // PromiseLike (não Promise): o query builder do Supabase é um thenable,
+    // .then() retorna PromiseLike — Promise.all aceita PromiseLike normalmente.
+    const updates: Array<PromiseLike<unknown>> = []
     const patch = (id: string, p: Record<string, unknown>): void => {
       updates.push(
         supabaseAdmin
