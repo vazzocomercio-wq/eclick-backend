@@ -1551,6 +1551,12 @@ export class TikTokShopService {
             price:       input.price,
           })
           this.logger.log(`[tts.publish] vínculo product_listings ${res}: ${data.product_id} → produto ${catalogId}`)
+          // Aplica a REGRA CENTRAL de estoque (físico+virtual, pausa quando o
+          // físico zera) ao anúncio recém-nascido — o recalc empurra o
+          // estoque-regra pro TikTok (e re-sincroniza os irmãos). Sem regra ligada,
+          // faz o clássico. Fire-and-forget: não bloqueia a resposta do publish.
+          void this.stockService.recalcAndPropagate(catalogId, 'creative_tiktok_publish')
+            .catch(e => this.logger.warn(`[tts.publish] recalc estoque pós-publish falhou: ${(e as Error)?.message}`))
         } else {
           this.logger.log(`[tts.publish] sem catálogo por SKU (${input.sku ?? '—'}) — anúncio ${data.product_id} fica sem vínculo de estoque`)
         }

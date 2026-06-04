@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus, Inject, forwardRef } from '@nestjs/common'
 import axios, { AxiosError } from 'axios'
 import { randomUUID } from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
@@ -12,6 +12,7 @@ import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { ShopeeCreativePublisherService } from '../marketplace/shopee-creative/shopee-creative.service'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
 import { resolveCatalogProductIdBySku, linkProductListing } from '../../common/product-listing-link'
+import { StockService } from '../stock/stock.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -166,6 +167,8 @@ export class CreativeMlPublisherService {
     private readonly activeResolver: ActiveResolverService,
     private readonly shopeeCreative: ShopeeCreativePublisherService,
     private readonly tiktok:         TikTokShopService,
+    @Inject(forwardRef(() => StockService))
+    private readonly stock:          StockService,
   ) {}
 
   /**
@@ -1004,6 +1007,13 @@ export class CreativeMlPublisherService {
             price:       opts.price,
           })
           this.logger.log(`[creative.ml.publish] vínculo product_listings ${res}: ${item.id} → produto ${catalogId}`)
+          // Aplica a REGRA CENTRAL de estoque (físico+virtual, pausa quando o
+          // físico zera) ao anúncio recém-nascido: o recalc empurra o
+          // estoque-regra pro MLB (e re-sincroniza os irmãos). Se o produto não
+          // tiver a regra ligada, faz o comportamento clássico. Fire-and-forget:
+          // o anúncio já foi criado, não bloqueia a resposta do publish.
+          void this.stock.recalcAndPropagate(catalogId, 'creative_ml_publish')
+            .catch(e => this.logger.warn(`[creative.ml.publish] recalc estoque pós-publish falhou: ${(e as Error).message}`))
         } else {
           this.logger.log(`[creative.ml.publish] sem catálogo por SKU — anúncio ${item.id} fica sem vínculo de estoque`)
         }

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common'
+import { Module, forwardRef } from '@nestjs/common'
 import { CreativeController } from './creative.controller'
 import { CreativeService } from './creative.service'
 import { CreativeImagePipelineService } from './creative-image-pipeline.service'
@@ -25,9 +25,10 @@ import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { MarketplaceModule } from '../marketplace/marketplace.module'
 import { TikTokShopModule } from '../tiktok-shop/tiktok-shop.module'
+import { StockModule } from '../stock/stock.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule, ActiveBridgeModule, MarketplaceModule, TikTokShopModule],
+  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule, ActiveBridgeModule, MarketplaceModule, TikTokShopModule, forwardRef(() => StockModule)],
   controllers: [CreativeController],
   providers:   [
     CreativeService,
