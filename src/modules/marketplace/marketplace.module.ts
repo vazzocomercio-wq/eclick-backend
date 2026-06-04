@@ -75,6 +75,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeAlgoScoreService,    // F1.1 — exporta pra outros módulos (Listing Center)
     ShopeeQualityService,      // F1.3 — exporta pro Algorithm Score Pillar 3 reusar
     ShopeeStockSyncService,    // F18 Fase C — StockService chama no recalcAndPropagate
+    ShopeeCreativePublisherService, // sync de confirmação — CreativeModule injeta
   ],
 })
 export class MarketplaceModule {}

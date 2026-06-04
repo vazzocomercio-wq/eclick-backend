@@ -144,6 +144,20 @@ interface TtsWebhookPayload {
   data?: Record<string, unknown>
 }
 
+/** status cru do produto TikTok (202309) → vocabulário comum do painel de
+ *  publicações. ACTIVATE = no ar; DEACTIVATED/FREEZE = pausado; PENDING/REVIEW =
+ *  em análise; DRAFT/FAILED = inativo; DELETED = removido. */
+function normalizeTiktokStatus(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const s = raw.toUpperCase()
+  if (s === 'ACTIVATE' || s === 'ACTIVE' || s === 'LIVE') return 'active'
+  if (s.includes('DEACTIVAT') || s === 'FREEZE' || s === 'SUSPEND') return 'paused'
+  if (s === 'PENDING' || s.includes('REVIEW') || s === 'AUDITING') return 'under_review'
+  if (s.includes('DELETE')) return 'closed'
+  if (s === 'DRAFT' || s === 'FAILED') return 'inactive'
+  return 'inactive'
+}
+
 @Injectable()
 export class TikTokShopService {
   private readonly logger = new Logger(TikTokShopService.name)
@@ -855,6 +869,19 @@ export class TikTokShopService {
     if (!o) return false
     // Webhook = venda nova em tempo real → aplica a baixa de estoque (gateada).
     return this.persistOrder(orgId, cred?.shop_id ?? null, o, true)
+  }
+
+  /** Sync de confirmação — status atual de 1 produto, normalizado pro
+   *  vocabulário do painel de publicações (active/paused/closed/under_review/
+   *  inactive). Usado pela esteira IA Criativo. Lança se a loja não estiver
+   *  conectada (o caller faz soft-fallback). */
+  async getListingStatus(orgId: string, productId: string): Promise<{ raw: string | null; normalized: string | null }> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    const p = await this.getProductDetail(productId, shopCipher, accessToken)
+    const raw = p?.status ?? null
+    return { raw, normalized: normalizeTiktokStatus(raw) }
   }
 
   /** Sincroniza UM produto pelo id (webhook): busca o detalhe e faz upsert. */

@@ -13,6 +13,20 @@ import {
   ShopeeDraftListing, ShopeeEvaluateResponse, RELEVANCE_GATE,
 } from './shopee-creative.types'
 
+/** item_status cru da Shopee → vocabulário comum do painel de publicações.
+ *  NORMAL = no ar; UNLIST = despublicado pelo vendedor; BANNED/DELETED =
+ *  removido; REVIEWING = em análise. */
+function normalizeShopeeStatus(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const s = raw.toUpperCase()
+  if (s === 'NORMAL') return 'active'
+  if (s === 'UNLIST') return 'paused'
+  if (s === 'REVIEWING' || s === 'REVIEW') return 'under_review'
+  if (s === 'BANNED') return 'inactive'
+  if (s === 'DELETED' || s.includes('DELETE')) return 'closed'
+  return 'inactive'
+}
+
 /** F18 F1.7 + Fase F — IA Criativo Shopee: guard de pré-publicação + publish.
  *
  *  evaluateDraft() — guard puro: roda o Algorithm Score (F1.1) no rascunho e
@@ -342,6 +356,20 @@ export class ShopeeCreativePublisherService {
       ok: true, item_id, category_id: categoryId, images: imageIds.length,
       virtual_stock: virtualStock, stock_paused: stockPaused, attributes_count: attributeList.length,
     }
+  }
+
+  /** Sync de confirmação — busca o status atual do anúncio na Shopee e o
+   *  normaliza pro vocabulário comum do painel de publicações
+   *  (active/paused/closed/under_review/inactive). Usado pela esteira IA
+   *  Criativo (botão "sync" + worker). Resolve conn + token fresco como no
+   *  publish. Lança se a loja não estiver conectada (o caller faz soft-fallback). */
+  async syncListingStatus(orgId: string, itemId: string | number): Promise<{ raw: string | null; normalized: string | null }> {
+    const resolved = await this.mp.resolve(orgId, 'shopee')
+    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    const adapter = resolved.adapter as ShopeeAdapter
+    const raw = await adapter.getItemStatus(conn, itemId)
+    return { raw, normalized: normalizeShopeeStatus(raw) }
   }
 
   /** Executa um passo da esteira convertendo erro 403/Forbidden da Shopee numa

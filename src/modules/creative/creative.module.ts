@@ -23,9 +23,11 @@ import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { CredentialsModule } from '../credentials/credentials.module'
 import { EOtimizerModule } from '../e-otimizer/e-otimizer.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
+import { MarketplaceModule } from '../marketplace/marketplace.module'
+import { TikTokShopModule } from '../tiktok-shop/tiktok-shop.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule, ActiveBridgeModule],
+  imports:     [AiModule, MercadolivreModule, CredentialsModule, EOtimizerModule, ActiveBridgeModule, MarketplaceModule, TikTokShopModule],
   controllers: [CreativeController],
   providers:   [
     CreativeService,

@@ -9,6 +9,8 @@ import { CreativeService, type CreativeListing, type CreativeProduct } from './c
 import { LlmService } from '../ai/llm.service'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { ActiveResolverService } from '../active-bridge/active-resolver.service'
+import { ShopeeCreativePublisherService } from '../marketplace/shopee-creative/shopee-creative.service'
+import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -118,7 +120,7 @@ export interface CreativePublication {
   product_id:                    string
   user_id:                       string | null
   seller_id:                     number | null
-  marketplace:                   'mercado_livre' | 'shopee' | 'amazon' | 'magalu'
+  marketplace:                   'mercado_livre' | 'shopee' | 'amazon' | 'magalu' | 'tiktok_shop' | 'tiktok' | 'loja_propria'
   status:                        'pending' | 'publishing' | 'published' | 'failed'
   idempotency_key:               string
   image_ids:                     string[]
@@ -161,6 +163,8 @@ export class CreativeMlPublisherService {
     private readonly llm:            LlmService,
     private readonly activeBridge:   ActiveBridgeClient,
     private readonly activeResolver: ActiveResolverService,
+    private readonly shopeeCreative: ShopeeCreativePublisherService,
+    private readonly tiktok:         TikTokShopService,
   ) {}
 
   /**
@@ -1123,6 +1127,13 @@ export class CreativeMlPublisherService {
       throw new BadRequestException('publication sem external_id')
     }
 
+    // Cross-plataforma: Shopee/TikTok/Loja NÃO podem bater na API do ML — o
+    // external_id não é um item ML (= "resource not found"). Cada plataforma
+    // confirma o próprio status; o sync NUNCA quebra (soft-fallback).
+    if (pub.marketplace !== 'mercado_livre') {
+      return this.syncNonMlStatus(orgId, pub)
+    }
+
     const { token } = await this.ml.getTokenForOrg(orgId, pub.seller_id ?? undefined)
 
     let mlStatus: string | null = null
@@ -1187,6 +1198,46 @@ export class CreativeMlPublisherService {
         .eq('id', pub.id)
       throw new HttpException(`Sync falhou: ${err.message}`, HttpStatus.BAD_GATEWAY)
     }
+  }
+
+  /** Sync de confirmação para plataformas NÃO-ML (Shopee/TikTok/Loja própria).
+   *  Diferente do ML, NUNCA lança: em qualquer falha (token expirado, escopo,
+   *  API fora) só carimba last_synced_at e preserva o status anterior — não
+   *  inventa "ativo". Quando consegue, grava o status real normalizado pro
+   *  vocabulário comum (active/paused/closed/under_review/inactive). */
+  private async syncNonMlStatus(orgId: string, pub: CreativePublication): Promise<CreativePublication> {
+    let normalized: string | null = null
+    try {
+      if (pub.marketplace === 'shopee') {
+        normalized = (await this.shopeeCreative.syncListingStatus(orgId, pub.external_id!)).normalized
+      } else if (pub.marketplace === 'tiktok_shop' || pub.marketplace === 'tiktok') {
+        normalized = (await this.tiktok.getListingStatus(orgId, pub.external_id!)).normalized
+      } else if (pub.marketplace === 'loja_propria') {
+        // Loja própria: o "status" é a visibilidade na vitrine (local, sem API).
+        const { data } = await supabaseAdmin
+          .from('products')
+          .select('storefront_visible')
+          .eq('id', pub.external_id!)
+          .maybeSingle<{ storefront_visible: boolean | null }>()
+        normalized = data ? (data.storefront_visible ? 'active' : 'paused') : null
+      }
+    } catch (e: unknown) {
+      this.logger.warn(`[creative.sync.${pub.marketplace}] ${pub.external_id}: ${(e as Error).message}`)
+    }
+
+    const update: Record<string, unknown> = {
+      last_synced_at: new Date().toISOString(),
+      updated_at:     new Date().toISOString(),
+    }
+    if (normalized) update.last_synced_status = normalized
+
+    const { data: updated } = await supabaseAdmin
+      .from('creative_publications')
+      .update(update)
+      .eq('id', pub.id)
+      .select('*')
+      .single()
+    return (updated as CreativePublication) ?? pub
   }
 
   /** Lista publications atualmente degradadas (não-ack) — usado pela UI

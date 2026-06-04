@@ -545,6 +545,32 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return { item_id: itemId, base_stock_info: baseStockInfo, models: models?.response ?? null }
   }
 
+  /** Sync de confirmação — status atual de 1 item (get_item_base_info →
+   *  item_status). A esteira IA Criativo usa pra confirmar que o anúncio
+   *  continua no ar. Retorna o item_status cru da Shopee
+   *  (NORMAL/UNLIST/BANNED/DELETED/REVIEWING/SELLER_DELETE…) ou null. */
+  async getItemStatus(conn: MpConnection, itemId: number | string): Promise<string | null> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const infoPath = '/api/v2/product/get_item_base_info'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(infoPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_id_list: String(itemId),
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.getItemStatus',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${infoPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const item = (data?.response?.item_list ?? [])[0] as any
+    return (item?.item_status as string | undefined) ?? null
+  }
+
   /** F18 Fase C — Resolve o `location_id` do seller_stock da loja a partir de 1
    *  item (read-only, via get_model_list). Sellers BR têm armazém nomeado (ex
    *  "BRZ") — o update_stock precisa do MESMO location_id, senão a escrita não
