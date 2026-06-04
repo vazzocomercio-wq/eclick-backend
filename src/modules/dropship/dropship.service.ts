@@ -1137,15 +1137,20 @@ export class DropshipService {
   }
 
   /**
-   * Promove identifications no estado `identified` pro próximo passo do fluxo:
-   *  - Se o pedido foi cancelado/refundado no marketplace → `cancelled`
-   *  - Se o pedido foi enviado (shipping_status shipped/delivered) → `eligible_for_oc`
-   *  - Caso contrário (paid sem envio confirmado) → `awaiting_shipment`
+   * Funil de validação de expedição. Promove identifications pelas camadas:
+   *  - Cancelado no marketplace → `cancelled`
+   *  - `ready_to_ship` (etiqueta liberada, NÃO despachado) → Camada 1:
+   *    `awaiting_shipment` + grava `label_ready_at`. NÃO entra em OC ainda.
+   *  - `shipped`/`delivered`/`in_transit` (canal confirma despacho) → Camada 2a:
+   *    grava `shipped_at` (= data de expedição p/ a coorte da OC). Vira
+   *    `eligible_for_oc` se o toggle de confirmação do parceiro estiver OFF
+   *    ou já houver `partner_confirmed_at` (Camada 2b); senão fica em `shipped`
+   *    aguardando o parceiro confirmar.
+   *  - handling/pending → `awaiting_shipment`.
    *
-   * O cron das 22h só gera OC pra identifications em `eligible_for_oc` ou
-   * `shipped_confirmed`. Sem esse promoter, todos ficam parados em
-   * `identified` e nenhuma OC é criada (caso real ontem: 67 pedidos
-   * identified, 0 OCs geradas).
+   * A regra de ouro: a OC fecha por DATA DE EXPEDIÇÃO, não de venda. Itens não
+   * confirmados ficam fora da OC e entram no dia em que forem confirmados
+   * (carry-forward implícito — só `eligible_for_oc`/`shipped_confirmed` entram).
    */
   async promoteIdentifications(orgId: string): Promise<{
     checked: number
@@ -1156,9 +1161,9 @@ export class DropshipService {
     // Pega identifications em estado intermediário (identified ou awaiting_shipment)
     const { data: idents } = await supabaseAdmin
       .from('dropship_order_identifications')
-      .select('id, order_id, marketplace_status, shipping_status, dropship_status')
+      .select('id, order_id, supplier_id, marketplace_status, shipping_status, dropship_status, shipped_at, label_ready_at, partner_confirmed_at')
       .eq('organization_id', orgId)
-      .in('dropship_status', ['identified', 'awaiting_shipment'])
+      .in('dropship_status', ['identified', 'awaiting_shipment', 'shipped'])
       .limit(500)
 
     if (!idents || idents.length === 0) {
@@ -1175,57 +1180,74 @@ export class DropshipService {
       (orders ?? []).map(o => [o.id, { status: o.status as string | null, shipping_status: o.shipping_status as string | null }]),
     )
 
+    // Toggle de confirmação obrigatória do parceiro (Camada 2b), por fornecedor.
+    const supplierIds = [...new Set(idents.map(i => i.supplier_id).filter(Boolean) as string[])]
+    const { data: profiles } = supplierIds.length > 0
+      ? await supabaseAdmin
+          .from('supplier_dropship_profiles')
+          .select('supplier_id, require_partner_shipment_confirmation')
+          .eq('organization_id', orgId)
+          .in('supplier_id', supplierIds)
+      : { data: [] as Array<{ supplier_id: string; require_partner_shipment_confirmation: boolean }> }
+    const requireConfirm = new Map(
+      (profiles ?? []).map(p => [p.supplier_id, !!p.require_partner_shipment_confirmation]),
+    )
+
+    const now = new Date().toISOString()
     let promoted = 0, awaiting = 0, cancelled = 0
-    const promoteIds:  string[] = []
-    const awaitingIds: string[] = []
-    const cancelIds:   string[] = []
+    const updates: Array<Promise<unknown>> = []
+    const patch = (id: string, p: Record<string, unknown>): void => {
+      updates.push(
+        supabaseAdmin
+          .from('dropship_order_identifications')
+          .update({ ...p, updated_at: now })
+          .eq('id', id)
+          .then(() => undefined),
+      )
+    }
 
     for (const i of idents) {
       const cur = orderMap.get(i.order_id) ?? { status: i.marketplace_status, shipping_status: i.shipping_status }
       const orderStatus = cur.status ?? i.marketplace_status
       const shipping    = cur.shipping_status ?? i.shipping_status
 
+      // Cancelado no marketplace → encerra
       if (orderStatus === 'cancelled' || orderStatus === 'invalid') {
-        cancelIds.push(i.id)
-        cancelled++
-      } else if (
-        shipping === 'shipped' || shipping === 'delivered' ||
-        shipping === 'in_transit' || shipping === 'ready_to_ship'
-      ) {
-        // Já saiu da nossa mão (ou está pronto) → seguro pedir do parceiro
-        promoteIds.push(i.id)
-        promoted++
+        if (i.dropship_status !== 'cancelled') {
+          patch(i.id, { dropship_status: 'cancelled', hold_reason: 'Pedido cancelado no marketplace' })
+          cancelled++
+        }
+        continue
+      }
+
+      const channelShipped = shipping === 'shipped' || shipping === 'delivered' || shipping === 'in_transit'
+      const labelReady     = shipping === 'ready_to_ship'
+
+      if (channelShipped) {
+        // Camada 2a: canal confirma despacho. shipped_at = data de expedição (coorte da OC).
+        // Vira elegível só se o parceiro não precisa confirmar (toggle OFF) ou já confirmou (2b).
+        const needsPartner = requireConfirm.get(i.supplier_id ?? '') === true
+        const confirmed    = !needsPartner || !!i.partner_confirmed_at
+        const target       = confirmed ? 'eligible_for_oc' : 'shipped'
+        if (i.dropship_status !== target || !i.shipped_at) {
+          patch(i.id, { dropship_status: target, shipped_at: i.shipped_at ?? now })
+          if (confirmed) promoted++
+          else awaiting++
+        }
+      } else if (labelReady) {
+        // Camada 1: etiqueta liberada, mas AINDA NÃO despachado → não entra em OC.
+        if (i.dropship_status !== 'awaiting_shipment' || !i.label_ready_at) {
+          patch(i.id, { dropship_status: 'awaiting_shipment', label_ready_at: i.label_ready_at ?? now })
+          awaiting++
+        }
       } else if (i.dropship_status === 'identified') {
-        // Ainda em handling/pending → status intermediário
-        awaitingIds.push(i.id)
+        // handling/pending → aguardando expedição
+        patch(i.id, { dropship_status: 'awaiting_shipment' })
         awaiting++
       }
     }
 
-    // Batch updates (idempotentes)
-    if (promoteIds.length > 0) {
-      await supabaseAdmin
-        .from('dropship_order_identifications')
-        .update({ dropship_status: 'eligible_for_oc', updated_at: new Date().toISOString() })
-        .in('id', promoteIds)
-    }
-    if (awaitingIds.length > 0) {
-      await supabaseAdmin
-        .from('dropship_order_identifications')
-        .update({ dropship_status: 'awaiting_shipment', updated_at: new Date().toISOString() })
-        .in('id', awaitingIds)
-    }
-    if (cancelIds.length > 0) {
-      await supabaseAdmin
-        .from('dropship_order_identifications')
-        .update({
-          dropship_status: 'cancelled',
-          hold_reason: 'Pedido cancelado no marketplace',
-          updated_at: new Date().toISOString(),
-        })
-        .in('id', cancelIds)
-    }
-
+    await Promise.all(updates)
     return { checked: idents.length, promoted, awaiting, cancelled }
   }
 
@@ -2008,8 +2030,10 @@ export class DropshipService {
       seller_id: number | null
       shopee_shop_id: string | null
       amazon_seller_id: string | null
+      reference_date: string   // dia de EXPEDIÇÃO da coorte (não data de venda)
       idents: typeof idents
     }
+    const today = new Date()  // usado na coorte de expedição (fallback) e no due_date
     const groups = new Map<string, Group>()
     for (const i of idents) {
       // Resolver conta via account-supplier mapping (procura match com marketplace)
@@ -2022,7 +2046,13 @@ export class DropshipService {
       const amazonSellerId = acc?.amazon_seller_id ?? null
       const accountLabel = acc?.account_label ?? null
 
-      const key = [i.supplier_id, i.marketplace, sellerId ?? shopeeShopId ?? amazonSellerId ?? 'unknown'].join(':')
+      // Coorte por DATA DE EXPEDIÇÃO (shipped_at): a OC agrupa o que foi
+      // despachado no mesmo dia. Despachos em dias diferentes geram OCs
+      // separadas (carry-forward natural). Fallback defensivo: data de
+      // identificação, senão hoje.
+      const shippedDate = String(i.shipped_at ?? i.identified_at ?? today.toISOString()).slice(0, 10)
+      const acct = sellerId ?? shopeeShopId ?? amazonSellerId ?? 'unknown'
+      const key = [i.supplier_id, i.marketplace, acct, shippedDate].join(':')
       if (!groups.has(key)) {
         groups.set(key, {
           supplier_id: i.supplier_id,
@@ -2031,6 +2061,7 @@ export class DropshipService {
           seller_id: sellerId,
           shopee_shop_id: shopeeShopId,
           amazon_seller_id: amazonSellerId,
+          reference_date: shippedDate,
           idents: [],
         })
       }
@@ -2038,9 +2069,7 @@ export class DropshipService {
     }
 
     const created: Array<{ id: string; oc_number: string; gross_total: number }> = []
-    const today = new Date()
-    const todayDate = today.toISOString().slice(0, 10)
-    const ocCounter: Record<string, number> = {}  // pra numeração sequencial
+    const ocCounter: Record<string, number> = {}  // numeração sequencial (por data de expedição + fornecedor)
 
     for (const [, grp] of groups) {
       const supplier = supplierById.get(grp.supplier_id)
@@ -2052,10 +2081,10 @@ export class DropshipService {
       // Numeração: DOC-YYYY-MM-DD-ORG-SUPPLIER-NNN
       const supplierSlug = String(supplier.name)
         .toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 20).replace(/^_|_$/g, '')
-      const counterKey = `${todayDate}:${grp.supplier_id}`
+      const counterKey = `${grp.reference_date}:${grp.supplier_id}`
       ocCounter[counterKey] = (ocCounter[counterKey] ?? 0) + 1
       const seq = String(ocCounter[counterKey]).padStart(3, '0')
-      const ocNumber = `DOC-${todayDate}-${supplierSlug}-${seq}`
+      const ocNumber = `DOC-${grp.reference_date}-${supplierSlug}-${seq}`
 
       // 3. Calcula totais
       let grossTotal = 0
@@ -2110,7 +2139,7 @@ export class DropshipService {
           seller_id: grp.seller_id,
           shopee_shop_id: grp.shopee_shop_id,
           amazon_seller_id: grp.amazon_seller_id,
-          reference_date: todayDate,
+          reference_date: grp.reference_date,
           generation_date: new Date().toISOString(),
           due_date: dueDate,
           items_count: itemsToInsert.length,
