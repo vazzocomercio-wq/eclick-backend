@@ -1264,8 +1264,12 @@ export class DropshipService {
       .select('supplier_id, marketplace, seller_id, shopee_shop_id, amazon_seller_id, is_default')
       .eq('organization_id', orgId)
       .is('active_until', null)
-    const accSupMap = new Map<string, string>()  // key = marketplace:account → supplier_id
+    const accSupMap = new Map<string, string>()            // key = marketplace:account → supplier_id (resolução EXATA)
+    const accSupByMarketplace = new Map<string, string[]>() // marketplace → supplier_ids (fallback CONTA-ÚNICA)
     for (const a of (accountSuppliers ?? [])) {
+      const list = accSupByMarketplace.get(a.marketplace) ?? []
+      list.push(a.supplier_id)
+      accSupByMarketplace.set(a.marketplace, list)
       const account = a.seller_id ?? a.shopee_shop_id ?? a.amazon_seller_id
       if (account == null) continue
       accSupMap.set(`${a.marketplace}:${account}`, a.supplier_id)
@@ -1282,11 +1286,27 @@ export class DropshipService {
     for (const order of candidates) {
       // 2. Mapear marketplace ao formato seller_account_suppliers
       const marketplace = this.normalizeMarketplaceName(order.source ?? '')
-      const account = order.seller_id  // ML usa seller_id; outros marketplaces precisam expansão futura
-      if (!marketplace || account == null) { skipped++; continue }
+      if (!marketplace) { skipped++; continue }
 
-      // 3. Resolver supplier via account
-      const supplierId = accSupMap.get(`${marketplace}:${account}`)
+      // 3. Resolver supplier via conta.
+      //    ML carrega a conta no próprio pedido (order.seller_id) → resolução EXATA.
+      //    Shopee/TikTok/loja própria NÃO trazem o shop_id na linha do pedido
+      //    (confirmado no raw_data) → fallback de CONTA-ÚNICA: se a org tem
+      //    exatamente 1 parceiro vinculado àquele canal, usa-o. Multi-loja por
+      //    canal exige persistir o shop_id na ingestão (follow-up) — aqui é
+      //    ambíguo, então logamos e pulamos pra não vincular ao parceiro errado.
+      const account = order.seller_id  // só o ML traz isso na linha do pedido
+      let supplierId = account != null ? accSupMap.get(`${marketplace}:${account}`) : undefined
+      if (!supplierId && account == null) {
+        const mktSuppliers = accSupByMarketplace.get(marketplace) ?? []
+        if (mktSuppliers.length === 1) {
+          supplierId = mktSuppliers[0]
+        } else if (mktSuppliers.length > 1) {
+          this.logger.warn(
+            `[identify] ${marketplace}: ${mktSuppliers.length} parceiros vinculados e pedido ${order.id} sem shop_id — ambíguo, pulando (rever: persistir shop_id na ingestão)`,
+          )
+        }
+      }
       if (!supplierId) { skipped++; continue }  // conta não vinculada a parceiro = não é dropship
 
       // 4. Resolver product. Cascata de 3 estratégias por ordem de
@@ -1360,8 +1380,10 @@ export class DropshipService {
     const s = source.toLowerCase()
     if (s.includes('mercadolivre') || s.includes('mercado_livre') || s === 'ml') return 'mercado_livre'
     if (s.includes('shopee')) return 'shopee'
+    if (s.includes('tiktok')) return 'tiktok_shop'   // requer migration F1b no CHECK de seller_account_suppliers.marketplace
     if (s.includes('amazon')) return 'amazon'
     if (s.includes('magalu')) return 'magalu'
+    if (s.includes('storefront') || s.includes('loja')) return 'storefront'  // idem F1b + espelhamento storefront→orders (F7)
     return ''
   }
 
