@@ -50,6 +50,16 @@ export class ProductsController {
     )
   }
 
+  /** POST /products/storefront-listings/backfill — cria os anúncios da loja
+   *  própria (product_listings platform='storefront') pra todos os produtos
+   *  visíveis na loja, normalizando a loja como canal. Idempotente. */
+  @Post('storefront-listings/backfill')
+  @RequirePermission('products.update')
+  backfillStorefrontListings(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.products.backfillStorefrontListings(u.orgId)
+  }
+
   // ── Active config dropdowns (sessão 2026-05-14) ────────────────────────
   // Endpoints que populam os dropdowns do modal "Despachar pra operador"
   // sem o user precisar copiar UUIDs do schema active.* na mão.

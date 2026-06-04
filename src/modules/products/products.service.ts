@@ -108,7 +108,92 @@ export class ProductsService {
         .catch(e => this.logger.warn(`[auto-sync] org=${orgId.slice(0,8)}: ${(e as Error).message}`))
     }
 
+    // Loja própria é um CANAL: o produto na loja é um anúncio com vínculo
+    // catálogo↔produto em product_listings (platform='storefront'). Visible →
+    // upsert o anúncio; hidden → desativa. Assim a loja entra no modelo
+    // multi-canal (vínculos, regra central de estoque, cobertura). Não-fatal.
+    await this.syncStorefrontListings(orgId, targetIds, visible)
+      .catch(e => this.logger.warn(`[storefront-listings] org=${orgId.slice(0,8)}: ${(e as Error).message}`))
+
     return { updated: targetIds.length, skipped }
+  }
+
+  /** Sincroniza os anúncios da LOJA PRÓPRIA (canal 'storefront') em
+   *  product_listings. listing_id = product_id (a loja vende o produto do
+   *  catálogo direto), account_id='loja', variation_id=''. Idempotente. */
+  async syncStorefrontListings(orgId: string, productIds: string[], visible: boolean): Promise<{ synced: number }> {
+    const ids = (productIds ?? []).filter(Boolean)
+    if (!ids.length) return { synced: 0 }
+
+    if (!visible) {
+      await supabaseAdmin
+        .from('product_listings')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('platform', 'storefront')
+        .in('product_id', ids)
+      return { synced: ids.length }
+    }
+
+    let synced = 0
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200)
+      const { data: prods } = await supabaseAdmin
+        .from('products')
+        .select('id, name, price')
+        .eq('organization_id', orgId)
+        .in('id', chunk)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows = ((prods ?? []) as any[]).map(p => ({
+        platform:      'storefront',
+        account_id:    'loja',
+        listing_id:    String(p.id),
+        variation_id:  '',
+        product_id:    p.id,
+        listing_title: p.name ?? null,
+        listing_price: p.price ?? null,
+        is_active:     true,
+        updated_at:    new Date().toISOString(),
+      }))
+      if (!rows.length) continue
+      const { error } = await supabaseAdmin
+        .from('product_listings')
+        .upsert(rows, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+      if (error) throw new BadRequestException(`storefront listings: ${error.message}`)
+      synced += rows.length
+    }
+    return { synced }
+  }
+
+  /** Backfill: garante o anúncio storefront pra TODOS os produtos visíveis na
+   *  loja da org (e desativa os que não estão mais visíveis). Idempotente. */
+  async backfillStorefrontListings(orgId: string): Promise<{ visible: number; synced: number; deactivated: number }> {
+    const { data: vis } = await supabaseAdmin
+      .from('products')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('storefront_visible', true)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const visibleIds = ((vis ?? []) as any[]).map(r => r.id as string)
+    const { synced } = await this.syncStorefrontListings(orgId, visibleIds, true)
+
+    const { data: actives } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id')
+      .eq('platform', 'storefront')
+      .eq('is_active', true)
+    const visibleSet = new Set(visibleIds)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toDeactivate = [...new Set(((actives ?? []) as any[]).map(r => r.product_id as string))].filter(pid => pid && !visibleSet.has(pid))
+    let deactivated = 0
+    if (toDeactivate.length) {
+      await supabaseAdmin
+        .from('product_listings')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('platform', 'storefront')
+        .in('product_id', toDeactivate)
+      deactivated = toDeactivate.length
+    }
+    return { visible: visibleIds.length, synced, deactivated }
   }
 
   async getAll(orgId: string | null) {
