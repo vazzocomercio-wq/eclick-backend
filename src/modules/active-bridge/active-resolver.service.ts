@@ -15,11 +15,17 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 
 export interface ActiveAgent {
-  member_id:    string  // active.org_members.id
-  user_id:      string
-  display_name: string | null
-  role:         string
-  status:       string  // 'active' | 'invited' | 'disabled'
+  member_id:      string  // active.org_members.id
+  user_id:        string
+  display_name:   string | null
+  role:           string
+  status:         string  // 'active' | 'invited' | 'disabled'
+  whatsapp_phone: string | null  // p/ alerta de tarefa urgente (null = sem alerta)
+}
+
+export interface ActiveMemberContact {
+  display_name:   string | null
+  whatsapp_phone: string | null
 }
 
 export interface ActivePipeline {
@@ -75,18 +81,47 @@ export class ActiveResolverService {
     const { data, error } = await supabaseAdmin
       .schema('active')
       .from('org_members')
-      .select('id, user_id, display_name, role, status')
+      .select('id, user_id, display_name, role, status, whatsapp_phone')
       .eq('org_id', org_id)
       .in('status', ['active', 'invited'])
       .order('display_name', { ascending: true, nullsFirst: false })
     if (error) throw new Error(`listAgents: ${error.message}`)
     return ((data ?? []) as Array<Record<string, unknown>>).map(row => ({
-      member_id:    row.id as string,
-      user_id:      row.user_id as string,
-      display_name: (row.display_name as string | null) ?? null,
-      role:         row.role as string,
-      status:       row.status as string,
+      member_id:      row.id as string,
+      user_id:        row.user_id as string,
+      display_name:   (row.display_name as string | null) ?? null,
+      role:           row.role as string,
+      status:         row.status as string,
+      whatsapp_phone: (row.whatsapp_phone as string | null) ?? null,
     }))
+  }
+
+  /**
+   * Contato (nome + WhatsApp) de um membro Active por user_id dentro de uma
+   * org Active. Usado pra disparar alerta de tarefa URGENTE no WhatsApp do
+   * operador. Retorna null se não achar membro. whatsapp_phone null = operador
+   * sem número cadastrado (sem alerta).
+   */
+  async getMemberContact(activeOrgId: string, userId: string): Promise<ActiveMemberContact | null> {
+    const { data, error } = await supabaseAdmin
+      .schema('active')
+      .from('org_members')
+      .select('display_name, whatsapp_phone')
+      .eq('org_id', activeOrgId)
+      .eq('user_id', userId)
+      .in('status', ['active', 'invited'])
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      this.log.warn(`[getMemberContact] erro: ${error.message}`)
+      return null
+    }
+    if (!data) return null
+    return {
+      display_name:   (data.display_name as string | null) ?? null,
+      whatsapp_phone: (data.whatsapp_phone as string | null) ?? null,
+    }
   }
 
   /** Lista pipelines não-arquivados de uma org Active. */

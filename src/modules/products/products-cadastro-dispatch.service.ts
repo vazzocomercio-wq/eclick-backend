@@ -5,6 +5,7 @@ import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { ProductsCompletenessService } from './products-completeness.service'
 import { ProductsListingCoverageService } from './products-listing-coverage.service'
+import { UnifiedWhatsAppSender } from '../wa-router/unified-whatsapp-sender.service'
 
 /**
  * F4 (sessão 2026-05-14) — Despacho de tarefas de cadastro pro operador (Active CRM)
@@ -42,6 +43,14 @@ export interface DispatchResult {
   skipped_existing: number          // produto já tinha assignment OPEN
   errors:           Array<{ product_id: string; message: string }>
   assignments:      Array<{ product_id: string; assignment_id: string; deal_id?: string; task_id?: string }>
+  /** Presente só quando a prioridade do despacho foi URGENTE: status do alerta
+   *  WhatsApp enviado pro operador (canal grátis/Baileys primeiro). */
+  urgent_alert?: {
+    sent:          boolean
+    channel?:      string | null    // 'baileys' | 'cloud_api'
+    phone_masked?: string
+    reason?:       string           // not_urgent | no_whatsapp | send_failed | ...
+  }
 }
 
 @Injectable()
@@ -53,6 +62,8 @@ export class ProductsCadastroDispatchService {
     private readonly activeResolver: ActiveResolverService,
     private readonly completeness:  ProductsCompletenessService,
     private readonly coverage:      ProductsListingCoverageService,
+    // @Global WaRouterModule — injeta sem precisar importar o módulo.
+    private readonly wa:            UnifiedWhatsAppSender,
   ) {}
 
   /** Despacha N produtos pro operador. Idempotente via dedup_key. */
@@ -121,6 +132,7 @@ export class ProductsCadastroDispatchService {
     const missing = input.product_ids.filter(id => !fetchedIds.has(id))
 
     const dispatched: DispatchResult['assignments'] = []
+    const alertItems: Array<{ name: string; sku: string | null; deeplink: string }> = []
     const errors: DispatchResult['errors'] = []
     let skippedExisting = 0
 
@@ -263,11 +275,29 @@ export class ProductsCadastroDispatchService {
           deal_id:       bridgeRes.deal_id ?? undefined,
           task_id:       bridgeRes.task_id ?? undefined,
         })
+        alertItems.push({
+          name:     ((p as any).name as string | null) ?? 'Produto',
+          sku:      ((p as any).sku as string | null) ?? null,
+          deeplink,
+        })
       } catch (e) {
         this.log.error(`[cadastro-dispatch] product=${p.id} falhou: ${(e as Error).message}`)
         errors.push({ product_id: p.id as string, message: (e as Error).message.slice(0, 200) })
       }
     }
+
+    // Prioridade URGENTE → alerta no WhatsApp grátis do operador (best-effort).
+    const urgent_alert = input.task_priority === 'urgent'
+      ? await this.maybeSendUrgentAlert({
+          saasOrgId:      orgId,
+          activeOrgId,
+          operatorUserId: input.operator_user_id,
+          priority:       input.task_priority,
+          dueDate,
+          kind:           'cadastro',
+          items:          alertItems,
+        })
+      : undefined
 
     return {
       ok:               true,
@@ -275,6 +305,7 @@ export class ProductsCadastroDispatchService {
       skipped_existing: skippedExisting,
       errors,
       assignments:      dispatched,
+      ...(urgent_alert ? { urgent_alert } : {}),
     }
   }
 
@@ -340,6 +371,7 @@ export class ProductsCadastroDispatchService {
 
     const fetchedIds = new Set((products ?? []).map(p => p.id as string))
     const dispatched: DispatchResult['assignments'] = []
+    const alertItems: Array<{ name: string; sku: string | null; deeplink: string }> = []
     const errors: DispatchResult['errors'] = []
     for (const m of input.product_ids.filter(id => !fetchedIds.has(id))) {
       errors.push({ product_id: m, message: 'Produto não encontrado nesse org' })
@@ -389,11 +421,28 @@ export class ProductsCadastroDispatchService {
           deal_id:       bridgeRes.deal_id ?? undefined,
           task_id:       bridgeRes.task_id ?? undefined,
         })
+        alertItems.push({
+          name:     ((p as any).name as string | null) ?? 'Produto',
+          sku:      ((p as any).sku as string | null) ?? null,
+          deeplink,
+        })
       } catch (e) {
         this.log.error(`[publish-dispatch] product=${p.id} falhou: ${(e as Error).message}`)
         errors.push({ product_id: p.id as string, message: (e as Error).message.slice(0, 200) })
       }
     }
+
+    const urgent_alert = input.task_priority === 'urgent'
+      ? await this.maybeSendUrgentAlert({
+          saasOrgId:      orgId,
+          activeOrgId,
+          operatorUserId: input.operator_user_id,
+          priority:       input.task_priority,
+          dueDate,
+          kind:           'anuncio',
+          items:          alertItems,
+        })
+      : undefined
 
     return {
       ok:               true,
@@ -401,6 +450,85 @@ export class ProductsCadastroDispatchService {
       skipped_existing: 0,
       errors,
       assignments:      dispatched,
+      ...(urgent_alert ? { urgent_alert } : {}),
+    }
+  }
+
+  /**
+   * Quando a prioridade do despacho é URGENTE, manda um alerta no WhatsApp do
+   * operador. Usa o wa-router com purpose `internal_alert` → canal GRÁTIS
+   * (Baileys) primeiro; Cloud API/Z-API só como último fallback. Best-effort:
+   * nunca derruba o dispatch — devolve o status do envio pra UI.
+   */
+  private async maybeSendUrgentAlert(params: {
+    saasOrgId:      string
+    activeOrgId:    string
+    operatorUserId: string
+    priority?:      DispatchInput['task_priority']
+    dueDate:        string
+    kind:           'cadastro' | 'anuncio'
+    items:          Array<{ name: string; sku: string | null; deeplink: string }>
+  }): Promise<NonNullable<DispatchResult['urgent_alert']>> {
+    const { saasOrgId, activeOrgId, operatorUserId, priority, dueDate, kind, items } = params
+
+    if (priority !== 'urgent') return { sent: false, reason: 'not_urgent' }
+    if (items.length === 0)    return { sent: false, reason: 'nothing_dispatched' }
+
+    let contact: { display_name: string | null; whatsapp_phone: string | null } | null = null
+    try {
+      contact = await this.activeResolver.getMemberContact(activeOrgId, operatorUserId)
+    } catch (e) {
+      this.log.warn(`[urgent-alert] getMemberContact falhou: ${(e as Error).message}`)
+    }
+    const phone = contact?.whatsapp_phone?.trim()
+    if (!phone) {
+      this.log.log(`[urgent-alert] operador ${operatorUserId} sem WhatsApp — alerta não enviado`)
+      return { sent: false, reason: 'no_whatsapp' }
+    }
+
+    const name = contact?.display_name?.trim() || 'operador'
+    const verb = kind === 'cadastro' ? 'cadastro' : 'anúncio'
+    const shown = items.slice(0, 8)
+    const rest  = items.length - shown.length
+    const lines = shown.map(it => `• ${it.name}${it.sku ? ` (${it.sku})` : ''}`).join('\n')
+      + (rest > 0 ? `\n• +${rest} ${rest === 1 ? 'outra' : 'outras'}` : '')
+
+    let dueLabel: string
+    try {
+      dueLabel = new Date(dueDate).toLocaleString('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+      })
+    } catch { dueLabel = dueDate }
+
+    // 1 tarefa → manda o deeplink direto; várias → aponta pro board do Active.
+    const actionUrl = items.length === 1
+      ? items[0].deeplink
+      : (process.env.ACTIVE_PUBLIC_URL ?? 'https://active.eclick.app.br')
+
+    const message =
+      `🔴 *Tarefa URGENTE — e-Click*\n\n` +
+      `${name}, você recebeu ${items.length} tarefa${items.length === 1 ? '' : 's'} de ${verb} com prioridade *URGENTE*:\n\n` +
+      `${lines}\n\n` +
+      `⏰ Prazo: ${dueLabel}\n` +
+      `👉 Abrir: ${actionUrl}`
+
+    try {
+      const r = await this.wa.send(saasOrgId, 'internal_alert', phone, message)
+      if (r.success) {
+        this.log.log(`[urgent-alert] enviado via ${r.channel} pra ${maskPhone(phone)} (${items.length} tarefa(s))`)
+      } else {
+        this.log.warn(`[urgent-alert] envio falhou (${r.channel ?? 'sem-canal'}): ${r.error}`)
+      }
+      return {
+        sent:         r.success,
+        channel:      r.channel ?? null,
+        phone_masked: maskPhone(phone),
+        ...(r.success ? {} : { reason: r.error ?? 'send_failed' }),
+      }
+    } catch (e) {
+      this.log.warn(`[urgent-alert] exceção no envio: ${(e as Error).message}`)
+      return { sent: false, phone_masked: maskPhone(phone), reason: (e as Error).message.slice(0, 120) }
     }
   }
 
@@ -701,6 +829,13 @@ const CHANNEL_TAG_LABEL: Record<string, string> = {
   shopee:        'Shopee',
   tiktok_shop:   'TikTok',
   loja_propria:  'Loja própria',
+}
+
+/** Mascara o telefone pra log/UI: mantém só os 4 últimos dígitos. */
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  if (digits.length <= 4) return '••••'
+  return `••••${digits.slice(-4)}`
 }
 
 function toMlTagSlug(label: string): string {
