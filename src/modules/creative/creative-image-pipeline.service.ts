@@ -289,21 +289,33 @@ export class CreativeImagePipelineService {
 
     const { data: rejected, error } = await supabaseAdmin
       .from('creative_images')
-      .select('id, position, prompt_text, product_id')
+      .select('id, position, prompt_text, product_id, generation_metadata')
       .eq('organization_id', orgId)
       .eq('job_id', jobId)
       .eq('status', 'rejected')
     if (error) throw new BadRequestException(`regenerateAllRejected.list: ${error.message}`)
     if (!rejected || rejected.length === 0) return { regenerated: 0, skipped_cost_cap: false }
 
-    const rows = (rejected as Array<{ id: string; position: number; prompt_text: string; product_id: string }>).map(r => ({
-      job_id:              jobId,
-      product_id:          r.product_id,
-      organization_id:     orgId,
-      position:            r.position,
-      prompt_text:         r.prompt_text,
-      status:              'pending' as const,
-      regenerated_from_id: r.id,
+    // Igual ao single-regenerate: remonta o prompt pelo template atual (resolve
+    // placeholders + pega edições). Best-effort por imagem — fallback no antigo.
+    const rejectedRows = rejected as Array<{ id: string; position: number; prompt_text: string; product_id: string; generation_metadata: Record<string, unknown> | null }>
+    const rows = await Promise.all(rejectedRows.map(async r => {
+      let promptText = r.prompt_text
+      let genMeta: Record<string, unknown> = r.generation_metadata ?? {}
+      const rebuilt = await this.rebuildTemplatePromptForRegen(
+        orgId, { product_id: r.product_id, generation_metadata: r.generation_metadata ?? {} }, job,
+      ).catch(() => null)
+      if (rebuilt) { promptText = rebuilt.prompt_text; genMeta = rebuilt.generation_metadata }
+      return {
+        job_id:              jobId,
+        product_id:          r.product_id,
+        organization_id:     orgId,
+        position:            r.position,
+        prompt_text:         promptText,
+        generation_metadata: genMeta,
+        status:              'pending' as const,
+        regenerated_from_id: r.id,
+      }
     }))
 
     const { error: insertErr } = await supabaseAdmin.from('creative_images').insert(rows)
@@ -328,6 +340,22 @@ export class CreativeImagePipelineService {
       throw new BadRequestException('limite de custo do job atingido — crie um novo job')
     }
 
+    // Sem prompt custom: REMONTA o prompt da posição pelo template ATUAL — assim
+    // a regeneração (a) pega edições do template e (b) sempre RESOLVE os
+    // placeholders ({product_name}, {primary_color}, {material}…), em vez de
+    // reusar o prompt_text antigo da imagem (que podia estar com placeholders
+    // crus → modelo sem a identidade do produto → imagem genérica). Best-effort.
+    let promptText = customPrompt?.trim() || original.prompt_text
+    let genMeta: Record<string, unknown> = original.generation_metadata ?? {}
+    if (!customPrompt?.trim()) {
+      const rebuilt = await this.rebuildTemplatePromptForRegen(orgId, original, job)
+        .catch(e => { this.logger.warn(`[regenerate] rebuild prompt falhou img=${imageId}: ${(e as Error).message}`); return null })
+      if (rebuilt) {
+        promptText = rebuilt.prompt_text
+        genMeta    = rebuilt.generation_metadata
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('creative_images')
       .insert({
@@ -335,7 +363,8 @@ export class CreativeImagePipelineService {
         product_id:          original.product_id,
         organization_id:     orgId,
         position:            original.position,
-        prompt_text:         customPrompt?.trim() || original.prompt_text,
+        prompt_text:         promptText,
+        generation_metadata: genMeta,
         status:              'pending',
         regenerated_from_id: original.id,
       })
@@ -351,6 +380,67 @@ export class CreativeImagePipelineService {
       .in('status', ['completed', 'generating_images', 'failed'])
 
     return data as CreativeImage
+  }
+
+  /** Remonta o prompt de UMA posição pelo template ATUAL (resolve placeholders +
+   *  pega edições do template). Retorna null se a imagem não veio de template
+   *  (ex: LLM-source) ou faltar dado — aí o caller mantém o prompt antigo.
+   *  Mesma lógica do `buildPromptsFromTemplate`, mas pra 1 posição só. */
+  private async rebuildTemplatePromptForRegen(
+    orgId:    string,
+    original: { product_id: string; generation_metadata: Record<string, unknown> },
+    job:      CreativeImageJob,
+  ): Promise<{ prompt_text: string; generation_metadata: Record<string, unknown> } | null> {
+    const meta        = (original.generation_metadata ?? {}) as Record<string, unknown>
+    const templateId  = typeof meta.template_id === 'string' ? meta.template_id : null
+    const templatePos = typeof meta.template_position === 'number' ? meta.template_position : null
+    if (!templateId || templatePos == null) return null
+
+    const template = await this.resolution.getTemplateById(orgId, templateId)
+    if (!template) return null
+    const pos = template.positions.find(p => p.position === templatePos)
+    if (!pos) return null
+
+    const product  = await this.creative.getProduct(orgId, original.product_id)
+    const briefing = await this.creative.getBriefing(orgId, job.briefing_id)
+    const productRow  = product  as unknown as ProductRow
+    const briefingRow = briefing as unknown as BriefingRow
+    const ambientLabels = await this.resolution.loadAmbientLabels(orgId)
+
+    const vars = this.resolution.buildVariables(productRow, briefingRow, pos, ambientLabels)
+    const promptInterpolated   = this.resolution.interpolate(pos.prompt_template, vars)
+    const negativeInterpolated = pos.negative_prompt ? this.resolution.interpolate(pos.negative_prompt, vars) : null
+    const finalPrompt = negativeInterpolated
+      ? `${promptInterpolated}\n\nAvoid: ${negativeInterpolated}`
+      : promptInterpolated
+
+    const { refs, warnings } = await this.resolution.resolveReferencesForPosition(
+      orgId, productRow, briefingRow, pos, { returnPaths: true },
+    )
+    const aspect_ratio: AspectRatio = pos.aspect_ratio ?? '1:1'
+
+    return {
+      prompt_text: finalPrompt,
+      generation_metadata: {
+        source:             'template',
+        template_id:        template.id,
+        template_position:  pos.position,
+        position_name:      pos.name,
+        negative_prompt:    pos.negative_prompt ?? null,
+        aspect_ratio,
+        references: refs.map(r => ({
+          mode:           'path',
+          source:         r.source,
+          storage_bucket: r.storage_bucket,
+          storage_path:   r.storage_path,
+          reference_id:   r.reference_id,
+          name:           r.name,
+        })),
+        variables_resolved: vars,
+        warnings,
+        regenerated: true,
+      },
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════════
