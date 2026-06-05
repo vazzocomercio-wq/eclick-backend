@@ -479,6 +479,11 @@ export class CreativeMlPublisherService {
     if (product.sku && !attributesPayload.find(a => a.id === 'SELLER_SKU')) {
       attributesPayload.push({ id: 'SELLER_SKU', value_name: product.sku })
     }
+    // GTIN (código de barras) a partir do EAN do produto — determinístico; a IA
+    // nunca adivinha um código de barras. Só inclui se não veio preenchido.
+    if (product.ean && !attributesPayload.find(a => a.id === 'GTIN')) {
+      attributesPayload.push({ id: 'GTIN', value_name: String(product.ean).trim() })
+    }
 
     // Dimensões da embalagem (SELLER_PACKAGE_*) — obrigatórias em categorias
     // com Mercado Envios (ex: iluminação). Lidas de `creative_products.dimensions`,
@@ -678,6 +683,31 @@ export class CreativeMlPublisherService {
         result.push({ id, value_name: raw, not_applicable: false })
       }
     }
+
+    // Pré-preenche determinístico GTIN (do EAN) e BRAND (da marca) — dados que
+    // já conhecemos do produto e que a IA não deve adivinhar (GTIN é código de
+    // barras). Sobrescreve o palpite da IA pra esses dois quando a categoria
+    // tem o atributo e o produto tem o valor.
+    const seedDeterministic = (id: string, value: string | null | undefined) => {
+      const attr = byId.get(id)
+      const raw = (value ?? '').trim()
+      if (!attr || !raw) return
+      let entry: { id: string; value_id?: string; value_name?: string; not_applicable: boolean }
+      if (attr.values && attr.values.length > 0) {
+        const opt = attr.values.find(o => norm(o.name) === norm(raw))
+        if (opt)                              entry = { id, value_id: opt.id, value_name: opt.name, not_applicable: false }
+        else if (attr.value_type === 'string') entry = { id, value_name: raw, not_applicable: false } // string aceita valor livre
+        else return                                                                                    // lista fechada sem match → não força
+      } else {
+        entry = { id, value_name: raw, not_applicable: false }
+      }
+      const i = result.findIndex(r => r.id === id)
+      if (i >= 0) result[i] = entry
+      else        result.push(entry)
+    }
+    seedDeterministic('GTIN',  product.ean)
+    seedDeterministic('BRAND', product.brand)
+
     return result
   }
 

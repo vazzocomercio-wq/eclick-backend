@@ -14,6 +14,7 @@ import {
 } from './creative.prompts'
 import type { Provider } from '../ai/defaults'
 import { getMarketplaceRules, type Marketplace } from './creative.marketplace-rules'
+import { resolveAdjustment, type CostAdjustment, type CostAdjustmentType } from '../icarus-integration/supplier-cost.util'
 
 // ── Types refletindo o schema ─────────────────────────────────────────────
 
@@ -352,35 +353,132 @@ export class CreativeService {
 
   /**
    * Prefill pro deeplink de cadastro: dado um produto do catálogo, retorna
-   * (a) os creative_products já vinculados e (b) os dados básicos do catálogo
-   * pra pré-preencher o Step 1 da tela de novo anúncio (nome/categoria/marca
-   * + fotos). O frontend usa pra decidir: redirecionar pro anúncio existente
-   * ou abrir o fluxo de criação já preenchido.
+   * (a) os creative_products já vinculados e (b) TODOS os dados aproveitáveis
+   * do catálogo pra pré-preencher a tela de novo anúncio — Step 1 (nome/
+   * categoria/marca/fotos) e Step 2 (cor, material, dimensões, peso, público,
+   * características, SKU, EAN) + custo de referência. A chave produto↔anúncio
+   * é o SKU. O frontend usa pra decidir: redirecionar pro anúncio existente
+   * ou abrir o fluxo de criação já preenchido (tudo editável pelo operador).
+   *
+   * Unidades: dimensões saem como "X cm" e peso como "X kg" — exatamente o que
+   * o publisher (`parsePackageDim`) espera pra mapear SELLER_PACKAGE_*.
+   *
+   * Custo: `cost_price` já vem LÍQUIDO do catálogo (o sync Icarus aplica o
+   * desconto do fornecedor ao gravar — ver supplier-cost.util). Por isso NÃO
+   * re-aplicamos desconto aqui; devolvemos o líquido + o bruto/% do fornecedor
+   * só pra transparência.
    */
   async getCatalogPrefill(orgId: string, catalogProductId: string): Promise<{
     existing: Array<{ id: string; name: string; status: string }>
-    catalog:  { id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] }
+    catalog:  {
+      id: string; name: string; category: string | null; brand: string | null; photo_urls: string[]
+      sku: string | null; ean: string | null
+      color: string | null; material: string | null
+      width: string | null; height: string | null; depth: string | null; weight: string | null
+      target_audience: string | null; differentials: string[]
+      cost: {
+        net: number | null; gross: number | null
+        discount_type: CostAdjustmentType | null; discount_value: number | null
+        tax_percentage: number | null; tax_on_freight: boolean
+        supplier_name: string | null
+      }
+    }
   }> {
     await this.assertCatalogProductInOrg(orgId, catalogProductId)
     const { data: cat, error } = await supabaseAdmin
       .from('products')
-      .select('id, name, category, brand, photo_urls')
+      .select('id, name, category, brand, photo_urls, sku, gtin, attributes, weight_kg, width_cm, length_cm, height_cm, cost_price, tax_percentage, tax_on_freight, ai_target_audience, differentials, preferred_supplier_id')
       .eq('id', catalogProductId)
       .eq('organization_id', orgId)
       .maybeSingle()
     if (error) throw new BadRequestException(`getCatalogPrefill: ${error.message}`)
     if (!cat) throw new NotFoundException('produto do catálogo não encontrado')
 
+    const c = cat as {
+      id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] | null
+      sku: string | null; gtin: string | null; attributes: Record<string, unknown> | null
+      weight_kg: number | null; width_cm: number | null; length_cm: number | null; height_cm: number | null
+      cost_price: number | null; tax_percentage: number | null; tax_on_freight: boolean | null
+      ai_target_audience: string | null; differentials: unknown
+      preferred_supplier_id: string | null
+    }
+
+    // Cor/material moram no JSONB `attributes` (não há coluna dedicada).
+    const attrs = (c.attributes ?? {}) as Record<string, unknown>
+    const asStr = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null)
+    const dim = (v: number | null, unit: 'cm' | 'kg'): string | null =>
+      v != null && Number(v) > 0 ? `${v} ${unit}` : null
+    const differentials = Array.isArray(c.differentials)
+      ? (c.differentials as unknown[]).filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
+      : []
+
+    // Custo: líquido vem direto do produto. Bruto + % do fornecedor (se houver
+    // vínculo) só pra transparência — efetivo = ajuste do produto ou o geral.
+    let gross: number | null = null
+    let discountType: CostAdjustmentType | null = null
+    let discountValue: number | null = null
+    let supplierName: string | null = null
+    if (c.preferred_supplier_id) {
+      const [{ data: sp }, { data: sup }] = await Promise.all([
+        supabaseAdmin
+          .from('supplier_products')
+          .select('supplier_gross_price, cost_adjustment_type, cost_adjustment_value')
+          .eq('organization_id', orgId)
+          .eq('product_id', catalogProductId)
+          .eq('supplier_id', c.preferred_supplier_id)
+          .maybeSingle(),
+        supabaseAdmin
+          .from('suppliers')
+          .select('name, default_cost_adjustment_type, default_cost_adjustment_value')
+          .eq('organization_id', orgId)
+          .eq('id', c.preferred_supplier_id)
+          .maybeSingle(),
+      ])
+      if (sup) supplierName = (sup as { name: string | null }).name ?? null
+      if (sp) {
+        gross = (sp as { supplier_gross_price: number | null }).supplier_gross_price ?? null
+        const productAdj: CostAdjustment = {
+          type:  ((sp as { cost_adjustment_type: CostAdjustmentType | null }).cost_adjustment_type) ?? null,
+          value: Number((sp as { cost_adjustment_value: number | null }).cost_adjustment_value) || 0,
+        }
+        const supplierDefault: CostAdjustment = {
+          type:  ((sup as { default_cost_adjustment_type: CostAdjustmentType | null } | null)?.default_cost_adjustment_type) ?? null,
+          value: Number((sup as { default_cost_adjustment_value: number | null } | null)?.default_cost_adjustment_value) || 0,
+        }
+        const eff = resolveAdjustment(productAdj, supplierDefault)
+        discountType  = eff.type
+        discountValue = eff.type ? eff.value : null
+      }
+    }
+
     const creatives = await this.listCreativesForCatalogProduct(orgId, catalogProductId)
-    const c = cat as { id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] | null }
     return {
       existing: creatives.map(cr => ({ id: cr.id, name: cr.name, status: cr.status })),
       catalog: {
-        id:         c.id,
-        name:       c.name,
-        category:   c.category,
-        brand:      c.brand,
-        photo_urls: c.photo_urls ?? [],
+        id:              c.id,
+        name:            c.name,
+        category:        c.category,
+        brand:           c.brand,
+        photo_urls:      c.photo_urls ?? [],
+        sku:             c.sku,
+        ean:             c.gtin,
+        color:           asStr(attrs.color),
+        material:        asStr(attrs.material),
+        width:           dim(c.width_cm,  'cm'),
+        height:          dim(c.height_cm, 'cm'),
+        depth:           dim(c.length_cm, 'cm'),
+        weight:          dim(c.weight_kg, 'kg'),
+        target_audience: c.ai_target_audience,
+        differentials,
+        cost: {
+          net:            c.cost_price,
+          gross,
+          discount_type:  discountType,
+          discount_value: discountValue,
+          tax_percentage: c.tax_percentage,
+          tax_on_freight: c.tax_on_freight ?? false,
+          supplier_name:  supplierName,
+        },
       },
     }
   }
