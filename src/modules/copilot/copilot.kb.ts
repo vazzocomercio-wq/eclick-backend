@@ -1024,10 +1024,9 @@ const ML_CAMPAIGNS_ENTRIES: KbEntry[] = [
 3. **Aprovar/Editar** (em \`/dashboard/ml-campaigns/recommendations\`): você revisa cada recomendação, edita preço/quantidade se quiser.
 4. **Aplicar** (\`POST /ml-campaigns/apply/single\` ou \`/apply/batch\`): submete pra ML API; item passa de candidate → started.
 
-**Por que NÃO existe botão "Aderir" direto:**
-- ML não aceita adesão sem preço promocional definido
-- IA precisa validar margem mínima (config \`min_margin_pct\`) — sem isso você poderia entrar em campanha que dá prejuízo
-- Subsídio MELI vem por item, não por campanha — IA combina os 2
+**Dois caminhos pra participar (desde 06/2026):**
+- **Direto por anúncio** (\`/dashboard/ml-campaigns/anuncio/[productId]\`, aberto pelo card "Incluir em campanha" do funil): lista as campanhas disponíveis pra aquele anúncio e participa na hora, SEM recomendação — você define o preço/desconto. Caminho rápido.
+- **Por recomendação IA** (este fluxo de 4 passos): a IA julga margem/subsídio e sugere antes de aplicar — bom pra decidir em lote com segurança. A IA valida margem mínima (\`min_margin_pct\`) e combina o subsídio MELI (por item) pra não entrar em campanha que dá prejuízo.
 
 **Status de item:**
 - \`candidate\`: ML te convidou, ainda não aderiu
@@ -1042,6 +1041,23 @@ Item sem custo cadastrado (catálogo) ou sem preço mínimo aceito do ML — dec
 
 **Subsídio "ML reduz X%"**: ML banca uma parte do desconto. Bom indicador — quanto maior o \`meli_percentage\`, menor seu sacrifício de margem.`,
     tags: ['ml-campaigns', 'campaigns', 'deal', 'price-discount', 'subsidio'],
+  },
+  {
+    routes:   ['/dashboard/ml-campaigns/anuncio/[productId]'],
+    category: 'campaigns',
+    title:    'Incluir em campanha — tela do anúncio (participar direto + criar promoção própria)',
+    content: `**Tela escopada num anúncio, aberta pelo card "Incluir em campanha" do funil Anúncios ML.** Mostra, por anúncio do produto, as campanhas do ML **disponíveis** (status \`candidate\`) e as que já **participa** (\`started\`).
+
+**Participar (direto, sem recomendação):** botão "Participar" → modal com **Desconto (%)** e **Preço final (R$)** ligados (edita um, o outro recalcula), dentro da faixa permitida pela campanha (min/max). Confirma → entra na campanha no ML e **o card do funil avança sozinho pra "Incluir ADS"**.
+
+**Criar promoção própria (PRICE_DISCOUNT):** quando o anúncio não tem nenhuma campanha do ML disponível, o botão "Criar promoção própria" abre um modal pra definir o **desconto** (% ou preço) + **vigência** (início/fim). Cria um desconto individual seu no ML (teto 80%). Também avança o card.
+
+**Por baixo (ML v2):** participar e criar promoção própria usam o MESMO endpoint \`POST /seller-promotions/items/{item_id}?app_version=v2\` (campo \`deal_price\`). O antigo \`/seller-promotions/offers\` foi deprecado pelo ML (responde 405).
+
+**Endpoints e-Click:** \`GET /ml-campaigns/listing/:productId/promotions\`, \`POST /ml-campaigns/listing/join\`, \`POST /ml-campaigns/listing/create-promotion\`.
+
+⚠️ É ação real no ML (mexe no preço de venda) — sempre confirme no modal.`,
+    tags: ['ml-campaigns', 'campaigns', 'incluir-campanha', 'participar', 'price-discount', 'promocao-propria', 'funil-anuncios'],
   },
   {
     routes:   ['/dashboard/ml-campaigns/recommendations', '/dashboard/ml-campaigns/recommendations/[id]'],
