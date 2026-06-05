@@ -131,6 +131,39 @@ export class MlCampaignsController {
     return this.svc.getItemPromotions(u.orgId, itemId, sellerId ? Number(sellerId) : undefined)
   }
 
+  // ── Tela escopada "Incluir em campanha" (por produto do catálogo) ──────
+
+  /** Campanhas disponíveis + participando pra um PRODUTO do catálogo,
+   *  agrupadas por anúncio. Fonte da tela do funil "Incluir em campanha". */
+  @Get('listing/:productId/promotions')
+  @RequirePermission('ads.view')
+  listingPromotions(
+    @ReqUser() u: ReqUserPayload,
+    @Param('productId') productId: string,
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getListingPromotions(u.orgId, productId)
+  }
+
+  /** Participar direto de uma campanha (sem recomendação): inclui o anúncio
+   *  no ML e avança o card do funil pra "Incluir ADS". */
+  @Post('listing/join')
+  @RequirePermission('ads.spend')
+  listingJoin(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { campaign_item_id: string; offer_price?: number; discount_pct?: number },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.campaign_item_id) throw new BadRequestException('campaign_item_id é obrigatório')
+    return this.apply.joinListingPromotion({
+      orgId:          u.orgId,
+      userId:         u.id,
+      campaignItemId: body.campaign_item_id,
+      offerPrice:     body.offer_price != null ? Number(body.offer_price) : undefined,
+      discountPct:    body.discount_pct != null ? Number(body.discount_pct) : undefined,
+    })
+  }
+
   // ── Sync ────────────────────────────────────────────────────────
 
   @Post('sync')

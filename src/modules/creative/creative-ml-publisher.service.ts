@@ -1155,8 +1155,10 @@ export class CreativeMlPublisherService {
       deal_id:       dealId,
       to_stage_name: 'Incluir Campanha',
       action_link: {
+        // Tela escopada no anúncio: lista as campanhas disponíveis pra ESTE
+        // produto e deixa participar/criar promoção direto no SaaS.
         label: 'Incluir em campanha',
-        url:   `${baseUrl}/dashboard/ml-campaigns`,
+        url:   `${baseUrl}/dashboard/ml-campaigns/anuncio/${catalogProductId}`,
       },
     })
     this.logger.log(

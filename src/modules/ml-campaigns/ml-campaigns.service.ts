@@ -1,7 +1,45 @@
 /** Read-only queries pro Campaign Center (dashboard, listas, detalhes). */
 
-import { Injectable, BadRequestException } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+
+// ── Tela "Incluir em campanha" (escopada no anúncio do catálogo) ──────────
+export interface ListingPromotionOption {
+  campaign_item_id: string
+  ml_item_id:       string
+  ml_campaign_id:   string
+  promotion_type:   string
+  campaign_name:    string | null
+  campaign_status:  string | null
+  start_date:       string | null
+  finish_date:      string | null
+  deadline_date:    string | null
+  item_status:      string
+  original_price:   number | null
+  suggested_price:  number | null
+  min_price:        number | null
+  max_price:        number | null
+  current_price:    number | null
+  ml_offer_id:      string | null
+  meli_percentage:  number | null
+  has_meli_subsidy: boolean
+  health_status:    string | null
+}
+export interface ListingAnuncio {
+  ml_item_id:    string
+  seller_id:     number
+  title:         string | null
+  thumbnail_url: string | null
+  permalink:     string | null
+  listing_status: string | null
+  available:     ListingPromotionOption[]
+  participating: ListingPromotionOption[]
+}
+export interface ListingPromotionsResult {
+  product:  { id: string; sku: string | null; name: string }
+  anuncios: ListingAnuncio[]
+  has_any_available: boolean
+}
 
 /** Calcula M.C.% final pra uma recomendação considerando o cost_breakdown
  *  do snapshot (ja inclui custo + imposto + comissão + frete + embalagem +
@@ -218,6 +256,95 @@ export class MlCampaignsService {
     const { data, error } = await q
     if (error) throw new BadRequestException(`getItemPromotions: ${error.message}`)
     return data ?? []
+  }
+
+  /**
+   * Promoções disponíveis pra um PRODUTO do catálogo, agrupadas por anúncio
+   * (um produto pode ter N anúncios no ML). É a fonte da tela escopada
+   * "Incluir em campanha" do funil: lista o que dá pra participar (candidate)
+   * e o que já participa (started/pending), direto dos dados já sincronizados.
+   */
+  async getListingPromotions(orgId: string, productId: string): Promise<ListingPromotionsResult> {
+    const { data: prod, error: pErr } = await supabaseAdmin
+      .from('products')
+      .select('id, sku, name')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (pErr) throw new BadRequestException(`getListingPromotions: ${pErr.message}`)
+    if (!prod) throw new NotFoundException('produto não encontrado')
+    const product = prod as { id: string; sku: string | null; name: string }
+
+    const { data: rows, error } = await supabaseAdmin
+      .from('ml_campaign_items')
+      .select('id, seller_id, ml_item_id, ml_campaign_id, ml_promotion_type, ml_offer_id, status, original_price, current_price, suggested_discounted_price, min_discounted_price, max_discounted_price, meli_percentage, has_meli_subsidy, health_status, listing_status, title, thumbnail_url, permalink, ml_campaigns!inner(name, status, start_date, finish_date, deadline_date)')
+      .eq('organization_id', orgId)
+      .eq('product_id', productId)
+      .in('status', ['candidate', 'started', 'pending'])
+      .order('updated_at', { ascending: false })
+    if (error) throw new BadRequestException(`getListingPromotions: ${error.message}`)
+
+    type CampaignEmbed = { name: string | null; status: string | null; start_date: string | null; finish_date: string | null; deadline_date: string | null }
+    type ItemRow = {
+      id: string; seller_id: number; ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string
+      ml_offer_id: string | null; status: string
+      original_price: number | null; current_price: number | null
+      suggested_discounted_price: number | null; min_discounted_price: number | null; max_discounted_price: number | null
+      meli_percentage: number | null; has_meli_subsidy: boolean | null
+      health_status: string | null; listing_status: string | null
+      title: string | null; thumbnail_url: string | null; permalink: string | null
+      ml_campaigns: CampaignEmbed | CampaignEmbed[] | null
+    }
+    const list = (rows ?? []) as unknown as ItemRow[]
+
+    const byAnuncio = new Map<string, ListingAnuncio>()
+    for (const r of list) {
+      const camp = Array.isArray(r.ml_campaigns) ? r.ml_campaigns[0] ?? null : r.ml_campaigns
+      const opt: ListingPromotionOption = {
+        campaign_item_id: r.id,
+        ml_item_id:       r.ml_item_id,
+        ml_campaign_id:   r.ml_campaign_id,
+        promotion_type:   r.ml_promotion_type,
+        campaign_name:    camp?.name ?? null,
+        campaign_status:  camp?.status ?? null,
+        start_date:       camp?.start_date ?? null,
+        finish_date:      camp?.finish_date ?? null,
+        deadline_date:    camp?.deadline_date ?? null,
+        item_status:      r.status,
+        original_price:   r.original_price,
+        suggested_price:  r.suggested_discounted_price,
+        min_price:        r.min_discounted_price,
+        max_price:        r.max_discounted_price,
+        current_price:    r.current_price,
+        ml_offer_id:      r.ml_offer_id,
+        meli_percentage:  r.meli_percentage,
+        has_meli_subsidy: !!r.has_meli_subsidy,
+        health_status:    r.health_status,
+      }
+      let an = byAnuncio.get(r.ml_item_id)
+      if (!an) {
+        an = {
+          ml_item_id:    r.ml_item_id,
+          seller_id:     r.seller_id,
+          title:         r.title,
+          thumbnail_url: r.thumbnail_url,
+          permalink:     r.permalink,
+          listing_status: r.listing_status,
+          available:     [],
+          participating: [],
+        }
+        byAnuncio.set(r.ml_item_id, an)
+      }
+      if (r.status === 'candidate') an.available.push(opt)
+      else                          an.participating.push(opt)  // started | pending
+    }
+
+    const anuncios = [...byAnuncio.values()]
+    return {
+      product,
+      anuncios,
+      has_any_available: anuncios.some(a => a.available.length > 0),
+    }
   }
 
   // ═══ Camada 2: Recommendations + Config ═════════════════════════

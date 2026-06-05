@@ -15,9 +15,11 @@
  *  pra nao trigger 429 do ML. Backoff exponencial ja vem do API client.
  */
 
-import { Injectable, Logger, BadRequestException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { ActiveResolverService } from '../active-bridge/active-resolver.service'
 import { MlCampaignsApiClient, CampaignsRateLimitedException } from './ml-campaigns-api.client'
 import { MlCampaignsValidatorService, ValidationResult } from './ml-campaigns-validator.service'
 
@@ -51,9 +53,11 @@ export class MlCampaignsApplyService {
   private readonly logger = new Logger(MlCampaignsApplyService.name)
 
   constructor(
-    private readonly ml:        MercadolivreService,
-    private readonly client:    MlCampaignsApiClient,
-    private readonly validator: MlCampaignsValidatorService,
+    private readonly ml:             MercadolivreService,
+    private readonly client:         MlCampaignsApiClient,
+    private readonly validator:      MlCampaignsValidatorService,
+    private readonly activeBridge:   ActiveBridgeClient,
+    private readonly activeResolver: ActiveResolverService,
   ) {}
 
   // ── Apply em lote ────────────────────────────────────────────────
@@ -335,6 +339,154 @@ export class MlCampaignsApplyService {
       base.offer_quantity = rec.recommended_quantity
     }
     return base
+  }
+
+  // ── Participar direto (sem recomendação) — tela "Incluir em campanha" ────
+
+  /**
+   * Inclui um anúncio numa campanha disponível direto pela tela escopada do
+   * funil (sem passar por recomendação). Resolve o item pelo
+   * `ml_campaign_items.id`, calcula o preço da oferta (offer_price OU
+   * discount_pct sobre o original), valida a faixa [min,max], chama o ML e —
+   * em caso de sucesso — marca o item como `started` e AVANÇA o card do funil
+   * "Anúncios ML" pra "Incluir ADS".
+   */
+  async joinListingPromotion(input: {
+    orgId:          string
+    userId:         string
+    campaignItemId: string
+    offerPrice?:    number
+    discountPct?:   number
+  }): Promise<{ ok: boolean; status: 'joined'; ml_offer_id?: string; offer_price: number; item_id: string }> {
+    const { data: itemRow } = await supabaseAdmin
+      .from('ml_campaign_items')
+      .select('id, seller_id, product_id, campaign_id, ml_item_id, ml_campaign_id, ml_promotion_type, ml_offer_id, status, original_price, current_price, suggested_discounted_price, min_discounted_price, max_discounted_price')
+      .eq('id', input.campaignItemId)
+      .eq('organization_id', input.orgId)
+      .maybeSingle()
+    if (!itemRow) throw new NotFoundException('anúncio/campanha não encontrado')
+    const item = itemRow as {
+      id: string; seller_id: number; product_id: string | null; campaign_id: string
+      ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string; ml_offer_id: string | null; status: string
+      original_price: number | null; current_price: number | null
+      suggested_discounted_price: number | null; min_discounted_price: number | null; max_discounted_price: number | null
+    }
+    if (item.status === 'started') {
+      throw new BadRequestException('Este anúncio já participa desta campanha.')
+    }
+
+    // Preço da oferta: explícito, ou calculado do desconto %, ou o sugerido.
+    let offerPrice = input.offerPrice
+    if (offerPrice == null && input.discountPct != null && item.original_price != null) {
+      offerPrice = item.original_price * (1 - input.discountPct / 100)
+    }
+    if (offerPrice == null) offerPrice = item.suggested_discounted_price ?? undefined
+    if (offerPrice == null || !Number.isFinite(offerPrice) || offerPrice <= 0) {
+      throw new BadRequestException('Informe o preço final (offer_price) ou o desconto (discount_pct).')
+    }
+    offerPrice = Math.round(offerPrice * 100) / 100
+    if (item.min_discounted_price != null && offerPrice < item.min_discounted_price) {
+      throw new BadRequestException(`Preço abaixo do mínimo da campanha (R$ ${item.min_discounted_price}).`)
+    }
+    if (item.max_discounted_price != null && offerPrice > item.max_discounted_price) {
+      throw new BadRequestException(`Preço acima do máximo da campanha (R$ ${item.max_discounted_price}).`)
+    }
+
+    let token: string
+    try {
+      token = (await this.ml.getTokenForOrg(input.orgId, item.seller_id)).token
+    } catch {
+      throw new BadRequestException('Conecte a conta Mercado Livre desse anúncio em Configurações > Integrações.')
+    }
+
+    const payload: Record<string, unknown> = {
+      promotion_id:   item.ml_campaign_id,
+      promotion_type: item.ml_promotion_type,
+      item_id:        item.ml_item_id,
+      offer_price:    offerPrice,
+    }
+
+    let newOfferId: string | undefined
+    let mlResponse: unknown = null
+    try {
+      const resp = await this.client.createOffer(token, item.seller_id, payload)
+      mlResponse = resp
+      newOfferId = (resp.id ?? resp.offer_id ?? '') || undefined
+    } catch (e) {
+      const msg = (e as Error).message
+      await this.auditJoin(input, item, payload, offerPrice, false, null, mlResponse, msg)
+      throw new BadRequestException(`O Mercado Livre recusou a inclusão: ${msg}`)
+    }
+
+    await supabaseAdmin
+      .from('ml_campaign_items')
+      .update({ status: 'started', ml_offer_id: newOfferId, current_price: offerPrice })
+      .eq('id', item.id)
+
+    await this.auditJoin(input, item, payload, offerPrice, true, newOfferId ?? null, mlResponse, null)
+    await this.advanceFunnelCardToAds(input.orgId, item.product_id)
+
+    return { ok: true, status: 'joined', ml_offer_id: newOfferId, offer_price: offerPrice, item_id: item.ml_item_id }
+  }
+
+  /** Audit best-effort do join direto (não derruba o fluxo se falhar). */
+  private async auditJoin(
+    input:      { orgId: string; userId: string },
+    item:       { seller_id: number; campaign_id: string; product_id: string | null; ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string; ml_offer_id: string | null; current_price: number | null; original_price: number | null },
+    payload:    Record<string, unknown>,
+    offerPrice: number,
+    success:    boolean,
+    newOfferId: string | null,
+    mlResponse: unknown,
+    errorMessage: string | null,
+  ): Promise<void> {
+    try {
+      await supabaseAdmin.from('ml_campaign_audit_log').insert({
+        organization_id:    input.orgId,
+        seller_id:          item.seller_id,
+        job_id:             null,
+        recommendation_id:  null,
+        campaign_id:        item.campaign_id,
+        product_id:         item.product_id ?? null,
+        user_id:            input.userId,
+        ml_item_id:         item.ml_item_id,
+        ml_campaign_id:     item.ml_campaign_id,
+        ml_promotion_type:  item.ml_promotion_type,
+        ml_offer_id_before: item.ml_offer_id ?? null,
+        ml_offer_id_after:  newOfferId,
+        operation:          'POST',
+        action:             'join_campaign',
+        values_before:      { price: item.current_price, original: item.original_price, status: 'candidate' },
+        values_after:       { price: offerPrice, source: 'listing_join' },
+        ml_payload:         payload,
+        ml_response:        mlResponse as Record<string, unknown> | null,
+        ml_response_status: success ? 200 : null,
+        applied_successfully: success,
+        error_code:         success ? null : 'ml_error',
+        error_message:      errorMessage,
+      })
+    } catch (e) {
+      this.logger.warn(`[join] audit falhou: ${(e as Error).message}`)
+    }
+  }
+
+  /** Avança o card do funil "Anúncios ML" pra "Incluir ADS" após participar.
+   *  Forward-only + idempotente (mesma semântica do sync). Best-effort. */
+  private async advanceFunnelCardToAds(orgId: string, catalogProductId: string | null): Promise<void> {
+    if (!catalogProductId || !this.activeBridge.isConfigured()) return
+    try {
+      const dealId = await this.activeResolver.findCardDealForProduct(orgId, catalogProductId)
+      if (!dealId) return
+      const baseUrl = (process.env.FRONTEND_PUBLIC_URL ?? 'https://eclick.app.br').replace(/\/+$/, '')
+      await this.activeBridge.moveCard({
+        deal_id:       dealId,
+        to_stage_name: 'Incluir ADS',
+        action_link:   { label: 'Gerenciar ADS', url: `${baseUrl}/dashboard/ads/mercadolivre` },
+      })
+      this.logger.log(`[join] card avançado pra Incluir ADS (produto=${catalogProductId})`)
+    } catch (e) {
+      this.logger.warn(`[join] avanço do card falhou: ${(e as Error).message}`)
+    }
   }
 
   // ── Leave (sair de campanha) ─────────────────────────────────────
