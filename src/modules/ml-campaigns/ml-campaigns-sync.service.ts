@@ -237,6 +237,15 @@ export class MlCampaignsSyncService {
       stats.campaigns++
     }
 
+    // Limpa "fantasmas": campanhas que o ML não oferece mais (encerraram) mas
+    // seguem started/pending no nosso banco → marca finished. Só roda quando a
+    // lista veio preenchida (evita marcar tudo numa resposta vazia/parcial).
+    if (campaigns.length > 0) {
+      const seen = new Set(campaigns.map(c => c.id))
+      const closed = await this.closeMissingCampaigns(orgId, sellerId, seen)
+      if (closed > 0) this.logger.log(`[campaigns] ${closed} campanha(s) fantasma marcada(s) finished seller=${sellerId}`)
+    }
+
     // Pra cada campanha, lista items por status (candidate + started)
     for (const c of campaigns) {
       const campaignRow = await this.findCampaignRow(orgId, sellerId, c.id)
@@ -265,6 +274,35 @@ export class MlCampaignsSyncService {
     stats.calls += metaResult.calls
 
     return stats
+  }
+
+  /** Marca como 'finished' as campanhas ainda started/pending no banco que o
+   *  ML NÃO retornou na listagem (encerraram). Retorna quantas mudaram.
+   *  Chamado pelo syncSeller só quando o ML devolveu ≥1 campanha. */
+  private async closeMissingCampaigns(orgId: string, sellerId: number, seen: Set<string>): Promise<number> {
+    const { data, error } = await supabaseAdmin
+      .from('ml_campaigns')
+      .select('id, ml_campaign_id')
+      .eq('organization_id', orgId)
+      .eq('seller_id', sellerId)
+      .in('status', ['started', 'pending'])
+    if (error) {
+      this.logger.warn(`[campaigns] closeMissing query falhou seller=${sellerId}: ${error.message}`)
+      return 0
+    }
+    const stale = ((data ?? []) as Array<{ id: string; ml_campaign_id: string }>)
+      .filter(c => !seen.has(c.ml_campaign_id))
+    if (stale.length === 0) return 0
+
+    const { error: uErr } = await supabaseAdmin
+      .from('ml_campaigns')
+      .update({ status: 'finished', last_synced_at: new Date().toISOString() })
+      .in('id', stale.map(c => c.id))
+    if (uErr) {
+      this.logger.warn(`[campaigns] closeMissing update falhou seller=${sellerId}: ${uErr.message}`)
+      return 0
+    }
+    return stale.length
   }
 
   /** Recomputa health_status nos items existentes baseado em products

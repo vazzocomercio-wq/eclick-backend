@@ -164,6 +164,32 @@ export class MlCampaignsController {
     })
   }
 
+  /** Criar promoção PRÓPRIA (PRICE_DISCOUNT) num anúncio — quando não há
+   *  campanha do ML disponível. Avança o card do funil pra "Incluir ADS". */
+  @Post('listing/create-promotion')
+  @RequirePermission('ads.spend')
+  listingCreatePromotion(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: {
+      product_id?: string; ml_item_id: string; seller_id: number
+      deal_price: number; top_deal_price?: number; start_date: string; finish_date: string
+    },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!body?.ml_item_id || body?.seller_id == null) throw new BadRequestException('ml_item_id e seller_id são obrigatórios')
+    return this.apply.createOwnPromotion({
+      orgId:        u.orgId,
+      userId:       u.id,
+      productId:    body.product_id ?? null,
+      mlItemId:     body.ml_item_id,
+      sellerId:     Number(body.seller_id),
+      dealPrice:    Number(body.deal_price),
+      topDealPrice: body.top_deal_price != null ? Number(body.top_deal_price) : undefined,
+      startDate:    body.start_date,
+      finishDate:   body.finish_date,
+    })
+  }
+
   // ── Sync ────────────────────────────────────────────────────────
 
   @Post('sync')

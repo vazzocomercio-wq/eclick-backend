@@ -143,6 +143,30 @@ export class MlCampaignsApiClient {
     }, sellerId)
   }
 
+  /** POST /seller-promotions/items/:itemId?app_version=v2
+   *  Endpoint UNIFICADO v2 pra adicionar um item a uma promoção — substitui o
+   *  antigo POST /seller-promotions/offers (que hoje responde 405).
+   *  Serve pra:
+   *   - PARTICIPAR de campanha do ML (DEAL/SMART/etc): body
+   *     { promotion_id, promotion_type, deal_price, top_deal_price? }.
+   *   - CRIAR promoção própria (PRICE_DISCOUNT/DOD): body
+   *     { promotion_type, deal_price, top_deal_price?, start_date, finish_date }.
+   *  Máx 80% de desconto. Retorna { id, status, ... }. */
+  async postItemPromotion(
+    token:    string,
+    sellerId: number,
+    itemId:   string,
+    body:     Record<string, unknown>,
+  ): Promise<{ id?: string; offer_id?: string; status?: string; [k: string]: unknown }> {
+    return this.requestWithBackoff<{ id?: string; offer_id?: string; status?: string; [k: string]: unknown }>({
+      method:  'POST',
+      url:     `${ML_BASE}/seller-promotions/items/${itemId}`,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      params:  { app_version: 'v2' },
+      data:    body,
+    }, sellerId)
+  }
+
   /** DELETE /seller-promotions/offers/:offerId
    *  Remove oferta (sai da campanha).
    *  Para PRICE_DISCOUNT/DOD/LIGHTNING usado tambem pra "edit-recreate"

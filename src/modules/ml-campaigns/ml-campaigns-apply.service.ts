@@ -399,17 +399,18 @@ export class MlCampaignsApplyService {
       throw new BadRequestException('Conecte a conta Mercado Livre desse anúncio em Configurações > Integrações.')
     }
 
+    // ML v2: participar é POST /seller-promotions/items/:itemId com deal_price
+    // (o antigo POST /offers responde 405).
     const payload: Record<string, unknown> = {
       promotion_id:   item.ml_campaign_id,
       promotion_type: item.ml_promotion_type,
-      item_id:        item.ml_item_id,
-      offer_price:    offerPrice,
+      deal_price:     offerPrice,
     }
 
     let newOfferId: string | undefined
     let mlResponse: unknown = null
     try {
-      const resp = await this.client.createOffer(token, item.seller_id, payload)
+      const resp = await this.client.postItemPromotion(token, item.seller_id, item.ml_item_id, payload)
       mlResponse = resp
       newOfferId = (resp.id ?? resp.offer_id ?? '') || undefined
     } catch (e) {
@@ -486,6 +487,103 @@ export class MlCampaignsApplyService {
       this.logger.log(`[join] card avançado pra Incluir ADS (produto=${catalogProductId})`)
     } catch (e) {
       this.logger.warn(`[join] avanço do card falhou: ${(e as Error).message}`)
+    }
+  }
+
+  // ── Criar promoção PRÓPRIA (PRICE_DISCOUNT) — sem campanha do ML ──────────
+
+  /**
+   * Cria uma promoção própria do vendedor (PRICE_DISCOUNT) num anúncio — usado
+   * quando não há campanha do ML disponível. O lojista define o preço com
+   * desconto e a vigência; o ML valida o teto de 80%. Em sucesso, avança o
+   * card do funil pra "Incluir ADS".
+   */
+  async createOwnPromotion(input: {
+    orgId:         string
+    userId:        string
+    productId:     string | null
+    mlItemId:      string
+    sellerId:      number
+    dealPrice:     number
+    topDealPrice?: number
+    startDate:     string
+    finishDate:    string
+  }): Promise<{ ok: boolean; status: 'created'; promotion_id?: string }> {
+    if (!(input.dealPrice > 0) || !Number.isFinite(input.dealPrice)) {
+      throw new BadRequestException('Informe um preço com desconto (deal_price) válido.')
+    }
+    const start  = normalizeMlDate(input.startDate, false)
+    const finish = normalizeMlDate(input.finishDate, true)
+    if (!start || !finish) throw new BadRequestException('Datas de início/fim inválidas.')
+
+    let token: string
+    try {
+      token = (await this.ml.getTokenForOrg(input.orgId, input.sellerId)).token
+    } catch {
+      throw new BadRequestException('Conecte a conta Mercado Livre desse anúncio em Configurações > Integrações.')
+    }
+
+    const body: Record<string, unknown> = {
+      promotion_type: 'PRICE_DISCOUNT',
+      deal_price:     Math.round(input.dealPrice * 100) / 100,
+      start_date:     start,
+      finish_date:    finish,
+    }
+    if (input.topDealPrice != null && input.topDealPrice > 0) {
+      body.top_deal_price = Math.round(input.topDealPrice * 100) / 100
+    }
+
+    let promotionId: string | undefined
+    let resp: unknown = null
+    try {
+      const r = await this.client.postItemPromotion(token, input.sellerId, input.mlItemId, body)
+      resp = r
+      promotionId = (r.id ?? r.offer_id ?? '') || undefined
+    } catch (e) {
+      await this.auditOwnPromotion(input, body, null, false, (e as Error).message)
+      throw new BadRequestException(`O Mercado Livre recusou a promoção: ${(e as Error).message}`)
+    }
+
+    await this.auditOwnPromotion(input, body, resp, true, null)
+    await this.advanceFunnelCardToAds(input.orgId, input.productId)
+    return { ok: true, status: 'created', promotion_id: promotionId }
+  }
+
+  /** Audit best-effort da promoção própria. */
+  private async auditOwnPromotion(
+    input:        { orgId: string; userId: string; productId: string | null; mlItemId: string; sellerId: number },
+    payload:      Record<string, unknown>,
+    mlResponse:   unknown,
+    success:      boolean,
+    errorMessage: string | null,
+  ): Promise<void> {
+    try {
+      await supabaseAdmin.from('ml_campaign_audit_log').insert({
+        organization_id:    input.orgId,
+        seller_id:          input.sellerId,
+        job_id:             null,
+        recommendation_id:  null,
+        campaign_id:        null,
+        product_id:         input.productId ?? null,
+        user_id:            input.userId,
+        ml_item_id:         input.mlItemId,
+        ml_campaign_id:     null,
+        ml_promotion_type:  'PRICE_DISCOUNT',
+        ml_offer_id_before: null,
+        ml_offer_id_after:  null,
+        operation:          'POST',
+        action:             'create_own_promotion',
+        values_before:      {},
+        values_after:       payload,
+        ml_payload:         payload,
+        ml_response:        mlResponse as Record<string, unknown> | null,
+        ml_response_status: success ? 200 : null,
+        applied_successfully: success,
+        error_code:         success ? null : 'ml_error',
+        error_message:      errorMessage,
+      })
+    } catch (e) {
+      this.logger.warn(`[create-own] audit falhou: ${(e as Error).message}`)
     }
   }
 
@@ -605,4 +703,16 @@ export class MlCampaignsApplyService {
   private sleep(ms: number) {
     return new Promise<void>(r => setTimeout(r, ms))
   }
+}
+
+/** Normaliza data pro formato que o ML espera: "YYYY-MM-DDTHH:MM:SS" (sem TZ).
+ *  Aceita "YYYY-MM-DD" (vira 00:00:00 no início / 23:59:59 no fim) ou ISO. */
+function normalizeMlDate(input: string, isEnd: boolean): string | null {
+  const s = (input ?? '').trim()
+  if (!s) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return `${s}T${isEnd ? '23:59:59' : '00:00:00'}`
+  }
+  const m = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/)
+  return m ? m[1] : null
 }

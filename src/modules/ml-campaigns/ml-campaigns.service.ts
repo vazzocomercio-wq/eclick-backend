@@ -32,6 +32,7 @@ export interface ListingAnuncio {
   thumbnail_url: string | null
   permalink:     string | null
   listing_status: string | null
+  original_price: number | null
   available:     ListingPromotionOption[]
   participating: ListingPromotionOption[]
 }
@@ -330,11 +331,13 @@ export class MlCampaignsService {
           thumbnail_url: r.thumbnail_url,
           permalink:     r.permalink,
           listing_status: r.listing_status,
+          original_price: r.original_price,
           available:     [],
           participating: [],
         }
         byAnuncio.set(r.ml_item_id, an)
       }
+      if (an.original_price == null && r.original_price != null) an.original_price = r.original_price
       if (r.status === 'candidate') an.available.push(opt)
       else                          an.participating.push(opt)  // started | pending
     }
