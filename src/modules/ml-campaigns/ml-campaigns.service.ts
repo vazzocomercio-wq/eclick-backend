@@ -37,6 +37,10 @@ export interface ListingAnuncio {
   original_price: number | null
   available:     ListingPromotionOption[]
   participating: ListingPromotionOption[]
+  // Limites do slot PRICE_DISCOUNT (promoção própria) que a ML devolve por item.
+  own_min_price:       number | null
+  own_max_price:       number | null
+  own_suggested_price: number | null
 }
 export interface ListingPromotionsResult {
   product:  { id: string; sku: string | null; name: string }
@@ -316,6 +320,9 @@ export class MlCampaignsService {
         original_price: l.listing_price,
         available:      [],
         participating:  [],
+        own_min_price:       null,
+        own_max_price:       null,
+        own_suggested_price: null,
       }
 
       // Busca AO VIVO as promoções elegíveis pra ESTE item — fonte real do que
@@ -327,6 +334,16 @@ export class MlCampaignsService {
           const token = (await this.ml.getTokenForOrg(orgId, sellerId)).token
           const promos = await this.client.listItemPromotions(token, sellerId, l.listing_id)
           for (const p of promos) {
+            // PRICE_DISCOUNT/DOD sem id = slot de promoção PRÓPRIA do vendedor
+            // (não é campanha do ML pra "participar"). A ML devolve aqui os
+            // limites pra criar a promoção própria — captura e segue (não vira
+            // card de Participar, evitando join com ml_campaign_id vazio).
+            if (!p.id) {
+              if (p.min_discounted_price != null)       an.own_min_price       = p.min_discounted_price
+              if (p.max_discounted_price != null)       an.own_max_price       = p.max_discounted_price
+              if (p.suggested_discounted_price != null) an.own_suggested_price = p.suggested_discounted_price
+              continue
+            }
             const opt: ListingPromotionOption = {
               campaign_item_id: null,
               ml_item_id:       l.listing_id,
@@ -339,10 +356,10 @@ export class MlCampaignsService {
               deadline_date:    p.deadline_date ?? null,
               item_status:      p.status,
               original_price:   p.original_price ?? l.listing_price,
-              suggested_price:  p.price ?? null,
-              min_price:        null,
-              max_price:        null,
-              current_price:    p.price ?? null,
+              suggested_price:  p.suggested_discounted_price ?? null,
+              min_price:        p.min_discounted_price ?? null,
+              max_price:        p.max_discounted_price ?? null,
+              current_price:    (p.price != null && p.price > 0) ? p.price : null,
               ml_offer_id:      p.offer_id ?? null,
               meli_percentage:  p.meli_percentage ?? null,
               has_meli_subsidy: (p.meli_percentage ?? 0) > 0,

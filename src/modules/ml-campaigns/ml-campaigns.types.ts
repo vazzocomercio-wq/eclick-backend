@@ -45,14 +45,17 @@ export interface MlPromotionItem {
  *  Endpoint que TEM o subsídio MELI (meli_percentage / seller_percentage).
  *  Retorna ARRAY de promoções (pode ter 1 item em N campanhas). */
 export interface MlItemPromotion {
-  id:                  string                       // ml_campaign_id
+  id?:                 string                       // ml_campaign_id — AUSENTE no PRICE_DISCOUNT (slot próprio)
   type:                MlPromotionType
   ref_id?:             string                       // CANDIDATE-... ou OFFER-...
   status:              MlItemStatus
   name?:               string
   offer_id?:           string                       // se já participa
-  price?:              number
+  price?:              number                       // oferta atual (0 = sem oferta definida)
   original_price?:     number
+  suggested_discounted_price?: number               // preço sugerido pela campanha
+  min_discounted_price?:       number               // piso permitido pela campanha
+  max_discounted_price?:       number               // teto permitido pela campanha
   meli_percentage?:    number                       // % subsidiado pelo ML
   seller_percentage?:  number                       // % desconto seller
   // Outros campos
