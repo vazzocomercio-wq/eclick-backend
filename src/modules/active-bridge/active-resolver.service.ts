@@ -124,6 +124,144 @@ export class ActiveResolverService {
     }
   }
 
+  // ── Fonte SaaS: Equipe do SaaS como operadores ──────────────────────────────
+
+  /**
+   * Lista operadores = membros da Equipe do SaaS (public.organization_members)
+   * da org, QUANDO a org tem o módulo 'active' ligado (enabled_modules contém
+   * 'active', ou é NULL = tudo liberado). Nome vem do auth.users; WhatsApp da
+   * própria organization_members (fonte da verdade). Shape compatível com
+   * ActiveAgent — o dropdown da Operação de Cadastro consome igual.
+   */
+  async listSaasOperators(saasOrgId: string): Promise<ActiveAgent[]> {
+    const { data: org } = await supabaseAdmin
+      .from('organizations')
+      .select('enabled_modules')
+      .eq('id', saasOrgId)
+      .maybeSingle()
+    const enabled = (org as { enabled_modules?: string[] | null } | null)?.enabled_modules
+    if (enabled != null && !enabled.includes('active')) return []  // módulo Active desligado p/ a org
+
+    const { data, error } = await supabaseAdmin
+      .from('organization_members')
+      .select('user_id, role, whatsapp_phone, created_at')
+      .eq('organization_id', saasOrgId)
+      .order('created_at', { ascending: true })
+    if (error) throw new Error(`listSaasOperators: ${error.message}`)
+    const rows = (data ?? []) as Array<{ user_id: string; role: string | null; whatsapp_phone: string | null }>
+    if (rows.length === 0) return []
+
+    const profiles = await this.fetchUserProfiles(rows.map(r => r.user_id))
+    return rows.map(r => {
+      const p = profiles.get(r.user_id)
+      return {
+        member_id:      r.user_id,
+        user_id:        r.user_id,
+        display_name:   p?.name ?? p?.email ?? null,
+        role:           r.role ?? 'member',
+        status:         'active',
+        whatsapp_phone: r.whatsapp_phone ?? null,
+      }
+    })
+  }
+
+  /**
+   * Contato (nome + WhatsApp) do operador na Equipe do SaaS. Fonte da verdade
+   * do WhatsApp pro alerta de tarefa URGENTE. Nome vem do auth.users.
+   */
+  async getSaasMemberContact(saasOrgId: string, userId: string): Promise<ActiveMemberContact | null> {
+    const { data } = await supabaseAdmin
+      .from('organization_members')
+      .select('whatsapp_phone')
+      .eq('organization_id', saasOrgId)
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (!data) return null
+    const profiles = await this.fetchUserProfiles([userId])
+    const p = profiles.get(userId)
+    return {
+      display_name:   p?.name ?? p?.email ?? null,
+      whatsapp_phone: (data as { whatsapp_phone: string | null }).whatsapp_phone ?? null,
+    }
+  }
+
+  /**
+   * Garante (idempotente) que o operador (user do SaaS) é membro do Active na
+   * org Active do gestor — pré-requisito pra receber/ver o card da Operação de
+   * Cadastro. Cria como 'agent'/'active' se não existir; se já existe, só
+   * espelha o WhatsApp quando o do Active está vazio (não sobrescreve
+   * role/nome/whatsapp já preenchidos). Best-effort (nunca lança).
+   */
+  async ensureActiveMembership(
+    activeOrgId: string,
+    userId: string,
+    displayName: string | null,
+    whatsappPhone: string | null,
+  ): Promise<void> {
+    try {
+      const { data: existing } = await supabaseAdmin
+        .schema('active')
+        .from('org_members')
+        .select('id, whatsapp_phone')
+        .eq('org_id', activeOrgId)
+        .eq('user_id', userId)
+        .maybeSingle()
+
+      if (!existing) {
+        const { error } = await supabaseAdmin
+          .schema('active')
+          .from('org_members')
+          .insert({
+            org_id:         activeOrgId,
+            user_id:        userId,
+            role:           'agent',
+            status:         'active',
+            display_name:   displayName,
+            whatsapp_phone: whatsappPhone,
+          })
+        if (error) this.log.warn(`[ensureActiveMembership] insert falhou: ${error.message}`)
+        else this.log.log(`[ensureActiveMembership] operador ${userId} provisionado na org Active ${activeOrgId}`)
+        return
+      }
+
+      const cur = (existing as { id: string; whatsapp_phone: string | null }).whatsapp_phone
+      if (!cur && whatsappPhone) {
+        await supabaseAdmin
+          .schema('active')
+          .from('org_members')
+          .update({ whatsapp_phone: whatsappPhone })
+          .eq('id', (existing as { id: string }).id)
+      }
+    } catch (e) {
+      this.log.warn(`[ensureActiveMembership] falhou: ${(e as Error).message}`)
+    }
+  }
+
+  /** Map user_id → {name,email} via auth admin (getUserById em paralelo).
+   *  Best-effort: devolve vazio se admin auth indisponível. */
+  private async fetchUserProfiles(
+    userIds: string[],
+  ): Promise<Map<string, { name: string | null; email: string | null }>> {
+    const map = new Map<string, { name: string | null; email: string | null }>()
+    if (userIds.length === 0) return map
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const auth = (supabaseAdmin as any).auth?.admin
+    if (!auth?.getUserById) return map
+    await Promise.all([...new Set(userIds)].map(async (id) => {
+      try {
+        const { data } = await auth.getUserById(id)
+        const u = data?.user
+        if (!u) return
+        const meta = (u.user_metadata ?? {}) as Record<string, unknown>
+        const name = (meta.full_name as string | undefined) ?? (meta.name as string | undefined) ?? null
+        map.set(id, { name: name ?? null, email: (u.email as string | null) ?? null })
+      } catch {
+        /* ignora user inacessível */
+      }
+    }))
+    return map
+  }
+
   /** Lista pipelines não-arquivados de uma org Active. */
   async listPipelines(saasUserId: string): Promise<ActivePipeline[]> {
     const { org_id } = await this.resolveActiveOrgForUser(saasUserId)

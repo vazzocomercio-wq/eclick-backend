@@ -64,11 +64,12 @@ export class ProductsController {
   // Endpoints que populam os dropdowns do modal "Despachar pra operador"
   // sem o user precisar copiar UUIDs do schema active.* na mão.
 
-  /** GET /products/active-config/agents — lista members ativos+convidados da org Active */
+  /** GET /products/active-config/agents — lista operadores = Equipe do SaaS da
+   *  org (quando o módulo 'active' está ligado). Nome do auth.users + WhatsApp. */
   @Get('active-config/agents')
   listActiveAgents(@ReqUser() u: ReqUserPayload) {
-    if (!u.id) throw new BadRequestException('userId ausente')
-    return this.activeResolver.listAgents(u.id)
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.activeResolver.listSaasOperators(u.orgId)
   }
 
   /** GET /products/active-config/pipelines — lista pipelines da org Active */

@@ -98,6 +98,20 @@ export class ProductsCadastroDispatchService {
       throw new BadRequestException(`Não foi possível resolver org no Active CRM: ${(e as Error).message}`)
     }
 
+    // Operador agora vem da Equipe do SaaS — pode ainda não ser membro do Active.
+    // Auto-provisiona (idempotente) pra ele receber/ver o card. Best-effort.
+    try {
+      const opContact = await this.activeResolver.getSaasMemberContact(orgId, input.operator_user_id)
+      await this.activeResolver.ensureActiveMembership(
+        activeOrgId,
+        input.operator_user_id,
+        opContact?.display_name ?? null,
+        opContact?.whatsapp_phone ?? null,
+      )
+    } catch (e) {
+      this.log.warn(`[dispatch] provisão do operador no Active falhou: ${(e as Error).message}`)
+    }
+
     // Resolve o stage de "em andamento" do pipeline — pra onde o card vai
     // quando o operador confirma que abriu o IA Criativo. Heurística: stage
     // não-terminal cujo nome casa /andamento|progress/i; fallback = primeiro
@@ -346,6 +360,20 @@ export class ProductsCadastroDispatchService {
       throw new BadRequestException(`Não foi possível resolver org no Active CRM: ${(e as Error).message}`)
     }
 
+    // Operador agora vem da Equipe do SaaS — pode ainda não ser membro do Active.
+    // Auto-provisiona (idempotente) pra ele receber/ver o card. Best-effort.
+    try {
+      const opContact = await this.activeResolver.getSaasMemberContact(orgId, input.operator_user_id)
+      await this.activeResolver.ensureActiveMembership(
+        activeOrgId,
+        input.operator_user_id,
+        opContact?.display_name ?? null,
+        opContact?.whatsapp_phone ?? null,
+      )
+    } catch (e) {
+      this.log.warn(`[dispatch] provisão do operador no Active falhou: ${(e as Error).message}`)
+    }
+
     const { data: products, error } = await supabaseAdmin
       .from('products')
       .select('id, sku, name')
@@ -476,9 +504,19 @@ export class ProductsCadastroDispatchService {
 
     let contact: { display_name: string | null; whatsapp_phone: string | null } | null = null
     try {
-      contact = await this.activeResolver.getMemberContact(activeOrgId, operatorUserId)
+      // Fonte da verdade = Equipe do SaaS; fallback = membro do Active (legado).
+      contact = await this.activeResolver.getSaasMemberContact(saasOrgId, operatorUserId)
+      if (!contact?.whatsapp_phone) {
+        const act = await this.activeResolver.getMemberContact(activeOrgId, operatorUserId)
+        if (act?.whatsapp_phone) {
+          contact = {
+            display_name:   contact?.display_name ?? act.display_name,
+            whatsapp_phone: act.whatsapp_phone,
+          }
+        }
+      }
     } catch (e) {
-      this.log.warn(`[urgent-alert] getMemberContact falhou: ${(e as Error).message}`)
+      this.log.warn(`[urgent-alert] resolver contato falhou: ${(e as Error).message}`)
     }
     const phone = contact?.whatsapp_phone?.trim()
     if (!phone) {
