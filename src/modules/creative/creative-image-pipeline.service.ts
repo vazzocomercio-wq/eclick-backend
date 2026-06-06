@@ -14,6 +14,18 @@ import type {
 } from './dto/template-position.dto'
 import type { CreativeImagePromptTemplate } from './creative-prompt-templates.service'
 
+/** Trava de fidelidade prefixada em TODO prompt de imagem do Criativo. Vai na
+ *  CABEÇA do prompt enviado ao modelo (gpt-image-1 / Gemini) pra não ser
+ *  ignorada: o modelo edita a CENA, NUNCA o produto. Resolve o caso em que o
+ *  modelo trocava o formato/modelo/cor do produto (ex.: base redonda virando
+ *  quadrada). Reforça o que o gerador de prompts já manda em cada prompt. */
+const IMAGE_FIDELITY_PREFIX =
+  'CRITICAL — PRODUCT FIDELITY LOCK: The reference image shows the EXACT real product. ' +
+  'Do NOT under any circumstance change the product\'s model, shape, format, proportions, ' +
+  'geometry, color, material, finish or surface print/artwork. Keep the product pixel-faithful ' +
+  'to the reference (a round base stays round; a printed image stays identical). Change ONLY ' +
+  'the scene, camera angle, framing, lighting and background. '
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 export type JobStatus =
@@ -937,7 +949,7 @@ export class CreativeImagePipelineService {
       const out = await this.llm.generateImage({
         orgId:           img.organization_id,
         feature:         'creative_image',
-        prompt:          img.prompt_text,
+        prompt:          IMAGE_FIDELITY_PREFIX + img.prompt_text,
         sourceImageUrls: sourceUrls,
         format:          mapAspectRatioToFormat(aspectRatio),
         n:               1,
@@ -1243,7 +1255,7 @@ export class CreativeImagePipelineService {
     const out = await this.llm.generateImage({
       orgId,
       feature:         'creative_image',
-      prompt:          finalPrompt,
+      prompt:          IMAGE_FIDELITY_PREFIX + finalPrompt,
       sourceImageUrls: sourceUrls,
       format:          mapAspectRatioToFormat(resolved.aspect_ratio ?? '1:1'),
       n:               1,

@@ -330,6 +330,31 @@ export function buildImagePromptsRequest(input: ImagePromptsBuilderInput): strin
 
   return `You are a senior product photographer + e-commerce art director.
 
+## 🚨 ABSOLUTE RULES — NEVER NEGOTIABLE, NO EXCEPTIONS
+
+The product photo is passed as the REFERENCE/SOURCE image to an image-EDIT model.
+You change ONLY the scene around the product (angle, framing, environment,
+lighting, background). You NEVER redesign the product. If any creative idea
+conflicts with these rules, DROP THE IDEA. There are zero acceptable exceptions.
+
+1. **NEVER alter the product's MODEL, SHAPE, FORMAT, GEOMETRY, PROPORTIONS or SILHOUETTE.**
+   If the base is ROUND it stays round (never square/oval); if it is a sphere it
+   stays a sphere. No morphing, no resizing of parts, no adding or removing
+   components, no changing the design or the number of pieces.
+2. **NEVER alter the product's COLOR, MATERIAL, FINISH, PRINT or PATTERN.**
+   The exact wood tone stays; a printed image (e.g. a jellyfish) stays the same
+   image in the same place; same texture and reflectivity — reference to final.
+3. **NEVER add elements/effects the real product does not have** (extra engravings,
+   different artwork, glows, light beams, rainbows, sparkles, decorations). The
+   customer receives the EXACT product in the reference image — anything different
+   is false advertising.
+4. **EVERY prompt you output MUST BEGIN with this exact fidelity lock**, then the scene:
+   "Keep the product EXACTLY as in the reference image — identical model, shape, format, proportions, color, material and surface print; do not redesign or alter the product, only change the scene, angle, framing, lighting and background. "
+
+These rules apply to EVERY prompt, EVERY position, EVERY variation.
+
+---
+
 Generate ${input.count} distinct image prompts for the product below, designed for a ${b.target_marketplace} listing. The product image will be passed as REFERENCE to the image model — do NOT change the product itself, only the angle, framing, environment, and lighting.
 
 ## PRODUCT
