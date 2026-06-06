@@ -354,22 +354,48 @@ export class MlCampaignsApplyService {
   async joinListingPromotion(input: {
     orgId:          string
     userId:         string
-    campaignItemId: string
+    campaignItemId?: string
+    // Caminho CRU (campanha vinda do fetch ao vivo, sem linha sincronizada):
+    mlItemId?:      string
+    sellerId?:      number
+    mlCampaignId?:  string
+    promotionType?: string
+    originalPrice?: number
+    productId?:     string | null
     offerPrice?:    number
     discountPct?:   number
   }): Promise<{ ok: boolean; status: 'joined'; ml_offer_id?: string; offer_price: number; item_id: string }> {
-    const { data: itemRow } = await supabaseAdmin
-      .from('ml_campaign_items')
-      .select('id, seller_id, product_id, campaign_id, ml_item_id, ml_campaign_id, ml_promotion_type, ml_offer_id, status, original_price, current_price, suggested_discounted_price, min_discounted_price, max_discounted_price')
-      .eq('id', input.campaignItemId)
-      .eq('organization_id', input.orgId)
-      .maybeSingle()
-    if (!itemRow) throw new NotFoundException('anúncio/campanha não encontrado')
-    const item = itemRow as {
-      id: string; seller_id: number; product_id: string | null; campaign_id: string
+    type JoinItem = {
+      id: string | null; seller_id: number; product_id: string | null; campaign_id: string | null
       ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string; ml_offer_id: string | null; status: string
       original_price: number | null; current_price: number | null
       suggested_discounted_price: number | null; min_discounted_price: number | null; max_discounted_price: number | null
+    }
+    let item: JoinItem
+
+    if (input.campaignItemId) {
+      const { data: itemRow } = await supabaseAdmin
+        .from('ml_campaign_items')
+        .select('id, seller_id, product_id, campaign_id, ml_item_id, ml_campaign_id, ml_promotion_type, ml_offer_id, status, original_price, current_price, suggested_discounted_price, min_discounted_price, max_discounted_price')
+        .eq('id', input.campaignItemId)
+        .eq('organization_id', input.orgId)
+        .maybeSingle()
+      if (!itemRow) throw new NotFoundException('anúncio/campanha não encontrado')
+      item = itemRow as JoinItem
+    } else {
+      // Caminho cru: a campanha foi listada ao vivo (não está sincronizada).
+      if (!input.mlItemId || input.sellerId == null || !input.mlCampaignId || !input.promotionType) {
+        throw new BadRequestException('Informe campaign_item_id OU (ml_item_id, seller_id, ml_campaign_id, promotion_type).')
+      }
+      const productId     = input.productId ?? await this.resolveProductIdByListing(input.orgId, input.mlItemId)
+      const campaignRowId = await this.resolveCampaignRowId(input.orgId, input.sellerId, input.mlCampaignId)
+      item = {
+        id: null, seller_id: input.sellerId, product_id: productId, campaign_id: campaignRowId,
+        ml_item_id: input.mlItemId, ml_campaign_id: input.mlCampaignId, ml_promotion_type: input.promotionType,
+        ml_offer_id: null, status: 'candidate',
+        original_price: input.originalPrice ?? null, current_price: null,
+        suggested_discounted_price: null, min_discounted_price: null, max_discounted_price: null,
+      }
     }
     if (item.status === 'started') {
       throw new BadRequestException('Este anúncio já participa desta campanha.')
@@ -419,10 +445,13 @@ export class MlCampaignsApplyService {
       throw new BadRequestException(`O Mercado Livre recusou a inclusão: ${msg}`)
     }
 
-    await supabaseAdmin
-      .from('ml_campaign_items')
-      .update({ status: 'started', ml_offer_id: newOfferId, current_price: offerPrice })
-      .eq('id', item.id)
+    // Só atualiza a linha sincronizada se ela existir (caminho cru não tem).
+    if (item.id) {
+      await supabaseAdmin
+        .from('ml_campaign_items')
+        .update({ status: 'started', ml_offer_id: newOfferId, current_price: offerPrice })
+        .eq('id', item.id)
+    }
 
     await this.auditJoin(input, item, payload, offerPrice, true, newOfferId ?? null, mlResponse, null)
     await this.advanceFunnelCardToAds(input.orgId, item.product_id)
@@ -433,7 +462,7 @@ export class MlCampaignsApplyService {
   /** Audit best-effort do join direto (não derruba o fluxo se falhar). */
   private async auditJoin(
     input:      { orgId: string; userId: string },
-    item:       { seller_id: number; campaign_id: string; product_id: string | null; ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string; ml_offer_id: string | null; current_price: number | null; original_price: number | null },
+    item:       { seller_id: number; campaign_id: string | null; product_id: string | null; ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string; ml_offer_id: string | null; current_price: number | null; original_price: number | null },
     payload:    Record<string, unknown>,
     offerPrice: number,
     success:    boolean,
@@ -469,6 +498,31 @@ export class MlCampaignsApplyService {
     } catch (e) {
       this.logger.warn(`[join] audit falhou: ${(e as Error).message}`)
     }
+  }
+
+  /** Resolve o product_id interno a partir do anúncio ML (product_listings). */
+  private async resolveProductIdByListing(orgId: string, mlItemId: string): Promise<string | null> {
+    const { data } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id, products!inner(organization_id)')
+      .eq('listing_id', mlItemId)
+      .eq('platform', 'mercadolivre')
+      .eq('products.organization_id', orgId)
+      .limit(1)
+      .maybeSingle()
+    return (data as { product_id: string } | null)?.product_id ?? null
+  }
+
+  /** Acha a row local da campanha (ml_campaigns) por ids ML — best-effort (audit). */
+  private async resolveCampaignRowId(orgId: string, sellerId: number, mlCampaignId: string): Promise<string | null> {
+    const { data } = await supabaseAdmin
+      .from('ml_campaigns')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('seller_id', sellerId)
+      .eq('ml_campaign_id', mlCampaignId)
+      .maybeSingle()
+    return (data as { id: string } | null)?.id ?? null
   }
 
   /** Avança o card do funil "Anúncios ML" pra "Incluir ADS" após participar.

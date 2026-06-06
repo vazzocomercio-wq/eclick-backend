@@ -1,11 +1,13 @@
 /** Read-only queries pro Campaign Center (dashboard, listas, detalhes). */
 
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common'
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { MlCampaignsApiClient } from './ml-campaigns-api.client'
 
 // ── Tela "Incluir em campanha" (escopada no anúncio do catálogo) ──────────
 export interface ListingPromotionOption {
-  campaign_item_id: string
+  campaign_item_id: string | null   // null quando vem do fetch ao vivo (não sincronizado)
   ml_item_id:       string
   ml_campaign_id:   string
   promotion_type:   string
@@ -96,6 +98,13 @@ interface ListItemsInput {
 
 @Injectable()
 export class MlCampaignsService {
+  private readonly log = new Logger(MlCampaignsService.name)
+
+  constructor(
+    private readonly ml:     MercadolivreService,
+    private readonly client: MlCampaignsApiClient,
+  ) {}
+
   /** Dashboard executivo — agrega summary multi-conta.
    *  GRACEFUL DEGRADATION: erro nunca propaga 500. Loga e retorna
    *  emptyDashboard() pra UI carregar mostrando "nenhuma campanha". */
@@ -276,73 +285,83 @@ export class MlCampaignsService {
     if (!prod) throw new NotFoundException('produto não encontrado')
     const product = prod as { id: string; sku: string | null; name: string }
 
-    const { data: rows, error } = await supabaseAdmin
-      .from('ml_campaign_items')
-      .select('id, seller_id, ml_item_id, ml_campaign_id, ml_promotion_type, ml_offer_id, status, original_price, current_price, suggested_discounted_price, min_discounted_price, max_discounted_price, meli_percentage, has_meli_subsidy, health_status, listing_status, title, thumbnail_url, permalink, ml_campaigns!inner(name, status, start_date, finish_date, deadline_date)')
-      .eq('organization_id', orgId)
+    // Âncora nos anúncios REAIS do ML (product_listings) — não dependem do sync
+    // de campanha. Assim o anúncio sempre aparece (e o operador pode criar
+    // promoção própria) mesmo que ainda não exista nenhuma campanha sincronizada.
+    const { data: listings, error: lErr } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id, account_id, listing_title, listing_price, listing_thumbnail, listing_permalink')
       .eq('product_id', productId)
-      .in('status', ['candidate', 'started', 'pending'])
-      .order('updated_at', { ascending: false })
-    if (error) throw new BadRequestException(`getListingPromotions: ${error.message}`)
+      .eq('platform', 'mercadolivre')
+      .eq('is_active', true)
+    if (lErr) throw new BadRequestException(`getListingPromotions: ${lErr.message}`)
 
-    type CampaignEmbed = { name: string | null; status: string | null; start_date: string | null; finish_date: string | null; deadline_date: string | null }
-    type ItemRow = {
-      id: string; seller_id: number; ml_item_id: string; ml_campaign_id: string; ml_promotion_type: string
-      ml_offer_id: string | null; status: string
-      original_price: number | null; current_price: number | null
-      suggested_discounted_price: number | null; min_discounted_price: number | null; max_discounted_price: number | null
-      meli_percentage: number | null; has_meli_subsidy: boolean | null
-      health_status: string | null; listing_status: string | null
-      title: string | null; thumbnail_url: string | null; permalink: string | null
-      ml_campaigns: CampaignEmbed | CampaignEmbed[] | null
+    type ListingRow = {
+      listing_id: string; account_id: string | null
+      listing_title: string | null; listing_price: number | null
+      listing_thumbnail: string | null; listing_permalink: string | null
     }
-    const list = (rows ?? []) as unknown as ItemRow[]
+    const anunciosRaw = ((listings ?? []) as ListingRow[]).filter(l => l.listing_id)
 
-    const byAnuncio = new Map<string, ListingAnuncio>()
-    for (const r of list) {
-      const camp = Array.isArray(r.ml_campaigns) ? r.ml_campaigns[0] ?? null : r.ml_campaigns
-      const opt: ListingPromotionOption = {
-        campaign_item_id: r.id,
-        ml_item_id:       r.ml_item_id,
-        ml_campaign_id:   r.ml_campaign_id,
-        promotion_type:   r.ml_promotion_type,
-        campaign_name:    camp?.name ?? null,
-        campaign_status:  camp?.status ?? null,
-        start_date:       camp?.start_date ?? null,
-        finish_date:      camp?.finish_date ?? null,
-        deadline_date:    camp?.deadline_date ?? null,
-        item_status:      r.status,
-        original_price:   r.original_price,
-        suggested_price:  r.suggested_discounted_price,
-        min_price:        r.min_discounted_price,
-        max_price:        r.max_discounted_price,
-        current_price:    r.current_price,
-        ml_offer_id:      r.ml_offer_id,
-        meli_percentage:  r.meli_percentage,
-        has_meli_subsidy: !!r.has_meli_subsidy,
-        health_status:    r.health_status,
+    const anuncios: ListingAnuncio[] = []
+    for (const l of anunciosRaw) {
+      const sellerId = l.account_id ? Number(l.account_id) : NaN
+      const an: ListingAnuncio = {
+        ml_item_id:     l.listing_id,
+        seller_id:      Number.isFinite(sellerId) ? sellerId : 0,
+        title:          l.listing_title,
+        thumbnail_url:  l.listing_thumbnail,
+        permalink:      l.listing_permalink,
+        listing_status: null,
+        original_price: l.listing_price,
+        available:      [],
+        participating:  [],
       }
-      let an = byAnuncio.get(r.ml_item_id)
-      if (!an) {
-        an = {
-          ml_item_id:    r.ml_item_id,
-          seller_id:     r.seller_id,
-          title:         r.title,
-          thumbnail_url: r.thumbnail_url,
-          permalink:     r.permalink,
-          listing_status: r.listing_status,
-          original_price: r.original_price,
-          available:     [],
-          participating: [],
+
+      // Busca AO VIVO as promoções elegíveis pra ESTE item — fonte real do que
+      // a ML mostra como "Participar". A lista por campanha (sync) costuma NÃO
+      // trazer todos os anúncios elegíveis; o endpoint por item traz. Best-effort:
+      // se falhar, o anúncio ainda aparece e o operador cria promoção própria.
+      if (Number.isFinite(sellerId)) {
+        try {
+          const token = (await this.ml.getTokenForOrg(orgId, sellerId)).token
+          const promos = await this.client.listItemPromotions(token, sellerId, l.listing_id)
+          for (const p of promos) {
+            const opt: ListingPromotionOption = {
+              campaign_item_id: null,
+              ml_item_id:       l.listing_id,
+              ml_campaign_id:   p.id,
+              promotion_type:   p.type,
+              campaign_name:    p.name ?? null,
+              campaign_status:  p.status ?? null,
+              start_date:       p.start_date ?? null,
+              finish_date:      p.finish_date ?? null,
+              deadline_date:    p.deadline_date ?? null,
+              item_status:      p.status,
+              original_price:   p.original_price ?? l.listing_price,
+              suggested_price:  p.price ?? null,
+              min_price:        null,
+              max_price:        null,
+              current_price:    p.price ?? null,
+              ml_offer_id:      p.offer_id ?? null,
+              meli_percentage:  p.meli_percentage ?? null,
+              has_meli_subsidy: (p.meli_percentage ?? 0) > 0,
+              health_status:    null,
+            }
+            if (an.original_price == null && opt.original_price != null) an.original_price = opt.original_price
+            // Já participa quando status 'started'/'pending' ou já tem offer_id;
+            // senão é elegível (candidate) → entra em "disponível".
+            if (p.status === 'started' || p.status === 'pending' || p.offer_id) an.participating.push(opt)
+            else an.available.push(opt)
+          }
+        } catch (e) {
+          this.log.warn(`[listing-promotions] fetch ao vivo falhou item=${l.listing_id} seller=${sellerId}: ${(e as Error).message}`)
         }
-        byAnuncio.set(r.ml_item_id, an)
       }
-      if (an.original_price == null && r.original_price != null) an.original_price = r.original_price
-      if (r.status === 'candidate') an.available.push(opt)
-      else                          an.participating.push(opt)  // started | pending
+
+      anuncios.push(an)
     }
 
-    const anuncios = [...byAnuncio.values()]
     return {
       product,
       anuncios,

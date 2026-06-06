@@ -151,14 +151,27 @@ export class MlCampaignsController {
   @RequirePermission('ads.spend')
   listingJoin(
     @ReqUser() u: ReqUserPayload,
-    @Body() body: { campaign_item_id: string; offer_price?: number; discount_pct?: number },
+    @Body() body: {
+      campaign_item_id?: string
+      ml_item_id?: string; seller_id?: number; ml_campaign_id?: string; promotion_type?: string
+      original_price?: number; product_id?: string
+      offer_price?: number; discount_pct?: number
+    },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
-    if (!body?.campaign_item_id) throw new BadRequestException('campaign_item_id é obrigatório')
+    if (!body?.campaign_item_id && (!body?.ml_item_id || body?.seller_id == null || !body?.ml_campaign_id || !body?.promotion_type)) {
+      throw new BadRequestException('Informe campaign_item_id OU (ml_item_id, seller_id, ml_campaign_id, promotion_type).')
+    }
     return this.apply.joinListingPromotion({
       orgId:          u.orgId,
       userId:         u.id,
       campaignItemId: body.campaign_item_id,
+      mlItemId:       body.ml_item_id,
+      sellerId:       body.seller_id != null ? Number(body.seller_id) : undefined,
+      mlCampaignId:   body.ml_campaign_id,
+      promotionType:  body.promotion_type,
+      originalPrice:  body.original_price != null ? Number(body.original_price) : undefined,
+      productId:      body.product_id ?? null,
       offerPrice:     body.offer_price != null ? Number(body.offer_price) : undefined,
       discountPct:    body.discount_pct != null ? Number(body.discount_pct) : undefined,
     })
