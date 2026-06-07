@@ -1298,7 +1298,8 @@ export class DropshipService {
       .eq('organization_id', orgId)
       .gte('created_at', sevenDaysAgo)
       .not('status', 'in', '(cancelled,refunded)')
-      .limit(200)
+      .order('created_at', { ascending: false })
+      .limit(1000)  // cobre a janela de 7d multicanal (ML+Shopee+TikTok); recentes 1º
 
     if (!orders || orders.length === 0) return { processed: 0, identified: 0, skipped: 0 }
 
@@ -1316,17 +1317,20 @@ export class DropshipService {
     // Pré-busca account-supplier mappings ativos do org
     const { data: accountSuppliers } = await supabaseAdmin
       .from('seller_account_suppliers')
-      .select('supplier_id, marketplace, seller_id, shopee_shop_id, amazon_seller_id, is_default')
+      .select('supplier_id, marketplace, seller_id, shopee_shop_id, amazon_seller_id, is_default, dedicated')
       .eq('organization_id', orgId)
       .is('active_until', null)
     // Modelo "produto manda": a CONTA habilita dropship (pode ter VÁRIOS
     // parceiros); o PRODUTO escolhe qual parceiro (via catálogo, passo 5).
     // Por isso guardamos o CONJUNTO de parceiros por conta/canal, não um só.
-    type AccSup = { supplier_id: string; is_default: boolean }
+    type AccSup = { supplier_id: string; is_default: boolean; dedicated: boolean }
     const accSupByAccount = new Map<string, AccSup[]>()     // marketplace:account → parceiros (ML traz a conta na linha)
     const accSupByMarketplace = new Map<string, AccSup[]>() // marketplace → parceiros (canais sem conta na linha)
     for (const a of (accountSuppliers ?? [])) {
-      const entry: AccSup = { supplier_id: a.supplier_id, is_default: !!a.is_default }
+      // dedicated=true (default): conta dedicada ao(s) parceiro(s) → produto fora
+      // do catálogo vira on_hold (lista de cadastro). dedicated=false (mista):
+      // conta vende também estoque próprio → produto fora do catálogo é ignorado.
+      const entry: AccSup = { supplier_id: a.supplier_id, is_default: !!a.is_default, dedicated: (a as { dedicated?: boolean }).dedicated !== false }
       const mkt = accSupByMarketplace.get(a.marketplace) ?? []
       mkt.push(entry)
       accSupByMarketplace.set(a.marketplace, mkt)
@@ -1417,6 +1421,11 @@ export class DropshipService {
       // radar; alimenta a divergência missing_partner_product).
       const supplierId = pp?.supplier_id
         ?? (candidatesSup.find(c => c.is_default) ?? candidatesSup[0]).supplier_id
+
+      // Conta MISTA (dedicated=false): produto fora do catálogo de qualquer
+      // parceiro = estoque próprio da loja → ignora (não vira on_hold). Conta
+      // DEDICADA mantém o on_hold abaixo (lista de cadastro).
+      if (!pp && !candidatesSup.some(c => c.dedicated)) { skipped++; continue }
 
       // Produto não vinculado a esse fornecedor: NÃO pula calado. A venda é de
       // uma conta-fornecedor, então registra em `on_hold` (com hold_reason de
