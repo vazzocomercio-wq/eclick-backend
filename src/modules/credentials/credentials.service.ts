@@ -277,6 +277,34 @@ export class CredentialsService {
         return { ok: false, message: (err as { error?: { message?: string } }).error?.message ?? `Erro HTTP ${res.status}` }
       }
 
+      if (provider === 'mercadopago') {
+        // Valida o access token chamando /users/me (não cobra nada).
+        const res = await fetch('https://api.mercadopago.com/users/me', {
+          headers: { Authorization: `Bearer ${key}` },
+        })
+        if (res.ok) {
+          const u = await res.json().catch(() => ({})) as { nickname?: string }
+          return { ok: true, message: `Mercado Pago conectado ✅${u.nickname ? ` (${u.nickname})` : ''}` }
+        }
+        const err = await res.json().catch(() => ({}))
+        return { ok: false, message: (err as { message?: string }).message ?? `Erro HTTP ${res.status}` }
+      }
+
+      if (provider === 'stripe') {
+        // O webhook secret (whsec_) não tem API de validação — só é usado na
+        // verificação de assinatura. Pra ele, confirma só que está salvo.
+        if (key.startsWith('whsec_')) {
+          return { ok: true, message: 'Webhook secret salvo ✅ (validado no 1º callback)' }
+        }
+        // Secret/restricted key (sk_/rk_): valida chamando /v1/balance.
+        const res = await fetch('https://api.stripe.com/v1/balance', {
+          headers: { Authorization: `Bearer ${key}` },
+        })
+        if (res.ok) return { ok: true, message: 'Stripe conectado ✅' }
+        const err = await res.json().catch(() => ({}))
+        return { ok: false, message: (err as { error?: { message?: string } }).error?.message ?? `Erro HTTP ${res.status}` }
+      }
+
       return { ok: true, message: 'Chave salva (sem teste disponível para este provedor)' }
     } catch (e) {
       return { ok: false, message: (e as Error).message }
