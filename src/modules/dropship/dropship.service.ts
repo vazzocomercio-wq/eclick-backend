@@ -69,6 +69,7 @@ export interface CreateAccountSupplierDto {
   amazon_seller_id?: string | null
   account_label?: string | null
   is_default?: boolean
+  dedicated?: boolean   // true: conta só do(s) parceiro(s); false: mista (vende estoque próprio tb)
   notes?: string | null
 }
 
@@ -526,7 +527,7 @@ export class DropshipService {
       .from('seller_account_suppliers')
       .select(`
         id, marketplace, seller_id, shopee_shop_id, amazon_seller_id,
-        account_label, is_default, active_since, active_until, notes,
+        account_label, is_default, dedicated, active_since, active_until, notes,
         created_at, updated_at,
         suppliers!inner(id, name)
       `)
@@ -576,6 +577,7 @@ export class DropshipService {
         amazon_seller_id: dto.amazon_seller_id ?? null,
         account_label: dto.account_label ?? null,
         is_default: dto.is_default ?? true,
+        dedicated: dto.dedicated ?? true,
         notes: dto.notes ?? null,
       })
       .select()
