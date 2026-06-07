@@ -7,7 +7,11 @@ import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 import { FinanceiroService } from '../financeiro/financeiro.service'
 import { LlmService } from '../ai/llm.service'
 import { BaileysProvider } from '../channels/providers/baileys.provider'
-import PDFDocument from 'pdfkit'
+// pdfkit é CommonJS e exporta o construtor direto (module.exports = PDFDocument).
+// Sem esModuleInterop no tsconfig, `import X from 'pdfkit'` compila pra
+// `pdfkit_1.default` (undefined) → "is not a constructor" em runtime.
+// import=require pega o export real.
+import PDFDocument = require('pdfkit')
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
 
