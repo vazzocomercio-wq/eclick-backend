@@ -1313,19 +1313,27 @@ export class DropshipService {
       .select('supplier_id, marketplace, seller_id, shopee_shop_id, amazon_seller_id, is_default')
       .eq('organization_id', orgId)
       .is('active_until', null)
-    const accSupMap = new Map<string, string>()            // key = marketplace:account → supplier_id (resolução EXATA)
-    const accSupByMarketplace = new Map<string, string[]>() // marketplace → supplier_ids (fallback CONTA-ÚNICA)
+    // Modelo "produto manda": a CONTA habilita dropship (pode ter VÁRIOS
+    // parceiros); o PRODUTO escolhe qual parceiro (via catálogo, passo 5).
+    // Por isso guardamos o CONJUNTO de parceiros por conta/canal, não um só.
+    type AccSup = { supplier_id: string; is_default: boolean }
+    const accSupByAccount = new Map<string, AccSup[]>()     // marketplace:account → parceiros (ML traz a conta na linha)
+    const accSupByMarketplace = new Map<string, AccSup[]>() // marketplace → parceiros (canais sem conta na linha)
     for (const a of (accountSuppliers ?? [])) {
-      const list = accSupByMarketplace.get(a.marketplace) ?? []
-      list.push(a.supplier_id)
-      accSupByMarketplace.set(a.marketplace, list)
+      const entry: AccSup = { supplier_id: a.supplier_id, is_default: !!a.is_default }
+      const mkt = accSupByMarketplace.get(a.marketplace) ?? []
+      mkt.push(entry)
+      accSupByMarketplace.set(a.marketplace, mkt)
       const account = a.seller_id ?? a.shopee_shop_id ?? a.amazon_seller_id
       if (account == null) continue
-      accSupMap.set(`${a.marketplace}:${account}`, a.supplier_id)
+      const key = `${a.marketplace}:${account}`
+      const list = accSupByAccount.get(key) ?? []
+      list.push(entry)
+      accSupByAccount.set(key, list)
     }
 
-    if (accSupMap.size === 0) {
-      // Sem mapping = nada é dropship (ou todos pedidos vão pro estoque próprio)
+    if ((accountSuppliers ?? []).length === 0) {
+      // Nenhum vínculo conta→fornecedor = nada é dropship
       return { processed: orders.length, identified: 0, skipped: candidates.length }
     }
 
@@ -1337,50 +1345,49 @@ export class DropshipService {
       const marketplace = this.normalizeMarketplaceName(order.source ?? '')
       if (!marketplace) { skipped++; continue }
 
-      // 3. Resolver supplier via conta.
-      //    ML carrega a conta no próprio pedido (order.seller_id) → resolução EXATA.
-      //    Shopee/TikTok/loja própria NÃO trazem o shop_id na linha do pedido
-      //    (confirmado no raw_data) → fallback de CONTA-ÚNICA: se a org tem
-      //    exatamente 1 parceiro vinculado àquele canal, usa-o. Multi-loja por
-      //    canal exige persistir o shop_id na ingestão (follow-up) — aqui é
-      //    ambíguo, então logamos e pulamos pra não vincular ao parceiro errado.
-      const account = order.seller_id  // só o ML traz isso na linha do pedido
-      let supplierId = account != null ? accSupMap.get(`${marketplace}:${account}`) : undefined
-      if (!supplierId && account == null) {
-        const mktSuppliers = accSupByMarketplace.get(marketplace) ?? []
-        if (mktSuppliers.length === 1) {
-          supplierId = mktSuppliers[0]
-        } else if (mktSuppliers.length > 1) {
-          this.logger.warn(
-            `[identify] ${marketplace}: ${mktSuppliers.length} parceiros vinculados e pedido ${order.id} sem shop_id — ambíguo, pulando (rever: persistir shop_id na ingestão)`,
-          )
-        }
-      }
-      if (!supplierId) { skipped++; continue }  // conta não vinculada a parceiro = não é dropship
+      // 3. Parceiros CANDIDATOS: a CONTA habilita o dropship (pode ter vários
+      //    parceiros); quem escolhe é o produto (passo 5). ML traz a conta na
+      //    linha (order.seller_id) → candidatos daquela conta. Canais sem conta
+      //    na linha (Shopee/TikTok/loja própria) → todos os parceiros do canal.
+      const account = order.seller_id
+      const candidatesSup = account != null
+        ? (accSupByAccount.get(`${marketplace}:${account}`) ?? [])
+        : (accSupByMarketplace.get(marketplace) ?? [])
+      if (candidatesSup.length === 0) { skipped++; continue }  // conta/canal sem parceiro = não é dropship
 
-      // 4. Resolver product. Cascata de 3 estratégias por ordem de
-      //    confiabilidade — para no primeiro hit:
-      //    a) order.product_id (já resolvido na ingestão)
-      //    b) listing_id em raw_data → product_listings → product_id
-      //       (mais robusto que SKU — listing nunca muda; cobre múltiplos
-      //       anúncios com SKUs distintos vinculados ao mesmo produto)
-      //    c) order.sku == products.sku literal (master_sku)
+      // 4. Resolver product. Cascata: a) product_id (ingestão) b) listing_id em
+      //    raw_data → product_listings c) sku literal. Para no 1º hit.
       const resolved = await this.resolveProductForOrder(orgId, order)
       const productId = resolved.productId
-
       if (!productId) { skipped++; continue }
 
-      // 5. Buscar supplier_products — SE existir vínculo ativo nessa
-      //    combinação supplier+product, o pedido É dropship. Não usamos
-      //    products.supply_type pra isso porque essa coluna é origem
-      //    geográfica (nacional|importado|hibrido), não vínculo de
-      //    fornecimento. supplier_products é a fonte da verdade.
-      const { data: pp } = await supabaseAdmin
+      // 5. O PRODUTO escolhe o parceiro: dentre os candidatos da conta, em qual
+      //    catálogo (supplier_products) esse produto está? Desempate quando o
+      //    produto está em 2+ parceiros: is_preferred → parceiro default da
+      //    conta → primeiro. supplier_products é a fonte da verdade do vínculo.
+      const candidateIds = candidatesSup.map(c => c.supplier_id)
+      const { data: ppsRaw } = await supabaseAdmin
         .from('supplier_products')
-        .select('id, supplier_sku, master_sku, unit_cost, partner_packaging_cost, partner_handling_cost')
-        .eq('supplier_id', supplierId)
+        .select('id, supplier_id, supplier_sku, master_sku, unit_cost, partner_packaging_cost, partner_handling_cost, is_preferred')
+        .in('supplier_id', candidateIds)
         .eq('product_id', productId)
-        .maybeSingle()
+      const ppList = (ppsRaw ?? []) as Array<{
+        id: string; supplier_id: string; supplier_sku: string | null; master_sku: string | null
+        unit_cost: number; partner_packaging_cost: number | null; partner_handling_cost: number | null
+        is_preferred: boolean | null
+      }>
+      let pp: (typeof ppList)[number] | null = null
+      if (ppList.length === 1) pp = ppList[0]
+      else if (ppList.length > 1) {
+        pp = ppList.find(p => p.is_preferred)
+          ?? ppList.find(p => candidatesSup.some(c => c.supplier_id === p.supplier_id && c.is_default))
+          ?? ppList[0]
+      }
+      // Parceiro vem do PRODUTO. Se o produto não está no catálogo de NENHUM
+      // candidato, on_hold atribuído ao parceiro default da conta (não some do
+      // radar; alimenta a divergência missing_partner_product).
+      const supplierId = pp?.supplier_id
+        ?? (candidatesSup.find(c => c.is_default) ?? candidatesSup[0]).supplier_id
 
       // Produto não vinculado a esse fornecedor: NÃO pula calado. A venda é de
       // uma conta-fornecedor, então registra em `on_hold` (com hold_reason de
