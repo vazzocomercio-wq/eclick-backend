@@ -1385,6 +1385,28 @@ export class DropshipService {
           ?? ppList.find(p => candidatesSup.some(c => c.supplier_id === p.supplier_id && c.is_default))
           ?? ppList[0]
       }
+      // 5b. Fallback por SKU: produto duplicado em `products` faz o product_id
+      //     do pedido divergir do catálogo mesmo com o MESMO SKU. Quando o match
+      //     por product_id falha, casa o SKU do pedido com supplier_sku no
+      //     catálogo dos candidatos. Conservador: só aceita se inequívoco (1 hit
+      //     ou desempate claro por is_preferred/default); ambíguo → mantém
+      //     on_hold (não chuta custo de OC). Produto próprio (SKU fora de
+      //     qualquer catálogo) continua on_hold normalmente.
+      if (!pp && order.sku) {
+        const { data: bySkuRaw } = await supabaseAdmin
+          .from('supplier_products')
+          .select('id, supplier_id, supplier_sku, master_sku, unit_cost, partner_packaging_cost, partner_handling_cost, is_preferred')
+          .in('supplier_id', candidateIds)
+          .eq('supplier_sku', order.sku)
+        const skuList = (bySkuRaw ?? []) as typeof ppList
+        if (skuList.length === 1) pp = skuList[0]
+        else if (skuList.length > 1) {
+          pp = skuList.find(p => p.is_preferred)
+            ?? skuList.find(p => candidatesSup.some(c => c.supplier_id === p.supplier_id && c.is_default))
+            ?? null  // ambíguo demais → on_hold
+        }
+      }
+
       // Parceiro vem do PRODUTO. Se o produto não está no catálogo de NENHUM
       // candidato, on_hold atribuído ao parceiro default da conta (não some do
       // radar; alimenta a divergência missing_partner_product).
