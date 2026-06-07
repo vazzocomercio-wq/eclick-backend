@@ -197,6 +197,7 @@ export class ShopeeMarketingService {
     commission_pct:   number
     objectives:       string[]
     total_candidates: number
+    already_promoted: number
     recommendations:  MarketingRecommendation[]
     warnings:         string[]
   }> {
@@ -239,9 +240,25 @@ export class ShopeeMarketingService {
       }
     }
 
-    // 3) avalia cada anúncio LINKADO com margem
+    // 2.1) itens JÁ em campanha ATIVA (aplicada via e-Click) → não recomendar de
+    // novo (some da lista; aparece na aba Resultados). Evita oferecer promoção
+    // pra produto que já está em promoção (e o re-apply falharia na Shopee).
+    const nowIso = new Date().toISOString()
+    const promotedItems = new Set<number>()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const linkedItems = (status.items as any[]).filter(i => i.linked && i.product && i.price > 0)
+    const { data: activePromos } = await (supabaseAdmin.schema('shopee') as any)
+      .from('applied_promotions')
+      .select('item_id, window_end')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const p of (activePromos ?? []) as any[]) {
+      if (!p.window_end || String(p.window_end) > nowIso) promotedItems.add(Number(p.item_id))
+    }
+
+    // 3) avalia cada anúncio LINKADO com margem, PULANDO os já em campanha ativa
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const linkedItems = (status.items as any[]).filter(i => i.linked && i.product && i.price > 0 && !promotedItems.has(Number(i.item_id)))
     const recs: MarketingRecommendation[] = []
 
     for (const it of linkedItems) {
@@ -336,6 +353,7 @@ export class ShopeeMarketingService {
       commission_pct:   commissionPct,
       objectives:       objs,
       total_candidates: linkedItems.length,
+      already_promoted: promotedItems.size,
       recommendations:  recs.slice(0, limit),
       warnings,
     }
