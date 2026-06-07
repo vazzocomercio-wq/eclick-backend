@@ -59,7 +59,7 @@ export interface UpdateDropshipPartnerDto extends Partial<CreateDropshipPartnerD
 
 export interface CreateAccountSupplierDto {
   supplier_id: string
-  marketplace: 'mercado_livre' | 'shopee' | 'amazon' | 'magalu' | 'others'
+  marketplace: 'mercado_livre' | 'shopee' | 'amazon' | 'magalu' | 'tiktok_shop' | 'storefront' | 'others'
   seller_id?: number | null         // ML
   shopee_shop_id?: string | null
   amazon_seller_id?: string | null
@@ -545,8 +545,15 @@ export class DropshipService {
       .maybeSingle()
     if (!supplier) throw new NotFoundException('Fornecedor não encontrado')
 
-    // Pelo menos 1 ID de marketplace
-    if (!dto.seller_id && !dto.shopee_shop_id && !dto.amazon_seller_id) {
+    // Canais com granularidade de conta (OAuth multi-conta) exigem o ID da
+    // conta. Canais de loja única (TikTok Shop, loja própria, Magalu, Outros)
+    // podem ser vinculados como "conta-única": sem ID, o identify resolve o
+    // fornecedor pelo único parceiro ativo do canal.
+    const CONTA_UNICA = ['tiktok_shop', 'storefront', 'magalu', 'others']
+    if (
+      !dto.seller_id && !dto.shopee_shop_id && !dto.amazon_seller_id &&
+      !CONTA_UNICA.includes(dto.marketplace)
+    ) {
       throw new BadRequestException(
         'Informe pelo menos um ID da conta no marketplace (seller_id, shopee_shop_id ou amazon_seller_id)',
       )
