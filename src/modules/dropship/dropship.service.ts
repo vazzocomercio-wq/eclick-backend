@@ -2069,9 +2069,12 @@ export class DropshipService {
     // da OC mostra a data da venda de verdade, não a hora em que o cron rodou.
     const ocOrderIds = [...new Set(idents.map(i => i.order_id).filter(Boolean) as string[])]
     const { data: ocOrders } = ocOrderIds.length > 0
-      ? await supabaseAdmin.from('orders').select('id, sold_at').in('id', ocOrderIds)
-      : { data: [] as Array<{ id: string; sold_at: string | null }> }
+      ? await supabaseAdmin.from('orders').select('id, sold_at, seller_id').in('id', ocOrderIds)
+      : { data: [] as Array<{ id: string; sold_at: string | null; seller_id: number | null }> }
     const soldAtByOrder = new Map((ocOrders ?? []).map(o => [o.id, o.sold_at as string | null]))
+    // Conta REAL do pedido (ML traz seller_id na linha) — pra OC agrupar/rotular
+    // pela conta de verdade quando há multi-conta no mesmo fornecedor.
+    const sellerByOrder = new Map((ocOrders ?? []).map(o => [o.id, (o.seller_id as number | null) ?? null]))
 
     // Pré-busca seller_account_suppliers pra resolver labels
     const supplierIds = [...new Set(idents.map(i => i.supplier_id))]
@@ -2117,12 +2120,19 @@ export class DropshipService {
     const today = new Date()  // usado na coorte de expedição (fallback) e no due_date
     const groups = new Map<string, Group>()
     for (const i of idents) {
-      // Resolver conta via account-supplier mapping (procura match com marketplace)
-      const acc = (accountSuppliers ?? []).find(a =>
-        a.supplier_id === i.supplier_id &&
-        a.marketplace === i.marketplace,
-      )
-      const sellerId = acc?.seller_id ?? null
+      // Resolver conta pela CONTA REAL do pedido (ML traz seller_id na linha),
+      // não pelo 1º mapeamento — senão com multi-conta no mesmo fornecedor a OC
+      // mistura contas e rotula errado. Casa exata pelo seller_id real; canais
+      // sem conta na linha (Shopee/TikTok/storefront) caem no mapeamento do canal.
+      const realSellerId = sellerByOrder.get(i.order_id) ?? null
+      const acc = (realSellerId != null
+        ? (accountSuppliers ?? []).find(a =>
+            a.supplier_id === i.supplier_id && a.marketplace === i.marketplace &&
+            Number(a.seller_id) === Number(realSellerId))
+        : undefined)
+        ?? (accountSuppliers ?? []).find(a =>
+            a.supplier_id === i.supplier_id && a.marketplace === i.marketplace)
+      const sellerId = realSellerId ?? acc?.seller_id ?? null
       const shopeeShopId = acc?.shopee_shop_id ?? null
       const amazonSellerId = acc?.amazon_seller_id ?? null
       const accountLabel = acc?.account_label ?? null
