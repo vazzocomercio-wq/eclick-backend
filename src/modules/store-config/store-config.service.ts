@@ -315,7 +315,7 @@ export class StoreConfigService {
    *  Retorna dados ricos pro frontend renderizar cards completos sem fazer
    *  fetch detalhado por item (marca, atributos basicos, descricao curta,
    *  estoque pra badge "esgotando", created_at pra badge "novidade", etc). */
-  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string; categoryMlIds?: string[] } = {}): Promise<Array<Record<string, unknown>>> {
+  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string; categoryMlIds?: string[]; q?: string } = {}): Promise<Array<Record<string, unknown>>> {
     const limit  = Math.min(opts.limit  ?? 24, 60)
     const offset = Math.max(opts.offset ?? 0, 0)
     let q = supabaseAdmin
@@ -346,6 +346,11 @@ export class StoreConfigService {
     if (opts.category) q = q.eq('category', opts.category)
     // Filtro por categoria do ML (uma folha ou várias — clique numa categoria/grupo da vitrine)
     if (opts.categoryMlIds && opts.categoryMlIds.length > 0) q = q.in('category_ml_id', opts.categoryMlIds)
+    // Busca por texto (nome/SKU/marca) — campo de busca do cabeçalho da vitrine
+    if (opts.q?.trim()) {
+      const esc = opts.q.trim().replace(/[%,]/g, '').slice(0, 80)
+      if (esc) q = q.or(`name.ilike.%${esc}%,sku.ilike.%${esc}%,brand.ilike.%${esc}%`)
+    }
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     const rows = (data ?? []) as unknown as Array<Record<string, unknown>>

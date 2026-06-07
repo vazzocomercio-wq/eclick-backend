@@ -200,6 +200,7 @@ export class StorePublicController {
     @Query('offset')     offsetRaw?:   string,
     @Query('category')   category?:    string,
     @Query('categoryMlId') categoryMlIdRaw?: string,  // 1 folha ou várias (csv) — filtro por categoria ML
+    @Query('q')          q?:           string,         // busca por texto (nome/SKU/marca)
   ) {
     const config = await this.svc.getPublicBySlugOrDomain({ slug })
     if (!config) return { config: null, products: [] }
@@ -211,6 +212,7 @@ export class StorePublicController {
       offset: offsetRaw ? parseInt(offsetRaw, 10) : undefined,
       category,
       categoryMlIds,
+      q,
     })
     return { config, products }
   }
