@@ -832,6 +832,20 @@ export class PaymentsService {
   /** Atualiza status de entrega de um pedido (admin).
    *  Quando vai pra 'shipped', preenche shipped_at (se não veio).
    *  Quando vai pra 'delivered', preenche delivered_at. */
+  /** Status real dos gateways de pagamento da org — quais estão conectados
+   *  de fato (credencial presente). Usado pela tela de Pagamentos pra mostrar
+   *  status concreto em vez de um toggle cego. */
+  async getGatewayStatus(orgId: string): Promise<{
+    mercadopago: { configured: boolean; scope: 'org' | 'global' | null }
+    stripe:      { configured: boolean; scope: 'org' | 'global' | null }
+  }> {
+    const [mercadopago, stripe] = await Promise.all([
+      this.mp.isConfigured(orgId),
+      this.stripe.isConfigured(orgId),
+    ])
+    return { mercadopago, stripe }
+  }
+
   async updateShipping(
     orgId: string,
     orderId: string,

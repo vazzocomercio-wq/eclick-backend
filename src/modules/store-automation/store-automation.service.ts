@@ -164,20 +164,15 @@ export class StoreAutomationService {
       .from('store_automation_actions')
       .select('*', { count: 'exact' })
       .eq('organization_id', orgId)
-      .order('severity_rank', { ascending: false, nullsFirst: false })
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1)
-    // severity_rank não existe; usa simples order created_at
-    q = supabaseAdmin
-      .from('store_automation_actions')
-      .select('*', { count: 'exact' })
-      .eq('organization_id', orgId)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1)
 
+    // filtros aplicados antes da ordenação/paginação
     if (opts.status)        q = q.eq('status',       opts.status)
     if (opts.trigger_type)  q = q.eq('trigger_type', opts.trigger_type)
     if (opts.severity)      q = q.eq('severity',     opts.severity)
+
+    q = q
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1)
 
     const { data, error, count } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
@@ -229,7 +224,7 @@ export class StoreAutomationService {
     let approved = 0, failed = 0
     for (const id of ids) {
       try { await this.approve(id, orgId); approved++ }
-      catch { failed++ }
+      catch (e) { this.logger.warn(`[approveBatch] ${id} falhou: ${(e as Error).message}`); failed++ }
     }
     return { approved, failed }
   }

@@ -355,6 +355,19 @@ export class StoreConfigService {
     return rows.map(r => enrichWithPromotionFields(r, now))
   }
 
+  /** Conta produtos visíveis na vitrine (storefront_visible=true E stock>0).
+   *  Usado pelo hub da loja pra mostrar quantos produtos estão no ar. */
+  async countPublicProducts(orgId: string): Promise<{ visible: number }> {
+    const { count, error } = await supabaseAdmin
+      .from('products')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('storefront_visible', true)
+      .gt('stock', 0)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { visible: count ?? 0 }
+  }
+
   /** Cat-2 — categorias da vitrine. Agrupa as categorias do ML que TÊM produto
    *  visível em estoque (vazia = oculta), resolvendo nome + caminho no espelho
    *  `ml_categories`. SÓ LEITURA — não toca em products nem em category_ml_id.
@@ -619,6 +632,7 @@ export class StoreConfigService {
     orgId: string,
     opts: {
       filter?: 'all' | 'active' | 'scheduled' | 'expired' | 'none'
+      stock?:  'in_stock' | 'low_stock' | 'no_stock'
       q?:      string
       limit?:  number
       offset?: number
@@ -632,12 +646,17 @@ export class StoreConfigService {
       .from('products')
       .select('id, name, sku, price, sale_price, sale_start_at, sale_end_at, sale_badge_text, photo_urls, stock, storefront_visible, category', { count: 'exact' })
       .eq('organization_id', orgId)
-      .order('updated_at', { ascending: false })
-      .range(offset, offset + limit - 1)
 
     if (opts.q?.trim()) {
       const esc = opts.q.trim().replace(/[%]/g, '')
       q = q.or(`name.ilike.%${esc}%,sku.ilike.%${esc}%`)
+    }
+
+    // Filtro de estoque server-side (mesma regra que era client-side: low = 1..5)
+    switch (opts.stock) {
+      case 'in_stock':  q = q.gt('stock', 0); break
+      case 'low_stock': q = q.gt('stock', 0).lte('stock', 5); break
+      case 'no_stock':  q = q.lte('stock', 0); break
     }
 
     // Filtros de janela
@@ -660,6 +679,10 @@ export class StoreConfigService {
         q = q.is('sale_price', null)
         break
     }
+
+    q = q
+      .order('updated_at', { ascending: false })
+      .range(offset, offset + limit - 1)
 
     const { data, error, count } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)

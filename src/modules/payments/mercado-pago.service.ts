@@ -23,6 +23,16 @@ export class MercadoPagoService {
 
   constructor(private readonly credentials: CredentialsService) {}
 
+  /** Status de configuração do MP pra org (sem expor a chave).
+   *  scope: 'org' se tem chave própria, 'global' se usa fallback, null se nenhuma. */
+  async isConfigured(orgId: string): Promise<{ configured: boolean; scope: 'org' | 'global' | null }> {
+    const org = await this.credentials.getDecryptedKey(orgId, 'mercadopago', 'MP_ACCESS_TOKEN').catch(() => null)
+    if (org) return { configured: true, scope: 'org' }
+    const global = await this.credentials.getDecryptedKey(null, 'mercadopago', 'MP_ACCESS_TOKEN').catch(() => null)
+    if (global) return { configured: true, scope: 'global' }
+    return { configured: false, scope: null }
+  }
+
   /** Pega o access_token do MP da org (org-specific → fallback global). */
   async getAccessToken(orgId: string): Promise<string> {
     const key =

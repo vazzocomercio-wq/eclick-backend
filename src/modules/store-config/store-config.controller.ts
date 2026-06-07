@@ -66,6 +66,14 @@ export class StoreConfigController {
     return THEME_PRESETS
   }
 
+  /** GET /store/config/products-count → { visible } — contagem de produtos no ar na vitrine */
+  @Get('products-count')
+  @RequirePermission('store.view')
+  productsCount(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.countPublicProducts(u.orgId)
+  }
+
   // ── Promoções por produto ─────────────────────────────────────────────
   // GET    /store/config/promotions?filter=active|scheduled|expired|none|all&q=&limit=&offset=
   // PATCH  /store/config/promotions/:productId
@@ -76,6 +84,7 @@ export class StoreConfigController {
   listPromotions(
     @ReqUser() u: ReqUserPayload,
     @Query('filter') filter?: string,
+    @Query('stock')  stock?:  string,
     @Query('q')      q?:      string,
     @Query('limit')  limit?:  string,
     @Query('offset') offset?: string,
@@ -85,8 +94,13 @@ export class StoreConfigController {
     const safeFilter = (validFilters as readonly string[]).includes(filter ?? 'all')
       ? (filter as typeof validFilters[number])
       : 'all'
+    const validStock = ['in_stock', 'low_stock', 'no_stock'] as const
+    const safeStock = (validStock as readonly string[]).includes(stock ?? '')
+      ? (stock as typeof validStock[number])
+      : undefined
     return this.svc.listProductsForPromotionAdmin(u.orgId, {
       filter: safeFilter,
+      stock:  safeStock,
       q,
       limit:  limit  ? parseInt(limit,  10) : undefined,
       offset: offset ? parseInt(offset, 10) : undefined,

@@ -27,6 +27,15 @@ export class StripeService {
 
   constructor(private readonly credentials: CredentialsService) {}
 
+  /** Status de configuração do Stripe pra org (sem expor a chave). */
+  async isConfigured(orgId: string): Promise<{ configured: boolean; scope: 'org' | 'global' | null }> {
+    const org = await this.credentials.getDecryptedKey(orgId, 'stripe', 'STRIPE_SECRET_KEY').catch(() => null)
+    if (org) return { configured: true, scope: 'org' }
+    const global = await this.credentials.getDecryptedKey(null, 'stripe', 'STRIPE_SECRET_KEY').catch(() => null)
+    if (global) return { configured: true, scope: 'global' }
+    return { configured: false, scope: null }
+  }
+
   async getSecretKey(orgId: string): Promise<string> {
     const key =
       (await this.credentials.getDecryptedKey(orgId, 'stripe', 'STRIPE_SECRET_KEY').catch(() => null)) ??

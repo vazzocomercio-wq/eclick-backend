@@ -723,7 +723,7 @@ export class StorefrontVisualizerService {
         .from('storefront_visualizer_generations')
         .update({ whatsapp_sent: sentOk, active_deal_id: dealId })
         .eq('id', generationId)
-        .then(undefined, () => undefined)
+        .then(undefined, () => undefined) // best-effort: marcação da entrega não pode quebrar o fluxo
     }
   }
 

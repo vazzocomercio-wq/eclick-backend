@@ -123,6 +123,14 @@ export class PaymentsController {
 export class StorefrontOrdersAdminController {
   constructor(private readonly svc: PaymentsService) {}
 
+  /** GET /storefront-orders/gateway-status → status real de conexão MP/Stripe da org */
+  @Get('gateway-status')
+  @RequirePermission('store.view')
+  gatewayStatus(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.getGatewayStatus(u.orgId)
+  }
+
   @Patch(':id/shipping')
   @RequirePermission('orders.update_status')
   updateShipping(
