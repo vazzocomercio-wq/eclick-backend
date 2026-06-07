@@ -1,8 +1,10 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { computeContributionMargin, round2 } from '../../../common/margin'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
+import type { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
 
@@ -29,17 +31,62 @@ export class ShopeeOrdersIngestionService {
     private readonly channelSettings: ChannelSettingsService,
   ) {}
 
-  async syncOrders(orgId: string, days = ShopeeOrdersIngestionService.DEFAULT_DAYS): Promise<{
-    shop_id: number
-    orders:  number
-    lines:   number
-    failed:  number
-    from:    string
-    to:      string
+  private static readonly CRON_DAYS = 3
+
+  /** Cron horário — sincroniza janela curta de TODAS as orgs com loja Shopee.
+   *  Gated por env SHOPEE_ORDER_SYNC='on' (controle de rollout). */
+  @Cron('0 */1 * * *', { name: 'shopee-orders-sync' })
+  async syncTick(): Promise<void> {
+    if (process.env.SHOPEE_ORDER_SYNC !== 'on') return
+    const { data: rows } = await supabaseAdmin
+      .from('marketplace_connections')
+      .select('organization_id')
+      .eq('platform', 'shopee')
+      .eq('status', 'connected')
+    const orgIds = [...new Set((rows ?? []).map(r => r.organization_id as string))]
+    for (const orgId of orgIds) {
+      try {
+        await this.syncOrders(orgId, ShopeeOrdersIngestionService.CRON_DAYS)
+      } catch (e) {
+        this.logger.warn(`[shopee.orders.cron] org=${orgId}: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+  }
+
+  /** Lista as conexões Shopee da org (multi-loja). */
+  private async shopeeConnections(orgId: string): Promise<MpConnection[]> {
+    return (await this.mp.listConnections(orgId)).filter(c => c.platform === 'shopee')
+  }
+
+  /** Sincroniza TODAS as lojas Shopee da org (multi-loja). Retorna 1 resumo por loja. */
+  async syncOrders(orgId: string, days = ShopeeOrdersIngestionService.DEFAULT_DAYS): Promise<Array<{
+    shop_id: number | null
+    orders?:  number
+    lines?:   number
+    failed?:  number
+    from?:    string
+    to?:      string
+    error?:   string
+  }>> {
+    const conns = await this.shopeeConnections(orgId)
+    if (conns.length === 0) throw new NotFoundException('Nenhuma loja Shopee conectada nesta organização')
+    const out = []
+    for (const c of conns) {
+      try {
+        out.push(await this.syncShop(orgId, c, days))
+      } catch (e) {
+        this.logger.warn(`[shopee.orders] shop=${c.shop_id} falhou: ${e instanceof Error ? e.message : e}`)
+        out.push({ shop_id: c.shop_id ?? null, error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    return out
+  }
+
+  /** Sincroniza UMA loja Shopee → orders. */
+  private async syncShop(orgId: string, baseConn: MpConnection, days: number): Promise<{
+    shop_id: number; orders: number; lines: number; failed: number; from: string; to: string
   }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    const conn = await this.productSync.ensureFreshToken(baseConn)
     if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
     const shopId = conn.shop_id
 
@@ -57,7 +104,7 @@ export class ShopeeOrdersIngestionService {
     let failed = 0
     for (const od of details) {
       try {
-        lines += await this.mirrorOrder(orgId, od, commissionPct)
+        lines += await this.mirrorOrder(orgId, od, commissionPct, shopId)
       } catch (e: unknown) {
         failed++
         this.logger.warn(`[shopee.orders] pedido falhou: ${(e as Error)?.message}`)
@@ -68,9 +115,11 @@ export class ShopeeOrdersIngestionService {
     return { shop_id: shopId, orders: details.length, lines, failed, from: from.toISOString(), to: to.toISOString() }
   }
 
-  /** Mapeia 1 pedido Shopee (detail com item_list) → N linhas em orders (1/SKU). */
+  /** Mapeia 1 pedido Shopee (detail com item_list) → N linhas em orders (1/SKU).
+   *  `shopId` carimba a conta no pedido (channel_account_id) pro dropship
+   *  distinguir multi-loja. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async mirrorOrder(orgId: string, od: any, commissionPct: number): Promise<number> {
+  private async mirrorOrder(orgId: string, od: any, commissionPct: number, shopId: number): Promise<number> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const items: any[] = Array.isArray(od?.item_list) ? od.item_list : []
     if (!items.length) return 0
@@ -165,6 +214,8 @@ export class ShopeeOrdersIngestionService {
           contribution_margin,
           contribution_margin_pct,
           status,
+          shipping_status:    this.mapShippingStatus(od?.order_status),
+          channel_account_id: String(shopId),  // carimbo da loja (multi-loja dropship)
           buyer_name:        buyer,
           buyer_phone:       phone,
           buyer_doc_number:  cpf,
@@ -194,6 +245,23 @@ export class ShopeeOrdersIngestionService {
       case 'CANCELLED':
       case 'TO_RETURN':         return 'cancelled'
       default:                  return 'pending'
+    }
+  }
+
+  /** Shopee order_status → shipping_status canônico (vocabulário do funil
+   *  dropship: ready_to_ship NÃO entra em OC; shipped/delivered sim). */
+  private mapShippingStatus(s?: string): string | null {
+    switch ((s ?? '').toUpperCase()) {
+      case 'READY_TO_SHIP':
+      case 'PROCESSED':
+      case 'RETRY_SHIP':         return 'ready_to_ship'  // etiqueta gerada, NÃO postado
+      case 'SHIPPED':
+      case 'TO_CONFIRM_RECEIVE': return 'shipped'
+      case 'COMPLETED':          return 'delivered'
+      case 'IN_CANCEL':
+      case 'CANCELLED':
+      case 'TO_RETURN':          return 'cancelled'
+      default:                   return null            // UNPAID etc → sem envio
     }
   }
 }

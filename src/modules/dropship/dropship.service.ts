@@ -1291,7 +1291,7 @@ export class DropshipService {
     const { data: orders } = await supabaseAdmin
       .from('orders')
       .select(`
-        id, source, external_order_id, seller_id, product_id, sku,
+        id, source, external_order_id, seller_id, channel_account_id, product_id, sku,
         quantity, sale_price, status, shipping_status, payment_status,
         sold_at, created_at, raw_data
       `)
@@ -1354,8 +1354,9 @@ export class DropshipService {
       // 3. Parceiros CANDIDATOS: a CONTA habilita o dropship (pode ter vários
       //    parceiros); quem escolhe é o produto (passo 5). ML traz a conta na
       //    linha (order.seller_id) → candidatos daquela conta. Canais sem conta
-      //    na linha (Shopee/TikTok/loja própria) → todos os parceiros do canal.
-      const account = order.seller_id
+      //    na linha → usam o shop_id carimbado na ingestão (channel_account_id);
+      //    sem isso, caem em todos os parceiros do canal.
+      const account = order.seller_id ?? order.channel_account_id ?? null
       const candidatesSup = account != null
         ? (accSupByAccount.get(`${marketplace}:${account}`) ?? [])
         : (accSupByMarketplace.get(marketplace) ?? [])
@@ -2069,12 +2070,14 @@ export class DropshipService {
     // da OC mostra a data da venda de verdade, não a hora em que o cron rodou.
     const ocOrderIds = [...new Set(idents.map(i => i.order_id).filter(Boolean) as string[])]
     const { data: ocOrders } = ocOrderIds.length > 0
-      ? await supabaseAdmin.from('orders').select('id, sold_at, seller_id').in('id', ocOrderIds)
-      : { data: [] as Array<{ id: string; sold_at: string | null; seller_id: number | null }> }
+      ? await supabaseAdmin.from('orders').select('id, sold_at, seller_id, channel_account_id').in('id', ocOrderIds)
+      : { data: [] as Array<{ id: string; sold_at: string | null; seller_id: number | null; channel_account_id: string | null }> }
     const soldAtByOrder = new Map((ocOrders ?? []).map(o => [o.id, o.sold_at as string | null]))
-    // Conta REAL do pedido (ML traz seller_id na linha) — pra OC agrupar/rotular
-    // pela conta de verdade quando há multi-conta no mesmo fornecedor.
-    const sellerByOrder = new Map((ocOrders ?? []).map(o => [o.id, (o.seller_id as number | null) ?? null]))
+    // Conta REAL do pedido: ML traz seller_id na linha; Shopee/TikTok carimbam
+    // o shop_id em channel_account_id. Pra OC agrupar/rotular pela conta de
+    // verdade quando há multi-conta/multi-loja no mesmo fornecedor.
+    const acctByOrder = new Map((ocOrders ?? []).map(o =>
+      [o.id, String((o.seller_id as number | null) ?? (o.channel_account_id as string | null) ?? '') || null]))
 
     // Pré-busca seller_account_suppliers pra resolver labels
     const supplierIds = [...new Set(idents.map(i => i.supplier_id))]
@@ -2124,15 +2127,15 @@ export class DropshipService {
       // não pelo 1º mapeamento — senão com multi-conta no mesmo fornecedor a OC
       // mistura contas e rotula errado. Casa exata pelo seller_id real; canais
       // sem conta na linha (Shopee/TikTok/storefront) caem no mapeamento do canal.
-      const realSellerId = sellerByOrder.get(i.order_id) ?? null
-      const acc = (realSellerId != null
+      const realAcct = acctByOrder.get(i.order_id) ?? null
+      const acc = (realAcct != null
         ? (accountSuppliers ?? []).find(a =>
             a.supplier_id === i.supplier_id && a.marketplace === i.marketplace &&
-            Number(a.seller_id) === Number(realSellerId))
+            String(a.seller_id ?? a.shopee_shop_id ?? a.amazon_seller_id ?? '') === String(realAcct))
         : undefined)
         ?? (accountSuppliers ?? []).find(a =>
             a.supplier_id === i.supplier_id && a.marketplace === i.marketplace)
-      const sellerId = realSellerId ?? acc?.seller_id ?? null
+      const sellerId = acc?.seller_id ?? null
       const shopeeShopId = acc?.shopee_shop_id ?? null
       const amazonSellerId = acc?.amazon_seller_id ?? null
       const accountLabel = acc?.account_label ?? null
@@ -2142,7 +2145,8 @@ export class DropshipService {
       // separadas (carry-forward natural). Fallback defensivo: data de
       // identificação, senão hoje.
       const shippedDate = String(i.shipped_at ?? i.identified_at ?? today.toISOString()).slice(0, 10)
-      const acct = sellerId ?? shopeeShopId ?? amazonSellerId ?? 'unknown'
+      // Chave de agrupamento pela conta REAL (split correto multi-conta/multi-loja).
+      const acct = realAcct ?? sellerId ?? shopeeShopId ?? amazonSellerId ?? 'unknown'
       const key = [i.supplier_id, i.marketplace, acct, shippedDate].join(':')
       if (!groups.has(key)) {
         groups.set(key, {
