@@ -1161,7 +1161,7 @@ export class DropshipService {
     // Pega identifications em estado intermediário (identified ou awaiting_shipment)
     const { data: idents } = await supabaseAdmin
       .from('dropship_order_identifications')
-      .select('id, order_id, supplier_id, marketplace_status, shipping_status, dropship_status, shipped_at, label_ready_at, partner_confirmed_at')
+      .select('id, order_id, supplier_id, marketplace_status, shipping_status, dropship_status, shipped_at, label_ready_at, partner_confirmed_at, logistic_type')
       .eq('organization_id', orgId)
       .in('dropship_status', ['identified', 'awaiting_shipment', 'shipped'])
       .limit(500)
@@ -1222,6 +1222,16 @@ export class DropshipService {
         if (i.dropship_status !== 'cancelled') {
           patch(i.id, { dropship_status: 'cancelled', hold_reason: 'Pedido cancelado no marketplace' })
           cancelled++
+        }
+        continue
+      }
+
+      // Full (fulfillment): estoque já no CD do ML → o parceiro foi pago no
+      // abastecimento, não por venda. Fora da OC por venda (acerto separado).
+      // Parqueia em on_hold uma vez; sai da fila de promoção.
+      if (i.logistic_type === 'fulfillment') {
+        if (i.dropship_status !== 'on_hold') {
+          patch(i.id, { dropship_status: 'on_hold', hold_reason: 'Full (fulfillment) — acerto separado, fora da OC por venda' })
         }
         continue
       }
@@ -1375,6 +1385,13 @@ export class DropshipService {
       const salePrice = Number(order.sale_price ?? 0)
       const margin = salePrice - cost
 
+      // Modal de envio (self_service=Flex, cross_docking=Coletas,
+      // drop_off/xd_drop_off=Agência/Correios, fulfillment=Full). Mora no
+      // raw_data.shipping (capturado na ingestão). Usado pra exibir o modal na
+      // OC e pra excluir Full do fluxo de OC por venda (acerto separado).
+      const logisticType = (((order.raw_data as Record<string, unknown> | null)
+        ?.shipping as Record<string, unknown> | undefined)?.logistic_type as string | null) ?? null
+
       // 6. Criar identification (idempotente via UNIQUE order_id)
       const { error } = await supabaseAdmin
         .from('dropship_order_identifications')
@@ -1398,6 +1415,7 @@ export class DropshipService {
           marketplace_status: order.status,
           shipping_status: order.shipping_status,
           payment_status: order.payment_status,
+          logistic_type: logisticType,
           dropship_status: pp ? 'identified' : 'on_hold',
           hold_reason: pp ? null : 'Sem mapeamento supplier_product (rever catálogo)',
           identified_at: new Date().toISOString(),
@@ -1995,7 +2013,8 @@ export class DropshipService {
         id, supplier_id, supplier_product_id, product_id,
         marketplace, ml_pack_id, ml_order_id, ml_shipment_id,
         partner_sku, master_sku, quantity,
-        cost_at_sale, sale_price, identified_at, shipped_at, order_id
+        cost_at_sale, sale_price, identified_at, shipped_at, order_id,
+        logistic_type
       `)
       .eq('organization_id', orgId)
       .in('dropship_status', ['eligible_for_oc', 'shipped_confirmed'])
@@ -2143,6 +2162,7 @@ export class DropshipService {
           handling_cost: handlingCost,
           sale_date: soldAtByOrder.get(ident.order_id) ?? ident.identified_at,
           shipped_at: ident.shipped_at,
+          logistic_type: ident.logistic_type ?? null,
           status: 'included',
         })
       }
@@ -2262,7 +2282,7 @@ export class DropshipService {
         quantity, unit_cost, packaging_cost, handling_cost,
         unit_total_cost, line_total,
         marketplace, ml_order_id, ml_pack_id,
-        sale_date, shipped_at, status,
+        sale_date, shipped_at, logistic_type, status,
         products(id, name, photo_urls)
       `)
       .eq('oc_id', id)
@@ -2573,7 +2593,7 @@ export class DropshipService {
       .select(`
         id, partner_sku, master_sku, product_name, variation_label,
         quantity, unit_cost, packaging_cost, handling_cost, line_total,
-        marketplace, ml_order_id, sale_date, status,
+        marketplace, ml_order_id, sale_date, logistic_type, status,
         products(name, photo_urls)
       `)
       .eq('oc_id', session.oc_id)
