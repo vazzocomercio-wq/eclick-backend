@@ -58,6 +58,16 @@ function optHex(v: unknown, fb: string | undefined): string | undefined {
 function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T): T {
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback
 }
+/** Ponto focal: aceita preset (center/top/...) OU "x% y%" (0-100). Usado direto
+ *  como background-position no renderizador. */
+function focus(v: unknown, fallback: string): string {
+  if (typeof v !== 'string') return fallback
+  const s = v.trim()
+  if (['center', 'top', 'bottom', 'left', 'right'].includes(s)) return s
+  const m = /^(\d{1,3})%\s+(\d{1,3})%$/.exec(s)
+  if (m && +m[1] <= 100 && +m[2] <= 100) return `${+m[1]}% ${+m[2]}%`
+  return fallback
+}
 function bool(v: unknown, fallback: boolean): boolean {
   return typeof v === 'boolean' ? v : fallback
 }
@@ -157,7 +167,7 @@ function validateBackground(raw: unknown, fb: BackgroundStyle): BackgroundStyle 
   if (kind === 'color')    out.color = hex(r.color, fb.color ?? '#ffffff')
   if (kind === 'image') {
     out.imageUrl   = str(r.imageUrl, fb.imageUrl ?? '')
-    out.imageFocus = oneOf(r.imageFocus, ['center','top','bottom','left','right'] as const, fb.imageFocus ?? 'center')
+    out.imageFocus = focus(r.imageFocus, fb.imageFocus ?? 'center')
   }
   if (kind === 'video') out.videoUrl = str(r.videoUrl, fb.videoUrl ?? '')
   if (kind === 'gradient') {

@@ -80,7 +80,7 @@ export interface BackgroundStyle {
   kind:        BackgroundKind
   color?:      string
   imageUrl?:   string
-  imageFocus?: 'center' | 'top' | 'bottom' | 'left' | 'right'
+  imageFocus?: string   // 'center'|'top'|'bottom'|'left'|'right' OU "x% y%" (ponto focal por clique)
   videoUrl?:   string
   gradient?:   { from: string; to: string; angle?: number }
   overlayColor?: string
