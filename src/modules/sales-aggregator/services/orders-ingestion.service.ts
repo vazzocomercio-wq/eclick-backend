@@ -136,6 +136,7 @@ export class OrdersIngestionService {
           shipObj.estimated_delivery_date = sh.estimated_delivery_date ?? shipObj.estimated_delivery_date ?? null
           shipObj.posting_deadline        = sh.posting_deadline        ?? shipObj.posting_deadline        ?? null
           shipObj.date_created            = sh.date_created            ?? shipObj.date_created            ?? null
+          shipObj.date_shipped            = sh.date_shipped            ?? shipObj.date_shipped            ?? null
         }
       } catch { /* best-effort */ }
     }
@@ -449,6 +450,7 @@ export class OrdersIngestionService {
             estimated_delivery_date: shipment.estimated_delivery_date ?? existingShipping.estimated_delivery_date ?? null,
             posting_deadline:        shipment.posting_deadline        ?? existingShipping.posting_deadline        ?? null,
             date_created:            shipment.date_created            ?? existingShipping.date_created            ?? null,
+            date_shipped:            shipment.date_shipped            ?? existingShipping.date_shipped            ?? null,
           },
         }
 
@@ -456,6 +458,7 @@ export class OrdersIngestionService {
           .from('orders')
           .update({
             shipping_status: shipment.status,
+            shipped_at:      (shipment.date_shipped as string | null) ?? null,
             raw_data:        newRawData,
           })
           .eq('id', r.id)
@@ -570,11 +573,13 @@ export class OrdersIngestionService {
             estimated_delivery_date: shipment.estimated_delivery_date ?? existingShipping.estimated_delivery_date ?? null,
             posting_deadline:        shipment.posting_deadline        ?? existingShipping.posting_deadline        ?? null,
             date_created:            shipment.date_created            ?? existingShipping.date_created            ?? null,
+            date_shipped:            shipment.date_shipped            ?? existingShipping.date_shipped            ?? null,
           },
         }
 
         const updatePayload: Record<string, unknown> = { raw_data: newRawData }
         if (shipment.status) updatePayload.shipping_status = shipment.status
+        if (shipment.date_shipped) updatePayload.shipped_at = shipment.date_shipped
 
         const { error: upErr } = await supabaseAdmin
           .from('orders')
@@ -871,6 +876,7 @@ export class OrdersIngestionService {
           status:                  order.status,
           shipping_id:             order.shipping?.id      ?? null,
           shipping_status:         order.shipping?.status  ?? null,
+          shipped_at:              ((order.shipping as Record<string, unknown> | undefined)?.date_shipped as string | null) ?? null,
           buyer_name:              buyerNameFallback,
           buyer_username:          order.buyer?.nickname ?? null,
           buyer_doc_type:          buyer?.doc_type        ?? null,
@@ -924,6 +930,7 @@ export class OrdersIngestionService {
                   estimated_delivery_date: (order.shipping as Record<string, unknown>).estimated_delivery_date ?? null,
                   posting_deadline:        (order.shipping as Record<string, unknown>).posting_deadline        ?? null,
                   date_created:            (order.shipping as Record<string, unknown>).date_created            ?? null,
+                  date_shipped:            (order.shipping as Record<string, unknown>).date_shipped            ?? null,
                   substatus:               (order.shipping as Record<string, unknown>).substatus               ?? null,
                   receiver_address:        (order.shipping as Record<string, unknown>).receiver_address        ?? null,
                 }

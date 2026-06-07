@@ -203,6 +203,7 @@ export class MercadoLivreClient {
     estimated_delivery_date: unknown
     posting_deadline:        unknown
     date_created:            unknown
+    date_shipped:            unknown
   } | null> {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -221,6 +222,12 @@ export class MercadoLivreClient {
         estimated_delivery_date: data.estimated_delivery_date ?? data.shipping_option?.estimated_delivery_final?.date ?? null,
         posting_deadline:        data.posting_deadline        ?? data.shipping_option?.estimated_handling_limit?.date ?? null,
         date_created:            data.date_created            ?? null,
+        // Data REAL de postagem (saiu da mão do seller). O formato legado
+        // do shipment traz status_history com os carimbos de cada etapa.
+        // date_shipped = postou de verdade; date_first_printed = fallback.
+        date_shipped:            data.status_history?.date_shipped
+                              ?? data.status_history?.date_first_printed
+                              ?? data.date_first_printed ?? null,
       }
     } catch {
       return null

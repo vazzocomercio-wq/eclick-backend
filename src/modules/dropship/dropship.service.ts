@@ -1174,10 +1174,14 @@ export class DropshipService {
     const orderIds = idents.map(i => i.order_id).filter(Boolean) as string[]
     const { data: orders } = await supabaseAdmin
       .from('orders')
-      .select('id, status, shipping_status')
+      .select('id, status, shipping_status, shipped_at')
       .in('id', orderIds)
-    const orderMap = new Map<string, { status: string | null; shipping_status: string | null }>(
-      (orders ?? []).map(o => [o.id, { status: o.status as string | null, shipping_status: o.shipping_status as string | null }]),
+    const orderMap = new Map<string, { status: string | null; shipping_status: string | null; shipped_at: string | null }>(
+      (orders ?? []).map(o => [o.id, {
+        status: o.status as string | null,
+        shipping_status: o.shipping_status as string | null,
+        shipped_at: o.shipped_at as string | null,
+      }]),
     )
 
     // Toggle de confirmação obrigatória do parceiro (Camada 2b), por fornecedor.
@@ -1209,7 +1213,7 @@ export class DropshipService {
     }
 
     for (const i of idents) {
-      const cur = orderMap.get(i.order_id) ?? { status: i.marketplace_status, shipping_status: i.shipping_status }
+      const cur = orderMap.get(i.order_id) ?? { status: i.marketplace_status, shipping_status: i.shipping_status, shipped_at: i.shipped_at }
       const orderStatus = cur.status ?? i.marketplace_status
       const shipping    = cur.shipping_status ?? i.shipping_status
 
@@ -1231,8 +1235,12 @@ export class DropshipService {
         const needsPartner = requireConfirm.get(i.supplier_id ?? '') === true
         const confirmed    = !needsPartner || !!i.partner_confirmed_at
         const target       = confirmed ? 'eligible_for_oc' : 'shipped'
+        // Data de expedição = data REAL de postagem do canal (orders.shipped_at,
+        // capturada da ML), não a hora do cron. Só cai pra `now` se o canal ainda
+        // não devolveu a data. Isso torna a coorte da OC precisa.
+        const realShippedAt = i.shipped_at ?? cur.shipped_at ?? now
         if (i.dropship_status !== target || !i.shipped_at) {
-          patch(i.id, { dropship_status: target, shipped_at: i.shipped_at ?? now })
+          patch(i.id, { dropship_status: target, shipped_at: realShippedAt })
           if (confirmed) promoted++
           else awaiting++
         }
@@ -1357,8 +1365,10 @@ export class DropshipService {
         .eq('product_id', productId)
         .maybeSingle()
 
-      if (!pp) { skipped++; continue }   // produto não vinculado a esse fornecedor = não é dropship desta conta
-
+      // Produto não vinculado a esse fornecedor: NÃO pula calado. A venda é de
+      // uma conta-fornecedor, então registra em `on_hold` (com hold_reason de
+      // mapeamento) pra (a) não sumir do radar e (b) alimentar a divergência
+      // `missing_partner_product` (Camada 4). on_hold não entra em OC.
       const cost = pp
         ? Number(pp.unit_cost) + Number(pp.partner_packaging_cost ?? 0) + Number(pp.partner_handling_cost ?? 0)
         : 0
@@ -1994,6 +2004,14 @@ export class DropshipService {
 
     if (!idents || idents.length === 0) return []
 
+    // Pré-busca a data REAL da compra (orders.sold_at) p/ cada pedido — o item
+    // da OC mostra a data da venda de verdade, não a hora em que o cron rodou.
+    const ocOrderIds = [...new Set(idents.map(i => i.order_id).filter(Boolean) as string[])]
+    const { data: ocOrders } = ocOrderIds.length > 0
+      ? await supabaseAdmin.from('orders').select('id, sold_at').in('id', ocOrderIds)
+      : { data: [] as Array<{ id: string; sold_at: string | null }> }
+    const soldAtByOrder = new Map((ocOrders ?? []).map(o => [o.id, o.sold_at as string | null]))
+
     // Pré-busca seller_account_suppliers pra resolver labels
     const supplierIds = [...new Set(idents.map(i => i.supplier_id))]
     const { data: accountSuppliers } = await supabaseAdmin
@@ -2123,7 +2141,7 @@ export class DropshipService {
           unit_cost: unitCost,
           packaging_cost: packagingCost,
           handling_cost: handlingCost,
-          sale_date: ident.identified_at,
+          sale_date: soldAtByOrder.get(ident.order_id) ?? ident.identified_at,
           shipped_at: ident.shipped_at,
           status: 'included',
         })
