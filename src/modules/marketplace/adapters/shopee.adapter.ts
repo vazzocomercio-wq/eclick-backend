@@ -542,6 +542,8 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   async inspectItemStock(conn: MpConnection, itemId: number): Promise<{
     item_id:        number
     base_stock_info: unknown
+    base_price_info: unknown
+    has_model:       boolean
     models:          unknown
   }> {
     const { accessToken, shopId } = this.requireShop(conn)
@@ -565,6 +567,8 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const item0 = (info?.response?.item_list ?? [])[0] as any
     const baseStockInfo = item0?.stock_info_v2 ?? item0?.stock_info ?? null
+    const basePriceInfo = item0?.price_info ?? null   // preço nível-item (anúncio sem variação)
+    const hasModel = !!item0?.has_model
 
     // 2) get_model_list — stock por model (variação)
     const mPath = '/api/v2/product/get_model_list'
@@ -583,7 +587,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     if (models?.error) throw new Error(`Shopee ${models.error}: ${models.message}`)
 
     this.logger.log(`[shopee.inspectStock] item=${itemId} base_stock_info=${JSON.stringify(baseStockInfo)} models=${JSON.stringify(models?.response ?? null)}`)
-    return { item_id: itemId, base_stock_info: baseStockInfo, models: models?.response ?? null }
+    return { item_id: itemId, base_stock_info: baseStockInfo, base_price_info: basePriceInfo, has_model: hasModel, models: models?.response ?? null }
   }
 
   /** Sync de confirmação — status atual de 1 item (get_item_base_info →

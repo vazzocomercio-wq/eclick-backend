@@ -89,21 +89,32 @@ export class ShopeeMarketingService {
     const { data: org } = await supabaseAdmin.from('organizations').select('min_campaign_margin_pct').eq('id', orgId).maybeSingle<{ min_campaign_margin_pct: number | null }>()
     const floorPct = org?.min_campaign_margin_pct ?? 8
 
-    // models reais (preço de lista) via inspect
+    // models reais (preço de lista) via inspect. Anúncio COM variação → 1 por
+    // model; SEM variação (has_model=false) → não há models, o preço vive no
+    // ITEM (base_price_info) → trata como 1 "model" item-level (model_id 0).
     const inspect = await adapter.inspectItemStock(conn, itemId)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawModels = ((inspect.models as any)?.model ?? []) as any[]
-    const models = rawModels.map(m => {
-      const original = Number(m?.price_info?.[0]?.original_price ?? m?.price_info?.[0]?.current_price ?? 0)
+    const mkModel = (model_id: number, original: number) => {
       const promo = round2(original * (1 - d / 100))
       const mm = computeContributionMargin({
         price: promo, saleFee: round2(promo * commissionPct / 100), shipping: 0,
         cost, taxPercentage: prod?.tax_percentage ?? 0, taxOnFreight: prod?.tax_on_freight ?? false,
       })
-      return { model_id: Number(m?.model_id ?? 0), original_price: original, promotion_price: promo, margin_pct: mm.contributionMarginPct }
-    }).filter(m => m.original_price > 0)
+      return { model_id, original_price: original, promotion_price: promo, margin_pct: mm.contributionMarginPct }
+    }
+    let models = rawModels
+      .map(m => mkModel(Number(m?.model_id ?? 0), Number(m?.price_info?.[0]?.original_price ?? m?.price_info?.[0]?.current_price ?? 0)))
+      .filter(m => m.original_price > 0)
+    // fallback item-level (sem variação)
+    if (!models.length) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bp = (inspect.base_price_info as any)?.[0]
+      const itemPrice = Number(bp?.original_price ?? bp?.current_price ?? 0)
+      if (itemPrice > 0) models = [mkModel(0, itemPrice)]
+    }
 
-    if (!models.length) throw new BadRequestException('Não foi possível ler os preços das variações na Shopee.')
+    if (!models.length) throw new BadRequestException('Não foi possível ler o preço deste anúncio na Shopee.')
     // GUARD: nenhuma variação pode ficar abaixo do piso de margem
     const below = models.find(m => m.margin_pct < floorPct)
     if (below) throw new BadRequestException(`Desconto ${d}% derruba a margem de uma variação pra ${below.margin_pct.toFixed(1)}% (piso ${floorPct}%). Reduza o desconto.`)
