@@ -2152,6 +2152,26 @@ export class DropshipService {
     const created: Array<{ id: string; oc_number: string; gross_total: number }> = []
     const ocCounter: Record<string, number> = {}  // numeração sequencial (por data de expedição + fornecedor)
 
+    // Semeia o contador com o maior sequencial JÁ usado por (data_exp,
+    // fornecedor) — evita colisão de oc_number quando generateDailyOCs roda mais
+    // de uma vez no mesmo dia (re-run manual + cron). Sem isso o 2º run gera
+    // DOC-…-001 de novo → viola UNIQUE → itens não entram em OC.
+    const refDates = [...new Set([...groups.values()].map(g => g.reference_date))]
+    if (refDates.length > 0) {
+      const { data: existingOcs } = await supabaseAdmin
+        .from('dropship_purchase_orders')
+        .select('oc_number, reference_date, supplier_id')
+        .eq('organization_id', orgId)
+        .in('supplier_id', supplierIds)
+        .in('reference_date', refDates)
+      for (const o of (existingOcs ?? [])) {
+        const m = String(o.oc_number).match(/-(\d+)$/)
+        const seq = m ? parseInt(m[1], 10) : 0
+        const key = `${o.reference_date}:${o.supplier_id}`
+        ocCounter[key] = Math.max(ocCounter[key] ?? 0, seq)
+      }
+    }
+
     for (const [, grp] of groups) {
       const supplier = supplierById.get(grp.supplier_id)
       if (!supplier) continue
