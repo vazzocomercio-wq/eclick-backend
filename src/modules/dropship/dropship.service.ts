@@ -464,7 +464,9 @@ export class DropshipService {
         .select('platform, seller_id, shop_id, external_id, nickname, status')
         .eq('organization_id', orgId)
         .eq('platform', platformMap[marketplace])
-        .eq('status', 'active')
+        // OAuth grava status 'connected'; aceitamos 'active' tb por retrocompat.
+        // Sem isso a conta Shopee/Amazon conectada não aparecia no vínculo.
+        .in('status', ['connected', 'active'])
         .order('created_at', { ascending: false })
       raw = (data ?? []).map(r => {
         if (marketplace === 'shopee') {
