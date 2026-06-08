@@ -959,16 +959,20 @@ function pickFormat(w?: number, h?: number): ImageFormat {
  *  produto, só corrigindo exposição/ruído/inclinação. */
 function buildRoomPrompt(productName: string, extra?: string): string {
   const base = [
-    `Você é um compositor fotográfico profissional. A PRIMEIRA imagem é a FOTO REAL DO AMBIENTE de um cliente. As imagens seguintes são o PRODUTO a ser inserido: "${productName}".`,
-    `TAREFA: inserir o produto de forma fotorrealista no ambiente da primeira imagem, como se ele já estivesse fisicamente ali.`,
+    `OBJETIVO ÚNICO: pegar APENAS o produto "${productName}" e inseri-lo dentro da foto do ambiente do cliente. O resultado final É a foto do cliente, idêntica, só com o produto adicionado. Nada mais muda.`,
+    ``,
+    `AS IMAGENS:`,
+    `• A 1ª imagem é a ÚNICA fonte do AMBIENTE: é a foto real do cômodo do cliente. Esse é o cenário do resultado — paredes, piso, móveis, janelas, objetos, cores, ângulo e perspectiva.`,
+    `• As demais imagens são SÓ referência da APARÊNCIA do produto (forma, cor, material, textura, proporções). Elas podem mostrar o produto em OUTROS ambientes/cenários montados — IGNORE COMPLETAMENTE esses fundos. NÃO copie, NÃO se inspire, NÃO use NADA do cenário das imagens do produto.`,
+    ``,
     `REGRAS ESTRITAS (obrigatórias):`,
-    `1. NÃO altere o ambiente: mantenha paredes, piso, móveis, janelas, objetos, cores e a perspectiva EXATAMENTE como na foto original.`,
-    `2. NÃO altere o produto: reproduza com fidelidade total a forma, cor, material, textura, proporções e detalhes do produto de referência.`,
-    `3. Posicione o produto em escala e perspectiva corretas para o ambiente, com sombras, reflexos e iluminação coerentes com a cena.`,
-    `4. Melhore SUTILMENTE a qualidade da foto: se estiver escura, clareie; se houver ruído ou sujeira, limpe; se estiver torta, alinhe. Sem exageros e SEM mudar o conteúdo do ambiente.`,
-    `5. Enquadramento proporcional ao ambiente original. Resultado realista de catálogo, sem texto, sem marca d'água, sem bordas, sem colagem artificial.`,
+    `1. PROIBIDO trocar o ambiente. O cômodo do resultado tem que ser EXATAMENTE o da 1ª foto (mesmas paredes, piso, móveis, objetos, janelas, iluminação e perspectiva). Se o resultado mostrar qualquer outro ambiente (ex.: uma sala diferente, uma TV, móveis que não existem na foto do cliente), a tarefa FALHOU.`,
+    `2. PROIBIDO alterar o produto. Reproduza com fidelidade total a forma, cor, material, textura, proporções e detalhes do produto de referência — sem inventar um produto diferente.`,
+    `3. Coloque o produto no lugar natural dele dentro da cena do cliente (ex.: luminária de teto vai no teto da foto), em escala e perspectiva corretas, com sombras, reflexos e iluminação coerentes com aquele ambiente.`,
+    `4. Pode melhorar SUTILMENTE a foto do cliente (clarear se escura, reduzir ruído, alinhar se torta), SEM mudar o conteúdo do ambiente.`,
+    `5. Resultado fotorrealista, enquadramento igual ao da foto do cliente, sem texto, sem marca d'água, sem bordas, sem colagem artificial.`,
   ]
-  if (extra && extra.trim()) base.push(`Contexto adicional do lojista: ${extra.trim()}`)
+  if (extra && extra.trim()) base.push(``, `Contexto adicional do lojista (não pode contrariar as regras acima): ${extra.trim()}`)
   return base.join('\n')
 }
 
