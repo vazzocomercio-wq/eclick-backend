@@ -66,10 +66,18 @@ export class ShopeeMarketingService {
     const d = Math.round(Number(discountPct))
     if (!(d >= 1 && d <= 95)) throw new BadRequestException('Desconto inválido (1-95%)')
 
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    const adapter = resolved.adapter as ShopeeAdapter
+    // multi-conta: resolve a LOJA DONA do item (via account_id do listing)
+    const { data: ownerPl } = await supabaseAdmin
+      .from('product_listings')
+      .select('account_id')
+      .eq('platform', 'shopee').eq('listing_id', String(itemId))
+      .limit(1).maybeSingle<{ account_id: string }>()
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    if (!all.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const ownerShop = ownerPl?.account_id ? Number(ownerPl.account_id) : all[0].conn.shop_id
+    const chosen = all.find(r => r.conn.shop_id === ownerShop) ?? all[0]
+    const conn = await this.productSync.ensureFreshToken(chosen.conn)
+    const adapter = chosen.adapter as ShopeeAdapter
     const shopId = conn.shop_id!
 
     // produto vinculado (custo/imposto) p/ o guard de margem
@@ -174,10 +182,16 @@ export class ShopeeMarketingService {
 
   /** F18 Bloco 3 — cancela/remove um Desconto (rollback de promoção). */
   async cancelDiscount(orgId: string, discountId: number): Promise<{ ok: true }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    const adapter = resolved.adapter as ShopeeAdapter
+    // multi-conta: o desconto pertence à loja registrada em applied_promotions
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: promo } = await (supabaseAdmin.schema('shopee') as any).from('applied_promotions')
+      .select('shop_id').eq('organization_id', orgId).eq('external_id', String(discountId)).limit(1).maybeSingle()
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    if (!all.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const shop = promo?.shop_id ? Number(promo.shop_id) : all[0].conn.shop_id
+    const chosen = all.find(r => r.conn.shop_id === shop) ?? all[0]
+    const conn = await this.productSync.ensureFreshToken(chosen.conn)
+    const adapter = chosen.adapter as ShopeeAdapter
     await adapter.deleteDiscount(conn, discountId)
     // marca a promoção como cancelada (loop de outcome)
     try {

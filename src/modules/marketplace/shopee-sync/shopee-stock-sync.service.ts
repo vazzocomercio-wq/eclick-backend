@@ -83,7 +83,8 @@ export class ShopeeStockSyncService {
     return process.env.SHOPEE_STOCK_SYNC === 'on'
   }
 
-  /** Resolve conn Shopee da org + garante token fresco. Null se não conectada. */
+  /** Resolve conn Shopee da org + garante token fresco. Null se não conectada.
+   *  (PRIMEIRA conta — multi-conta usa resolveConnsMap/resolveConnForItem.) */
   private async resolveConn(orgId: string): Promise<{ conn: MpConnection; adapter: ShopeeAdapter } | null> {
     const resolved = await this.mp.resolve(orgId, 'shopee')
     if (!resolved?.conn?.shop_id) return null
@@ -91,17 +92,43 @@ export class ShopeeStockSyncService {
     return { conn, adapter: resolved.adapter as ShopeeAdapter }
   }
 
-  /** Anúncios Shopee vinculados a um produto (item_id + variation_id). */
-  private async listingsForProduct(productId: string, shopId: number): Promise<Array<{ listing_id: string; variation_id: string | null }>> {
+  /** Multi-conta: Map<shop_id, {conn, adapter}> de TODAS as lojas (token fresco). */
+  private async resolveConnsMap(orgId: string): Promise<Map<number, { conn: MpConnection; adapter: ShopeeAdapter }>> {
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    const map = new Map<number, { conn: MpConnection; adapter: ShopeeAdapter }>()
+    for (const { conn: c0, adapter } of all) {
+      if (!c0.shop_id) continue
+      try { map.set(c0.shop_id, { conn: await this.productSync.ensureFreshToken(c0), adapter: adapter as ShopeeAdapter }) }
+      catch (e) { this.logger.warn(`[shopee.stock] token shop=${c0.shop_id}: ${(e as Error)?.message}`) }
+    }
+    return map
+  }
+
+  /** Multi-conta: resolve a loja DONA de um item (via account_id do listing). */
+  private async resolveConnForItem(orgId: string, itemId: number): Promise<{ conn: MpConnection; adapter: ShopeeAdapter; shopId: number } | null> {
     const { data } = await supabaseAdmin
       .from('product_listings')
-      .select('listing_id, variation_id')
+      .select('account_id')
+      .eq('platform', 'shopee')
+      .eq('listing_id', String(itemId))
+      .limit(1)
+      .maybeSingle<{ account_id: string }>()
+    const conns = await this.resolveConnsMap(orgId)
+    const shopId = data?.account_id ? Number(data.account_id) : [...conns.keys()][0]
+    const r = conns.get(shopId)
+    return r ? { ...r, shopId } : null
+  }
+
+  /** Anúncios Shopee vinculados a um produto, COM a loja (account_id). */
+  private async listingsForProduct(productId: string): Promise<Array<{ listing_id: string; variation_id: string | null; shop_id: number }>> {
+    const { data } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id, variation_id, account_id')
       .eq('product_id', productId)
       .eq('platform', 'shopee')
-      .eq('account_id', String(shopId))
       .eq('is_active', true)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return ((data ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null }))
+    return ((data ?? []) as any[]).map(r => ({ listing_id: String(r.listing_id), variation_id: r.variation_id ?? null, shop_id: Number(r.account_id) }))
   }
 
   /** Empurra `qty` pros anúncios dados, logando cada push em stock_sync_logs.
@@ -187,11 +214,10 @@ export class ShopeeStockSyncService {
     const orgId = prod?.organization_id ?? null
     if (!orgId) return { pushed: 0, skipped: 'no_org' }
 
-    const resolved = await this.resolveConn(orgId)
-    if (!resolved) return { pushed: 0, skipped: 'shopee_not_connected' }
-    const { conn, adapter } = resolved
+    const conns = await this.resolveConnsMap(orgId)
+    if (!conns.size) return { pushed: 0, skipped: 'shopee_not_connected' }
 
-    const listings = await this.listingsForProduct(productId, conn.shop_id!)
+    const listings = await this.listingsForProduct(productId)  // todas as lojas
     if (!listings.length) return { pushed: 0, skipped: 'no_shopee_links' }
 
     const v = await this.virtualStockFor(productId)
@@ -199,8 +225,20 @@ export class ShopeeStockSyncService {
 
     const effQty = v.pause ? 0 : v.qty
     const trig = opts?.bypassGate ? 'manual_product' : 'recalc_auto'
-    const { pushed, failed } = await this.pushToListings(conn, adapter, productId, listings, effQty, trig)
-    this.logger.log(`[shopee.stock] ${trig} product=${productId} virtual_stock=${v.qty} pause=${v.pause} sent=${effQty} pushed=${pushed} failed=${failed}`)
+    // agrupa por loja e empurra com o conn de cada loja (multi-conta)
+    let pushed = 0, failed = 0
+    const byShop = new Map<number, Array<{ listing_id: string; variation_id: string | null }>>()
+    for (const l of listings) {
+      if (!byShop.has(l.shop_id)) byShop.set(l.shop_id, [])
+      byShop.get(l.shop_id)!.push({ listing_id: l.listing_id, variation_id: l.variation_id })
+    }
+    for (const [shopId, ls] of byShop) {
+      const r = conns.get(shopId)
+      if (!r) { this.logger.warn(`[shopee.stock] shop=${shopId} sem conn — ${ls.length} pulados`); continue }
+      const out = await this.pushToListings(r.conn, r.adapter, productId, ls, effQty, trig)
+      pushed += out.pushed; failed += out.failed
+    }
+    this.logger.log(`[shopee.stock] ${trig} product=${productId} virtual_stock=${v.qty} pause=${v.pause} sent=${effQty} shops=${byShop.size} pushed=${pushed} failed=${failed}`)
     return { pushed, failed, virtual_stock: v.qty, paused: v.pause }
   }
 
@@ -208,47 +246,52 @@ export class ShopeeStockSyncService {
    *  com anúncio Shopee vinculado da org. Ignora o gate (ação explícita do
    *  user). Produto sem registro de estoque é PULADO (não zera o anúncio). */
   async pushStockForOrg(orgId: string): Promise<{
-    shop_id: number; products: number; listings: number; pushed: number; failed: number; skipped_no_stock: number
+    shop_ids: number[]; products: number; listings: number; pushed: number; failed: number; skipped_no_stock: number
   }> {
-    const resolved = await this.resolveConn(orgId)
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const { conn, adapter } = resolved
-    const shopId = conn.shop_id!
+    const conns = await this.resolveConnsMap(orgId)
+    if (!conns.size) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const shopIds = [...conns.keys()]
 
     const { data: pls, error } = await supabaseAdmin
       .from('product_listings')
-      .select('product_id, listing_id, variation_id')
+      .select('product_id, listing_id, variation_id, account_id')
       .eq('platform', 'shopee')
-      .eq('account_id', String(shopId))
+      .in('account_id', shopIds.map(String))   // TODAS as lojas
       .eq('is_active', true)
     if (error) throw new Error(`product_listings: ${error.message}`)
 
-    // agrupa anúncios por produto
-    const byProduct = new Map<string, Array<{ listing_id: string; variation_id: string | null }>>()
+    // agrupa por (loja, produto) — multi-conta
+    const byShopProduct = new Map<number, Map<string, Array<{ listing_id: string; variation_id: string | null }>>>()
+    const allProductIds = new Set<string>()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const pl of (pls ?? []) as any[]) {
-      const pid = pl.product_id as string
-      if (!pid) continue
-      if (!byProduct.has(pid)) byProduct.set(pid, [])
-      byProduct.get(pid)!.push({ listing_id: String(pl.listing_id), variation_id: pl.variation_id ?? null })
+      const pid = pl.product_id as string; if (!pid) continue
+      const sid = Number(pl.account_id)
+      allProductIds.add(pid)
+      if (!byShopProduct.has(sid)) byShopProduct.set(sid, new Map())
+      const m = byShopProduct.get(sid)!
+      if (!m.has(pid)) m.set(pid, [])
+      m.get(pid)!.push({ listing_id: String(pl.listing_id), variation_id: pl.variation_id ?? null })
     }
-    if (!byProduct.size) return { shop_id: shopId, products: 0, listings: 0, pushed: 0, failed: 0, skipped_no_stock: 0 }
+    if (!allProductIds.size) return { shop_ids: shopIds, products: 0, listings: 0, pushed: 0, failed: 0, skipped_no_stock: 0 }
 
-    // estoque virtual (físico+virtual) por produto, em lote
-    const stockById = await this.virtualStockForMany([...byProduct.keys()])
+    const stockById = await this.virtualStockForMany([...allProductIds])
 
     let totalListings = 0, pushed = 0, failed = 0, skippedNoStock = 0
-    for (const [pid, listings] of byProduct) {
-      const v = stockById.get(pid)
-      if (v == null) { skippedNoStock += listings.length; continue } // sem registro → não zera
-      totalListings += listings.length
-      const effQty = v.pause ? 0 : v.qty // respeita mínimo p/ pausar (auto-pausa)
-      const r = await this.pushToListings(conn, adapter, pid, listings, effQty, 'manual_bulk')
-      pushed += r.pushed
-      failed += r.failed
+    for (const [sid, byProduct] of byShopProduct) {
+      const r = conns.get(sid)
+      if (!r) continue
+      for (const [pid, listings] of byProduct) {
+        const v = stockById.get(pid)
+        if (v == null) { skippedNoStock += listings.length; continue }
+        totalListings += listings.length
+        const effQty = v.pause ? 0 : v.qty
+        const out = await this.pushToListings(r.conn, r.adapter, pid, listings, effQty, 'manual_bulk')
+        pushed += out.pushed; failed += out.failed
+      }
     }
-    this.logger.log(`[shopee.stock] MANUAL org=${orgId} products=${byProduct.size} listings=${totalListings} pushed=${pushed} failed=${failed} skipped_no_stock=${skippedNoStock}`)
-    return { shop_id: shopId, products: byProduct.size, listings: totalListings, pushed, failed, skipped_no_stock: skippedNoStock }
+    this.logger.log(`[shopee.stock] MANUAL org=${orgId} shops=${shopIds.length} products=${allProductIds.size} listings=${totalListings} pushed=${pushed} failed=${failed} skipped_no_stock=${skippedNoStock}`)
+    return { shop_ids: shopIds, products: allProductIds.size, listings: totalListings, pushed, failed, skipped_no_stock: skippedNoStock }
   }
 
   /** MANUAL — escreve estoque de 1 anúncio. Ignora o gate (edição inline Fase D
@@ -258,10 +301,9 @@ export class ShopeeStockSyncService {
   async pushStockForItem(orgId: string, itemId: number, quantity: number, variationId?: string | null): Promise<{
     ok: boolean; pushed: number; failed: number
   }> {
-    const resolved = await this.resolveConn(orgId)
+    const resolved = await this.resolveConnForItem(orgId, itemId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const { conn, adapter } = resolved
-    const shopId = conn.shop_id!
+    const { conn, adapter, shopId } = resolved
 
     const { data: pls } = await supabaseAdmin
       .from('product_listings')
@@ -293,10 +335,9 @@ export class ShopeeStockSyncService {
   async pushPriceForItem(orgId: string, itemId: number, price: number, variationId?: string | null): Promise<{
     ok: boolean; pushed: number; failed: number
   }> {
-    const resolved = await this.resolveConn(orgId)
+    const resolved = await this.resolveConnForItem(orgId, itemId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const { conn, adapter } = resolved
-    const shopId = conn.shop_id!
+    const { conn, adapter, shopId } = resolved
 
     const { data: pls } = await supabaseAdmin
       .from('product_listings')
@@ -354,14 +395,14 @@ export class ShopeeStockSyncService {
 
   /** AUDITORIA read-only — dump do estoque cru de 1 item (Fase C, pré-mapeamento). */
   async inspectStock(orgId: string, itemId: number) {
-    const resolved = await this.resolveConn(orgId)
+    const resolved = await this.resolveConnForItem(orgId, itemId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
     return resolved.adapter.inspectItemStock(resolved.conn, itemId)
   }
 
   /** F18 Fase E — Detalhe editável de 1 item (título/descrição/atributos). */
   async getItemForEdit(orgId: string, itemId: number) {
-    const resolved = await this.resolveConn(orgId)
+    const resolved = await this.resolveConnForItem(orgId, itemId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
     return resolved.adapter.getItemForEdit(resolved.conn, itemId)
   }
@@ -375,7 +416,7 @@ export class ShopeeStockSyncService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     attributeList?: any[] | null
   }): Promise<{ ok: boolean }> {
-    const resolved = await this.resolveConn(orgId)
+    const resolved = await this.resolveConnForItem(orgId, itemId)
     if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
     const { conn, adapter } = resolved
 

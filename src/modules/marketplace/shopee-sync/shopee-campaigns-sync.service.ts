@@ -27,33 +27,28 @@ export class ShopeeCampaignsSyncService {
     private readonly campaigns:   ShopeeCampaignsService,
   ) {}
 
+  /** Sincroniza campanhas de TODAS as lojas Shopee conectadas (multi-conta). */
   async syncCampaigns(orgId: string): Promise<{
-    shop_id:     number
-    vouchers:    number
-    flash_sales: number
-    total:       number
-    errors:      string[]
+    shops: Array<{ shop_id: number; vouchers: number; flash_sales: number; total: number; errors: string[] }>
   }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
-    const shopId = conn.shop_id
-
-    const result = await this.adapter.getCampaigns(conn)
-    await this.campaigns.replaceSyncedCampaigns(orgId, shopId, result.campaigns)
-
-    const vouchers    = result.campaigns.filter(c => c.kind === 'voucher').length
-    const flash_sales = result.campaigns.filter(c => c.kind === 'flash_sale').length
-
-    this.logger.log(
-      `[shopee.campaigns.sync] org=${orgId} shop=${shopId} ` +
-      `vouchers=${vouchers} flash=${flash_sales} errors=${result.errors.length}`,
-    )
-    return {
-      shop_id: shopId, vouchers, flash_sales,
-      total: result.campaigns.length, errors: result.errors,
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    if (!all.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const shops: Array<{ shop_id: number; vouchers: number; flash_sales: number; total: number; errors: string[] }> = []
+    for (const { conn: c0 } of all) {
+      try {
+        const conn = await this.productSync.ensureFreshToken(c0)
+        if (!conn.shop_id) continue
+        const shopId = conn.shop_id
+        const result = await this.adapter.getCampaigns(conn)
+        await this.campaigns.replaceSyncedCampaigns(orgId, shopId, result.campaigns)
+        const vouchers    = result.campaigns.filter(c => c.kind === 'voucher').length
+        const flash_sales = result.campaigns.filter(c => c.kind === 'flash_sale').length
+        this.logger.log(`[shopee.campaigns.sync] org=${orgId} shop=${shopId} vouchers=${vouchers} flash=${flash_sales} errors=${result.errors.length}`)
+        shops.push({ shop_id: shopId, vouchers, flash_sales, total: result.campaigns.length, errors: result.errors })
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.campaigns.sync] shop=${c0.shop_id} falhou: ${(e as Error)?.message}`)
+      }
     }
+    return { shops }
   }
 }

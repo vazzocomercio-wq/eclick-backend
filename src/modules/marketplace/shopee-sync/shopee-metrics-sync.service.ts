@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter, ShopMetricsParsed } from '../adapters/shopee.adapter'
+import { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ShopeeQualityService } from '../shopee-quality/shopee-quality.service'
 import { ShopMetricsSnapshot } from '../shopee-quality/shopee-quality.types'
@@ -29,20 +30,27 @@ export class ShopeeShopMetricsSyncService {
     private readonly quality:     ShopeeQualityService,
   ) {}
 
+  /** Sincroniza métricas de TODAS as lojas Shopee conectadas (multi-conta). */
   async syncShopMetrics(orgId: string): Promise<{
-    shop_id:         number
-    snapshot_date:   string
-    metrics:         ShopMetricsParsed
-    errors:          string[]
-    raw_metric_list: unknown
+    shops: Array<{ shop_id: number; snapshot_date: string; metrics: ShopMetricsParsed; errors: string[]; raw_metric_list: unknown }>
   }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    if (!all.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const shops: Array<{ shop_id: number; snapshot_date: string; metrics: ShopMetricsParsed; errors: string[]; raw_metric_list: unknown }> = []
+    for (const { conn: c0 } of all) {
+      try {
+        const conn = await this.productSync.ensureFreshToken(c0)
+        if (!conn.shop_id) continue
+        shops.push(await this.syncOneShop(orgId, conn))
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.metrics] shop=${c0.shop_id} falhou: ${(e as Error)?.message}`)
+      }
+    }
+    return { shops }
+  }
 
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
-    const shopId = conn.shop_id
-
+  private async syncOneShop(orgId: string, conn: MpConnection): Promise<{ shop_id: number; snapshot_date: string; metrics: ShopMetricsParsed; errors: string[]; raw_metric_list: unknown }> {
+    const shopId = conn.shop_id!
     const result = await this.adapter.getShopMetrics(conn)
     const snapshotDate = new Date().toISOString().slice(0, 10)
 
