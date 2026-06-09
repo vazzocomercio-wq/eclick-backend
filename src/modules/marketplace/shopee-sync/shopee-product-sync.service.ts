@@ -38,35 +38,39 @@ export class ShopeeProductSyncService {
 
   /** Sincroniza todos os anúncios NORMAL da loja Shopee conectada da org.
    *  Retorna resumo. Lança NotFound se a org não tem Shopee conectada. */
+  /** Sincroniza TODAS as lojas Shopee conectadas da org (multi-conta). */
   async syncProducts(orgId: string): Promise<{
-    shop_id:    number
-    pages:      number
+    started_at: string
+    shops:      Array<{ shop_id: number; pages: number; items: number; scored: number; failed: number }>
     items:      number
     scored:     number
     failed:     number
-    started_at: string
   }> {
     const startedAt = new Date().toISOString()
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const resolvedAll = await this.mp.resolveAll(orgId, 'shopee')
+    if (!resolvedAll.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
 
-    let conn = resolved.conn
-    const adapter = resolved.adapter
-    conn = await this.ensureFreshToken(conn)
+    const shops: Array<{ shop_id: number; pages: number; items: number; scored: number; failed: number }> = []
+    for (const { conn: c0, adapter } of resolvedAll) {
+      try {
+        const conn = await this.ensureFreshToken(c0)
+        if (!conn.shop_id) continue
+        shops.push(await this.syncOneShop(orgId, conn, adapter))
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.sync] shop=${c0.shop_id} falhou: ${(e as Error)?.message}`)
+      }
+    }
+    const tot = shops.reduce((a, s) => ({ items: a.items + s.items, scored: a.scored + s.scored, failed: a.failed + s.failed }), { items: 0, scored: 0, failed: 0 })
+    this.logger.log(`[shopee.sync] org=${orgId} shops=${shops.length} ${JSON.stringify(tot)}`)
+    return { started_at: startedAt, shops, ...tot }
+  }
 
-    if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
-    const shopId = conn.shop_id
-
-    // Métricas da loja (shop-level, iguais p/ todos os anúncios) → pilar
-    // seller_quality REAL no Algorithm Score. Null-safe: sem snapshot → neutro.
+  /** Sincroniza UMA loja Shopee (paginação → Algorithm Score). */
+  private async syncOneShop(orgId: string, conn: MpConnection, adapter: { listProducts: (c: MpConnection, cursor?: string | null) => Promise<{ items: RawListing[]; nextCursor: string | null }> }): Promise<{ shop_id: number; pages: number; items: number; scored: number; failed: number }> {
+    const shopId = conn.shop_id!
     const shopMetrics = await this.loadShopMetrics(orgId, shopId)
-
-    let pages = 0
-    let items = 0
-    let scored = 0
-    let failed = 0
+    let pages = 0, items = 0, scored = 0, failed = 0
     let cursor: string | null = null
-
     do {
       const page = await adapter.listProducts(conn, cursor)
       pages++
@@ -77,18 +81,13 @@ export class ShopeeProductSyncService {
           scored++
         } catch (e: unknown) {
           failed++
-          this.logger.warn(`[shopee.sync] score falhou item=${listing.external_product_id}: ${(e as Error)?.message}`)
+          this.logger.warn(`[shopee.sync] shop=${shopId} score falhou item=${listing.external_product_id}: ${(e as Error)?.message}`)
         }
       }
       cursor = page.nextCursor
-      if (pages >= ShopeeProductSyncService.MAX_PAGES) {
-        this.logger.warn(`[shopee.sync] MAX_PAGES atingido (${pages}) — parando paginação`)
-        break
-      }
+      if (pages >= ShopeeProductSyncService.MAX_PAGES) { this.logger.warn(`[shopee.sync] shop=${shopId} MAX_PAGES`); break }
     } while (cursor)
-
-    this.logger.log(`[shopee.sync] org=${orgId} shop=${shopId} pages=${pages} items=${items} scored=${scored} failed=${failed}`)
-    return { shop_id: shopId, pages, items, scored, failed, started_at: startedAt }
+    return { shop_id: shopId, pages, items, scored, failed }
   }
 
   /** Renova o token se vencido/perto. Persiste os 2 tokens novos (rotação) e

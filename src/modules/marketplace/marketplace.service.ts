@@ -29,12 +29,43 @@ export class MarketplaceService {
 
   /** Pega 1 connection específica. */
   async getConnection(orgId: string, platform: MarketplacePlatform): Promise<MpConnection | null> {
+    // PRIMEIRA conexão conectada (limit 1 + order). ⚠️ com MÚLTIPLAS contas do
+    // mesmo platform (ex: 2 lojas Shopee), use getConnections() pra cobrir TODAS
+    // — o .maybeSingle() antigo QUEBRAVA com 2+ linhas (multi-conta).
     const { data } = await supabaseAdmin
       .from('marketplace_connections')
       .select('*')
       .eq('organization_id', orgId)
       .eq('platform', platform)
       .eq('status', 'connected')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (!data) return null
+    return this.hydrate(data as DbRow)
+  }
+
+  /** TODAS as conexões conectadas do platform (multi-conta). Ex: 2 lojas Shopee. */
+  async getConnections(orgId: string, platform: MarketplacePlatform): Promise<MpConnection[]> {
+    const { data } = await supabaseAdmin
+      .from('marketplace_connections')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('platform', platform)
+      .eq('status', 'connected')
+      .order('created_at', { ascending: true })
+    return ((data ?? []) as DbRow[]).map(r => this.hydrate(r))
+  }
+
+  /** Conexão específica por shop_id (multi-conta: roteia escrita pro dono). */
+  async getConnectionByShop(orgId: string, shopId: number): Promise<MpConnection | null> {
+    const { data } = await supabaseAdmin
+      .from('marketplace_connections')
+      .select('*')
+      .eq('organization_id', orgId)
+      .eq('shop_id', shopId)
+      .eq('status', 'connected')
+      .limit(1)
       .maybeSingle()
     if (!data) return null
     return this.hydrate(data as DbRow)
@@ -118,10 +149,24 @@ export class MarketplaceService {
     }
   }
 
-  /** Atalho: pega connection + adapter prontos pra uso. */
+  /** Atalho: pega connection + adapter prontos pra uso (PRIMEIRA conta). */
   async resolve(orgId: string, platform: MarketplacePlatform) {
     const conn = await this.getConnection(orgId, platform)
     if (!conn) return null
+    return { conn, adapter: this.registry.get(platform) }
+  }
+
+  /** Multi-conta: TODAS as conexões + adapter (mesma instância de adapter). */
+  async resolveAll(orgId: string, platform: MarketplacePlatform) {
+    const conns = await this.getConnections(orgId, platform)
+    const adapter = this.registry.get(platform)
+    return conns.map(conn => ({ conn, adapter }))
+  }
+
+  /** Multi-conta: conexão+adapter de um shop específico (roteia escrita). */
+  async resolveByShop(orgId: string, shopId: number, platform: MarketplacePlatform) {
+    const conn = await this.getConnectionByShop(orgId, shopId)
+    if (!conn || conn.platform !== platform) return null
     return { conn, adapter: this.registry.get(platform) }
   }
 }

@@ -4,6 +4,7 @@ import {
 import { supabaseAdmin } from '../../../common/supabase'
 import { computeContributionMargin, round2 } from '../../../common/margin'
 import { MarketplaceService } from '../marketplace.service'
+import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
@@ -42,6 +43,26 @@ export class ShopeeListingLinkService {
     return resolved.conn.shop_id
   }
 
+  /** TODOS os shop_ids Shopee conectados da org (multi-conta). */
+  private async resolveShopIds(orgId: string): Promise<number[]> {
+    const conns = await this.mp.getConnections(orgId, 'shopee')
+    const ids = conns.map(c => c.shop_id).filter((n): n is number => !!n)
+    if (!ids.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    return ids
+  }
+
+  /** Descobre a qual shop_id um item pertence (via algo score breakdown). */
+  private async shopOfItem(orgId: string, itemId: number, fallbackShopIds: number[]): Promise<number> {
+    const { data } = await supabaseAdmin
+      .schema('shopee')
+      .from('v_latest_algo_score')
+      .select('shop_id')
+      .eq('organization_id', orgId)
+      .eq('item_id', itemId)
+      .maybeSingle<{ shop_id: number }>()
+    return data?.shop_id ?? fallbackShopIds[0]
+  }
+
   /** Auto-vincula TODOS os anúncios da loja por SKU de variação → products.sku.
    *  Idempotente (upsert na chave única). Retorna métricas de cobertura. */
   async autoLinkAll(orgId: string): Promise<{
@@ -54,27 +75,31 @@ export class ShopeeListingLinkService {
     items_linked:     number
     unmatched_items:  Array<{ item_id: number; title: string | null }>
   }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    let conn = resolved.conn
-    conn = await this.productSync.ensureFreshToken(conn)
-    if (!conn.shop_id) throw new NotFoundException('Conexão Shopee sem shop_id')
-    const shopId  = conn.shop_id
-    const adapter = resolved.adapter as ShopeeAdapter
+    const resolvedAll = await this.mp.resolveAll(orgId, 'shopee')
+    if (!resolvedAll.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    // conns por shop_id (token fresco) — multi-conta
+    const connByShop = new Map<number, MpConnection>()
+    for (const { conn: c0 } of resolvedAll) {
+      if (!c0.shop_id) continue
+      try { connByShop.set(c0.shop_id, await this.productSync.ensureFreshToken(c0)) }
+      catch (e) { this.logger.warn(`[shopee.link] token shop=${c0.shop_id}: ${(e as Error)?.message}`) }
+    }
+    const shopId = resolvedAll[0].conn.shop_id!
 
-    // 1) anúncios mais recentes da org (item_id + snapshot p/ display)
+    // 1) anúncios da org (item_id + snapshot + shop_id) — TODAS as lojas
     const { data: rows, error } = await supabaseAdmin
       .schema('shopee')
       .from('v_latest_algo_score')
-      .select('item_id, input_snapshot')
+      .select('item_id, input_snapshot, shop_id')
       .eq('organization_id', orgId)
     if (error) throw new Error(`v_latest_algo_score: ${error.message}`)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const listings = (rows ?? []) as Array<{ item_id: number; input_snapshot: any }>
+    const listings = (rows ?? []) as Array<{ item_id: number; input_snapshot: any; shop_id: number }>
     const itemIds = [...new Set(listings.map(r => Number(r.item_id)).filter(Number.isFinite))]
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const snapById = new Map<number, any>()
-    for (const r of listings) snapById.set(Number(r.item_id), r.input_snapshot ?? {})
+    const shopByItem = new Map<number, number>()
+    for (const r of listings) { snapById.set(Number(r.item_id), r.input_snapshot ?? {}); shopByItem.set(Number(r.item_id), Number(r.shop_id)) }
 
     if (!itemIds.length) {
       return {
@@ -83,8 +108,22 @@ export class ShopeeListingLinkService {
       }
     }
 
-    // 2) SKUs por item (nível variação) via get_model_list
-    const skuMap = await adapter.getItemSkus(conn, itemIds)
+    // 2) SKUs por item via get_model_list/item_sku — agrupando por loja (cada
+    //    loja usa o SEU conn; item de uma loja não existe no token de outra).
+    const skuMap = new Map<number, Array<{ model_id: number; sku: string }>>()
+    const itemsByShop = new Map<number, number[]>()
+    for (const id of itemIds) {
+      const sid = shopByItem.get(id) ?? shopId
+      if (!itemsByShop.has(sid)) itemsByShop.set(sid, [])
+      itemsByShop.get(sid)!.push(id)
+    }
+    for (const [sid, ids] of itemsByShop) {
+      const c = connByShop.get(sid)
+      if (!c) { this.logger.warn(`[shopee.link] shop=${sid} sem conn — ${ids.length} itens pulados`); continue }
+      const adapter = resolvedAll[0].adapter as ShopeeAdapter
+      const partial = await adapter.getItemSkus(c, ids)
+      for (const [k, v] of partial) skuMap.set(k, v)
+    }
     let itemsWithSku = 0
     const allSkus = new Set<string>()
     for (const pairs of skuMap.values()) {
@@ -117,16 +156,17 @@ export class ShopeeListingLinkService {
     for (const itemId of itemIds) {
       const pairs = skuMap.get(itemId) ?? []
       const snap  = snapById.get(itemId) ?? {}
+      const itemShop = shopByItem.get(itemId) ?? shopId   // loja DONA do item
       for (const { model_id, sku } of pairs) {
         const prod = prodBySku.get(sku)
         if (!prod) continue
         const variationId = String(model_id ?? '')
-        const key = `${shopId}|${itemId}|${variationId}|${prod.id}`
+        const key = `${itemShop}|${itemId}|${variationId}|${prod.id}`
         if (seen.has(key)) continue
         seen.add(key)
         plRows.push({
           platform:          'shopee',
-          account_id:        String(shopId),
+          account_id:        String(itemShop),
           listing_id:        String(itemId),
           variation_id:      variationId,
           product_id:        prod.id,
@@ -172,6 +212,7 @@ export class ShopeeListingLinkService {
    *  Fonte da verdade = product_listings (não o breakdown). */
   async getLinkStatus(orgId: string): Promise<{
     shop_id:     number
+    shop_ids:    number[]
     total:       number
     linked:      number
     unlinked:    number
@@ -179,12 +220,12 @@ export class ShopeeListingLinkService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     items:       any[]
   }> {
-    const shopId = await this.resolveShopId(orgId)
+    const shopIds = await this.resolveShopIds(orgId)  // TODAS as contas
 
     const { data: rows, error } = await supabaseAdmin
       .schema('shopee')
       .from('v_latest_algo_score')
-      .select('item_id, algo_score, input_snapshot')
+      .select('item_id, algo_score, input_snapshot, shop_id')
       .eq('organization_id', orgId)
     if (error) throw new Error(`v_latest_algo_score: ${error.message}`)
 
@@ -192,7 +233,7 @@ export class ShopeeListingLinkService {
       .from('product_listings')
       .select('listing_id, variation_id, product_id')
       .eq('platform', 'shopee')
-      .eq('account_id', String(shopId))
+      .in('account_id', shopIds.map(String))   // anúncios de TODAS as lojas
     if (plErr) throw new Error(`product_listings: ${plErr.message}`)
 
     const linkByItem = new Map<string, string>()
@@ -257,6 +298,7 @@ export class ShopeeListingLinkService {
 
       return {
         item_id:    Number(r.item_id),
+        shop_id:    r.shop_id != null ? Number(r.shop_id) : null,
         title:      snap.title          ?? null,
         thumbnail:  snap.main_image_url ?? null,
         price,
@@ -278,7 +320,7 @@ export class ShopeeListingLinkService {
     const linked = items.filter(i => i.linked).length
     const withMargin = items.filter(i => i.margin != null).length
     return {
-      shop_id: shopId, total: items.length, linked,
+      shop_id: shopIds[0], shop_ids: shopIds, total: items.length, linked,
       unlinked: items.length - linked, with_margin: withMargin, items,
     }
   }
@@ -286,7 +328,8 @@ export class ShopeeListingLinkService {
   /** Vínculo manual item → produto (substitui qualquer vínculo anterior do item).
    *  Item-level (variation_id=''). Valida que o produto é da org. */
   async manualLink(orgId: string, itemId: number, productId: string): Promise<{ ok: true }> {
-    const shopId = await this.resolveShopId(orgId)
+    const shopIds = await this.resolveShopIds(orgId)
+    const shopId = await this.shopOfItem(orgId, itemId, shopIds)  // loja DONA do item
 
     const { data: prod, error: pErr } = await supabaseAdmin
       .from('products')
@@ -335,12 +378,13 @@ export class ShopeeListingLinkService {
 
   /** Remove o vínculo de um item (todas as variações). Escopo por loja. */
   async unlink(orgId: string, itemId: number): Promise<{ ok: true; removed: number }> {
-    const shopId = await this.resolveShopId(orgId)
+    const shopIds = await this.resolveShopIds(orgId)
+    // remove o vínculo do item em QUALQUER loja da org (escopo multi-conta)
     const { data, error } = await supabaseAdmin
       .from('product_listings')
       .delete()
       .eq('platform', 'shopee')
-      .eq('account_id', String(shopId))
+      .in('account_id', shopIds.map(String))
       .eq('listing_id', String(itemId))
       .select('id')
     if (error) throw new Error(`product_listings delete: ${error.message}`)
