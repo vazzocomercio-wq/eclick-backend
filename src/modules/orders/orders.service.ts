@@ -780,6 +780,25 @@ export class OrdersService {
     return row.seller_id != null ? `Conta #${row.seller_id}` : 'Sem identificação'
   }
 
+  /** Aliases legados de plataforma → canônico. `mercado_livre` (typo antigo)
+   *  e `manual` (pedidos lançados à mão, sempre vinculados à conta ML) entram
+   *  como Mercado Livre — evita pills/contas duplicadas no dashboard. */
+  private canonPlatform(p: string): string {
+    if (p === 'mercado_livre' || p === 'manual') return 'mercadolivre'
+    return p
+  }
+
+  /** Expande o filtro de plataformas pros aliases legados, pra o filtro de ML
+   *  não perder as linhas com platform='mercado_livre'/'manual'. */
+  private expandPlatformsFilter(platforms: string[]): string[] {
+    const out = new Set<string>()
+    for (const p of platforms) {
+      out.add(p)
+      if (p === 'mercadolivre') { out.add('mercado_livre'); out.add('manual') }
+    }
+    return [...out]
+  }
+
   /** Lista as contas que têm venda na org, agrupadas por (plataforma, seller_id).
    *  Data-driven: percorre `orders` e devolve combos distintos com nickname +
    *  contagem. Alimenta o seletor unificado do dashboard. */
@@ -808,8 +827,9 @@ export class OrdersService {
       }>
       for (const r of batch) {
         // `platform` é a coluna que os filtros do dashboard usam; cai pra
-        // `source` quando platform vier nulo (ingestões antigas).
-        const platform = r.platform ?? r.source ?? 'unknown'
+        // `source` quando platform vier nulo (ingestões antigas). Canoniza
+        // aliases legados (mercado_livre/manual → mercadolivre).
+        const platform = this.canonPlatform(r.platform ?? r.source ?? 'unknown')
         const key = `${platform}:${r.seller_id ?? 'null'}`
         const existing = seen.get(key)
         if (existing) {
@@ -818,8 +838,10 @@ export class OrdersService {
           seen.set(key, {
             platform,
             seller_id: r.seller_id ?? null,
+            // Usa a plataforma CANÔNICA como source — assim a entrada ML
+            // mesclada (que pode ter 1ª linha 'manual') resolve pro nick ML.
             nickname: this.ordersNicknameFor(
-              { source: r.source ?? platform, seller_id: r.seller_id },
+              { source: platform, seller_id: r.seller_id },
               nick,
             ),
             orders: 1,
@@ -861,7 +883,7 @@ export class OrdersService {
       if (opts.sellerIdFilter != null) q = q.eq('seller_id', opts.sellerIdFilter)
       if (opts.statusFilter && opts.statusFilter !== 'all') q = q.eq('status', opts.statusFilter)
       if (opts.platformsFilter && opts.platformsFilter.length > 0) {
-        q = q.in('platform', opts.platformsFilter)
+        q = q.in('platform', this.expandPlatformsFilter(opts.platformsFilter))
       }
       q = q.order('sold_at', { ascending: false }).range(pageStart, pageStart + PAGE_SIZE - 1)
       const { data, error } = await q
