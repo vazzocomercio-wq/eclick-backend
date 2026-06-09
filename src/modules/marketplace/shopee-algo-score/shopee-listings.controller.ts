@@ -33,7 +33,7 @@ export class ShopeeListingsController {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     const filters: ListingScoreFilters = {
       orgId:    user.orgId,
-      limit:    parseIntOr(limit,    50, { min: 1, max: 200 }),
+      limit:    parseIntOr(limit,    50, { min: 1, max: 2000 }),  // multi-conta: cobre todas as lojas
       offset:   parseIntOr(offset,   0,  { min: 0 }),
       minScore: parseIntOrNull(minScore),
       maxScore: parseIntOrNull(maxScore),
