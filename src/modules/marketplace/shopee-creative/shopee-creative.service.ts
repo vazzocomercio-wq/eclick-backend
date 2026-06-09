@@ -6,6 +6,7 @@ import { composeListingDescription } from '../../../common/listing-description'
 import { ShopeeAlgoScoreService } from '../shopee-algo-score/shopee-algo-score.service'
 import { AlgoScoreInput } from '../shopee-algo-score/algo-score.types'
 import { MarketplaceService } from '../marketplace.service'
+import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from '../shopee-sync/shopee-product-sync.service'
 import { ShopeeStockSyncService } from '../shopee-sync/shopee-stock-sync.service'
@@ -176,11 +177,10 @@ export class ShopeeCreativePublisherService {
       prod = data as unknown as ProdRow
     }
 
-    // 3) conn Shopee + token fresco
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    const adapter = resolved.adapter as ShopeeAdapter
+    // 3) conn Shopee + token fresco — MULTI-LOJA: roteia pela loja escolhida no
+    //    draft (shop_id). Com 1 só conta o shop_id é opcional (compat); com 2+
+    //    e sem shop_id, erro acionável pedindo a loja.
+    const { conn, adapter } = await this.resolveConnForShop(orgId, draft.shop_id)
 
     const name = (draft.title ?? prod?.name ?? '').toString().trim()
     if (!name) throw new BadRequestException('Título obrigatório')
@@ -381,15 +381,56 @@ export class ShopeeCreativePublisherService {
   /** Sync de confirmação — busca o status atual do anúncio na Shopee e o
    *  normaliza pro vocabulário comum do painel de publicações
    *  (active/paused/closed/under_review/inactive). Usado pela esteira IA
-   *  Criativo (botão "sync" + worker). Resolve conn + token fresco como no
-   *  publish. Lança se a loja não estiver conectada (o caller faz soft-fallback). */
+   *  Criativo (botão "sync" + worker). MULTI-LOJA: resolve a loja DONA do item
+   *  via product_listings.account_id (o publish grava o vínculo); item sem
+   *  vínculo cai na resolução padrão (única loja / erro se 2+). */
   async syncListingStatus(orgId: string, itemId: string | number): Promise<{ raw: string | null; normalized: string | null }> {
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved?.conn?.shop_id) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
-    const adapter = resolved.adapter as ShopeeAdapter
+    const { data: link } = await supabaseAdmin
+      .from('product_listings')
+      .select('account_id')
+      .eq('platform', 'shopee')
+      .eq('listing_id', String(itemId))
+      .limit(1)
+      .maybeSingle<{ account_id: string | null }>()
+    const ownerShopId = link?.account_id ? Number(link.account_id) : undefined
+    const { conn, adapter } = await this.resolveConnForShop(orgId, ownerShopId)
     const raw = await adapter.getItemStatus(conn, itemId)
     return { raw, normalized: normalizeShopeeStatus(raw) }
+  }
+
+  /** Lojas Shopee conectadas da org — alimenta o seletor de loja do publish.
+   *  Campos seguros apenas (sem tokens). */
+  async listShops(orgId: string): Promise<Array<{ shop_id: number; nickname: string | null }>> {
+    const conns = await this.mp.getConnections(orgId, 'shopee')
+    return conns
+      .filter(c => c.shop_id != null)
+      .map(c => ({ shop_id: c.shop_id as number, nickname: c.nickname ?? null }))
+  }
+
+  /** MULTI-LOJA: resolve conexão+adapter da loja pedida (token fresco).
+   *  - shopId válido → conexão DESSA loja (404 se não conectada);
+   *  - sem shopId (ou 0, placeholder do front): 1 conta → usa ela;
+   *    0 contas → 404; 2+ contas → 400 pedindo a escolha da loja. */
+  private async resolveConnForShop(orgId: string, shopId?: number | null): Promise<{ conn: MpConnection; adapter: ShopeeAdapter }> {
+    if (shopId != null && Number.isFinite(shopId) && shopId > 0) {
+      const resolved = await this.mp.resolveByShop(orgId, Number(shopId), 'shopee')
+      if (!resolved?.conn?.shop_id) {
+        throw new NotFoundException(`Loja Shopee ${shopId} não está conectada nesta organização.`)
+      }
+      const conn = await this.productSync.ensureFreshToken(resolved.conn)
+      return { conn, adapter: resolved.adapter as ShopeeAdapter }
+    }
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    const withShop = all.filter(r => r.conn.shop_id != null)
+    if (withShop.length === 0) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    if (withShop.length > 1) {
+      const opts = withShop.map(r => r.conn.nickname ?? `Shopee #${r.conn.shop_id}`).join(', ')
+      throw new BadRequestException(
+        `Esta organização tem ${withShop.length} lojas Shopee conectadas (${opts}) — informe shop_id (selecione a loja na tela de publicação).`,
+      )
+    }
+    const conn = await this.productSync.ensureFreshToken(withShop[0].conn)
+    return { conn, adapter: withShop[0].adapter as ShopeeAdapter }
   }
 
   /** Executa um passo da esteira convertendo erro 403/Forbidden da Shopee numa

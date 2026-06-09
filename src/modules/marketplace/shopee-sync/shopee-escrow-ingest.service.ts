@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { MarketplaceService } from '../marketplace.service'
+import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 
@@ -29,14 +30,24 @@ export class ShopeeEscrowIngestService {
     const daysBack = Math.max(opts.daysBack ?? 120, 1)
     const fromIso  = new Date(Date.now() - daysBack * 86400_000).toISOString()
 
-    const resolved = await this.mp.resolve(orgId, 'shopee')
-    if (!resolved) throw new NotFoundException('Loja Shopee não conectada nesta organização')
-    const conn = await this.productSync.ensureFreshToken(resolved.conn)
+    // MULTI-LOJA: todas as conexões (token fresco), indexadas por shop_id. O
+    // escrow é por pedido e cada pedido pertence a UMA loja — roteamos pelo
+    // carimbo orders.channel_account_id (gravado na ingestão de pedidos).
+    const all = await this.mp.resolveAll(orgId, 'shopee')
+    if (!all.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const connByShop = new Map<string, MpConnection>()
+    for (const { conn: c0 } of all) {
+      if (!c0.shop_id) continue
+      try { connByShop.set(String(c0.shop_id), await this.productSync.ensureFreshToken(c0)) }
+      catch (e) { this.logger.warn(`[shopee.escrow] token shop=${c0.shop_id}: ${(e as Error).message}`) }
+    }
+    if (!connByShop.size) throw new NotFoundException('Nenhuma loja Shopee com token válido nesta organização')
+    const fallbackConn = [...connByShop.values()][0]
 
-    // pedidos concluídos no período
+    // pedidos concluídos no período (+ carimbo da loja dona)
     const { data: orders } = await supabaseAdmin
       .from('orders')
-      .select('external_order_id, sold_at')
+      .select('external_order_id, sold_at, channel_account_id')
       .eq('organization_id', orgId)
       .eq('source', 'shopee')
       .eq('status', 'delivered')
@@ -45,7 +56,12 @@ export class ShopeeEscrowIngestService {
       .limit(2000)
     const allSns = [...new Set((orders ?? []).map(o => String((o as { external_order_id: string }).external_order_id)))]
     const soldAtBySn = new Map<string, string | null>()
-    for (const o of orders ?? []) soldAtBySn.set(String((o as { external_order_id: string }).external_order_id), (o as { sold_at: string | null }).sold_at)
+    const shopBySn   = new Map<string, string | null>()
+    for (const o of orders ?? []) {
+      const sn = String((o as { external_order_id: string }).external_order_id)
+      soldAtBySn.set(sn, (o as { sold_at: string | null }).sold_at)
+      shopBySn.set(sn, (o as { channel_account_id: string | null }).channel_account_id ?? null)
+    }
 
     // já ingeridos (escrow) → pula
     const { data: done } = await supabaseAdmin
@@ -61,13 +77,16 @@ export class ShopeeEscrowIngestService {
     let upserted = 0, failed = 0
     const rows: Record<string, unknown>[] = []
     for (const sn of todo) {
+      // conn da loja DONA do pedido; pedido antigo sem carimbo → 1ª loja.
+      const ownerShop = shopBySn.get(sn)
+      const conn = (ownerShop && connByShop.get(ownerShop)) || fallbackConn
       let income: Record<string, unknown> = {}
       try {
         const det = await this.adapter.getEscrowDetail(conn, sn)
         income = (det.raw ?? {}) as Record<string, unknown>
       } catch (e) {
         failed++
-        this.logger.warn(`[shopee.escrow] ${sn}: ${(e as Error).message}`)
+        this.logger.warn(`[shopee.escrow] ${sn} (shop=${ownerShop ?? '?'}): ${(e as Error).message}`)
         continue
       }
       const chargeDate = (soldAtBySn.get(sn) ?? new Date().toISOString()).slice(0, 10)

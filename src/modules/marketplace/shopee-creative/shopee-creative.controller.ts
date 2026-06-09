@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Body, UseGuards, HttpCode, HttpStatus, BadRequestException,
+  Controller, Get, Post, Body, UseGuards, HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
@@ -13,6 +13,14 @@ interface ReqUserPayload { id: string; orgId: string | null }
 @UseGuards(SupabaseAuthGuard)
 export class ShopeeCreativeController {
   constructor(private readonly svc: ShopeeCreativePublisherService) {}
+
+  /** GET /shopee/creative/shops — lojas Shopee conectadas (seletor do publish).
+   *  Só campos seguros (shop_id + nickname). */
+  @Get('shops')
+  shops(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listShops(user.orgId)
+  }
 
   /** POST /shopee/creative/evaluate
    *  Body: rascunho do anúncio. Retorna score + ready + blockers/warnings.
