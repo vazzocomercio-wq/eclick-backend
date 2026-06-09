@@ -773,10 +773,63 @@ export class OrdersService {
     nick: { ml: Record<number, string>; tiktokSeller: string | null },
   ): string {
     if (row.source === 'tiktok_shop') return nick.tiktokSeller ?? 'TikTok Shop'
+    if (row.source === 'shopee') return 'Shopee'
     if (row.source === 'storefront') return 'Loja Própria'
     if (row.source === 'manual') return 'Manual'
     if (row.seller_id != null && nick.ml[row.seller_id]) return nick.ml[row.seller_id]
     return row.seller_id != null ? `Conta #${row.seller_id}` : 'Sem identificação'
+  }
+
+  /** Lista as contas que têm venda na org, agrupadas por (plataforma, seller_id).
+   *  Data-driven: percorre `orders` e devolve combos distintos com nickname +
+   *  contagem. Alimenta o seletor unificado do dashboard. */
+  async getAccountsWithSales(orgId: string): Promise<
+    Array<{ platform: string; seller_id: number | null; nickname: string; orders: number }>
+  > {
+    const nick = await this.ordersBuildNicknameMap(orgId)
+    const PAGE_SIZE = 1000
+    const SAFETY_CAP = 50_000
+    const seen = new Map<
+      string,
+      { platform: string; seller_id: number | null; nickname: string; orders: number }
+    >()
+    let pageStart = 0
+    while (pageStart < SAFETY_CAP) {
+      const { data, error } = await supabaseAdmin
+        .from('orders')
+        .select('platform, source, seller_id')
+        .eq('organization_id', orgId)
+        .range(pageStart, pageStart + PAGE_SIZE - 1)
+      if (error) throw error
+      const batch = (data ?? []) as Array<{
+        platform: string | null
+        source: string | null
+        seller_id: number | null
+      }>
+      for (const r of batch) {
+        // `platform` é a coluna que os filtros do dashboard usam; cai pra
+        // `source` quando platform vier nulo (ingestões antigas).
+        const platform = r.platform ?? r.source ?? 'unknown'
+        const key = `${platform}:${r.seller_id ?? 'null'}`
+        const existing = seen.get(key)
+        if (existing) {
+          existing.orders++
+        } else {
+          seen.set(key, {
+            platform,
+            seller_id: r.seller_id ?? null,
+            nickname: this.ordersNicknameFor(
+              { source: r.source ?? platform, seller_id: r.seller_id },
+              nick,
+            ),
+            orders: 1,
+          })
+        }
+      }
+      if (batch.length < PAGE_SIZE) break
+      pageStart += PAGE_SIZE
+    }
+    return [...seen.values()].sort((a, b) => b.orders - a.orders)
   }
 
   /** Paginação manual — Supabase corta em 1000 sem .range(). */
@@ -907,8 +960,13 @@ export class OrdersService {
     platforms?: string[],
   ) {
     const nick = await this.ordersBuildNicknameMap(orgId)
+    // Normaliza pra dia-inteiro em BRT (igual getRecentOrders). Sem isso,
+    // date_to='YYYY-MM-DD' vira meia-noite UTC e EXCLUI os pedidos de hoje.
+    // Defensivo: só anexa hora quando vier data pura (sem 'T').
+    const isoFrom = dateFrom && !dateFrom.includes('T') ? `${dateFrom}T00:00:00.000-03:00` : dateFrom
+    const isoTo = dateTo && !dateTo.includes('T') ? `${dateTo}T23:59:59.999-03:00` : dateTo
     const allRows = await this.ordersFetchRowsForReport({
-      orgId, dateFrom, dateTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
+      orgId, dateFrom: isoFrom, dateTo: isoTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
     })
 
     let faturamento = 0, canceladas = 0

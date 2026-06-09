@@ -94,6 +94,15 @@ export class OrdersController {
     )
   }
 
+  /** GET /orders/accounts — lista contas que têm venda na org, por plataforma.
+   *  Data-driven: só aparece plataforma/conta com pedido. Alimenta o seletor
+   *  unificado do dashboard (ML × N contas + Shopee + TikTok + …). */
+  @Get('accounts')
+  @RequirePermission('orders.view')
+  getAccounts(@ReqUser() user: ReqUserPayload) {
+    return this.orders.getAccountsWithSales(user.orgId!)
+  }
+
   // ── TT-5c: agnóstico de canal pra dashboard + financeiro ────────────────
   // Espelham /ml/recent-orders e /ml/financial-summary mas pra TODAS as
   // plataformas (sem exigir ML conectado).
