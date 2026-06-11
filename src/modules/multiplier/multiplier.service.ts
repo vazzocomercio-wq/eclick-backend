@@ -255,7 +255,18 @@ export class MultiplierService {
       .limit(5)
     const sameAccount = (open ?? []).find(d =>
       String((d as { target_account_id: string | null }).target_account_id ?? '') === String(accountId ?? ''))
-    if (sameAccount) return sameAccount as unknown as MultiplierDraft
+    if (sameAccount) {
+      const existing = sameAccount as unknown as MultiplierDraft
+      // veio um grupo de variações novo → mescla no rascunho aberto (senão a
+      // idempotência devolveria o antigo ignorando o pedido)
+      if (body.variations?.length) {
+        return this.updateDraft(orgId, existing.id, {
+          variations: body.variations.map(v => ({ product_id: v.product_id, label: v.label, price: null, sku: null })),
+          variation_tier_name: (body.variation_tier_name ?? 'Cor').trim() || 'Cor',
+        })
+      }
+      return existing
+    }
 
     // conteúdo de origem: anúncio escolhido OU melhor anúncio existente (ML primeiro)
     let source: ListingRow | null = null
