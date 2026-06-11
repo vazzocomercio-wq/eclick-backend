@@ -450,7 +450,7 @@ export class MultiplierService {
       currency_id:        'BRL',
       available_quantity: Math.max(0, Math.round(Number(p.stock) || 0)),
       buying_mode:        'buy_it_now',
-      listing_type_id:    p.listing_type ?? 'gold_special',
+      listing_type_id:    this.normalizeMlListingType(p.listing_type),
       condition:          p.condition ?? 'new',
       pictures:           p.image_urls.slice(0, 10).map(u => ({ source: u })),
       attributes,
@@ -586,6 +586,16 @@ export class MultiplierService {
     return [...out.values()]
   }
 
+  /** Normaliza o tipo de anúncio pro id que a API do ML aceita —
+   *  products.ml_listing_type guarda apelidos ('classic', 'premium'). */
+  private normalizeMlListingType(v: string | null | undefined): string {
+    const s = (v ?? '').toLowerCase().trim()
+    if (s === 'classic' || s === 'classico' || s === 'clássico') return 'gold_special'
+    if (s === 'premium') return 'gold_pro'
+    if (['free', 'bronze', 'silver', 'gold', 'gold_special', 'gold_premium', 'gold_pro'].includes(s)) return s
+    return 'gold_special'
+  }
+
   /** Erro do ML → mensagem acionável em PT-BR (lista as causes). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private formatMlError(e: any): string {
@@ -665,7 +675,7 @@ export class MultiplierService {
       } catch {
         payload.category_id = null
       }
-      payload.listing_type = product.ml_listing_type ?? 'gold_special'
+      payload.listing_type = this.normalizeMlListingType(product.ml_listing_type)
       payload.condition = 'new'
     }
 
