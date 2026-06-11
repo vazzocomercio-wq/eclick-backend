@@ -1023,6 +1023,83 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   }
 
   /** F18 Fase F — Remove um anúncio (rollback do teste de publish). */
+  /** Multiplicador — inicializa VARIAÇÕES (tier_variation + models) num item
+   *  recém-criado. `POST /api/v2/product/init_tier_variation`. 1 dimensão
+   *  (ex.: Cor) com N opções; cada model nasce com estoque 0 (o motor central
+   *  empurra depois, por model). Retorna os models criados (model_id +
+   *  tier_index) — se a resposta não trouxer, lê via get_model_list. */
+  async initTierVariation(conn: MpConnection, args: {
+    itemId:   number
+    tierName: string
+    options:  string[]
+    models:   Array<{ tierIndex: number; price: number; sku?: string | null }>
+  }): Promise<Array<{ model_id: number; tier_index: number[] }>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/init_tier_variation'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+
+    const payload = {
+      item_id: args.itemId,
+      tier_variation: [{
+        name: args.tierName.slice(0, 14), // limite Shopee pro nome da dimensão
+        option_list: args.options.map(o => ({ option: o.slice(0, 30) })),
+      }],
+      model: args.models.map(m => ({
+        tier_index:     [m.tierIndex],
+        original_price: m.price,
+        seller_stock:   [{ stock: 0 }],
+        ...(m.sku ? { model_sku: m.sku } : {}),
+      })),
+    }
+
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.initTierVariation',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, payload),
+    })
+    this.logger.log(`[shopee.initTierVariation] item=${args.itemId} → ${JSON.stringify(data)?.slice(0, 400)}`)
+    if (data?.error) throw new Error(`Shopee init_tier_variation ${data.error}: ${data.message}`)
+
+    const fromResp = (data?.response?.model ?? []) as Array<{ model_id?: number; tier_index?: number[] }>
+    const models = fromResp
+      .filter(m => m?.model_id != null)
+      .map(m => ({ model_id: Number(m.model_id), tier_index: m.tier_index ?? [] }))
+    if (models.length > 0) return models
+
+    // fallback: a resposta nem sempre ecoa os models — lê via get_model_list
+    return this.getModelListRaw(conn, args.itemId)
+  }
+
+  /** get_model_list cru (model_id + tier_index) — suporte do initTierVariation. */
+  private async getModelListRaw(conn: MpConnection, itemId: number): Promise<Array<{ model_id: number; tier_index: number[] }>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/get_model_list'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_id: String(itemId),
+    }).toString()
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.getModelListRaw',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(url),
+    })
+    if (data?.error) throw new Error(`Shopee get_model_list ${data.error}: ${data.message}`)
+    return ((data?.response?.model ?? []) as Array<{ model_id?: number; tier_index?: number[] }>)
+      .filter(m => m?.model_id != null)
+      .map(m => ({ model_id: Number(m.model_id), tier_index: m.tier_index ?? [] }))
+  }
+
+  /** F18 Fase F — Remove um anúncio (rollback do teste de publish). */
   async deleteItem(conn: MpConnection, itemId: number): Promise<void> {
     const { accessToken, shopId } = this.requireShop(conn)
     const { partnerId } = this.partnerEnv()

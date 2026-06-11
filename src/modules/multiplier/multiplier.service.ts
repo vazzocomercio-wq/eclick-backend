@@ -10,8 +10,10 @@ import { ProductsService } from '../products/products.service'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { LlmService } from '../ai/llm.service'
 import { StockService } from '../stock/stock.service'
+import { ShopeeStockSyncService } from '../marketplace/shopee-sync/shopee-stock-sync.service'
 import {
   MULTIPLIER_TARGETS, MultiplierTarget, MultiplierPayload, MultiplierDraft, MultiplierCandidate,
+  MultiplierVariation,
 } from './multiplier.types'
 
 /** Campos do produto canônico que alimentam a proposta de multiplicação. */
@@ -69,6 +71,7 @@ export class MultiplierService {
     private readonly mercadolivre:    MercadolivreService,
     private readonly llm:             LlmService,
     private readonly stock:           StockService,
+    private readonly shopeeStock:     ShopeeStockSyncService,
   ) {}
 
   // ── Destinos conectados ────────────────────────────────────────────────
@@ -200,6 +203,10 @@ export class MultiplierService {
     target_platform: MultiplierTarget
     target_account_id?: string | null
     source_listing_id?: string | null
+    /** VARIAÇÕES (Shopee): demais produtos do grupo + rótulo (o produto base
+     *  entra automaticamente se não vier na lista). */
+    variations?: Array<{ product_id: string; label: string }>
+    variation_tier_name?: string
   }): Promise<MultiplierDraft> {
     this.assertTarget(body.target_platform)
     if (!body.product_id) throw new BadRequestException('product_id obrigatório')
@@ -261,6 +268,15 @@ export class MultiplierService {
 
     const payload = await this.buildPayload(orgId, body.target_platform, product, source)
 
+    // VARIAÇÕES (Shopee MVP): valida e enriquece o grupo já no draft
+    if (body.variations?.length) {
+      if (body.target_platform !== 'shopee') {
+        throw new BadRequestException('Variações: por enquanto só com destino Shopee (ML/TikTok na próxima fase).')
+      }
+      payload.variations = await this.buildVariations(orgId, body.product_id, body.variations, payload)
+      payload.variation_tier_name = (body.variation_tier_name ?? 'Cor').trim() || 'Cor'
+    }
+
     const { data, error } = await supabaseAdmin
       .from('multiplier_drafts')
       .insert({
@@ -304,7 +320,7 @@ export class MultiplierService {
     const allowed: Array<keyof MultiplierPayload> = [
       'title', 'description', 'price', 'image_urls', 'sku', 'brand', 'gtin',
       'weight_kg', 'package_dimensions_cm', 'stock', 'category_id',
-      'listing_type', 'condition',
+      'listing_type', 'condition', 'variations', 'variation_tier_name',
     ]
     const merged: MultiplierPayload = { ...draft.payload }
     for (const k of allowed) {
@@ -409,10 +425,14 @@ export class MultiplierService {
         'Aguarde o ML processar (ou adicione fotos no produto) e tente de novo.',
       )
     }
+
+    const hasVariations = (p.variations?.length ?? 0) >= 2
     const shopeeDraft: ShopeeDraftListing = {
       shop_id:            Number(draft.target_account_id ?? 0),
       product_id:         draft.product_id,
-      catalog_product_id: draft.product_id,
+      // COM variações: o publisher NÃO vincula nem empurra estoque (vínculo é
+      // por model, feito abaixo). Sem variações: fluxo clássico (1:1).
+      catalog_product_id: hasVariations ? null : draft.product_id,
       title:              p.title,
       description:        p.description,
       price:              p.price,
@@ -430,7 +450,125 @@ export class MultiplierService {
         `Shopee bloqueou a publicação:\n• ${(res.blockers ?? ['erro desconhecido']).join('\n• ')}`,
       )
     }
-    return String(res.item_id)
+    const itemId = res.item_id
+
+    if (hasVariations) {
+      await this.attachShopeeVariations(orgId, draft, itemId, p.variations as MultiplierVariation[])
+    }
+    return String(itemId)
+  }
+
+  /** Fase 2 do publish com variações: cria os tiers/models no item, vincula
+   *  CADA model ao SEU produto do catálogo e dispara o estoque por variação. */
+  private async attachShopeeVariations(
+    orgId: string,
+    draft: MultiplierDraft,
+    itemId: number,
+    variations: MultiplierVariation[],
+  ): Promise<void> {
+    const tierName = draft.payload.variation_tier_name?.trim() || 'Cor'
+    const fallbackPrice = draft.payload.price ?? 0
+
+    let models: Array<{ model_id: number; tier_index: number[] }>
+    try {
+      models = await this.shopeePublisher.initVariations(orgId, Number(draft.target_account_id ?? 0), {
+        itemId,
+        tierName,
+        options: variations.map(v => v.label),
+        models:  variations.map((v, i) => ({
+          tierIndex: i,
+          price:     v.price ?? fallbackPrice,
+          sku:       v.sku ?? null,
+        })),
+      })
+    } catch (e) {
+      // item já existe — erro aqui é PARCIAL e precisa ser explícito
+      throw new BadRequestException(
+        `Anúncio ${itemId} criado, mas as VARIAÇÕES falharam: ${(e as Error)?.message}. ` +
+        'Corrija na Shopee ou apague o item e publique de novo.',
+      )
+    }
+
+    // model → variação pela posição do tier_index (mesma ordem das options)
+    const byTier = new Map<number, number>()
+    for (const m of models) byTier.set(m.tier_index?.[0] ?? -1, m.model_id)
+
+    for (let i = 0; i < variations.length; i++) {
+      const v = variations[i]
+      const modelId = byTier.get(i)
+      if (!modelId) {
+        this.logger.warn(`[multiplier.shopee] model do tier ${i} (${v.label}) não retornado — vínculo manual depois`)
+        continue
+      }
+      try {
+        await supabaseAdmin.from('product_listings').upsert({
+          platform:      'shopee',
+          account_id:    String(draft.target_account_id ?? ''),
+          listing_id:    String(itemId),
+          variation_id:  String(modelId),
+          product_id:    v.product_id,
+          listing_title: `${draft.payload.title} — ${v.label}`,
+          listing_price: v.price ?? fallbackPrice,
+          is_active:     true,
+        }, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+      } catch (e) {
+        this.logger.warn(`[multiplier.shopee] vínculo model=${modelId} produto=${v.product_id} falhou: ${(e as Error)?.message}`)
+      }
+      // estoque da variação (motor central, por model via vínculo recém-criado)
+      try {
+        await this.shopeeStock.pushStockForProduct(v.product_id, { bypassGate: true })
+      } catch (e) {
+        this.logger.warn(`[multiplier.shopee] estoque variação ${v.label} falhou: ${(e as Error)?.message}`)
+      }
+    }
+    this.logger.log(`[multiplier.shopee] item=${itemId} com ${variations.length} variações (${tierName}) vinculadas`)
+  }
+
+  /** Valida e enriquece o grupo de variações no draft. O produto base entra
+   *  automaticamente (rótulo 'Principal') se não vier na lista. */
+  private async buildVariations(
+    orgId: string,
+    baseProductId: string,
+    input: Array<{ product_id: string; label: string }>,
+    payload: MultiplierPayload,
+  ): Promise<MultiplierVariation[]> {
+    const list = (input ?? [])
+      .filter(v => v?.product_id)
+      .map(v => ({ product_id: v.product_id, label: String(v.label ?? '').trim() }))
+
+    if (!list.some(v => v.product_id === baseProductId)) {
+      list.unshift({ product_id: baseProductId, label: 'Principal' })
+    }
+    if (list.length < 2) throw new BadRequestException('Variações: informe pelo menos 2 opções (produtos).')
+    if (list.length > 50) throw new BadRequestException('Variações: máximo de 50 opções.')
+
+    const ids = list.map(v => v.product_id)
+    if (new Set(ids).size !== ids.length) throw new BadRequestException('Variações: produto repetido no grupo.')
+    const labels = list.map(v => v.label.toLowerCase())
+    if (list.some(v => !v.label)) throw new BadRequestException('Variações: cada opção precisa de um rótulo (ex.: cor).')
+    if (new Set(labels).size !== labels.length) throw new BadRequestException('Variações: rótulo repetido no grupo.')
+
+    const { data: prods, error } = await supabaseAdmin
+      .from('products')
+      .select('id, name, sku, price, stock')
+      .eq('organization_id', orgId)
+      .in('id', ids)
+    if (error) throw new BadRequestException(`buildVariations: ${error.message}`)
+    const byId = new Map((prods ?? []).map(pr => [pr.id as string, pr as { id: string; name: string | null; sku: string | null; price: number | null; stock: number | null }]))
+    const missing = ids.filter(id => !byId.has(id))
+    if (missing.length) throw new BadRequestException('Variações: produto fora do catálogo desta organização.')
+
+    return list.map(v => {
+      const pr = byId.get(v.product_id)
+      return {
+        product_id: v.product_id,
+        label:      v.label,
+        price:      pr?.price ?? payload.price ?? null,
+        sku:        pr?.sku ?? null,
+        name:       pr?.name ?? null,
+        stock:      pr?.stock ?? null,
+      }
+    })
   }
 
   private async publishToTikTok(orgId: string, draft: MultiplierDraft): Promise<string> {

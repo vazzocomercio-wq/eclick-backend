@@ -407,6 +407,18 @@ export class ShopeeCreativePublisherService {
       .map(c => ({ shop_id: c.shop_id as number, nickname: c.nickname ?? null }))
   }
 
+  /** Multiplicador — inicializa variações (tier + models) num item recém-criado
+   *  desta loja. Reusa a resolução multi-loja/token fresco do publish. */
+  async initVariations(orgId: string, shopId: number | null, args: {
+    itemId:   number
+    tierName: string
+    options:  string[]
+    models:   Array<{ tierIndex: number; price: number; sku?: string | null }>
+  }): Promise<Array<{ model_id: number; tier_index: number[] }>> {
+    const { conn, adapter } = await this.resolveConnForShop(orgId, shopId)
+    return adapter.initTierVariation(conn, args)
+  }
+
   /** MULTI-LOJA: resolve conexão+adapter da loja pedida (token fresco).
    *  - shopId válido → conexão DESSA loja (404 se não conectada);
    *  - sem shopId (ou 0, placeholder do front): 1 conta → usa ela;

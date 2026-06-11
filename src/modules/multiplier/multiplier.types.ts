@@ -34,6 +34,21 @@ export interface MultiplierPayload {
   listing_type?: string | null
   /** Condição ML: 'new' | 'used'. */
   condition?:   string | null
+  /** VARIAÇÕES (Shopee MVP): cada opção (cor/tamanho) aponta pro SEU produto
+   *  do catálogo — o vínculo nasce por model e o estoque corre por variação. */
+  variations?:  MultiplierVariation[] | null
+  /** Nome da dimensão de variação (default 'Cor'). */
+  variation_tier_name?: string | null
+}
+
+export interface MultiplierVariation {
+  product_id: string
+  label:      string
+  // enriquecidos na criação (revisáveis):
+  price:      number | null
+  sku:        string | null
+  name?:      string | null
+  stock?:     number | null
 }
 
 export interface MultiplierDraft {
