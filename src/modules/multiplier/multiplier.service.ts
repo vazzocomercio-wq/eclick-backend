@@ -513,15 +513,27 @@ export class MultiplierService {
     if (p.description?.trim()) mlPayload.description = { plain_text: p.description.trim() }
 
     let itemId: string
+    const cfg = { headers: { Authorization: `Bearer ${token}` }, timeout: 60_000 }
     try {
-      const { data } = await axios.post<{ id: string }>(
-        'https://api.mercadolibre.com/items',
-        mlPayload,
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 30_000 },
-      )
+      const { data } = await axios.post<{ id: string }>('https://api.mercadolibre.com/items', mlPayload, cfg)
       itemId = String(data.id)
     } catch (e) {
-      throw new BadRequestException(this.formatMlError(e))
+      // Categorias de catálogo/família (ex.: iluminação) GERAM o título a
+      // partir do family_name e rejeitam `title` no corpo (invalid_fields
+      // [title]) — reenvia sem title (mesmo fallback do IA Criativo).
+      if (this.isMlTitleRejected(e) && 'title' in mlPayload) {
+        this.logger.log('[multiplier.ml] categoria gera o título — reenviando sem `title`')
+        const retry = { ...mlPayload }
+        delete retry.title
+        try {
+          const { data } = await axios.post<{ id: string }>('https://api.mercadolibre.com/items', retry, cfg)
+          itemId = String(data.id)
+        } catch (e2) {
+          throw new BadRequestException(this.formatMlError(e2))
+        }
+      } else {
+        throw new BadRequestException(this.formatMlError(e))
+      }
     }
 
     // vínculo produto↔anúncio (conta dona) + estoque na esteira central
@@ -642,6 +654,20 @@ export class MultiplierService {
     }
 
     return [...out.values()]
+  }
+
+  /** ML rejeitou especificamente o campo title? (categorias de família) */
+  private isMlTitleRejected(e: unknown): boolean {
+    if (!axios.isAxiosError(e)) return false
+    const data = e.response?.data as
+      | { error?: string; message?: string; cause?: Array<{ message?: string }> }
+      | undefined
+    if (!data) return false
+    const text = [
+      data.error ?? '', data.message ?? '',
+      ...(data.cause ?? []).map(c => c?.message ?? ''),
+    ].join(' ').toLowerCase()
+    return text.includes('[title]') && text.includes('invalid')
   }
 
   /** Normaliza o tipo de anúncio pro id que a API do ML aceita —
@@ -864,9 +890,28 @@ export class MultiplierService {
   private async resolveImagesForPublish(orgId: string, draft: MultiplierDraft): Promise<string[]> {
     const fromPayload = this.normalizeImageUrls(draft.payload.image_urls)
     if (fromPayload.length > 0) return fromPayload
+
     try {
       const product = await this.fetchProduct(orgId, draft.product_id)
-      return this.collectImageUrls(product).slice(0, 9)
-    } catch { return [] }
+      const fromProduct = this.collectImageUrls(product).slice(0, 9)
+      if (fromProduct.length > 0) return fromProduct
+    } catch { /* segue pro fallback do anúncio de origem */ }
+
+    // último recurso: fotos AO VIVO do anúncio ML de origem (o catálogo pode
+    // ter sincronizado só o placeholder, mas o anúncio já tem as fotos prontas)
+    if (draft.source_platform === 'mercadolivre' && draft.source_listing_id) {
+      try {
+        const { token } = await this.mercadolivre.getTokenForOrg(orgId)
+        const { data } = await axios.get<{ pictures?: Array<{ secure_url?: string; url?: string }> }>(
+          `https://api.mercadolibre.com/items/${draft.source_listing_id}?attributes=pictures`,
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
+        )
+        const pics = (data?.pictures ?? []).map(p => p.secure_url ?? p.url).filter(Boolean) as string[]
+        return this.normalizeImageUrls(pics).slice(0, 9)
+      } catch (e) {
+        this.logger.warn(`[multiplier] fotos do anúncio origem ${draft.source_listing_id} falharam: ${(e as Error)?.message}`)
+      }
+    }
+    return []
   }
 }
