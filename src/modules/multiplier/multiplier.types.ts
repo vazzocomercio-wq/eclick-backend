@@ -7,9 +7,10 @@
  *  + conteúdo do anúncio de origem, guarda na fila revisável
  *  (multiplier_drafts) e despacha pro publicador do destino. */
 
-/** Destinos suportados no MVP. Mercado Livre como destino continua pela
- *  esteira IA Criativo (CreativeMlPublisher) — integração fica pra fase 2. */
-export const MULTIPLIER_TARGETS = ['shopee', 'tiktok_shop', 'storefront'] as const
+/** Destinos suportados. Mercado Livre publica direto (POST /items) com
+ *  categoria prevista + atributos obrigatórios preenchidos (determinístico +
+ *  IA), nascendo PAUSADO pra revisão no painel ML. */
+export const MULTIPLIER_TARGETS = ['shopee', 'tiktok_shop', 'storefront', 'mercadolivre'] as const
 export type MultiplierTarget = typeof MULTIPLIER_TARGETS[number]
 
 /** Conteúdo proposto pro canal destino — tudo revisável na fila antes do
@@ -25,8 +26,14 @@ export interface MultiplierPayload {
   package_dimensions_cm: { length: number; width: number; height: number } | null
   /** Estoque inicial (TikTok usa na criação; depois o motor central assume). */
   stock:        number | null
-  /** Categoria do DESTINO (TikTok: id da categoria recomendada/escolhida). */
+  /** Categoria do DESTINO (TikTok/ML: id recomendado/escolhido). */
   category_id?: string | null
+  /** GTIN/EAN do produto (ML usa no atributo GTIN). */
+  gtin?:        string | null
+  /** Tipo de anúncio ML: 'free' | 'gold_special' | 'gold_pro'. */
+  listing_type?: string | null
+  /** Condição ML: 'new' | 'used'. */
+  condition?:   string | null
 }
 
 export interface MultiplierDraft {

@@ -1,10 +1,15 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { contentKeyFor, CHANNEL_TITLE_LIMITS, CHANNEL_LABELS, ChannelPlatform } from '../../common/channel-map'
+import { linkProductListing } from '../../common/product-listing-link'
 import { ShopeeCreativePublisherService } from '../marketplace/shopee-creative/shopee-creative.service'
 import { ShopeeDraftListing } from '../marketplace/shopee-creative/shopee-creative.types'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
 import { ProductsService } from '../products/products.service'
+import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { LlmService } from '../ai/llm.service'
+import { StockService } from '../stock/stock.service'
 import {
   MULTIPLIER_TARGETS, MultiplierTarget, MultiplierPayload, MultiplierDraft, MultiplierCandidate,
 } from './multiplier.types'
@@ -13,7 +18,7 @@ import {
 const PRODUCT_FIELDS =
   'id, organization_id, name, sku, price, stock, brand, gtin, description, ' +
   'ai_long_description, ai_short_description, channel_titles, channel_descriptions, ' +
-  'ml_title, photo_urls, images, weight_kg, width_cm, length_cm, height_cm, storefront_visible'
+  'ml_title, ml_listing_type, photo_urls, images, weight_kg, width_cm, length_cm, height_cm, storefront_visible'
 
 interface ProductRow {
   id: string
@@ -30,6 +35,7 @@ interface ProductRow {
   channel_titles: Record<string, string> | null
   channel_descriptions: Record<string, string> | null
   ml_title: string | null
+  ml_listing_type: string | null
   photo_urls: string[] | null
   images: unknown
   weight_kg: number | null
@@ -60,16 +66,21 @@ export class MultiplierService {
     private readonly shopeePublisher: ShopeeCreativePublisherService,
     private readonly tiktok:          TikTokShopService,
     private readonly products:        ProductsService,
+    private readonly mercadolivre:    MercadolivreService,
+    private readonly llm:             LlmService,
+    private readonly stock:           StockService,
   ) {}
 
   // ── Destinos conectados ────────────────────────────────────────────────
 
   async getTargets(orgId: string): Promise<{
-    shopee:      Array<{ shop_id: number; nickname: string | null }>
-    tiktok_shop: { connected: boolean }
-    storefront:  { connected: boolean }
+    mercadolivre: Array<{ seller_id: number; nickname: string | null }>
+    shopee:       Array<{ shop_id: number; nickname: string | null }>
+    tiktok_shop:  { connected: boolean }
+    storefront:   { connected: boolean }
   }> {
-    const [shops, tiktokConn] = await Promise.all([
+    const [mlConns, shops, tiktokConn] = await Promise.all([
+      this.mercadolivre.getConnections(orgId).catch(() => []),
       this.shopeePublisher.listShops(orgId).catch(() => [] as Array<{ shop_id: number; nickname: string | null }>),
       supabaseAdmin
         .from('tiktok_shop_credentials')
@@ -78,9 +89,12 @@ export class MultiplierService {
         .maybeSingle<{ status: string | null }>(),
     ])
     return {
-      shopee:      shops,
-      tiktok_shop: { connected: tiktokConn.data?.status === 'connected' },
-      storefront:  { connected: true },
+      mercadolivre: (mlConns as Array<{ seller_id: number | string; nickname: string | null }>)
+        .filter(c => c.seller_id != null)
+        .map(c => ({ seller_id: Number(c.seller_id), nickname: c.nickname ?? null })),
+      shopee:       shops,
+      tiktok_shop:  { connected: tiktokConn.data?.status === 'connected' },
+      storefront:   { connected: true },
     }
   }
 
@@ -105,12 +119,14 @@ export class MultiplierService {
       byProduct.set(l.product_id, arr)
     }
 
-    // candidato = tem ≥1 anúncio ativo e NÃO está coberto no destino(+conta)
+    // candidato = tem ≥1 anúncio ativo e NÃO está coberto no destino(+conta).
+    // Com accountId (ML/Shopee multi-conta), cobre POR CONTA — produto com
+    // anúncio na conta A é candidato pra conta B (multiplicação entre contas).
     const candidateIds: string[] = []
     for (const [pid, ls] of byProduct) {
       const covered = ls.some(l =>
         l.platform === opts.target &&
-        (opts.target !== 'shopee' || !opts.accountId || String(l.account_id) === String(opts.accountId)),
+        (!opts.accountId || String(l.account_id) === String(opts.accountId)),
       )
       if (!covered) candidateIds.push(pid)
     }
@@ -168,7 +184,7 @@ export class MultiplierService {
 
     const product = await this.fetchProduct(orgId, body.product_id)
 
-    // resolve conta destino (Shopee multi-loja)
+    // resolve conta destino (Shopee/ML multi-conta)
     let accountId: string | null = body.target_account_id ?? null
     if (body.target_platform === 'shopee' && !accountId) {
       const shops = await this.shopeePublisher.listShops(orgId)
@@ -178,12 +194,20 @@ export class MultiplierService {
       }
       accountId = String(shops[0].shop_id)
     }
+    if (body.target_platform === 'mercadolivre' && !accountId) {
+      const conns = await this.mercadolivre.getConnections(orgId)
+      if (!conns.length) throw new BadRequestException('Nenhuma conta Mercado Livre conectada.')
+      if (conns.length > 1) {
+        throw new BadRequestException('Mais de uma conta ML conectada — informe target_account_id (seller_id).')
+      }
+      accountId = String((conns[0] as { seller_id: number | string }).seller_id)
+    }
 
-    // já coberto no destino? não duplica anúncio
+    // já coberto no destino(+conta)? não duplica anúncio
     const listings = await this.fetchActiveListings(orgId, body.product_id)
     const dup = listings.find(l =>
       l.platform === body.target_platform &&
-      (body.target_platform !== 'shopee' || !accountId || String(l.account_id) === String(accountId)),
+      (!accountId || String(l.account_id) === String(accountId)),
     )
     if (dup) {
       throw new BadRequestException(
@@ -256,8 +280,9 @@ export class MultiplierService {
     }
 
     const allowed: Array<keyof MultiplierPayload> = [
-      'title', 'description', 'price', 'image_urls', 'sku', 'brand',
+      'title', 'description', 'price', 'image_urls', 'sku', 'brand', 'gtin',
       'weight_kg', 'package_dimensions_cm', 'stock', 'category_id',
+      'listing_type', 'condition',
     ]
     const merged: MultiplierPayload = { ...draft.payload }
     for (const k of allowed) {
@@ -308,10 +333,10 @@ export class MultiplierService {
         externalId = await this.publishToShopee(orgId, draft)
       } else if (draft.target_platform === 'tiktok_shop') {
         externalId = await this.publishToTikTok(orgId, draft)
+      } else if (draft.target_platform === 'mercadolivre') {
+        externalId = await this.publishToMercadoLivre(orgId, draft)
       } else {
-        throw new BadRequestException(
-          `Destino '${draft.target_platform}' ainda não suportado pelo multiplicador — use o IA Criativo.`,
-        )
+        throw new BadRequestException(`Destino '${draft.target_platform}' não suportado.`)
       }
 
       await this.setDraftStatus(orgId, draftId, {
@@ -393,6 +418,186 @@ export class MultiplierService {
     return String(res.product_id)
   }
 
+  /** Publica no Mercado Livre direto do produto canônico (POST /items).
+   *  Categoria: payload.category_id (editável no draft) ou re-prevista.
+   *  Atributos: determinísticos (SELLER_SKU/BRAND/GTIN/dimensões) + IA pros
+   *  obrigatórios restantes. Anúncio nasce PAUSADO — revisão no painel ML. */
+  private async publishToMercadoLivre(orgId: string, draft: MultiplierDraft): Promise<string> {
+    const p = draft.payload
+    if (!p.image_urls?.length) throw new BadRequestException('Produto sem foto — adicione imagens antes de publicar no ML.')
+    if (!p.price || p.price <= 0) throw new BadRequestException('Preço obrigatório pra publicar no ML.')
+
+    const sellerHint = Number(draft.target_account_id)
+    const { token, sellerId } = await this.mercadolivre.getTokenForOrg(
+      orgId, Number.isFinite(sellerHint) && sellerHint > 0 ? sellerHint : undefined,
+    )
+
+    let categoryId = p.category_id ?? null
+    if (!categoryId) {
+      const pred = await this.mercadolivre.predictCategory(p.title)
+      categoryId = pred.category_id
+    }
+    if (!categoryId) {
+      throw new BadRequestException('ML não previu categoria pra este título — edite o draft e informe category_id.')
+    }
+
+    const attributes = await this.buildMlAttributes(orgId, draft, categoryId)
+
+    const mlPayload: Record<string, unknown> = {
+      title:              p.title.slice(0, 60),
+      category_id:        categoryId,
+      price:              p.price,
+      currency_id:        'BRL',
+      available_quantity: Math.max(0, Math.round(Number(p.stock) || 0)),
+      buying_mode:        'buy_it_now',
+      listing_type_id:    p.listing_type ?? 'gold_special',
+      condition:          p.condition ?? 'new',
+      pictures:           p.image_urls.slice(0, 10).map(u => ({ source: u })),
+      attributes,
+      // nasce PAUSADO — mesmo padrão do IA Criativo: user revisa e ativa no ML.
+      status:             'paused',
+    }
+    if (p.description?.trim()) mlPayload.description = { plain_text: p.description.trim() }
+
+    let itemId: string
+    try {
+      const { data } = await axios.post<{ id: string }>(
+        'https://api.mercadolibre.com/items',
+        mlPayload,
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 30_000 },
+      )
+      itemId = String(data.id)
+    } catch (e) {
+      throw new BadRequestException(this.formatMlError(e))
+    }
+
+    // vínculo produto↔anúncio (conta dona) + estoque na esteira central
+    try {
+      await linkProductListing({
+        platform:  'mercadolivre',
+        listingId: itemId,
+        productId: draft.product_id,
+        accountId: String(sellerId),
+        title:     p.title,
+        price:     p.price,
+      })
+      void this.stock.recalcAndPropagate(draft.product_id, 'multiplier_ml_publish')
+        .catch(e => this.logger.warn(`[multiplier.ml] recalc pós-publish: ${(e as Error)?.message}`))
+    } catch (e) {
+      this.logger.warn(`[multiplier.ml] vínculo falhou item=${itemId}: ${(e as Error)?.message}`)
+    }
+
+    this.logger.log(`[multiplier.ml] publicado item=${itemId} seller=${sellerId} produto=${draft.product_id} (pausado)`)
+    return itemId
+  }
+
+  /** Atributos ML: determinísticos + IA pros obrigatórios da categoria. */
+  private async buildMlAttributes(
+    orgId: string,
+    draft: MultiplierDraft,
+    categoryId: string,
+  ): Promise<Array<{ id: string; value_id?: string; value_name?: string }>> {
+    const p = draft.payload
+    type MlAttr = {
+      id: string; name: string; value_type: string
+      values?: Array<{ id: string; name: string }>
+      tags?: Record<string, boolean>
+    }
+    const all = (await this.mercadolivre.getCategoryAttributes(categoryId).catch(() => [])) as MlAttr[]
+    const byId = new Map<string, MlAttr>(all.map(a => [a.id, a] as [string, MlAttr]))
+    const out = new Map<string, { id: string; value_id?: string; value_name?: string }>()
+
+    const setIfAttr = (id: string, value: string | null | undefined) => {
+      const attr = byId.get(id)
+      const raw = (value ?? '').trim()
+      if (!attr || !raw || out.has(id)) return
+      if (attr.values?.length) {
+        const opt = attr.values.find(o => o.name.toLowerCase().trim() === raw.toLowerCase().trim())
+        if (opt) { out.set(id, { id, value_id: opt.id, value_name: opt.name }); return }
+        if (attr.value_type !== 'string') return // lista fechada sem match → não força
+      }
+      out.set(id, { id, value_name: raw })
+    }
+
+    // determinísticos — dados que JÁ conhecemos do produto
+    setIfAttr('SELLER_SKU', p.sku)
+    setIfAttr('BRAND',      p.brand)
+    setIfAttr('GTIN',       p.gtin)
+    if (p.package_dimensions_cm) {
+      setIfAttr('SELLER_PACKAGE_HEIGHT', `${p.package_dimensions_cm.height} cm`)
+      setIfAttr('SELLER_PACKAGE_WIDTH',  `${p.package_dimensions_cm.width} cm`)
+      setIfAttr('SELLER_PACKAGE_LENGTH', `${p.package_dimensions_cm.length} cm`)
+    }
+    if (p.weight_kg) setIfAttr('SELLER_PACKAGE_WEIGHT', `${Math.round(p.weight_kg * 1000)} g`)
+
+    // obrigatórios restantes → IA (nunca inventa; sem confiança = deixa de fora
+    // e o erro do ML aponta o que falta, acionável no draft)
+    const required = all.filter(a => {
+      const t = a.tags ?? {}
+      return (t.required || t.catalog_required || t.conditional_required)
+        && a.value_type !== 'picture_id' && !out.has(a.id)
+    })
+    if (required.length > 0) {
+      try {
+        const attrLines = required.map(a => {
+          const opts = (a.values ?? []).map(v => v.name).filter(Boolean)
+          const spec = opts.length ? `escolha UMA opção exata: ${opts.slice(0, 60).join(' | ')}`
+            : a.value_type === 'boolean' ? 'responda "Sim" ou "Não"'
+            : a.value_type === 'number_unit' ? 'número com unidade (ex: "40 W", "30 cm")'
+            : a.value_type === 'number' ? 'número' : 'texto curto'
+          return `- ${a.id} ("${a.name}") — ${spec}`
+        }).join('\n')
+
+        const outLlm = await this.llm.generateText({
+          orgId,
+          feature:    'creative_listing',
+          userPrompt: [
+            'Você preenche a ficha técnica de um anúncio do Mercado Livre.',
+            '',
+            'PRODUTO:',
+            `- Título: ${p.title}`,
+            `- Marca: ${p.brand ?? '—'}`,
+            `- Descrição: ${(p.description ?? '').slice(0, 2000)}`,
+            '',
+            'ATRIBUTOS OBRIGATÓRIOS A PREENCHER:',
+            attrLines,
+            '',
+            'REGRAS:',
+            '- Preencha apenas o que der pra deduzir COM CONFIANÇA dos dados acima.',
+            '- Para atributos com opções, use EXATAMENTE uma das opções listadas.',
+            '- Se não der pra determinar, omita o atributo.',
+            '- NUNCA invente valores.',
+            '',
+            'Responda só JSON: {"attributes":[{"id":"X","value":"Y"}]}',
+          ].join('\n'),
+          jsonMode:  true,
+          maxTokens: 1500,
+        })
+        const parsed = JSON.parse(outLlm.text) as { attributes?: Array<{ id?: string; value?: string }> }
+        for (const it of parsed?.attributes ?? []) {
+          const id = String(it?.id ?? '').trim()
+          if (id && byId.has(id)) setIfAttr(id, it?.value == null ? null : String(it.value))
+        }
+      } catch (e) {
+        this.logger.warn(`[multiplier.ml] IA de atributos falhou (segue sem): ${(e as Error)?.message}`)
+      }
+    }
+
+    return [...out.values()]
+  }
+
+  /** Erro do ML → mensagem acionável em PT-BR (lista as causes). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private formatMlError(e: any): string {
+    const data = e?.response?.data
+    if (!data) return e instanceof Error ? e.message : String(e)
+    const causes = Array.isArray(data.cause)
+      ? data.cause.map((c: { message?: string; code?: string }) => c?.message ?? c?.code).filter(Boolean)
+      : []
+    const head = data.message ?? 'Mercado Livre recusou a publicação'
+    return causes.length ? `${head}:\n• ${causes.join('\n• ')}` : String(head)
+  }
+
   // ── Montagem da proposta ───────────────────────────────────────────────
 
   private async buildPayload(
@@ -432,6 +637,7 @@ export class MultiplierService {
       image_urls: images,
       sku: product.sku,
       brand: product.brand,
+      gtin: product.gtin,
       weight_kg: product.weight_kg,
       package_dimensions_cm: dims,
       stock: product.stock,
@@ -450,6 +656,19 @@ export class MultiplierService {
       }
     }
 
+    // ML: prevê a categoria no draft (domain_discovery, público) e propõe
+    // tipo de anúncio (o do produto, ou Clássico) + condição.
+    if (target === 'mercadolivre' && title) {
+      try {
+        const pred = await this.mercadolivre.predictCategory(title)
+        payload.category_id = pred.category_id
+      } catch {
+        payload.category_id = null
+      }
+      payload.listing_type = product.ml_listing_type ?? 'gold_special'
+      payload.condition = 'new'
+    }
+
     return payload
   }
 
@@ -461,6 +680,10 @@ export class MultiplierService {
     if (target === 'shopee') {
       const desc = p.channel_descriptions?.['shopee'] ?? p.ai_long_description ?? p.description ?? ''
       if ((desc ?? '').trim().length < 20) w.push('descrição curta (<20 chars)')
+    }
+    if (target === 'mercadolivre') {
+      if (!p.brand?.trim()) w.push('sem marca (muitas categorias ML exigem)')
+      if (!p.gtin?.trim()) w.push('sem GTIN/EAN')
     }
     return w
   }
