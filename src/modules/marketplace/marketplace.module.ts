@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common'
+import { Module, forwardRef } from '@nestjs/common'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+import { StockModule } from '../stock/stock.module'
 import { MercadoLivreAdapter } from './adapters/ml.adapter'
 import { MagaluAdapter } from './adapters/magalu.adapter'
 import { ShopeeAdapter } from './adapters/shopee.adapter'
@@ -36,7 +37,10 @@ import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.wor
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
 @Module({
-  imports:     [MercadolivreModule, ChannelSettingsModule], // ML billing + comissão canal (F1.6 orders)
+  // forwardRef(StockModule): venda Shopee → baixa estoque mestre (ingestão de
+  // pedidos) precisa do StockService, e StockModule já importa este módulo
+  // (ShopeeStockSyncService no recalcAndPropagate).
+  imports:     [MercadolivreModule, ChannelSettingsModule, forwardRef(() => StockModule)], // ML billing + comissão canal (F1.6 orders)
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores

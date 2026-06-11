@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { Inject, Injectable, Logger, NotFoundException, forwardRef } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../../common/supabase'
 import { computeContributionMargin, round2 } from '../../../common/margin'
@@ -7,6 +7,7 @@ import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import type { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
 import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
+import { StockService } from '../../stock/stock.service'
 
 /** F18 F1.6 — Ingestão de pedidos Shopee na tabela unificada `public.orders`.
  *
@@ -24,11 +25,15 @@ export class ShopeeOrdersIngestionService {
   private readonly logger = new Logger(ShopeeOrdersIngestionService.name)
   private static readonly DEFAULT_DAYS = 60
 
+  // forwardRef: StockModule importa MarketplaceModule (propagação estoque →
+  // anúncio Shopee) e vice-versa (venda Shopee → baixa estoque mestre aqui).
   constructor(
     private readonly mp:              MarketplaceService,
     private readonly adapter:         ShopeeAdapter,
     private readonly productSync:     ShopeeProductSyncService,
     private readonly channelSettings: ChannelSettingsService,
+    @Inject(forwardRef(() => StockService))
+    private readonly stockService:    StockService,
   ) {}
 
   private static readonly CRON_DAYS = 3
@@ -228,7 +233,90 @@ export class ShopeeOrdersIngestionService {
       if (error) this.logger.warn(`[shopee.orders] sku=${g.sku} pedido=${od?.order_sn}: ${error.message}`)
       else n++
     }
+
+    // Baixa de estoque (Estoque Unificado): venda paga/enviada/entregue baixa o
+    // ledger, cancelamento estorna — paridade com ML/TikTok. Idempotente
+    // (apply_sale_movement_tx), então o re-sync da janela é seguro. Best-effort:
+    // falha na baixa não derruba o espelho do pedido.
+    await this.applyOrderStockMovement(orgId, od, shopId, status).catch(e =>
+      this.logger.warn(`[shopee.stock] pedido=${od?.order_sn}: ${e instanceof Error ? e.message : e}`))
+
     return n
+  }
+
+  /** Gate da baixa de estoque: env SHOPEE_ORDER_DECREMENT define a data de corte
+   *  ('on' = corte default abaixo; ou um ISO date explícito, ex '2026-06-11').
+   *  Pedidos CRIADOS antes do corte nunca mexem no estoque — o sync re-varre a
+   *  janela inteira (até 60d) e sem o corte o primeiro deploy baixaria
+   *  retroativamente todo o histórico já ingerido. Ausente/inválida = OFF. */
+  private static readonly STOCK_DEFAULT_CUTOFF = '2026-06-11T00:00:00-03:00'
+  private stockCutoffMs(): number | null {
+    const v = (process.env.SHOPEE_ORDER_DECREMENT ?? '').trim()
+    if (!v) return null
+    const t = Date.parse(v.toLowerCase() === 'on' ? ShopeeOrdersIngestionService.STOCK_DEFAULT_CUTOFF : v)
+    return Number.isFinite(t) ? t : null
+  }
+
+  /** Baixa o estoque mestre a partir das linhas do pedido Shopee. Resolve o
+   *  produto via product_listings (platform='shopee', account_id=shop_id,
+   *  listing_id=item_id; variação exata primeiro, fallback vínculo de item
+   *  variation_id=''), agrega por produto e chama applySaleMovement
+   *  (idempotente; composição/kit baixa componentes; recalc re-propaga pros
+   *  canais). Cancelamento estorna. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async applyOrderStockMovement(orgId: string, od: any, shopId: number, status: string): Promise<void> {
+    const cutoff = this.stockCutoffMs()
+    if (cutoff == null) return                                      // gate OFF
+    const createdMs = (Number(od?.create_time) || 0) * 1000
+    if (createdMs < cutoff) return                                  // pedido antigo — não tocar
+    if (status === 'pending') return                                // não pago ainda
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const items: any[] = Array.isArray(od?.item_list) ? od.item_list : []
+    type Line = { itemId: string; varId: string; qty: number }
+    const lines: Line[] = []
+    for (const it of items) {
+      const itemId = String(it?.item_id ?? '')
+      if (!itemId) continue
+      const qty = Number(it?.model_quantity_purchased) || 0
+      if (qty <= 0) continue
+      // model_id=0 = item sem variação → vínculo nível-item (variation_id '')
+      const varId = it?.model_id ? String(it.model_id) : ''
+      lines.push({ itemId, varId, qty })
+    }
+    if (!lines.length) return
+
+    const { data: links } = await supabaseAdmin
+      .from('product_listings')
+      .select('listing_id, variation_id, product_id')
+      .eq('platform', 'shopee')
+      .eq('account_id', String(shopId))
+      .eq('is_active', true)
+      .in('listing_id', [...new Set(lines.map(l => l.itemId))])
+    if (!links?.length) return
+    const linkRows = links as Array<{ listing_id: string; variation_id: string | null; product_id: string }>
+
+    // por linha: vínculo da variação exata > vínculo nível-item ('')
+    const qtyByProduct = new Map<string, number>()
+    for (const l of lines) {
+      const candidates = linkRows.filter(r => String(r.listing_id) === l.itemId)
+      const match = candidates.find(r => (r.variation_id ?? '') === l.varId)
+        ?? candidates.find(r => (r.variation_id ?? '') === '')
+      if (!match?.product_id) continue
+      qtyByProduct.set(match.product_id, (qtyByProduct.get(match.product_id) ?? 0) + l.qty)
+    }
+
+    for (const [productId, quantity] of qtyByProduct) {
+      const r = await this.stockService.applySaleMovement({
+        productId,
+        quantity,
+        externalOrderId: String(od?.order_sn),
+        status,
+        channel: 'shopee',
+      })
+      if (r !== 'noop') this.logger.log(
+        `[shopee.stock] pedido=${od?.order_sn} produto=${productId} qty=${quantity} status=${status} → ${r}`)
+    }
   }
 
   /** Shopee order_status → status interno (mesmo vocabulário do TikTok mirror). */

@@ -8,8 +8,9 @@ import { MarketplaceModule } from '../marketplace/marketplace.module'
 
 @Module({
   // MarketplaceModule: ShopeeStockSyncService (F18 Fase C — propaga estoque →
-  // anúncio Shopee no recalcAndPropagate). Sem ciclo: marketplace não importa stock.
-  imports: [MercadolivreModule, forwardRef(() => TikTokShopModule), MarketplaceModule],
+  // anúncio Shopee no recalcAndPropagate). forwardRef: marketplace agora também
+  // importa stock (venda Shopee → baixa estoque mestre na ingestão de pedidos).
+  imports: [MercadolivreModule, forwardRef(() => TikTokShopModule), forwardRef(() => MarketplaceModule)],
   controllers: [StockController],
   providers: [StockService, StockCron],
   exports: [StockService],
