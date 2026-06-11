@@ -315,7 +315,7 @@ export class StoreConfigService {
    *  Retorna dados ricos pro frontend renderizar cards completos sem fazer
    *  fetch detalhado por item (marca, atributos basicos, descricao curta,
    *  estoque pra badge "esgotando", created_at pra badge "novidade", etc). */
-  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string; categoryMlIds?: string[]; q?: string } = {}): Promise<Array<Record<string, unknown>>> {
+  async listPublicProducts(orgId: string, opts: { limit?: number; offset?: number; category?: string; categoryMlIds?: string[]; q?: string; sort?: 'newest' | 'bestsellers'; onSale?: boolean } = {}): Promise<Array<Record<string, unknown>>> {
     const limit  = Math.min(opts.limit  ?? 24, 60)
     const offset = Math.max(opts.offset ?? 0, 0)
     let q = supabaseAdmin
@@ -341,8 +341,6 @@ export class StoreConfigService {
       .eq('organization_id', orgId)
       .eq('storefront_visible', true)
       .gt('stock', 0)
-      .order('ai_score', { ascending: false })
-      .range(offset, offset + limit - 1)
     if (opts.category) q = q.eq('category', opts.category)
     // Filtro por categoria do ML (uma folha ou várias — clique numa categoria/grupo da vitrine)
     if (opts.categoryMlIds && opts.categoryMlIds.length > 0) q = q.in('category_ml_id', opts.categoryMlIds)
@@ -351,6 +349,24 @@ export class StoreConfigService {
       const esc = opts.q.trim().replace(/[%,]/g, '').slice(0, 80)
       if (esc) q = q.or(`name.ilike.%${esc}%,sku.ilike.%${esc}%,brand.ilike.%${esc}%`)
     }
+    // Origem "Em promoção": só com promoção ATIVA (janela vigente)
+    if (opts.onSale) {
+      const nowIso = new Date().toISOString()
+      q = q.not('sale_price', 'is', null)
+           .or(`sale_start_at.is.null,sale_start_at.lte.${nowIso}`)
+           .or(`sale_end_at.is.null,sale_end_at.gt.${nowIso}`)
+    }
+    // Ordenação por origem da vitrine
+    if (opts.sort === 'newest') {
+      q = q.order('created_at', { ascending: false })
+    } else if (opts.sort === 'bestsellers') {
+      // sem dado de unidades vendidas no front: proxy por avaliações + score
+      q = q.order('review_count', { ascending: false, nullsFirst: false })
+           .order('ai_score', { ascending: false })
+    } else {
+      q = q.order('ai_score', { ascending: false })
+    }
+    q = q.range(offset, offset + limit - 1)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     const rows = (data ?? []) as unknown as Array<Record<string, unknown>>

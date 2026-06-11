@@ -201,18 +201,23 @@ export class StorePublicController {
     @Query('category')   category?:    string,
     @Query('categoryMlId') categoryMlIdRaw?: string,  // 1 folha ou várias (csv) — filtro por categoria ML
     @Query('q')          q?:           string,         // busca por texto (nome/SKU/marca)
+    @Query('sort')       sortRaw?:     string,         // origem da vitrine: newest | bestsellers
+    @Query('onSale')     onSaleRaw?:   string,         // origem "em promoção" (true)
   ) {
     const config = await this.svc.getPublicBySlugOrDomain({ slug })
     if (!config) return { config: null, products: [] }
     const categoryMlIds = categoryMlIdRaw
       ? categoryMlIdRaw.split(',').map(s => s.trim()).filter(Boolean)
       : undefined
+    const sort = sortRaw === 'newest' || sortRaw === 'bestsellers' ? sortRaw : undefined
     const products = await this.svc.listPublicProducts(config.organization_id, {
       limit:  limitRaw  ? parseInt(limitRaw, 10)  : undefined,
       offset: offsetRaw ? parseInt(offsetRaw, 10) : undefined,
       category,
       categoryMlIds,
       q,
+      sort,
+      onSale: onSaleRaw === 'true' || onSaleRaw === '1',
     })
     return { config, products }
   }
