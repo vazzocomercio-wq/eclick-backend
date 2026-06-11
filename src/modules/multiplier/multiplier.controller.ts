@@ -41,6 +41,15 @@ export class MultiplierController {
     })
   }
 
+  /** Cobertura por produto ('platform:account'[]) — chips da lista de Produtos.
+   *  ids = csv de product_ids (máx 200). */
+  @Get('coverage')
+  coverage(@ReqUser() user: ReqUserPayload, @Query('ids') ids?: string) {
+    const list = (ids ?? '').split(',').map(s => s.trim()).filter(Boolean)
+    if (!list.length) throw new BadRequestException('ids obrigatório (csv de product_ids)')
+    return this.svc.getCoverage(this.orgOf(user), list)
+  }
+
   @Get('drafts')
   drafts(
     @ReqUser() user: ReqUserPayload,

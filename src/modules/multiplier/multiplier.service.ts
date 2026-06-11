@@ -171,6 +171,28 @@ export class MultiplierService {
     return { total: rows.length, items }
   }
 
+  /** Cobertura de anúncios ativos por produto ('platform:account_id'[]) —
+   *  alimenta os chips da lista de Produtos. Lote de até 200 ids. */
+  async getCoverage(orgId: string, productIds: string[]): Promise<Record<string, string[]>> {
+    const ids = [...new Set((productIds ?? []).filter(Boolean))].slice(0, 200)
+    if (ids.length === 0) return {}
+    const { data, error } = await supabaseAdmin
+      .from('product_listings')
+      .select('product_id, platform, account_id, products!inner(organization_id)')
+      .eq('products.organization_id', orgId)
+      .eq('is_active', true)
+      .in('product_id', ids)
+    if (error) throw new BadRequestException(`getCoverage: ${error.message}`)
+    const out: Record<string, string[]> = {}
+    for (const r of (data ?? []) as unknown as Array<{ product_id: string; platform: string; account_id: string | null }>) {
+      const key = r.account_id ? `${r.platform}:${r.account_id}` : r.platform
+      const arr = out[r.product_id] ?? []
+      if (!arr.includes(key)) arr.push(key)
+      out[r.product_id] = arr
+    }
+    return out
+  }
+
   // ── Drafts ─────────────────────────────────────────────────────────────
 
   async createDraft(orgId: string, userId: string, body: {
