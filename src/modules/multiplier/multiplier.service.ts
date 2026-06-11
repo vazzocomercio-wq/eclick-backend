@@ -329,6 +329,21 @@ export class MultiplierService {
     if (merged.title) {
       merged.title = merged.title.trim().slice(0, CHANNEL_TITLE_LIMITS[draft.target_platform as ChannelPlatform] ?? 255)
     }
+    // edição do grupo de variações passa pelas MESMAS validações da criação
+    if (patch.variations !== undefined) {
+      if (patch.variations && patch.variations.length > 0) {
+        if (draft.target_platform !== 'shopee') {
+          throw new BadRequestException('Variações: por enquanto só com destino Shopee.')
+        }
+        merged.variations = await this.buildVariations(
+          orgId, draft.product_id,
+          patch.variations.map(v => ({ product_id: v.product_id, label: v.label })),
+          merged,
+        )
+      } else {
+        merged.variations = null
+      }
+    }
 
     const { data, error } = await supabaseAdmin
       .from('multiplier_drafts')
