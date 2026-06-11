@@ -402,7 +402,13 @@ export class MultiplierService {
 
   private async publishToShopee(orgId: string, draft: MultiplierDraft): Promise<string> {
     const p = draft.payload
-    const imageUrls = this.normalizeImageUrls(p.image_urls)
+    const imageUrls = await this.resolveImagesForPublish(orgId, draft)
+    if (!imageUrls.length) {
+      throw new BadRequestException(
+        'Sem foto válida: as imagens do anúncio de origem ainda estão "processando" no ML. ' +
+        'Aguarde o ML processar (ou adicione fotos no produto) e tente de novo.',
+      )
+    }
     const shopeeDraft: ShopeeDraftListing = {
       shop_id:            Number(draft.target_account_id ?? 0),
       product_id:         draft.product_id,
@@ -441,8 +447,8 @@ export class MultiplierService {
         'TikTok não recomendou categoria pra este título — edite o draft e informe category_id.',
       )
     }
-    const ttImages = this.normalizeImageUrls(p.image_urls)
-    if (!ttImages.length) throw new BadRequestException('Produto sem foto — adicione imagens antes de publicar no TikTok.')
+    const ttImages = await this.resolveImagesForPublish(orgId, draft)
+    if (!ttImages.length) throw new BadRequestException('Produto sem foto válida — adicione imagens antes de publicar no TikTok.')
 
     const res = await this.tiktok.publishProduct(orgId, {
       title:                 p.title,
@@ -466,7 +472,8 @@ export class MultiplierService {
    *  obrigatórios restantes. Anúncio nasce PAUSADO — revisão no painel ML. */
   private async publishToMercadoLivre(orgId: string, draft: MultiplierDraft): Promise<string> {
     const p = draft.payload
-    if (!p.image_urls?.length) throw new BadRequestException('Produto sem foto — adicione imagens antes de publicar no ML.')
+    const mlImages = await this.resolveImagesForPublish(orgId, draft)
+    if (!mlImages.length) throw new BadRequestException('Produto sem foto válida — adicione imagens antes de publicar no ML.')
     if (!p.price || p.price <= 0) throw new BadRequestException('Preço obrigatório pra publicar no ML.')
 
     const sellerHint = Number(draft.target_account_id)
@@ -498,7 +505,7 @@ export class MultiplierService {
       buying_mode:        'buy_it_now',
       listing_type_id:    this.normalizeMlListingType(p.listing_type),
       condition:          p.condition ?? 'new',
-      pictures:           this.normalizeImageUrls(p.image_urls).slice(0, 10).map(u => ({ source: u })),
+      pictures:           mlImages.slice(0, 10).map(u => ({ source: u })),
       attributes,
       // nasce PAUSADO — mesmo padrão do IA Criativo: user revisa e ativa no ML.
       status:             'paused',
@@ -625,7 +632,12 @@ export class MultiplierService {
           if (id && byId.has(id)) setIfAttr(id, it?.value == null ? null : String(it.value))
         }
       } catch (e) {
-        this.logger.warn(`[multiplier.ml] IA de atributos falhou (segue sem): ${(e as Error)?.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body = (e as any)?.response?.data
+        this.logger.warn(
+          `[multiplier.ml] IA de atributos falhou (segue sem): ${(e as Error)?.message}` +
+          (body ? ` — ${JSON.stringify(body).slice(0, 300)}` : ''),
+        )
       }
     }
 
@@ -651,7 +663,9 @@ export class MultiplierService {
       ? data.cause.map((c: { message?: string; code?: string }) => c?.message ?? c?.code).filter(Boolean)
       : []
     const head = data.message ?? 'Mercado Livre recusou a publicação'
-    return causes.length ? `${head}:\n• ${causes.join('\n• ')}` : String(head)
+    if (causes.length) return `${head}:\n• ${causes.join('\n• ')}`
+    // sem causes legíveis → expõe o corpo bruto (truncado) pra não esconder o campo
+    try { return `${head} — detalhe: ${JSON.stringify(data).slice(0, 600)}` } catch { return String(head) }
   }
 
   // ── Montagem da proposta ───────────────────────────────────────────────
@@ -835,10 +849,24 @@ export class MultiplierService {
     const out: string[] = []
     for (const raw of urls ?? []) {
       if (typeof raw !== 'string' || !raw.startsWith('http')) continue
+      // placeholder "Processando imagem" do ML não é foto (e 404a no upload)
+      if (/mlstatic\.com\/resources\/frontend\/statics\/processing-image/i.test(raw)) continue
       let u = raw.replace(/^http:\/\//, 'https://')
       if (/mlstatic\.com\//.test(u)) u = u.replace(/-O\.(jpg|jpeg|png|webp)$/i, '-F.$1')
       if (!out.includes(u)) out.push(u)
     }
     return out
+  }
+
+  /** Fotos pro publish: payload normalizado; se ficar vazio (ex.: origem tinha
+   *  só placeholder "processando"), re-coleta FRESCO do produto — as fotos
+   *  podem ter terminado de processar depois que o rascunho foi criado. */
+  private async resolveImagesForPublish(orgId: string, draft: MultiplierDraft): Promise<string[]> {
+    const fromPayload = this.normalizeImageUrls(draft.payload.image_urls)
+    if (fromPayload.length > 0) return fromPayload
+    try {
+      const product = await this.fetchProduct(orgId, draft.product_id)
+      return this.collectImageUrls(product).slice(0, 9)
+    } catch { return [] }
   }
 }
