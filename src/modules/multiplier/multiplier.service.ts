@@ -11,6 +11,7 @@ import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { LlmService } from '../ai/llm.service'
 import { StockService } from '../stock/stock.service'
 import { ShopeeStockSyncService } from '../marketplace/shopee-sync/shopee-stock-sync.service'
+import { MarketplaceScrapingService } from '../marketplace-scraping/marketplace-scraping.service'
 import {
   MULTIPLIER_TARGETS, MultiplierTarget, MultiplierPayload, MultiplierDraft, MultiplierCandidate,
   MultiplierVariation,
@@ -72,6 +73,7 @@ export class MultiplierService {
     private readonly llm:             LlmService,
     private readonly stock:           StockService,
     private readonly shopeeStock:     ShopeeStockSyncService,
+    private readonly scraping:        MarketplaceScrapingService,
   ) {}
 
   // ── Destinos conectados ────────────────────────────────────────────────
@@ -870,6 +872,113 @@ export class MultiplierService {
     try { return `${head} — detalhe: ${JSON.stringify(data).slice(0, 600)}` } catch { return String(head) }
   }
 
+  // ── Importar anúncio de CONCORRENTE ────────────────────────────────────
+  //
+  // URL de anúncio ML/Shopee → scrape (título/preço/fotos) + enriquecimento
+  // ML (descrição + marca/GTIN/modelo dos atributos públicos) → cria PRODUTO
+  // rascunho no catálogo (SKU IMP-{listing}) → opcionalmente já abre um
+  // rascunho de multiplicação pro destino escolhido. ⚠️ conteúdo de terceiro:
+  // a UI avisa pra revisar fotos/textos (direitos autorais) antes de publicar.
+
+  async importCompetitor(orgId: string, userId: string, body: {
+    url: string
+    target_platform?: MultiplierTarget | null
+    target_account_id?: string | null
+  }): Promise<{ product_id: string; reused: boolean; draft: MultiplierDraft | null; scraped: { title: string; price: number | null; images: number; platform: string; listing_id: string | null } }> {
+    if (!body.url?.trim()) throw new BadRequestException('Informe a URL do anúncio do concorrente.')
+
+    const summary = await this.scraping.scrapeFromUrl(body.url.trim(), orgId)
+    if (!summary.title?.trim()) {
+      throw new BadRequestException('Não consegui ler o anúncio dessa URL (título vazio) — confira o link.')
+    }
+
+    // enriquecimento ML: descrição + atributos públicos do item
+    let description: string | null = null
+    let brand: string | null = null
+    let gtin: string | null = null
+    if (summary.platform === 'mercadolivre' && summary.listing_id?.startsWith('MLB')) {
+      try {
+        const { token } = await this.mercadolivre.getTokenForOrg(orgId)
+        const [itemRes, descRes] = await Promise.allSettled([
+          axios.get<{ attributes?: Array<{ id: string; value_name?: string | null }> }>(
+            `https://api.mercadolibre.com/items/${summary.listing_id}?include_attributes=all`,
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
+          ),
+          axios.get<{ plain_text?: string }>(
+            `https://api.mercadolibre.com/items/${summary.listing_id}/description`,
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
+          ),
+        ])
+        if (descRes.status === 'fulfilled') description = descRes.value.data?.plain_text?.trim() || null
+        if (itemRes.status === 'fulfilled') {
+          const attrs = itemRes.value.data?.attributes ?? []
+          const attr = (id: string) => attrs.find(a => a.id === id)?.value_name?.trim() || null
+          brand = attr('BRAND')
+          gtin  = attr('GTIN')
+        }
+      } catch (e) {
+        this.logger.warn(`[multiplier.import] enriquecimento ML ${summary.listing_id} falhou: ${(e as Error)?.message}`)
+      }
+    }
+
+    const images = this.normalizeImageUrls(summary.all_images ?? [])
+    const price = summary.sale_price ?? summary.price ?? null
+    const sku = `IMP-${(summary.listing_id ?? Math.abs(hashCode(body.url))).toString().replace(/[^A-Za-z0-9-]/g, '')}`.slice(0, 40)
+
+    // re-importou a mesma URL? reusa o produto (SKU é único por org)
+    const { data: existing } = await supabaseAdmin
+      .from('products')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('sku', sku)
+      .maybeSingle<{ id: string }>()
+
+    let productId: string
+    let reused = false
+    if (existing) {
+      productId = existing.id
+      reused = true
+    } else {
+      const { data: created, error } = await supabaseAdmin
+        .from('products')
+        .insert({
+          organization_id: orgId,
+          name:        summary.title.trim().slice(0, 150),
+          sku,
+          price,
+          photo_urls:  images,
+          description,
+          brand,
+          gtin,
+          status:      'draft',
+        })
+        .select('id')
+        .single<{ id: string }>()
+      if (error) throw new BadRequestException(`importCompetitor: ${error.message}`)
+      productId = created.id
+      this.logger.log(`[multiplier.import] concorrente ${summary.platform}/${summary.listing_id ?? '—'} → produto ${productId} (${sku})`)
+    }
+
+    let draft: MultiplierDraft | null = null
+    if (body.target_platform) {
+      draft = await this.createDraft(orgId, userId, {
+        product_id:        productId,
+        target_platform:   body.target_platform,
+        target_account_id: body.target_account_id ?? null,
+      })
+    }
+
+    return {
+      product_id: productId,
+      reused,
+      draft,
+      scraped: {
+        title: summary.title, price, images: images.length,
+        platform: summary.platform, listing_id: summary.listing_id,
+      },
+    }
+  }
+
   // ── Montagem da proposta ───────────────────────────────────────────────
 
   private async buildPayload(
@@ -1103,4 +1212,11 @@ export class MultiplierService {
     }
     return []
   }
+}
+
+/** Hash simples e estável pra gerar SKU de import quando a URL não tem id. */
+function hashCode(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0 }
+  return h
 }

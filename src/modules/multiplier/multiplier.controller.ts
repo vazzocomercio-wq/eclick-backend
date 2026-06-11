@@ -64,6 +64,18 @@ export class MultiplierController {
     })
   }
 
+  /** Importa anúncio de CONCORRENTE (URL ML/Shopee) → produto rascunho no
+   *  catálogo + opcionalmente rascunho de multiplicação pro destino.
+   *  ⚠️ conteúdo de terceiro — revisar fotos/textos antes de publicar. */
+  @Post('import-competitor')
+  @HttpCode(HttpStatus.OK)
+  importCompetitor(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { url: string; target_platform?: MultiplierTarget | null; target_account_id?: string | null },
+  ) {
+    return this.svc.importCompetitor(this.orgOf(user), user.id, body)
+  }
+
   /** Cria a proposta de multiplicação (payload já adaptado ao destino). */
   @Post('drafts')
   createDraft(

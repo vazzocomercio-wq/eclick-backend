@@ -5,6 +5,7 @@ import { ProductsModule } from '../products/products.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { AiModule } from '../ai/ai.module'
 import { StockModule } from '../stock/stock.module'
+import { MarketplaceScrapingModule } from '../marketplace-scraping/marketplace-scraping.module'
 import { MultiplierService } from './multiplier.service'
 import { MultiplierController } from './multiplier.controller'
 
@@ -12,7 +13,7 @@ import { MultiplierController } from './multiplier.controller'
  *  existentes (Shopee add_item, TikTok create product, ML POST /items,
  *  storefront). */
 @Module({
-  imports:     [MarketplaceModule, TikTokShopModule, ProductsModule, MercadolivreModule, AiModule, StockModule],
+  imports:     [MarketplaceModule, TikTokShopModule, ProductsModule, MercadolivreModule, AiModule, StockModule, MarketplaceScrapingModule],
   controllers: [MultiplierController],
   providers:   [MultiplierService],
   exports:     [MultiplierService],
