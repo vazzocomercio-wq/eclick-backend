@@ -898,10 +898,23 @@ export class MultiplierService {
     } catch { /* segue pro fallback do anúncio de origem */ }
 
     // último recurso: fotos AO VIVO do anúncio ML de origem (o catálogo pode
-    // ter sincronizado só o placeholder, mas o anúncio já tem as fotos prontas)
+    // ter sincronizado só o placeholder, mas o anúncio já tem as fotos prontas).
+    // ⚠️ multi-conta: usar o token da conta DONA do anúncio (o vínculo sabe);
+    // token de outra conta dá 403 no PolicyAgent.
     if (draft.source_platform === 'mercadolivre' && draft.source_listing_id) {
       try {
-        const { token } = await this.mercadolivre.getTokenForOrg(orgId)
+        const { data: link } = await supabaseAdmin
+          .from('product_listings')
+          .select('account_id')
+          .eq('platform', 'mercadolivre')
+          .eq('listing_id', draft.source_listing_id)
+          .not('account_id', 'is', null)
+          .limit(1)
+          .maybeSingle<{ account_id: string | null }>()
+        const ownerId = link?.account_id ? Number(link.account_id) : undefined
+        const { token } = await this.mercadolivre.getTokenForOrg(
+          orgId, Number.isFinite(ownerId) && (ownerId as number) > 0 ? ownerId : undefined,
+        )
         const { data } = await axios.get<{ pictures?: Array<{ secure_url?: string; url?: string }> }>(
           `https://api.mercadolibre.com/items/${draft.source_listing_id}?attributes=pictures`,
           { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
