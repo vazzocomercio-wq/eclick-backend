@@ -1524,7 +1524,7 @@ export class TikTokShopService {
       }
     }
 
-    const data = await this.ttsRequest<{ product_id: string; skus?: unknown }>({
+    const data = await this.ttsRequest<{ product_id: string; skus?: Array<{ id?: string | number }> }>({
       method: 'POST',
       path: '/product/202309/products',
       accessToken,
@@ -1541,16 +1541,23 @@ export class TikTokShopService {
       try {
         const catalogId = await resolveCatalogProductIdBySku(orgId, { sku: input.sku })
         if (catalogId) {
+          // listing_id canônico do TikTok = sku_id (é por ele que o push de
+          // estoque e a baixa por venda resolvem o vínculo); product_id só
+          // como fallback se a resposta vier sem skus.
+          const skuId = data.skus?.[0]?.id != null ? String(data.skus[0].id) : null
           const res = await linkProductListing({
             platform:    'tiktok_shop',
-            listingId:   String(data.product_id),
+            listingId:   skuId ?? String(data.product_id),
             productId:   catalogId,
             accountId:   null,
             variationId: null,
             title:       input.title,
             price:       input.price,
           })
-          this.logger.log(`[tts.publish] vínculo product_listings ${res}: ${data.product_id} → produto ${catalogId}`)
+          this.logger.log(`[tts.publish] vínculo product_listings ${res}: sku=${skuId ?? `(fallback ${data.product_id})`} → produto ${catalogId}`)
+          // Sincroniza o produto recém-criado pra tiktok_shop_products ANTES do
+          // recalc — o pushStockForProduct resolve warehouse pelo raw importado.
+          await this.syncProductById(orgId, String(data.product_id)).catch(() => undefined)
           // Aplica a REGRA CENTRAL de estoque (físico+virtual, pausa quando o
           // físico zera) ao anúncio recém-nascido — o recalc empurra o
           // estoque-regra pro TikTok (e re-sincroniza os irmãos). Sem regra ligada,
