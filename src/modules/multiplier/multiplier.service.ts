@@ -375,15 +375,34 @@ export class MultiplierService {
   }
 
   private async publishToStorefront(orgId: string, draft: MultiplierDraft): Promise<string> {
+    // A loja lê products.name/price — se o produto está sem preço (ou nome) e o
+    // rascunho revisado tem, completa o cadastro com o valor REVISADO antes de
+    // publicar (só preenche o que está vazio; nunca sobrescreve valor existente).
+    const p = draft.payload
+    const { data: prod } = await supabaseAdmin
+      .from('products')
+      .select('id, name, price')
+      .eq('organization_id', orgId)
+      .eq('id', draft.product_id)
+      .maybeSingle<{ id: string; name: string | null; price: number | null }>()
+    const patch: Record<string, unknown> = {}
+    if (prod && (!prod.price || prod.price <= 0) && p.price && p.price > 0) patch.price = p.price
+    if (prod && !prod.name?.trim() && p.title?.trim()) patch.name = p.title.trim()
+    if (Object.keys(patch).length > 0) {
+      await supabaseAdmin.from('products').update(patch).eq('id', draft.product_id)
+      this.logger.log(`[multiplier.loja] cadastro completado pelo rascunho ${draft.id}: ${Object.keys(patch).join(', ')}`)
+    }
+
     const res = await this.products.setStorefrontVisibility(orgId, [draft.product_id], true)
     if (res.updated === 0) {
-      throw new BadRequestException('Produto sem nome ou sem preço — complete o cadastro antes de publicar na loja.')
+      throw new BadRequestException('Produto sem nome ou sem preço — informe o preço no rascunho (ou no cadastro) antes de publicar na loja.')
     }
     return draft.product_id
   }
 
   private async publishToShopee(orgId: string, draft: MultiplierDraft): Promise<string> {
     const p = draft.payload
+    const imageUrls = this.normalizeImageUrls(p.image_urls)
     const shopeeDraft: ShopeeDraftListing = {
       shop_id:            Number(draft.target_account_id ?? 0),
       product_id:         draft.product_id,
@@ -391,8 +410,8 @@ export class MultiplierService {
       title:              p.title,
       description:        p.description,
       price:              p.price,
-      image_count:        p.image_urls?.length || null,
-      image_urls:         p.image_urls?.length ? p.image_urls : null,
+      image_count:        imageUrls.length || null,
+      image_urls:         imageUrls.length ? imageUrls : null,
       weight_kg:          p.weight_kg,
       package_length_cm:  p.package_dimensions_cm?.length ?? null,
       package_width_cm:   p.package_dimensions_cm?.width ?? null,
@@ -422,13 +441,14 @@ export class MultiplierService {
         'TikTok não recomendou categoria pra este título — edite o draft e informe category_id.',
       )
     }
-    if (!p.image_urls?.length) throw new BadRequestException('Produto sem foto — adicione imagens antes de publicar no TikTok.')
+    const ttImages = this.normalizeImageUrls(p.image_urls)
+    if (!ttImages.length) throw new BadRequestException('Produto sem foto — adicione imagens antes de publicar no TikTok.')
 
     const res = await this.tiktok.publishProduct(orgId, {
       title:                 p.title,
       description:           p.description ?? undefined,
       category_id:           categoryId,
-      image_urls:            p.image_urls,
+      image_urls:            ttImages,
       price:                 p.price ?? 0,
       stock:                 p.stock ?? 0,
       sku:                   p.sku ?? undefined,
@@ -465,8 +485,12 @@ export class MultiplierService {
 
     const attributes = await this.buildMlAttributes(orgId, draft, categoryId)
 
+    // family_name: obrigatório em categorias de catálogo (ex.: iluminação);
+    // o ML valida consistência título×família — usar o próprio título garante.
+    // Categorias que não exigem simplesmente ignoram (mesmo padrão do Criativo).
     const mlPayload: Record<string, unknown> = {
       title:              p.title.slice(0, 60),
+      family_name:        p.title.slice(0, 60),
       category_id:        categoryId,
       price:              p.price,
       currency_id:        'BRL',
@@ -474,7 +498,7 @@ export class MultiplierService {
       buying_mode:        'buy_it_now',
       listing_type_id:    this.normalizeMlListingType(p.listing_type),
       condition:          p.condition ?? 'new',
-      pictures:           p.image_urls.slice(0, 10).map(u => ({ source: u })),
+      pictures:           this.normalizeImageUrls(p.image_urls).slice(0, 10).map(u => ({ source: u })),
       attributes,
       // nasce PAUSADO — mesmo padrão do IA Criativo: user revisa e ativa no ML.
       status:             'paused',
@@ -800,6 +824,21 @@ export class MultiplierService {
         }
       }
     }
-    return [...new Set(urls)]
+    return this.normalizeImageUrls(urls)
+  }
+
+  /** Normaliza URLs de imagem pros publicadores: força https e, no CDN do ML,
+   *  troca a variante pequena (-O) pela grande (-F) — a Shopee/TikTok rejeitam
+   *  ou degradam imagem pequena/http. Aplicado na montagem E no publish
+   *  (rascunhos antigos podem ter URL crua). */
+  private normalizeImageUrls(urls: Array<string | null | undefined>): string[] {
+    const out: string[] = []
+    for (const raw of urls ?? []) {
+      if (typeof raw !== 'string' || !raw.startsWith('http')) continue
+      let u = raw.replace(/^http:\/\//, 'https://')
+      if (/mlstatic\.com\//.test(u)) u = u.replace(/-O\.(jpg|jpeg|png|webp)$/i, '-F.$1')
+      if (!out.includes(u)) out.push(u)
+    }
+    return out
   }
 }
