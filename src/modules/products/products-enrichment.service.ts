@@ -113,8 +113,11 @@ export interface EnrichmentOutput {
   tags?:                    string[]
 }
 
-/** Marketplaces suportados pra channel_titles/descriptions. */
-export const CHANNEL_KEYS = ['mercado_livre', 'shopee', 'amazon', 'magalu', 'loja_propria'] as const
+/** Marketplaces suportados pra channel_titles/descriptions.
+ *  ⚠️ vocabulário de CONTEÚDO ('mercado_livre', 'loja_propria') ≠ vocabulário
+ *  de platform do product_listings ('mercadolivre', 'storefront') — converter
+ *  via src/common/channel-map.ts. */
+export const CHANNEL_KEYS = ['mercado_livre', 'shopee', 'amazon', 'magalu', 'loja_propria', 'tiktok_shop'] as const
 export type ChannelKey = typeof CHANNEL_KEYS[number]
 
 @Injectable()
@@ -902,6 +905,7 @@ ${JSON.stringify(p.attributes ?? {}, null, 2)}
 Adapte o título do produto pra cada marketplace, respeitando regras específicas:
 - mercado_livre: máx 60 chars. Formato: [Produto] [Característica] [Marca] [Modelo]. Sem CAPS LOCK, sem palavras tipo "promoção", "oferta", "frete grátis".
 - shopee: máx 120 chars. Mais descritivo, pode usar hashtags no final (#categoria, #marca).
+- tiktok_shop: máx 255 chars. Descritivo e rico em palavras-chave de busca (produto + característica + uso + público), sem CAPS LOCK e sem emoji.
 - amazon: máx 200 chars. Formato: [Marca] - [Produto] - [Características] - [Quantidade/Tamanho]. Capitalize First Letter.
 - magalu: máx 150 chars. Similar ao ML mas mais longo.
 - loja_propria: livre, foco em SEO + conversão.
@@ -910,6 +914,7 @@ Adapte o título do produto pra cada marketplace, respeitando regras específica
 Adapte a descrição pra cada canal (use ai_long_description como base):
 - mercado_livre: até 2000 chars, parágrafos curtos.
 - shopee: até 1500 chars, pode usar emojis moderadamente.
+- tiktok_shop: até 2000 chars, texto direto e escaneável (frases curtas, benefícios primeiro), sem HTML.
 - amazon: até 2000 chars, texto puro sem emoji.
 - loja_propria: livre.
 
@@ -938,6 +943,7 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
   "channel_titles": {
     "mercado_livre": "...",
     "shopee": "...",
+    "tiktok_shop": "...",
     "amazon": "...",
     "magalu": "...",
     "loja_propria": "..."
@@ -945,6 +951,7 @@ Retorne APENAS o JSON (sem markdown, sem explicação):
   "channel_descriptions": {
     "mercado_livre": "...",
     "shopee": "...",
+    "tiktok_shop": "...",
     "amazon": "...",
     "loja_propria": "..."
   },
