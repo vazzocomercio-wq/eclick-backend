@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Put, Delete, Param, Query, Body, UseGuards, HttpCode, HttpStatus, BadRequestException, Logger } from '@nestjs/common'
 import { IcarusIntegrationService, type ConnectInput } from './icarus-integration.service'
 import { IcarusCatalogService } from './icarus-catalog.service'
+import { IcarusSyncCron } from './icarus-sync.cron'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -22,6 +23,7 @@ export class IcarusIntegrationController {
   constructor(
     private readonly service: IcarusIntegrationService,
     private readonly catalog: IcarusCatalogService,
+    private readonly syncCron: IcarusSyncCron,
   ) {}
 
   /** POST /suppliers/:supplierId/integrations/icarus
@@ -89,6 +91,16 @@ export class IcarusIntegrationController {
       this.log.error(`[icarus] pull em segundo plano falhou: ${err?.message}`)
     })
     return { started: true }
+  }
+
+  /** POST .../stock/reconcile — reconciliação saldo-a-saldo sob demanda
+   *  (partner_stock → ledger; o cron de 15min faz o mesmo automaticamente). */
+  @Post('stock/reconcile')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('stock.adjust')
+  async reconcileStock(@ReqUser() u: ReqUserPayload, @Param('supplierId') supplierId: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.syncCron.reconcileNow(u.orgId, supplierId)
   }
 
   /** GET .../catalog — lista do staging com status synced/available/new. */

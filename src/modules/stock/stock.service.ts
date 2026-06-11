@@ -347,11 +347,14 @@ export class StockService {
    * Aplica o efeito de uma venda no estoque, de forma idempotente.
    *  - Pedido pago/enviado/entregue → baixa o físico (movimento 'sale').
    *  - Pedido cancelado/reembolsado → estorna a baixa ('sale_reversal').
-   * Idempotência via stock_movements: chave reference_type='ml_order' +
-   * reference_id='{pedido}:{produto}'. Re-ingestão (webhook + cron de
-   * reconciliação) é segura — quem já baixou vira noop.
-   * Após uma mudança real, recalcAndPropagate re-espelha products.stock e
-   * re-distribui pros canais vinculados.
+   * Toda a mutação roda no RPC apply_sale_movement_tx (migration 20260702):
+   * SELECT ... FOR UPDATE na linha-mestre serializa webhook × cron (antes a
+   * checagem read-then-insert em corrida gravou 35% de movimentos duplicados)
+   * e a idempotência (ml_order + '{pedido}:{produto}') é checada dentro da
+   * transação. Estorno em produto dropship ativo respeita o teto do
+   * partner_stock do fornecedor — cancelamento não ressuscita produto que o
+   * Icarus zerou. Após mudança real, recalcAndPropagate re-espelha
+   * products.stock e re-distribui pros canais vinculados.
    */
   async applySaleMovement(params: {
     productId: string
@@ -369,62 +372,28 @@ export class StockService {
     const isCancel  = status === 'cancelled' || status === 'canceled' || status === 'refunded'
     if (!isSale && !isCancel) return 'noop'
 
-    const refId   = `${params.externalOrderId}:${productId}`
-    const channel = params.channel ?? 'mercadolivre'
-
-    const { data: stock } = await supabaseAdmin
-      .from('product_stock')
-      .select('id, quantity')
-      .eq('product_id', productId)
-      .is('platform', null)
-      .maybeSingle()
-    if (!stock) {
-      this.logger.warn(`[stock.sale] produto ${productId} sem registro de estoque — venda ${params.externalOrderId} ignorada`)
+    const { data, error } = await supabaseAdmin.rpc('apply_sale_movement_tx', {
+      p_product_id:        productId,
+      p_quantity:          qty,
+      p_external_order_id: params.externalOrderId,
+      p_is_sale:           isSale,
+      p_channel:           params.channel ?? 'mercadolivre',
+    })
+    if (error) {
+      this.logger.error(`[stock.sale] RPC falhou produto=${productId} pedido=${params.externalOrderId}: ${error.message}`)
       return 'noop'
     }
 
-    const { data: movs } = await supabaseAdmin
-      .from('stock_movements')
-      .select('movement_type')
-      .eq('reference_type', 'ml_order')
-      .eq('reference_id', refId)
-    const hasSale     = (movs ?? []).some(m => m.movement_type === 'sale')
-    const hasReversal = (movs ?? []).some(m => m.movement_type === 'sale_reversal')
-
-    if (isSale) {
-      if (hasSale) return 'noop' // já baixado
-      const novaQtd = Math.max(0, Number(stock.quantity || 0) - qty)
-      await supabaseAdmin
-        .from('product_stock')
-        .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq('id', stock.id)
-      await supabaseAdmin.from('stock_movements').insert({
-        product_id: productId, stock_id: stock.id,
-        movement_type: 'sale', quantity: qty, balance_after: novaQtd,
-        reference_type: 'ml_order', reference_id: refId,
-        notes: `Venda ${channel} — pedido ${params.externalOrderId}`,
-      })
-      await this.recalcAndPropagate(productId, 'sale_decrement')
-        .catch(e => this.logger.warn(`[stock.sale] recalc ${productId}: ${e?.message}`))
-      return 'decremented'
+    const result = String(data ?? 'noop')
+    if (result === 'noop_no_stock') {
+      this.logger.warn(`[stock.sale] produto ${productId} sem registro de estoque — venda ${params.externalOrderId} ignorada`)
+      return 'noop'
     }
+    if (result !== 'decremented' && result !== 'reversed') return 'noop'
 
-    // Cancelamento — só estorna se houve baixa e ainda não estornou
-    if (!hasSale || hasReversal) return 'noop'
-    const novaQtd = Math.max(0, Number(stock.quantity || 0) + qty)
-    await supabaseAdmin
-      .from('product_stock')
-      .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', stock.id)
-    await supabaseAdmin.from('stock_movements').insert({
-      product_id: productId, stock_id: stock.id,
-      movement_type: 'sale_reversal', quantity: qty, balance_after: novaQtd,
-      reference_type: 'ml_order', reference_id: refId,
-      notes: `Cancelamento — pedido ${params.externalOrderId}`,
-    })
-    await this.recalcAndPropagate(productId, 'sale_reversal')
+    await this.recalcAndPropagate(productId, result === 'decremented' ? 'sale_decrement' : 'sale_reversal')
       .catch(e => this.logger.warn(`[stock.sale] recalc ${productId}: ${e?.message}`))
-    return 'reversed'
+    return result
   }
 
   /** Reestoque de devolução (F12): soma de volta ao estoque quando um item

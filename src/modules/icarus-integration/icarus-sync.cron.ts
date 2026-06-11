@@ -16,11 +16,19 @@ import { StockService } from '../stock/stock.service'
 const STOCK_FIRST_CURSOR = 100       // estoque_v2 rejeita 0/1; 100 pega a 1ª página
 const STOCK_PAGE_SIZE = 100          // estoque_v2 devolve no máximo 100 por chamada
 const STOCK_MAX_PAGES_PER_RUN = 40   // teto por run (rate limit 60/min, sobra folga)
+const RECONCILE_MAX_FIXES_PER_RUN = 500 // teto de ajustes por rodada (cada um propaga pros canais)
 
 interface ActiveIntegration {
   id:              string
   organization_id: string
   supplier_id:     string
+}
+
+interface ReconcileRow {
+  supplier_sku:         string
+  product_id:           string
+  partner_stock:        number | null
+  last_stock_change_at: string | null
 }
 
 @Injectable()
@@ -34,7 +42,8 @@ export class IcarusSyncCron {
     private readonly stockService: StockService,
   ) {}
 
-  /** Estoque — incremental via estoque_v2. Mantém partner_stock fresco. */
+  /** Estoque — incremental via estoque_v2. Mantém partner_stock fresco.
+   *  Após o incremental, roda a reconciliação saldo-a-saldo (ver método). */
   @Cron('*/15 * * * *', { name: 'icarus-stock-sync' })
   async syncStock(): Promise<void> {
     const integrations = await this.listActiveIntegrations()
@@ -44,7 +53,20 @@ export class IcarusSyncCron {
       } catch (e) {
         this.log.error(`[icarus-stock] supplier=${integ.supplier_id} falhou: ${(e as Error).message}`)
       }
+      try {
+        await this.reconcileStockForIntegration(integ)
+      } catch (e) {
+        this.log.error(`[icarus-reconcile] supplier=${integ.supplier_id} falhou: ${(e as Error).message}`)
+      }
     }
+  }
+
+  /** Dispara a reconciliação sob demanda (endpoint do controller). */
+  async reconcileNow(orgId: string, supplierId: string): Promise<{ checked: number; adjusted: number }> {
+    const integrations = await this.listActiveIntegrations()
+    const integ = integrations.find(i => i.organization_id === orgId && i.supplier_id === supplierId)
+    if (!integ) return { checked: 0, adjusted: 0 }
+    return this.reconcileStockForIntegration(integ)
   }
 
   /** Preço/cadastro — incremental via /produtos?dtAlteracao + recálculo de custo. */
@@ -151,6 +173,120 @@ export class IcarusSyncCron {
       .eq('id', integ.id)
 
     this.log.log(`[icarus-stock] supplier=${integ.supplier_id} → ${latest.size} SKUs atualizados, cursor=${maxMo}`)
+  }
+
+  /** Reconciliação saldo-a-saldo: re-asserta o ledger (linha-mestre do
+   *  product_stock) a partir do partner_stock pra TODO produto vinculado.
+   *
+   *  Por que existe: o sync incremental só re-visita um SKU quando o Icarus
+   *  gera movimento NOVO dele. SKU parado no fornecedor (ex.: zerado) nunca
+   *  mais era corrigido, enquanto estornos locais de cancelamento re-criavam
+   *  estoque fantasma — auditoria 2026-06-11 achou 205/1603 divergentes e
+   *  anúncio ativo com fornecedor zerado (20406080C / CD251199/200).
+   *
+   *  Regras de segurança:
+   *   • ledger > fornecedor → clampa pra BAIXO sempre (fantasma; o risco real
+   *     é vender sem ter).
+   *   • ledger < fornecedor → sobe, mas descontando as vendas locais líquidas
+   *     posteriores ao último relatório do fornecedor — não re-adiciona
+   *     unidade que acabou de vender e o Icarus ainda não processou.
+   *  Cada ajuste grava movimento 'supplier_reconcile' (auditável na tela de
+   *  movimentos) e dispara recalcAndPropagate (pausa/republica anúncios). */
+  private async reconcileStockForIntegration(integ: ActiveIntegration): Promise<{ checked: number; adjusted: number }> {
+    // 1. Todos os vínculos ativos com produto (paginado — pode passar de 1000).
+    const links: ReconcileRow[] = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabaseAdmin
+        .from('supplier_products')
+        .select('supplier_sku, product_id, partner_stock, last_stock_change_at')
+        .eq('supplier_id', integ.supplier_id)
+        .eq('is_active', true)
+        .not('product_id', 'is', null)
+        .range(from, from + 999)
+      if (error) throw new Error(`supplier_products: ${error.message}`)
+      links.push(...((data ?? []) as ReconcileRow[]))
+      if (!data || data.length < 1000) break
+    }
+    if (!links.length) return { checked: 0, adjusted: 0 }
+
+    // 2. Linhas-mestre do ledger em chunks.
+    const ledger = new Map<string, { id: string; quantity: number }>()
+    const ids = [...new Set(links.map(l => l.product_id))]
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await supabaseAdmin
+        .from('product_stock')
+        .select('id, product_id, quantity')
+        .in('product_id', ids.slice(i, i + 200))
+        .is('platform', null)
+      if (error) throw new Error(`product_stock: ${error.message}`)
+      for (const r of data ?? []) {
+        ledger.set(r.product_id as string, { id: r.id as string, quantity: Number(r.quantity) || 0 })
+      }
+    }
+
+    // 3. Divergências + ajustes.
+    let adjusted = 0
+    for (const link of links) {
+      if (adjusted >= RECONCILE_MAX_FIXES_PER_RUN) {
+        this.log.warn(`[icarus-reconcile] teto de ${RECONCILE_MAX_FIXES_PER_RUN} ajustes atingido — restante fica pra próxima rodada`)
+        break
+      }
+      if (link.partner_stock == null) continue // fornecedor nunca reportou — nada a assertar
+      const row = ledger.get(link.product_id)
+      if (!row) continue
+      const target = Math.max(0, Math.round(Number(link.partner_stock) || 0))
+      if (row.quantity === target) continue
+
+      let newQty = target
+      if (row.quantity < target) {
+        // Subida: desconta vendas locais líquidas APÓS o último relatório do
+        // fornecedor (provavelmente ainda não processadas no Icarus).
+        const since = link.last_stock_change_at
+        if (!since) continue
+        const { data: movs } = await supabaseAdmin
+          .from('stock_movements')
+          .select('movement_type, quantity')
+          .eq('product_id', link.product_id)
+          .eq('reference_type', 'ml_order')
+          .gt('created_at', since)
+        let net = 0
+        for (const m of movs ?? []) {
+          if (m.movement_type === 'sale') net += Number(m.quantity) || 0
+          else if (m.movement_type === 'sale_reversal') net -= Number(m.quantity) || 0
+        }
+        newQty = Math.max(0, target - Math.max(0, net))
+        if (newQty <= row.quantity) continue // sem ganho real — não mexe
+      }
+
+      const now = new Date().toISOString()
+      const { error: upErr } = await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: newQty, last_movement_at: now, updated_at: now })
+        .eq('id', row.id)
+      if (upErr) {
+        this.log.warn(`[icarus-reconcile] update sku=${link.supplier_sku} falhou: ${upErr.message}`)
+        continue
+      }
+      await supabaseAdmin.from('stock_movements').insert({
+        product_id:     link.product_id,
+        stock_id:       row.id,
+        movement_type:  'supplier_reconcile',
+        quantity:       Math.abs(newQty - row.quantity),
+        balance_after:  newQty,
+        reference_type: 'icarus_reconcile',
+        reference_id:   link.supplier_sku,
+        notes:          `Reconciliação fornecedor: ledger ${row.quantity} → ${newQty} (fornecedor=${target})`,
+      })
+      await this.stockService
+        .recalcAndPropagate(link.product_id, 'icarus_reconcile')
+        .catch(e => this.log.warn(`[icarus-reconcile] recalc produto=${link.product_id} falhou: ${(e as Error).message}`))
+      adjusted++
+    }
+
+    if (adjusted > 0) {
+      this.log.log(`[icarus-reconcile] supplier=${integ.supplier_id} → ${links.length} conferidos, ${adjusted} corrigidos`)
+    }
+    return { checked: links.length, adjusted }
   }
 
   private yyyymmdd(d: Date): string {
