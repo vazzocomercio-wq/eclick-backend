@@ -638,7 +638,11 @@ export class MultiplierService {
           jsonMode:  true,
           maxTokens: 1500,
         })
-        const parsed = JSON.parse(outLlm.text) as { attributes?: Array<{ id?: string; value?: string }> }
+        // o modelo às vezes embrulha em cerca markdown (```json … ```)
+        const cleaned = outLlm.text.trim()
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```\s*$/, '')
+        const parsed = JSON.parse(cleaned) as { attributes?: Array<{ id?: string; value?: string }> }
         for (const it of parsed?.attributes ?? []) {
           const id = String(it?.id ?? '').trim()
           if (id && byId.has(id)) setIfAttr(id, it?.value == null ? null : String(it.value))
@@ -653,6 +657,14 @@ export class MultiplierService {
       }
     }
 
+    // fallback determinístico final: MODEL é obrigatório em muitas categorias
+    // e aceita texto livre — usa o SKU (prática padrão de integradores) quando
+    // nem a IA preencheu.
+    if (!out.has('MODEL') && byId.has('MODEL')) {
+      setIfAttr('MODEL', p.sku ?? p.title.slice(0, 60))
+    }
+
+    this.logger.log(`[multiplier.ml] atributos montados: ${[...out.keys()].join(', ') || '(nenhum)'}`)
     return [...out.values()]
   }
 
