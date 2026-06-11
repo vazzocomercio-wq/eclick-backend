@@ -99,6 +99,7 @@ import { TikTokShopModule } from './modules/tiktok-shop/tiktok-shop.module'
 import { ChannelSettingsModule } from './modules/channel-settings/channel-settings.module'
 import { AccessModule } from './modules/access/access.module'
 import { MultiplierModule } from './modules/multiplier/multiplier.module'
+import { CompositionModule } from './modules/composition/composition.module'
 import { RbacModule } from './modules/rbac/rbac.module'
 
 @Module({
@@ -202,6 +203,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     ChannelSettingsModule,
     AccessModule,
     MultiplierModule,
+    CompositionModule,
   ],
   controllers: [AppController],
   providers: [AppService],

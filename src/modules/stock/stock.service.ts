@@ -17,6 +17,82 @@ export class StockService {
     private readonly shopeeStock: ShopeeStockSyncService,
   ) {}
 
+  // ── Composição (kit operacional) ──────────────────────────────────────────
+  //
+  // Kit = SKU composto de N unidades de outros produtos (product_components).
+  // Mecânica: venda do kit baixa os COMPONENTES; o estoque FÍSICO do kit é um
+  // espelho DERIVADO = min(floor(físico_componente ÷ qtd_no_kit)), gravado no
+  // ledger do kit por syncKitDerivedStock — assim TODA a esteira existente
+  // (segurança, regra virtual, pausa, pushes ML/Shopee/TikTok, espelho
+  // products.stock) funciona pro kit sem nenhuma mudança nos canais.
+  // CRUD/validações vivem no CompositionService (módulo composition/).
+
+  /** Componentes do kit (vazio = produto comum). */
+  private async getKitComponents(productId: string): Promise<Array<{ component_product_id: string; quantity: number }>> {
+    if (!productId) return []
+    const { data } = await supabaseAdmin
+      .from('product_components')
+      .select('component_product_id, quantity')
+      .eq('kit_product_id', productId)
+    return ((data ?? []) as Array<{ component_product_id: string; quantity: number }>)
+      .map(r => ({ component_product_id: r.component_product_id, quantity: Number(r.quantity) || 0 }))
+      .filter(r => r.quantity > 0)
+  }
+
+  /** Kits que contêm este produto como componente (fan-out de recalc). */
+  private async getKitsContaining(productId: string): Promise<string[]> {
+    if (!productId) return []
+    const { data } = await supabaseAdmin
+      .from('product_components')
+      .select('kit_product_id')
+      .eq('component_product_id', productId)
+    return [...new Set(((data ?? []) as Array<{ kit_product_id: string }>).map(r => r.kit_product_id))]
+  }
+
+  /** Recalcula e grava o estoque FÍSICO derivado do kit no ledger
+   *  (product_stock.quantity). O físico do kit NUNCA é movimentado por venda
+   *  (a venda baixa os componentes) — é sempre derivado. Virtual/segurança/
+   *  pausa do próprio kit aplicam por cima, como em qualquer produto.
+   *  Retorna o derivado, ou null se o produto não tem composição. */
+  async syncKitDerivedStock(productId: string): Promise<number | null> {
+    const comps = await this.getKitComponents(productId)
+    if (comps.length === 0) return null
+
+    let derived = Infinity
+    for (const c of comps) {
+      const { data: cs } = await supabaseAdmin
+        .from('product_stock')
+        .select('quantity')
+        .eq('product_id', c.component_product_id)
+        .is('platform', null)
+        .maybeSingle()
+      const physical = Math.max(0, Number(cs?.quantity || 0))
+      derived = Math.min(derived, Math.floor(physical / c.quantity))
+    }
+    if (!Number.isFinite(derived) || derived < 0) derived = 0
+
+    const { data: ks } = await supabaseAdmin
+      .from('product_stock')
+      .select('id, quantity')
+      .eq('product_id', productId)
+      .is('platform', null)
+      .maybeSingle()
+
+    if (!ks) {
+      await supabaseAdmin.from('product_stock').insert({
+        product_id: productId, platform: null, account_id: null, quantity: derived,
+      })
+      return derived
+    }
+    if (Number(ks.quantity || 0) !== derived) {
+      await supabaseAdmin
+        .from('product_stock')
+        .update({ quantity: derived, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', ks.id)
+    }
+    return derived
+  }
+
   // ── Central calculation ───────────────────────────────────────────────────
 
   async calculateAvailable(productId: string): Promise<{
@@ -363,6 +439,56 @@ export class StockService {
     status: string
     channel?: string
   }): Promise<'decremented' | 'reversed' | 'noop'> {
+    // ── COMPOSIÇÃO (kit operacional): a venda de um kit baixa o estoque dos
+    //    COMPONENTES (qty × qtd_no_kit), nunca o do próprio kit — o físico do
+    //    kit é espelho derivado (syncKitDerivedStock). refId por componente:
+    //    '{pedido}:{kit}:{componente}' (idempotente por componente). ──
+    const comps = await this.getKitComponents(params.productId)
+    if (comps.length > 0) {
+      // compat: pedido processado ANTES do produto virar kit (baixou o próprio
+      // kit com refId legado '{pedido}:{kit}') → segue o caminho antigo
+      // (idempotência/estorno no kit), sem tocar componentes — evita baixa dupla.
+      const legacyRef = `${params.externalOrderId}:${params.productId}`
+      const { data: legacy } = await supabaseAdmin
+        .from('stock_movements')
+        .select('movement_type')
+        .eq('reference_type', 'ml_order')
+        .eq('reference_id', legacyRef)
+      if ((legacy ?? []).some(m => m.movement_type === 'sale')) {
+        return this.applySaleMovementSingle(params)
+      }
+
+      let result: 'decremented' | 'reversed' | 'noop' = 'noop'
+      for (const c of comps) {
+        // o RPC monta ref = external_order_id:product_id → passando o order id
+        // composto '{pedido}:{kit}' o ref final vira '{pedido}:{kit}:{componente}'.
+        const r = await this.applySaleMovementSingle({
+          productId:       c.component_product_id,
+          quantity:        (Number(params.quantity) || 0) * Number(c.quantity),
+          externalOrderId: `${params.externalOrderId}:${params.productId}`,
+          status:          params.status,
+          channel:         params.channel,
+        })
+        if (r !== 'noop') result = r
+      }
+      // o recalc de cada componente já faz fan-out pro kit (anúncios do kit
+      // recebem o derivado atualizado).
+      return result
+    }
+
+    return this.applySaleMovementSingle(params)
+  }
+
+  /** Movimento de venda de UM produto físico (sem composição), via RPC
+   *  transacional apply_sale_movement_tx (FOR UPDATE serializa webhook×cron;
+   *  idempotência dentro da transação; estorno respeita teto dropship). */
+  private async applySaleMovementSingle(params: {
+    productId: string
+    quantity: number
+    externalOrderId: string
+    status: string
+    channel?: string
+  }): Promise<'decremented' | 'reversed' | 'noop'> {
     const productId = params.productId
     const qty = Math.max(0, Math.round(Number(params.quantity) || 0))
     if (!productId || qty <= 0) return 'noop'
@@ -405,10 +531,34 @@ export class StockService {
     quantity: number
     returnId: string
   }): Promise<'restocked' | 'noop'> {
+    // COMPOSIÇÃO: devolução de kit reestoca os COMPONENTES (qty × qtd_no_kit).
+    const comps = await this.getKitComponents(params.productId)
+    if (comps.length > 0) {
+      let result: 'restocked' | 'noop' = 'noop'
+      for (const c of comps) {
+        const r = await this.applyReturnRestockSingle({
+          productId: c.component_product_id,
+          quantity:  (Number(params.quantity) || 0) * Number(c.quantity),
+          returnId:  params.returnId,
+          refId:     `${params.returnId}:${params.productId}:${c.component_product_id}`,
+        })
+        if (r !== 'noop') result = r
+      }
+      return result
+    }
+    return this.applyReturnRestockSingle({ ...params, refId: `${params.returnId}:${params.productId}` })
+  }
+
+  private async applyReturnRestockSingle(params: {
+    productId: string
+    quantity: number
+    returnId: string
+    refId: string
+  }): Promise<'restocked' | 'noop'> {
     const productId = params.productId
     const qty = Math.max(0, Math.round(Number(params.quantity) || 0))
     if (!productId || qty <= 0) return 'noop'
-    const refId = `${params.returnId}:${productId}`
+    const refId = params.refId
 
     const { data: stock } = await supabaseAdmin
       .from('product_stock').select('id, quantity')
@@ -595,6 +745,11 @@ export class StockService {
 
   async recalcAndPropagate(productId: string, triggeredBy = 'system_distribution') {
     try {
+      // COMPOSIÇÃO: se o produto é kit, refresca primeiro o físico DERIVADO
+      // (min(componente ÷ qtd)) no ledger — calculateAvailable lê fresquinho.
+      await this.syncKitDerivedStock(productId)
+        .catch(e => this.logger.warn(`[stock.kit] derive ${productId}: ${(e as Error)?.message}`))
+
       const calc = await this.calculateAvailable(productId)
 
       // ── REGRA CENTRAL DE ESTOQUE VIRTUAL (opt-in por produto via
@@ -622,6 +777,17 @@ export class StockService {
         .catch((e) =>
           this.logger.warn(`[stock.tts] product=${productId}: ${e instanceof Error ? e.message : String(e)}`),
         )
+
+      // COMPOSIÇÃO: mudou o estoque de um COMPONENTE → re-deriva e re-propaga
+      // os kits que o contêm (kit não pode ser componente ⇒ profundidade 1,
+      // e o guard por triggeredBy corta qualquer reentrada).
+      if (triggeredBy !== 'kit_fanout') {
+        const kitIds = await this.getKitsContaining(productId)
+        for (const kitId of kitIds) {
+          await this.recalcAndPropagate(kitId, 'kit_fanout')
+            .catch(e => this.logger.warn(`[stock.kit] fanout kit=${kitId}: ${(e as Error)?.message}`))
+        }
+      }
 
       const channelQtys = await this.calculateChannelQuantities(productId)
       if (!channelQtys?.length) return

@@ -77,7 +77,13 @@ export class FulfillmentSefazService {
 
   /** Emite uma NF-e de TESTE (sempre homologação) — Simples Nacional, 1 produto
    *  genérico, destinatário de teste. Serve pra validar a emissão ponta a ponta.
-   *  Itera ao vivo contra as rejeições da SEFAZ até cStat 100 (autorizada). */
+   *  Itera ao vivo contra as rejeições da SEFAZ até cStat 100 (autorizada).
+   *
+   *  ⚠️ EMISSÃO REAL DE PEDIDO (F2b-3): antes de montar make.tagProd(), os
+   *  itens da invoice DEVEM passar por CompositionService.explodeForInvoice
+   *  (módulo composition/) — SKU com composição (kit) é faturado pelos
+   *  COMPONENTES (quantidade = qty × qtd_no_kit, valor rateado pelo preço de
+   *  catálogo, total preservado), espelhando a baixa real de estoque. */
   async emitTest(orgId: string, companyId: string): Promise<{ authorized: boolean; cStat: string | null; xMotivo: string | null; chave: string | null; protocolo: string | null }> {
     const cfg = await this.fiscal.getCompanyFiscal(orgId, companyId)
     const { data: company } = await supabaseAdmin
