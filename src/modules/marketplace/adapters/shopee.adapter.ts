@@ -213,7 +213,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
         shop_id:                  String(shopId),
         sign,
         order_sn_list:            chunk.join(','),
-        response_optional_fields: 'item_list,total_amount,actual_shipping_fee,estimated_shipping_fee,payment_method,buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,pay_time,invoice_data',
+        response_optional_fields: 'item_list,total_amount,actual_shipping_fee,estimated_shipping_fee,payment_method,buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,pay_time,invoice_data,package_list',
       })
       const { data } = await this.callShopee({
         key:  `shop:${shopId}`,
@@ -232,6 +232,52 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   async fetchOrderDetails(conn: MpConnection, sns: string[]): Promise<unknown[]> {
     if (!sns.length) return []
     return this.fetchDetailBatch(conn, sns)
+  }
+
+  /** Endereço do destinatário via DOCUMENTO DE ENVIO (etiqueta). A Shopee
+   *  mascara o recipient_address do get_order_detail, mas a etiqueta carrega
+   *  o endereço completo — disponível SÓ na janela entre "Organizar Envio"
+   *  (ship_order) e o despacho. Cria o documento (mesmo AWB que o Seller
+   *  Center imprime; criar de novo não quebra nada) e lê os dados. Lança
+   *  fora da janela — caller trata como skip silencioso. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async fetchShippingDocumentRecipient(conn: MpConnection, orderSn: string, packageNumber: string): Promise<Record<string, any> | null> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const post = async (apiPath: string, body: Record<string, unknown>) => {
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(apiPath, ts, accessToken, shopId)
+      const qs = new URLSearchParams({
+        partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+        shop_id: String(shopId), sign,
+      })
+      const { data } = await this.callShopee({
+        key: `shop:${shopId}`, tag: 'shopee.shippingDoc',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.post<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`, body),
+      })
+      return data
+    }
+
+    // 1) garante o documento criado (best-effort; "já criado" não é erro,
+    //    "can not print" = fora da janela — o data_info abaixo decide)
+    await post('/api/v2/logistics/create_shipping_document', {
+      order_list: [{ order_sn: orderSn, package_number: packageNumber, shipping_document_type: 'NORMAL_AIR_WAYBILL' }],
+    }).catch(() => null)
+
+    // 2) lê os dados do documento (recipient incluso)
+    const info = await post('/api/v2/logistics/get_shipping_document_data_info', {
+      order_sn: orderSn, package_number: packageNumber,
+    })
+    if (info?.error) throw new Error(`Shopee get_shipping_document_data_info ${info.error}: ${info.message}`)
+    // shape defensivo: recipient pode vir em shipping_document_info.recipient_address
+    // ou no topo — loga o raw pra calibrar na 1ª captura real
+    const resp = info?.response ?? {}
+    const rcpt = resp?.shipping_document_info?.recipient_address
+      ?? resp?.recipient_address
+      ?? null
+    this.logger.log(`[shopee.shippingDoc] ${orderSn} recipient=${JSON.stringify(rcpt ?? resp).slice(0, 500)}`)
+    return rcpt as Record<string, unknown> | null
   }
 
   /** Repasse REAL (escrow) de 1 pedido concluído — a fonte da verdade das

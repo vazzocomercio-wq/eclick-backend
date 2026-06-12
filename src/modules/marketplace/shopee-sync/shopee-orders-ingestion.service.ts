@@ -109,6 +109,10 @@ export class ShopeeOrdersIngestionService {
     let failed = 0
     for (const od of details) {
       try {
+        // Endereço via etiqueta: na janela "Organizar Envio"→despacho o
+        // documento de envio expõe o endereço que o get_order_detail mascara.
+        // Best-effort — enxerta no od antes do mirror (que persiste/preserva).
+        await this.captureOpenRecipient(conn, od)
         lines += await this.mirrorOrder(orgId, od, commissionPct, shopId)
       } catch (e: unknown) {
         failed++
@@ -118,6 +122,31 @@ export class ShopeeOrdersIngestionService {
 
     this.logger.log(`[shopee.orders] org=${orgId} shop=${shopId} orders=${details.length} lines=${lines} failed=${failed}`)
     return { shop_id: shopId, orders: details.length, lines, failed, from: from.toISOString(), to: to.toISOString() }
+  }
+
+  /** Captura o endereço ABERTO do destinatário via documento de envio
+   *  (etiqueta) quando o get_order_detail veio mascarado. Só tenta em pedido
+   *  ready_to_ship com pacote; falha fora da janela = skip silencioso.
+   *  Sucesso = enxerta od.recipient_address aberto (o mirror persiste e o
+   *  preserve impede re-sync mascarado de sobrescrever). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async captureOpenRecipient(conn: MpConnection, od: any): Promise<void> {
+    const masked = (v: unknown) => typeof v !== 'string' || !v.trim() || /^\*+$/.test(v.trim())
+    if (this.mapShippingStatus(od?.order_status) !== 'ready_to_ship') return
+    const r = od?.recipient_address
+    if (r && !masked(r.full_address)) return  // já veio aberto
+    const pkg = od?.package_list?.[0]?.package_number
+    if (!pkg) return
+    try {
+      const open = await this.adapter.fetchShippingDocumentRecipient(conn, String(od.order_sn), String(pkg))
+      if (open && !masked(open.full_address ?? open.address)) {
+        od.recipient_address = { ...(r ?? {}), ...open }
+        this.logger.log(`[shopee.orders] endereço capturado via etiqueta: ${od.order_sn}`)
+      }
+    } catch (e: unknown) {
+      // fora da janela (não organizado/já despachado) — esperado na maioria
+      this.logger.debug(`[shopee.orders] etiqueta ${od?.order_sn}: ${(e as Error)?.message}`)
+    }
   }
 
   /** Mapeia 1 pedido Shopee (detail com item_list) → N linhas em orders (1/SKU).
