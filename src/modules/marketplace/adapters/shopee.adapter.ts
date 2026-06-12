@@ -350,6 +350,79 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  // ── avaliações (product/get_comment + reply_comment) ────────────────────
+
+  /** Avaliações da loja (shop-level, paginado por cursor). Shape validado
+   *  live: comment_id, comment (texto; vazio = só estrelas), buyer_username,
+   *  order_sn, item_id, model_id, create_time, rating_star (1-5), editable
+   *  (EDITABLE/EXPIRED), hidden, media{image_url_list?,video_url_list?},
+   *  comment_reply{reply,hidden} quando já respondida. */
+  async listItemComments(
+    conn: MpConnection,
+    opts: { cursor?: string; pageSize?: number; itemId?: number | string } = {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ comments: any[]; more: boolean; nextCursor: string | null }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/get_comment'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+      cursor:    opts.cursor ?? '',
+      page_size: String(opts.pageSize ?? 50),
+    })
+    if (opts.itemId != null) qs.set('item_id', String(opts.itemId))
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.listComments',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    const resp = data?.response ?? {}
+    return {
+      comments:   resp.item_comment_list ?? [],
+      more:       Boolean(resp.more),
+      nextCursor: resp.next_cursor != null ? String(resp.next_cursor) : null,
+    }
+  }
+
+  /** Responde avaliações (até 100 por chamada). ⚠️ resposta PÚBLICA no
+   *  anúncio — irreversível na prática (Shopee não deixa editar depois). */
+  async replyComments(
+    conn: MpConnection,
+    replies: Array<{ commentId: number | string; comment: string }>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/reply_comment'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = {
+      comment_list: replies.map(r => ({ comment_id: Number(r.commentId), comment: r.comment })),
+    }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.replyComment',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // result_list traz fail_error por comment quando algo falha (parse defensivo)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fails = (data?.response?.result_list ?? []).filter((r: any) => r?.fail_error)
+    if (fails.length) {
+      throw new Error(`Shopee reply_comment falhou: ${JSON.stringify(fails[0])}`)
+    }
+    this.logger.log(`[shopee.replyComment] ${replies.length} resposta(s) publicada(s) shop=${shopId}`)
+    return data?.response ?? data
+  }
+
   // ── sellerchat (chat com comprador) ─────────────────────────────────────
   // ⚠️ Exige a permissão "Chat" do app no Open Platform (hoje o app e-Click
   // recebe error_api_permission — ação do user no console). Shapes baseados

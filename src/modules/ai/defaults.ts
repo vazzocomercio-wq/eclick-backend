@@ -49,6 +49,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'openai', model: 'gpt-image-1' },
     fallback:    null,
   },
+  // Central de Avaliações — resposta pública a review da Shopee (a resposta
+  // vende: fica visível pra futuros compradores). Sonnet pra qualidade.
+  shopee_review_reply: {
+    label:       'Resposta de avaliação (Shopee)',
+    description: 'Gera resposta pública sugerida para avaliações de produto',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   // Pós-venda Shopee — sugere resposta no chat (sellerchat) usando contexto
   // da conversa + pedido. Sonnet pra qualidade (paridade c/ ml_question_suggest).
   shopee_chat_suggest: {

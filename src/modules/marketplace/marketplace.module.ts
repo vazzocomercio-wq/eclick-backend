@@ -37,6 +37,8 @@ import { ShopeeReturnsSyncService } from './shopee-sync/shopee-returns-sync.serv
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 import { ShopeeChatService } from './shopee-chat/shopee-chat.service'
 import { ShopeeChatController } from './shopee-chat/shopee-chat.controller'
+import { ShopeeReviewsService } from './shopee-reviews/shopee-reviews.service'
+import { ShopeeReviewsController } from './shopee-reviews/shopee-reviews.controller'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 import { AiModule } from '../ai/ai.module'
 
@@ -56,6 +58,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
     ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
     ShopeeChatController,        // Pós-venda B — chat sellerchat (dormante até permissão do app)
+    ShopeeReviewsController,     // Central de Avaliações — reviews + resposta IA
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -79,6 +82,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações
     ShopeeChatService,               // Pós-venda Fase B — chat sellerchat (gate SHOPEE_CHAT_SYNC)
+    ShopeeReviewsService,            // Central de Avaliações (gate SHOPEE_REVIEW_SYNC)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
