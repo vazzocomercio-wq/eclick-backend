@@ -25,6 +25,14 @@ export class ReviewCentralController {
     return this.central.getConfig(user.orgId)
   }
 
+  /** Operadores do Active pro seletor (nome + WhatsApp do cadastro). */
+  @Get('operators')
+  @RequirePermission('crm.view')
+  async operators(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return { operators: await this.central.listOperators(user.orgId) }
+  }
+
   @Put('config')
   @RequirePermission('crm.message')
   async saveConfig(@ReqUser() user: ReqUserPayload, @Body() body: Record<string, unknown>) {

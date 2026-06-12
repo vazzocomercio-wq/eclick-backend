@@ -9,16 +9,25 @@ import { UnifiedWhatsAppSender } from '../../wa-router/unified-whatsapp-sender.s
 type Json = any
 
 export interface ReviewCentralConfig {
-  organization_id:        string
-  autopilot_enabled:      boolean
-  auto_reply_min_rating:  number
-  auto_reply_window_days: number
-  max_auto_per_hour:      number
-  sensitive_words:        string[]
-  notification_phone:     string | null
-  active_org_id:          string | null
-  active_pipeline_id:     string | null
-  active_stage_id:        string | null
+  organization_id:          string
+  autopilot_enabled:        boolean
+  auto_reply_min_rating:    number
+  auto_reply_window_days:   number
+  max_auto_per_hour:        number
+  sensitive_words:          string[]
+  notification_phone:       string | null
+  notification_operator_id: string | null  // active.org_members.user_id — fone resolve na hora do envio
+  active_org_id:            string | null
+  active_pipeline_id:       string | null
+  active_stage_id:          string | null
+}
+
+export interface OperatorOption {
+  user_id:        string
+  display_name:   string | null
+  whatsapp_phone: string | null
+  role:           string | null
+  status:         string | null
 }
 
 /** Central de Avaliações — AUTOMAÇÃO (piloto automático, opt-in por org).
@@ -208,10 +217,57 @@ export class ReviewCentralService {
     return result.deal_id ?? null
   }
 
+  // ── Operadores (vêm do time do Active — sem digitar número) ─────────────
+
+  /** Resolve o id da org no Active (mapeada por saas_org_id; fallback = mesmo id). */
+  private async resolveActiveOrgId(orgId: string): Promise<string> {
+    const { data } = await supabaseAdmin
+      .schema('active')
+      .from('organizations')
+      .select('id')
+      .or(`saas_org_id.eq.${orgId},id.eq.${orgId}`)
+      .limit(1)
+      .maybeSingle()
+    return (data?.id as string | undefined) ?? orgId
+  }
+
+  /** Lista os operadores do Active pro seletor da tela (com/sem WhatsApp). */
+  async listOperators(orgId: string): Promise<OperatorOption[]> {
+    const activeOrgId = await this.resolveActiveOrgId(orgId)
+    const { data } = await supabaseAdmin
+      .schema('active')
+      .from('org_members')
+      .select('user_id, display_name, whatsapp_phone, role, status')
+      .eq('org_id', activeOrgId)
+      .neq('status', 'suspended')
+      .order('display_name')
+    return (data ?? []) as OperatorOption[]
+  }
+
+  /** Telefone do alerta: override manual (legado) > cadastro do operador no
+   *  Active NA HORA do envio (cadastrou depois, funciona sem reconfigurar). */
+  private async resolveAlertPhone(cfg: ReviewCentralConfig): Promise<string | null> {
+    if (cfg.notification_phone) return cfg.notification_phone
+    if (!cfg.notification_operator_id) return null
+    const activeOrgId = await this.resolveActiveOrgId(cfg.organization_id)
+    const { data } = await supabaseAdmin
+      .schema('active')
+      .from('org_members')
+      .select('whatsapp_phone')
+      .eq('org_id', activeOrgId)
+      .eq('user_id', cfg.notification_operator_id)
+      .maybeSingle()
+    return (data?.whatsapp_phone as string | undefined) ?? null
+  }
+
   // ── Negativa: WhatsApp pro operador ──────────────────────────────────────
 
   private async alertOperator(cfg: ReviewCentralConfig, review: Json, sensitiveHits: string[]): Promise<void> {
-    if (!cfg.notification_phone) return
+    const phone = await this.resolveAlertPhone(cfg)
+    if (!phone) {
+      this.logger.log(`[review-central] sem WhatsApp do operador (card criado mesmo assim) org=${cfg.organization_id}`)
+      return
+    }
     const platformLabel = review.platform === 'mercadolivre' ? 'Mercado Livre' : review.platform === 'shopee' ? 'Shopee' : review.platform
     const motivo = sensitiveHits.length
       ? `⚠️ palavra sensível: ${sensitiveHits.join(', ')}`
@@ -225,7 +281,7 @@ export class ReviewCentralService {
       `🔗 eclick.app.br/dashboard/atendimento/avaliacoes`
 
     try {
-      const r = await this.wa.send(cfg.organization_id, 'internal_alert', cfg.notification_phone, msg)
+      const r = await this.wa.send(cfg.organization_id, 'internal_alert', phone, msg)
       if (r.success) return
       this.logger.warn(`[review-central] alerta WA (router) falhou: ${r.error}`)
     } catch (e: unknown) {
@@ -235,7 +291,7 @@ export class ReviewCentralService {
     try {
       await this.bridge.sendDirectMessage({
         organization_id: cfg.active_org_id ?? cfg.organization_id,
-        phone:           cfg.notification_phone,
+        phone,
         message:         msg,
         dedup_key:       `review-alert:${review.id}`,
       })
@@ -265,6 +321,7 @@ export class ReviewCentralService {
         'polícia', 'denúncia', 'perigoso', 'incêndio', 'choque', 'machucou', 'acidente', 'reclame aqui',
       ],
       notification_phone: null,
+      notification_operator_id: null,
       active_org_id: null,
       active_pipeline_id: null,
       active_stage_id: null,
@@ -283,8 +340,9 @@ export class ReviewCentralService {
       sensitive_words:        Array.isArray(input.sensitive_words)
         ? input.sensitive_words.map(w => String(w).trim().toLowerCase()).filter(Boolean)
         : undefined,
-      notification_phone:     input.notification_phone?.toString().trim() || null,
-      updated_at:             new Date().toISOString(),
+      notification_phone:       input.notification_phone?.toString().trim() || null,
+      notification_operator_id: input.notification_operator_id || null,
+      updated_at:               new Date().toISOString(),
     }
     const { data, error } = await supabaseAdmin
       .from('review_central_config')

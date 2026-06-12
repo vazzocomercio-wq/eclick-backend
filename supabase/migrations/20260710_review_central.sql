@@ -45,3 +45,9 @@ CREATE POLICY review_central_config_org_isolation ON public.review_central_confi
   USING (organization_id IN (
     SELECT organization_id FROM public.organization_members WHERE user_id = auth.uid()
   ));
+
+-- 12/06 (mesmo dia, incremento): operador escolhido em vez de número digitado.
+-- O telefone do alerta resolve do cadastro do operador no Active (org_members)
+-- NA HORA do envio — cadastrou o WhatsApp lá depois, passa a funcionar sozinho.
+ALTER TABLE public.review_central_config
+  ADD COLUMN IF NOT EXISTS notification_operator_id uuid;
