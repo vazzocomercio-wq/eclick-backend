@@ -3,6 +3,8 @@ import { PermissionService } from './permission.service'
 import { RequirePermissionGuard } from './require-permission.guard'
 import { RbacAdminService } from './rbac-admin.service'
 import { RbacAdminController } from './rbac-admin.controller'
+import { AccountScopeService } from './account-scope.service'
+import { AccountScopeController } from './account-scope.controller'
 import { AccessModule } from '../access/access.module'
 
 /**
@@ -17,8 +19,8 @@ import { AccessModule } from '../access/access.module'
 @Global()
 @Module({
   imports:     [forwardRef(() => AccessModule)],
-  controllers: [RbacAdminController],
-  providers:   [PermissionService, RequirePermissionGuard, RbacAdminService],
-  exports:     [PermissionService, RequirePermissionGuard, RbacAdminService],
+  controllers: [RbacAdminController, AccountScopeController],
+  providers:   [PermissionService, RequirePermissionGuard, RbacAdminService, AccountScopeService],
+  exports:     [PermissionService, RequirePermissionGuard, RbacAdminService, AccountScopeService],
 })
 export class RbacModule {}

@@ -8,6 +8,7 @@ import { ReqUser } from '../../common/decorators/user.decorator'
 import { AccessService } from './access.service'
 import { StripePlatformService } from './stripe-platform.service'
 import { PermissionService } from '../rbac/permission.service'
+import { AccountScopeService } from '../rbac/account-scope.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -117,12 +118,20 @@ export class AccessPublicController {
 @Controller('access/me')
 @UseGuards(SupabaseAuthGuard)
 export class AccessMeController {
-  constructor(private readonly perms: PermissionService) {}
+  constructor(
+    private readonly perms:  PermissionService,
+    private readonly scopes: AccountScopeService,
+  ) {}
 
   @Get('permissions')
   async permissions(@ReqUser() u: ReqUserPayload) {
-    if (!u.orgId) return { permissions: [], roles: [] }
-    return this.perms.snapshot(u.id, u.orgId)
+    if (!u.orgId) return { permissions: [], roles: [], account_scope: null }
+    const [snapshot, scope] = await Promise.all([
+      this.perms.snapshot(u.id, u.orgId),
+      this.scopes.getScope(u.id, u.orgId),
+    ])
+    // account_scope: null = irrestrito; array = whitelist de contas (F17-C).
+    return { ...snapshot, account_scope: scope ? scope.rows : null }
   }
 }
 

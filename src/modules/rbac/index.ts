@@ -6,5 +6,9 @@
 export { RequirePermission } from './require-permission.decorator'
 export { RequirePermissionGuard } from './require-permission.guard'
 export { PermissionService } from './permission.service'
+export {
+  AccountScopeService, applyOrdersScope, assertScopeAllowsSeller, assertScopeAllowsAccount,
+} from './account-scope.service'
+export type { AccountScope, AccountScopeRow } from './account-scope.service'
 export { RbacAdminService } from './rbac-admin.service'
 export { RbacModule } from './rbac.module'

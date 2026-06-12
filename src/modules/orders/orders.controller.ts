@@ -3,34 +3,47 @@ import { OrdersService, CreateManualOrderDto } from './orders.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
+// F17-C: escopo por conta — import do arquivo concreto (regra anti-ciclo).
+import { AccountScopeService, AccountScope } from '../rbac/account-scope.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
 @Controller('orders')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class OrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly scopes: AccountScopeService,
+  ) {}
+
+  /** F17-C: escopo por conta do user (null = irrestrito). */
+  private scopeOf(user: ReqUserPayload): Promise<AccountScope | null> {
+    if (!user.orgId) return Promise.resolve(null)
+    return this.scopes.getScope(user.id, user.orgId)
+  }
 
   // POST /orders/manual
   @Post('manual')
   @HttpCode(HttpStatus.CREATED)
   @RequirePermission('orders.update_status')
-  createManual(
+  async createManual(
     @ReqUser() user: ReqUserPayload,
     @Body() dto: CreateManualOrderDto,
   ) {
-    return this.orders.createManualOrder(user.orgId!, dto)
+    const scope = await this.scopeOf(user)
+    return this.orders.createManualOrder(user.orgId!, dto, scope)
   }
 
   // GET /orders/manual?offset=0&limit=20
   @Get('manual')
   @RequirePermission('orders.view')
-  getManual(
+  async getManual(
     @ReqUser() user: ReqUserPayload,
     @Query('offset') offset?: string,
     @Query('limit')  limit?: string,
   ) {
-    return this.orders.getManualOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 20))
+    const scope = await this.scopeOf(user)
+    return this.orders.getManualOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 20), scope)
   }
 
   /** GET /orders/list?offset=&limit=&q=&seller_id=&tab=&platform=&account_id=
@@ -41,7 +54,7 @@ export class OrdersController {
    */
   @Get('list')
   @RequirePermission('orders.view')
-  listOrders(
+  async listOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset')     offset?:    string,
     @Query('limit')      limit?:     string,
@@ -56,6 +69,7 @@ export class OrdersController {
       ? (tab as typeof validTabs[number])
       : undefined
     const safePlatform = sanitizePlatform(platform)
+    const scope = await this.scopeOf(user)
     return this.orders.listOrders(user.orgId, {
       offset:     offset ? Number(offset) : 0,
       limit:      limit  ? Number(limit)  : 20,
@@ -64,40 +78,45 @@ export class OrdersController {
       tab:        safeTab,
       platform:   safePlatform,
       account_id: accountId || undefined,
+      scope,
     })
   }
 
   /** GET /orders/list/kpis?seller_id=&platform=&account_id= */
   @Get('list/kpis')
   @RequirePermission('orders.view')
-  listOrdersKpis(
+  async listOrdersKpis(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id')  sellerId?:  string,
     @Query('platform')   platform?:  string,
     @Query('account_id') accountId?: string,
   ) {
+    const scope = await this.scopeOf(user)
     return this.orders.listOrdersKpis(
       user.orgId,
       sellerId ? Number(sellerId) : undefined,
       sanitizePlatform(platform),
       accountId || undefined,
+      scope,
     )
   }
 
   /** GET /orders/list/tab-counts?seller_id=&platform=&account_id= */
   @Get('list/tab-counts')
   @RequirePermission('orders.view')
-  listOrdersTabCounts(
+  async listOrdersTabCounts(
     @ReqUser() user: ReqUserPayload,
     @Query('seller_id')  sellerId?:  string,
     @Query('platform')   platform?:  string,
     @Query('account_id') accountId?: string,
   ) {
+    const scope = await this.scopeOf(user)
     return this.orders.listOrdersTabCounts(
       user.orgId,
       sellerId ? Number(sellerId) : undefined,
       sanitizePlatform(platform),
       accountId || undefined,
+      scope,
     )
   }
 
@@ -106,8 +125,9 @@ export class OrdersController {
    *  e vendas/receita do mês corrente (BRT). ML continua nos endpoints /ml/*. */
   @Get('channels-overview')
   @RequirePermission('orders.view')
-  getChannelsOverview(@ReqUser() user: ReqUserPayload) {
-    return this.orders.getChannelsOverview(user.orgId!)
+  async getChannelsOverview(@ReqUser() user: ReqUserPayload) {
+    const scope = await this.scopeOf(user)
+    return this.orders.getChannelsOverview(user.orgId!, scope)
   }
 
   /** GET /orders/accounts — lista contas que têm venda na org, por plataforma.
@@ -115,8 +135,9 @@ export class OrdersController {
    *  unificado do dashboard (ML × N contas + Shopee + TikTok + …). */
   @Get('accounts')
   @RequirePermission('orders.view')
-  getAccounts(@ReqUser() user: ReqUserPayload) {
-    return this.orders.getAccountsWithSales(user.orgId!)
+  async getAccounts(@ReqUser() user: ReqUserPayload) {
+    const scope = await this.scopeOf(user)
+    return this.orders.getAccountsWithSales(user.orgId!, scope)
   }
 
   // ── TT-5c: agnóstico de canal pra dashboard + financeiro ────────────────
@@ -126,7 +147,7 @@ export class OrdersController {
   /** GET /orders/recent?offset=&limit=&date_from=&date_to=&seller_id=&platforms=ml,tiktok */
   @Get('recent')
   @RequirePermission('orders.view')
-  getRecentOrders(
+  async getRecentOrders(
     @ReqUser() user: ReqUserPayload,
     @Query('offset')    offset?:   string,
     @Query('limit')     limit?:    string,
@@ -138,6 +159,7 @@ export class OrdersController {
     const platformsList = platforms
       ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
       : undefined
+    const scope = await this.scopeOf(user)
     return this.orders.getRecentOrders(
       user.orgId!,
       Number(offset ?? 0),
@@ -146,13 +168,14 @@ export class OrdersController {
       dateTo,
       sellerId ? Number(sellerId) : undefined,
       platformsList,
+      scope,
     )
   }
 
   /** GET /orders/financial-summary?date_from=&date_to=&status=&seller_id=&platforms= */
   @Get('financial-summary')
   @RequirePermission('orders.view')
-  getFinancialSummary(
+  async getFinancialSummary(
     @ReqUser() user: ReqUserPayload,
     @Query('date_from') dateFrom: string,
     @Query('date_to')   dateTo:   string,
@@ -164,6 +187,7 @@ export class OrdersController {
     const platformsList = platforms
       ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
       : undefined
+    const scope = await this.scopeOf(user)
     return this.orders.getFinancialSummary(
       user.orgId!,
       dateFrom,
@@ -172,6 +196,7 @@ export class OrdersController {
       sellerId ? Number(sellerId) : undefined,
       platformsList,
       kpisOnly === 'true',
+      scope,
     )
   }
 }

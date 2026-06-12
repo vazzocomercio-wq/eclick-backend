@@ -20,6 +20,8 @@ import { ScraperService } from '../scraper/scraper.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
+// F17-C: escopo por conta — import do arquivo concreto (regra anti-ciclo).
+import { AccountScopeService } from '../rbac/account-scope.service'
 
 interface ReqUserPayload {
   id: string
@@ -35,6 +37,7 @@ export class MercadolivreController {
     private readonly billingFetcher: MlBillingFetcherService,
     private readonly orderDetail: OrderDetailService,
     private readonly questionsAi: MlQuestionsAiService,
+    private readonly accountScopes: AccountScopeService,
   ) {}
 
   /** GET /ml/orders/:external_order_id/full-detail — agregador read-only
@@ -216,10 +219,15 @@ export class MercadolivreController {
   }
 
   // GET /ml/connections  (all connected accounts, no tokens)
+  // F17-C: user escopado por conta só recebe as contas ML sob a
+  // responsabilidade dele — restringe o seletor de TODAS as telas ML de vez.
   @Get('connections')
   @RequirePermission('integrations.view')
-  getConnections(@ReqUser() user: ReqUserPayload) {
-    return this.ml.getConnections(user.orgId!)
+  async getConnections(@ReqUser() user: ReqUserPayload) {
+    const conns = await this.ml.getConnections(user.orgId!)
+    const scope = user.orgId ? await this.accountScopes.getScope(user.id, user.orgId) : null
+    if (!scope) return conns
+    return (conns as Array<{ seller_id: number }>).filter(c => scope.mlSellerIds.includes(Number(c.seller_id)))
   }
 
   // GET /ml/item-info?url=...

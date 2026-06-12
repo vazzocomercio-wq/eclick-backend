@@ -1,8 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { computeContributionMargin, estimateSaleFee, round2 } from '../../common/margin'
+// F17-C: escopo por conta. Import dos arquivos concretos (não do barrel) —
+// regra preventiva do outage pós-Wave-16.
+import {
+  AccountScope, applyOrdersScope, assertScopeAllowsSeller, assertScopeAllowsAccount,
+} from '../rbac/account-scope.service'
 
 const ML_BASE = 'https://api.mercadolibre.com'
 
@@ -26,7 +31,10 @@ export class OrdersService {
 
   constructor(private readonly ml: MercadolivreService) {}
 
-  async createManualOrder(orgId: string, dto: CreateManualOrderDto) {
+  async createManualOrder(orgId: string, dto: CreateManualOrderDto, scope?: AccountScope | null) {
+    // Pedido manual não pertence a nenhuma conta de marketplace — fora da
+    // alçada de um operador escopado por conta (F17-C).
+    if (scope) throw new ForbiddenException('Pedidos manuais não estão sob sua responsabilidade.')
     // Pedido manual não tem tarifa real do ML — estima 11,5% (sem categoria
     // não dá pra precisar). Vendas reais ingeridas via webhook usam o
     // `sale_fee` real. Frete e imposto não são resolvidos no manual.
@@ -68,10 +76,13 @@ export class OrdersService {
     return { id: data.id }
   }
 
-  async getManualOrders(orgId: string, offset = 0, limit = 20) {
+  async getManualOrders(orgId: string, offset = 0, limit = 20, scope?: AccountScope | null) {
+    // Operador escopado por conta não enxerga pedidos manuais (sem conta).
+    if (scope) return { orders: [], total: 0 }
     const { data, error, count } = await supabaseAdmin
       .from('orders')
       .select('*', { count: 'exact' })
+      .eq('organization_id', orgId)
       .eq('source', 'manual')
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1)
@@ -96,16 +107,24 @@ export class OrdersService {
       tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao' | 'canceladas'
       platform?:  'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all'
       account_id?: string
+      /** F17-C: escopo por conta do user (null/undefined = irrestrito). */
+      scope?:      AccountScope | null
     } = {},
   ) {
     const offset = Math.max(options.offset ?? 0, 0)
     const limit  = Math.min(options.limit  ?? 20, 200)
+    const scope  = options.scope
+
+    // F17-C: pedir explicitamente conta fora do escopo = 403.
+    assertScopeAllowsSeller(scope, options.seller_id)
+    assertScopeAllowsAccount(scope, options.account_id)
 
     // Pedidos da Loja Própria moram em storefront_orders — schema diferente.
     // Quando o user filtra explicitamente "storefront", redireciona pra
     // listStorefrontOrders que mapeia pro shape canônico. Tabs marketplace
     // não fazem sentido aqui (pending/paid em vez de shipping_status).
     if (options.platform === 'storefront') {
+      if (scope && !scope.allowStorefront) return { orders: [], total: 0 }
       return this.listStorefrontOrders(orgId, { offset, limit, q: options.q })
     }
 
@@ -118,6 +137,8 @@ export class OrdersService {
     if (options.seller_id)  q = q.eq('seller_id',       options.seller_id)
     // Filtro por loja do canal (shop_id Shopee/TikTok carimbado no pedido)
     if (options.account_id) q = q.eq('channel_account_id', options.account_id)
+    // F17-C: restringe às contas sob responsabilidade do user.
+    q = applyOrdersScope(q, scope)
 
     // Filtro de source: específico ou todos os canais do `orders`.
     if (options.platform === 'mercadolivre') {
@@ -549,12 +570,18 @@ export class OrdersService {
     sellerId?: number,
     platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all',
     accountId?: string,
+    scope?: AccountScope | null,
   ): Promise<{
     abertas: number; em_preparacao: number; despachadas: number;
     pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
     canceladas: number;
   }> {
+    assertScopeAllowsSeller(scope, sellerId)
+    assertScopeAllowsAccount(scope, accountId)
     if (platform === 'storefront') {
+      if (scope && !scope.allowStorefront) {
+        return { abertas: 0, em_preparacao: 0, despachadas: 0, pgto_pendente: 0, flex: 0, encerradas: 0, mediacao: 0, canceladas: 0 }
+      }
       return this.listStorefrontTabCounts(orgId)
     }
 
@@ -563,6 +590,7 @@ export class OrdersService {
       if (orgId)     q = q.eq('organization_id', orgId)
       if (sellerId)  q = q.eq('seller_id', sellerId)
       if (accountId) q = q.eq('channel_account_id', accountId)
+      q = applyOrdersScope(q, scope)
       if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
       else if (platform === 'manual')       q = q.eq('source', 'manual')
       else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
@@ -647,8 +675,15 @@ export class OrdersService {
     sellerId?: number,
     platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all',
     accountId?: string,
+    scope?: AccountScope | null,
   ) {
+    assertScopeAllowsSeller(scope, sellerId)
+    assertScopeAllowsAccount(scope, accountId)
     if (platform === 'storefront') {
+      if (scope && !scope.allowStorefront) {
+        const empty = { count: 0, revenue: 0, pending_shipment: 0, in_transit: 0, delivered: 0, by_day: [] }
+        return { today: empty, current_month: { ...empty }, last_month: { ...empty } }
+      }
       return this.listStorefrontKpis(orgId)
     }
     // Cortes de dia/mês em HORÁRIO DE BRASÍLIA (servidor roda em UTC — sem
@@ -684,6 +719,7 @@ export class OrdersService {
         if (orgId)      q = q.eq('organization_id', orgId)
         if (sellerId)   q = q.eq('seller_id', sellerId)
         if (accountId)  q = q.eq('channel_account_id', accountId)
+        q = applyOrdersScope(q, scope)
         if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
         else if (platform === 'manual')       q = q.eq('source', 'manual')
         else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
@@ -886,8 +922,15 @@ export class OrdersService {
   /** Vendas do mês corrente (BRT) de um canal na tabela `orders`.
    *  Pedido = external_order_id distinto (a tabela é 1 linha por SKU);
    *  receita = Σ sale_price das linhas pagas/enviadas/entregues. */
-  private async monthSalesBySource(orgId: string, source: 'shopee' | 'tiktok_shop', monthStartIso: string) {
-    const { data } = await supabaseAdmin
+  private async monthSalesBySource(
+    orgId: string,
+    source: 'shopee' | 'tiktok_shop',
+    monthStartIso: string,
+    /** F17-C: quando o user é escopado, restringe às lojas dele. */
+    accountIds?: string[] | null,
+  ) {
+    if (accountIds && accountIds.length === 0) return { orders: 0, revenue: 0 }
+    let q = supabaseAdmin
       .from('orders')
       .select('external_order_id, sale_price')
       .eq('organization_id', orgId)
@@ -895,6 +938,8 @@ export class OrdersService {
       .gte('sold_at', monthStartIso)
       .in('status', ['paid', 'shipped', 'delivered'])
       .limit(10_000)
+    if (accountIds) q = q.in('channel_account_id', accountIds)
+    const { data } = await q
     const ids = new Set<string>()
     let revenue = 0
     for (const r of (data ?? []) as Array<{ external_order_id: string; sale_price: number | null }>) {
@@ -909,7 +954,7 @@ export class OrdersService {
    *  fora — a tela já consome /ml/connections, /ml/listings/counts e
    *  /ml/orders/kpis. Loja Própria vende em `storefront_orders` (schema
    *  próprio), Shopee/TikTok no `orders` unificado. */
-  async getChannelsOverview(orgId: string): Promise<{
+  async getChannelsOverview(orgId: string, scope?: AccountScope | null): Promise<{
     month_start: string
     shopee: {
       connected: boolean
@@ -949,7 +994,7 @@ export class OrdersService {
           .select('shop_id')
           .eq('organization_id', orgId)
           .limit(10_000),
-        this.monthSalesBySource(orgId, 'shopee', monthStartIso),
+        this.monthSalesBySource(orgId, 'shopee', monthStartIso, scope ? scope.channelAccountIds : null),
         supabaseAdmin
           .from('tiktok_shop_credentials')
           .select('shop_id, seller_name, status, access_expires_at')
@@ -959,7 +1004,7 @@ export class OrdersService {
           .select('status')
           .eq('organization_id', orgId)
           .limit(10_000),
-        this.monthSalesBySource(orgId, 'tiktok_shop', monthStartIso),
+        this.monthSalesBySource(orgId, 'tiktok_shop', monthStartIso, scope ? scope.channelAccountIds : null),
         // produtos publicados na vitrine (anúncio storefront em product_listings;
         // a tabela não tem org → escopo via join no produto dono).
         supabaseAdmin
@@ -990,7 +1035,7 @@ export class OrdersService {
       status:     c.status ?? 'connected',
       expires_at: c.expires_at,
       listings:   listingsByShop.get(String(c.shop_id ?? '')) ?? 0,
-    }))
+    })).filter(a => !scope || scope.channelAccountIds.includes(a.id))
     const shopeeTotal = shopeeAccounts.reduce((s, a) => s + a.listings, 0)
 
     // TikTok: produtos ACTIVATE = anúncios ativos
@@ -1004,12 +1049,13 @@ export class OrdersService {
       status:     c.status ?? 'connected',
       expires_at: c.access_expires_at,
       listings:   ttsRows.length,
-    }))
+    })).filter(a => !scope || scope.channelAccountIds.includes(a.id))
 
-    // Loja Própria: pedidos pagos do mês
-    const sfRows = (sfOrders.data ?? []) as Array<{ total: number | null; status: string }>
+    // Loja Própria: pedidos pagos do mês (zerada pra user escopado sem ela)
+    const sfAllowed = !scope || scope.allowStorefront
+    const sfRows = sfAllowed ? (sfOrders.data ?? []) as Array<{ total: number | null; status: string }> : []
     const sfPaid = sfRows.filter(r => r.status === 'paid')
-    const sfCount = sfListings.count ?? 0
+    const sfCount = sfAllowed ? (sfListings.count ?? 0) : 0
 
     return {
       month_start: monthStartIso,
@@ -1022,7 +1068,9 @@ export class OrdersService {
       tiktok_shop: {
         connected: ttsAccounts.length > 0,
         accounts:  ttsAccounts,
-        listings:  { total: ttsRows.length, active: ttsActive },
+        listings:  ttsAccounts.length > 0
+          ? { total: ttsRows.length, active: ttsActive }
+          : { total: 0, active: 0 },
         month:     ttsMonth,
       },
       storefront: {
@@ -1042,7 +1090,7 @@ export class OrdersService {
   /** Lista as contas que têm venda na org, agrupadas por (plataforma, seller_id).
    *  Data-driven: percorre `orders` e devolve combos distintos com nickname +
    *  contagem. Alimenta o seletor unificado do dashboard. */
-  async getAccountsWithSales(orgId: string): Promise<
+  async getAccountsWithSales(orgId: string, scope?: AccountScope | null): Promise<
     Array<{ platform: string; seller_id: number | null; account_id: string | null; nickname: string; orders: number }>
   > {
     const nick = await this.ordersBuildNicknameMap(orgId)
@@ -1096,7 +1144,15 @@ export class OrdersService {
       if (batch.length < PAGE_SIZE) break
       pageStart += PAGE_SIZE
     }
-    return [...seen.values()].sort((a, b) => b.orders - a.orders)
+    let accounts = [...seen.values()]
+    // F17-C: user escopado só vê as contas dele no seletor.
+    if (scope) {
+      accounts = accounts.filter(a =>
+        (a.platform === 'mercadolivre' && a.seller_id != null && scope.mlSellerIds.includes(a.seller_id))
+        || (a.account_id != null && scope.channelAccountIds.includes(a.account_id)),
+      )
+    }
+    return accounts.sort((a, b) => b.orders - a.orders)
   }
 
   /** Paginação manual — Supabase corta em 1000 sem .range(). */
@@ -1112,6 +1168,8 @@ export class OrdersService {
      *  então pular esses blobs corta a leitura do DB + serialização (o raw_data
      *  é o JSON inteiro do pedido do marketplace — a coluna mais pesada). */
     lightweight?: boolean
+    /** F17-C: escopo por conta do user. */
+    scope?: AccountScope | null
   }): Promise<OrdersReportRow[]> {
     const PAGE_SIZE = 1000
     const SAFETY_CAP = 50_000
@@ -1131,6 +1189,7 @@ export class OrdersService {
       if (opts.dateFrom) q = q.gte('sold_at', opts.dateFrom)
       if (opts.dateTo) q = q.lte('sold_at', opts.dateTo)
       if (opts.sellerIdFilter != null) q = q.eq('seller_id', opts.sellerIdFilter)
+      q = applyOrdersScope(q, opts.scope)
       if (opts.statusFilter && opts.statusFilter !== 'all') q = q.eq('status', opts.statusFilter)
       if (opts.platformsFilter && opts.platformsFilter.length > 0) {
         q = q.in('platform', this.expandPlatformsFilter(opts.platformsFilter))
@@ -1155,12 +1214,14 @@ export class OrdersService {
     dateTo?: string,
     sellerIdFilter?: number,
     platforms?: string[],
+    scope?: AccountScope | null,
   ) {
+    assertScopeAllowsSeller(scope, sellerIdFilter)
     const nick = await this.ordersBuildNicknameMap(orgId)
     const isoFrom = dateFrom ? `${dateFrom}T00:00:00.000-03:00` : null
     const isoTo = dateTo ? `${dateTo}T23:59:59.999-03:00` : null
     const allRows = await this.ordersFetchRowsForReport({
-      orgId, dateFrom: isoFrom, dateTo: isoTo, sellerIdFilter, platformsFilter: platforms,
+      orgId, dateFrom: isoFrom, dateTo: isoTo, sellerIdFilter, platformsFilter: platforms, scope,
     })
 
     const sliceStart = Math.max(offset, 0)
@@ -1235,7 +1296,9 @@ export class OrdersService {
      *  montar/serializar o array de pedidos do mês inteiro era puro desperdício
      *  (≈248KB jogados fora a cada carregamento). */
     kpisOnly = false,
+    scope?: AccountScope | null,
   ) {
+    assertScopeAllowsSeller(scope, sellerIdFilter)
     const nick = kpisOnly ? null : await this.ordersBuildNicknameMap(orgId)
     // Normaliza pra dia-inteiro em BRT (igual getRecentOrders). Sem isso,
     // date_to='YYYY-MM-DD' vira meia-noite UTC e EXCLUI os pedidos de hoje.
@@ -1244,7 +1307,7 @@ export class OrdersService {
     const isoTo = dateTo && !dateTo.includes('T') ? `${dateTo}T23:59:59.999-03:00` : dateTo
     const allRows = await this.ordersFetchRowsForReport({
       orgId, dateFrom: isoFrom, dateTo: isoTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
-      lightweight: kpisOnly,
+      lightweight: kpisOnly, scope,
     })
 
     let faturamento = 0, canceladas = 0
