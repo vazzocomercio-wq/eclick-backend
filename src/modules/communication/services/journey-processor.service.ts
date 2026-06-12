@@ -309,6 +309,29 @@ export class JourneyProcessorService {
       throw new Error(`step[0] mal-formado: ${JSON.stringify(step)}`)
     }
 
+    // ─── (g.2) Dedup por pedido externo ──────────────────────────────────
+    // Pedido multi-SKU vira N linhas em `orders` → N OCJs pro MESMO pedido.
+    // Garante 1 run (e portanto 1 sequência de mensagens) por (journey, pedido):
+    // se já existe run, marca este OCJ como active sem criar envio novo.
+    if (snapshot.external_order_id) {
+      const { data: dupRun } = await supabaseAdmin
+        .from('messaging_journey_runs')
+        .select('id')
+        .eq('organization_id', orgId)
+        .eq('journey_id', ocj.journey_id)
+        .eq('order_id', snapshot.external_order_id)
+        .limit(1)
+        .maybeSingle()
+      if (dupRun?.id) {
+        await supabaseAdmin
+          .from('order_communication_journeys')
+          .update({ state: 'active', started_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq('id', ocj.id)
+        this.logger.log(`[CC-1.dedup] ocj=${ocj.id} pedido=${snapshot.external_order_id} já tem run ${dupRun.id} — sem novo envio`)
+        return 'active'
+      }
+    }
+
     // ─── (h) Decide canal ────────────────────────────────────────────────
     const { data: pickRaw, error: pickErr } = await supabaseAdmin.rpc('pick_communication_channel', {
       p_ocj_id:           ocj.id,
@@ -374,11 +397,14 @@ export class JourneyProcessorService {
     let productName:  string | null = null
     let totalAmount:  string | null = null
     let trackingCode: string | null = null
+    let brandName = 'Vazzo Comercio'
     if (snapshot.external_order_id) {
       const { data: orderRow } = await supabaseAdmin
         .from('orders')
-        .select('product_title, shipping_id, raw_data')
+        .select('product_title, shipping_id, raw_data, source, channel_account_id')
+        .eq('organization_id', orgId)
         .eq('external_order_id', snapshot.external_order_id)
+        .limit(1)
         .maybeSingle()
       // Preferência: coluna SQL direta (orders.product_title) > raw_data.item.title.
       // Coluna direta funciona pra ML + manual orders; raw_data só pra ML.
@@ -394,6 +420,23 @@ export class JourneyProcessorService {
       // template. Hooks de status (CC-3) podem atualizar quando o ML
       // sobrescrever esse campo com novo código.
       trackingCode = (orderRow?.shipping_id as string | null | undefined) ?? null
+
+      // Multi-loja: pedido Shopee carrega o shop_id em channel_account_id —
+      // o {{brand_name}} do template vira o nome REAL da loja (ex.: "Vazzo
+      // Comercio" / "Tudo em Casa Online") em vez do default hardcoded.
+      if (orderRow?.source === 'shopee' && orderRow?.channel_account_id) {
+        const shopId = Number(orderRow.channel_account_id)
+        if (Number.isFinite(shopId)) {
+          const { data: connRow } = await supabaseAdmin
+            .from('marketplace_connections')
+            .select('nickname')
+            .eq('organization_id', orgId)
+            .eq('platform', 'shopee')
+            .eq('shop_id', shopId)
+            .maybeSingle()
+          if (connRow?.nickname) brandName = connRow.nickname as string
+        }
+      }
     }
 
     const runRow = {
@@ -425,7 +468,7 @@ export class JourneyProcessorService {
         product_title:     productName,
         product_name:      productName,
         total_amount:      totalAmount,
-        brand_name:        'Vazzo Comercio',
+        brand_name:        brandName,
         tracking_code:     trackingCode,
         delivery_date:     null,
       },
