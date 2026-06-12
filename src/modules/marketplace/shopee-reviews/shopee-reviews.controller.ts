@@ -23,6 +23,7 @@ export class ShopeeReviewsController {
     @Query('unreplied') unreplied?: string,
     @Query('shop_id')   shopId?: string,
     @Query('with_text') withText?: string,
+    @Query('platform')  platform?: string,
     @Query('limit')     limit?: string,
     @Query('offset')    offset?: string,
   ) {
@@ -32,6 +33,7 @@ export class ShopeeReviewsController {
       unreplied: unreplied === 'true',
       shopId,
       withText:  withText === 'true',
+      platform:  platform && platform !== 'all' ? platform : undefined,
       limit:     limit  ? Number(limit)  : undefined,
       offset:    offset ? Number(offset) : undefined,
     })

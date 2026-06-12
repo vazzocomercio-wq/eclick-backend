@@ -139,15 +139,16 @@ export class ShopeeReviewsService {
 
   async list(orgId: string, opts: {
     rating?: number; unreplied?: boolean; shopId?: string; withText?: boolean
+    platform?: string  // 'shopee' | 'mercadolivre' | undefined = todas
     limit?: number; offset?: number
   } = {}): Promise<Json> {
     let q = supabaseAdmin
       .from('marketplace_reviews')
       .select('*', { count: 'exact' })
       .eq('organization_id', orgId)
-      .eq('platform', 'shopee')
       .order('review_create_at', { ascending: false, nullsFirst: false })
       .range(opts.offset ?? 0, (opts.offset ?? 0) + Math.min(opts.limit ?? 60, 200) - 1)
+    if (opts.platform)  q = q.eq('platform', opts.platform)
     if (opts.rating)    q = q.eq('rating', opts.rating)
     if (opts.unreplied) q = q.is('reply_text', null)
     if (opts.shopId)    q = q.eq('shop_id', opts.shopId)
@@ -156,20 +157,21 @@ export class ShopeeReviewsService {
     if (error) throw new Error(`marketplace_reviews list: ${error.message}`)
     const reviews = (data ?? []) as Json[]
 
-    // título do produto via vínculo anúncio↔produto (best-effort)
-    const itemIds = [...new Set(reviews.map(r => r.item_id).filter(Boolean))] as string[]
+    // título do produto via vínculo anúncio↔produto (best-effort, por plataforma)
     const titleByItem = new Map<string, string>()
-    if (itemIds.length) {
+    for (const plat of ['shopee', 'mercadolivre']) {
+      const itemIds = [...new Set(reviews.filter(r => r.platform === plat).map(r => r.item_id).filter(Boolean))] as string[]
+      if (!itemIds.length) continue
       const { data: links } = await supabaseAdmin
         .from('product_listings')
         .select('listing_id, products(title)')
-        .eq('platform', 'shopee')
+        .eq('platform', plat)
         .in('listing_id', itemIds)
       for (const l of (links ?? []) as Json[]) {
-        if (l.products?.title) titleByItem.set(String(l.listing_id), l.products.title as string)
+        if (l.products?.title) titleByItem.set(`${plat}:${l.listing_id}`, l.products.title as string)
       }
     }
-    for (const r of reviews) r.product_title = titleByItem.get(String(r.item_id)) ?? null
+    for (const r of reviews) r.product_title = titleByItem.get(`${r.platform}:${r.item_id}`) ?? null
 
     const { data: conns } = await supabaseAdmin
       .from('marketplace_connections')
@@ -180,22 +182,25 @@ export class ShopeeReviewsService {
       .filter(c => c.shop_id != null)
       .map(c => ({ shop_id: String(c.shop_id), nickname: (c.nickname as string) ?? `Shopee #${c.shop_id}` }))
 
-    return { reviews, total: count ?? reviews.length, shops, kpis: await this.kpis(orgId) }
+    return { reviews, total: count ?? reviews.length, shops, kpis: await this.kpis(orgId, opts.platform) }
   }
 
   /** KPIs agregados (média, distribuição por estrela, respondidas, fila ≤3).
    *  Counts head-only via PostgREST — sem SQL interpolado. */
-  private async kpis(orgId: string): Promise<Json> {
-    const base = () => supabaseAdmin
-      .from('marketplace_reviews')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('platform', 'shopee')
+  private async kpis(orgId: string, platform?: string): Promise<Json> {
+    const base = () => {
+      let b = supabaseAdmin
+        .from('marketplace_reviews')
+        .select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId)
+      if (platform) b = b.eq('platform', platform)
+      return b
+    }
 
     const [total, respondidas, negativasPendentes, ...porEstrela] = await Promise.all([
       base().then(r => r.count ?? 0),
       base().not('reply_text', 'is', null).then(r => r.count ?? 0),
-      base().lte('rating', 3).is('reply_text', null).eq('editable', 'EDITABLE').then(r => r.count ?? 0),
+      base().lte('rating', 3).is('reply_text', null).then(r => r.count ?? 0),
       ...[1, 2, 3, 4, 5].map(star => base().eq('rating', star).then(r => r.count ?? 0)),
     ])
 

@@ -39,6 +39,11 @@ import { ShopeeChatService } from './shopee-chat/shopee-chat.service'
 import { ShopeeChatController } from './shopee-chat/shopee-chat.controller'
 import { ShopeeReviewsService } from './shopee-reviews/shopee-reviews.service'
 import { ShopeeReviewsController } from './shopee-reviews/shopee-reviews.controller'
+import { ReviewCentralService } from './review-central/review-central.service'
+import { ReviewCentralController } from './review-central/review-central.controller'
+import { MlReviewsSyncService } from './review-central/ml-reviews-sync.service'
+import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
+import { WaRouterModule } from '../wa-router/wa-router.module'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 import { AiModule } from '../ai/ai.module'
 
@@ -46,7 +51,7 @@ import { AiModule } from '../ai/ai.module'
   // forwardRef(StockModule): venda Shopee → baixa estoque mestre (ingestão de
   // pedidos) precisa do StockService, e StockModule já importa este módulo
   // (ShopeeStockSyncService no recalcAndPropagate).
-  imports:     [MercadolivreModule, ChannelSettingsModule, AiModule, forwardRef(() => StockModule)], // ML billing + comissão canal (F1.6 orders) + IA (chat suggest)
+  imports:     [MercadolivreModule, ChannelSettingsModule, AiModule, ActiveBridgeModule, WaRouterModule, forwardRef(() => StockModule)], // ML billing + comissão canal + IA + ponte Active/WA (Central de Avaliações)
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores
@@ -59,6 +64,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
     ShopeeChatController,        // Pós-venda B — chat sellerchat (dormante até permissão do app)
     ShopeeReviewsController,     // Central de Avaliações — reviews + resposta IA
+    ReviewCentralController,     // Central de Avaliações — config automação + sync ML
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -83,6 +89,8 @@ import { AiModule } from '../ai/ai.module'
     ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações
     ShopeeChatService,               // Pós-venda Fase B — chat sellerchat (gate SHOPEE_CHAT_SYNC)
     ShopeeReviewsService,            // Central de Avaliações (gate SHOPEE_REVIEW_SYNC)
+    ReviewCentralService,            // Automação: positiva auto-responde, negativa → WA + funil Active (gate REVIEW_AUTOPILOT)
+    MlReviewsSyncService,            // Avaliações do ML (gate ML_REVIEW_SYNC; sem resposta pública)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
