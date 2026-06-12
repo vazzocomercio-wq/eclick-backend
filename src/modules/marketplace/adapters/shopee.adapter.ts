@@ -1772,16 +1772,22 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   }
 
   /** F0.3/F0.5 — webhook Push. Shopee envia header `Authorization` com
-   *  HMAC-SHA256(partner_key, `${url}|${body}`) em hex lowercase. Validação
+   *  HMAC-SHA256(push_key, `${url}|${body}`) em hex lowercase. Validação
    *  síncrona (sem fetch). rawBody DEVE ser o body cru (não JSON.parsed) —
    *  parse perde whitespace e quebra o hash. URL é a do receptor REGISTRADO
    *  no Shopee Partner Center (não a URL local da request — host/proxy podem
-   *  diferir). Caller passa via `input.url`. */
+   *  diferir). Caller passa via `input.url`.
+   *
+   *  ⚠️ A chave do push NÃO é a partner key da API: é a "Live Push Partner
+   *  Key" exibida no console em Push Mechanism → Set Push (validado offline
+   *  contra eventos reais 2026-06-12 — era a causa de 100% sig inválida). */
   validateWebhookSignature(input: WebhookValidationInput): boolean {
     const { headers, url, rawBody, secret } = input
-    const partnerKey = secret ?? process.env.SHOPEE_PARTNER_KEY
+    const partnerKey = secret
+      ?? process.env.SHOPEE_PUSH_PARTNER_KEY
+      ?? process.env.SHOPEE_PARTNER_KEY
     if (!partnerKey) {
-      this.logger.error('[shopee.webhook] SHOPEE_PARTNER_KEY ausente')
+      this.logger.error('[shopee.webhook] SHOPEE_PUSH_PARTNER_KEY/SHOPEE_PARTNER_KEY ausentes')
       return false
     }
     if (!url) {

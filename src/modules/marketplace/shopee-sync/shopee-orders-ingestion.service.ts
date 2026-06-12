@@ -124,6 +124,46 @@ export class ShopeeOrdersIngestionService {
     return { shop_id: shopId, orders: details.length, lines, failed, from: from.toISOString(), to: to.toISOString() }
   }
 
+  // Debounce do webhook: rajadas de push (status+rastreio+etiqueta do MESMO
+  // pedido em segundos) viram 1 ingestão; janela curta pra não segurar
+  // transição real de status.
+  private readonly recentWebhookIngest = new Map<string, number>()
+  private static readonly WEBHOOK_DEBOUNCE_MS = 20_000
+
+  /** Ingestão de UM pedido em tempo real (chamada pelo webhook push).
+   *  Mesmo pipeline do cron: detail → captureOpenRecipient (CPF/endereço na
+   *  janela) → mirrorOrder (upsert + margem + estoque). Idempotente. */
+  async ingestSingleOrder(orgId: string, shopId: number | string, orderSn: string): Promise<{
+    ingested: boolean; reason?: string
+  }> {
+    const key = `${shopId}:${orderSn}`
+    const last = this.recentWebhookIngest.get(key) ?? 0
+    if (Date.now() - last < ShopeeOrdersIngestionService.WEBHOOK_DEBOUNCE_MS) {
+      return { ingested: false, reason: 'debounce' }
+    }
+    this.recentWebhookIngest.set(key, Date.now())
+    // GC simples do map (evita crescer pra sempre)
+    if (this.recentWebhookIngest.size > 500) {
+      const cutoff = Date.now() - ShopeeOrdersIngestionService.WEBHOOK_DEBOUNCE_MS
+      for (const [k, t] of this.recentWebhookIngest) if (t < cutoff) this.recentWebhookIngest.delete(k)
+    }
+
+    const conns = await this.shopeeConnections(orgId)
+    const baseConn = conns.find(c => String(c.shop_id) === String(shopId))
+    if (!baseConn) return { ingested: false, reason: `loja ${shopId} não conectada na org` }
+    const conn = await this.productSync.ensureFreshToken(baseConn)
+
+    const details = await this.adapter.fetchOrderDetails(conn, [orderSn])
+    if (!details.length) return { ingested: false, reason: 'detail vazio' }
+    const od = details[0]
+
+    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    await this.captureOpenRecipient(conn, od)
+    const lines = await this.mirrorOrder(orgId, od, commissionPct, Number(shopId))
+    this.logger.log(`[shopee.orders.push] pedido=${orderSn} shop=${shopId} linhas=${lines} (tempo real)`)
+    return { ingested: lines > 0 }
+  }
+
   /** Captura o endereço ABERTO do destinatário via documento de envio
    *  (etiqueta) quando o get_order_detail veio mascarado. Só tenta em pedido
    *  ready_to_ship com pacote; falha fora da janela = skip silencioso.

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { MarketplaceAdapterRegistry } from './adapters/registry'
 import { ShopeeAdapter } from './adapters/shopee.adapter'
+import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
 
 /** F18 F0.3 — Recebe webhooks de marketplaces, valida assinatura, persiste em
  *  marketplace_webhook_events ANTES de processar (audit + replay), e
@@ -18,7 +19,10 @@ import { ShopeeAdapter } from './adapters/shopee.adapter'
 export class MarketplaceWebhooksService {
   private readonly logger = new Logger(MarketplaceWebhooksService.name)
 
-  constructor(private readonly registry: MarketplaceAdapterRegistry) {}
+  constructor(
+    private readonly registry: MarketplaceAdapterRegistry,
+    private readonly orders:   ShopeeOrdersIngestionService,
+  ) {}
 
   /** Entry point pra webhook Shopee. Sempre retorna 200 (mesmo em sig falha)
    *  no soft-mode — controller chama ack imediato.
@@ -112,44 +116,64 @@ export class MarketplaceWebhooksService {
       return
     }
 
-    // 6. Dispatcher por push_code. Real handlers em F1.x; agora só log
-    //    estruturado pra debug e marca processado.
-    await this.dispatchShopeeByCode({ eventId, pushCode, shopId: shopIdStr, parsed })
+    // 6. Dispatcher por push_code — pedidos em TEMPO REAL (codes com ordersn)
+    //    re-ingerem o pedido na hora; demais codes ficam no audit.
+    await this.dispatchShopeeByCode({ eventId, pushCode, shopId: shopIdStr, organizationId, parsed })
   }
 
-  /** Stub dispatcher. Cada code mapeia pra um handler vertical (orders,
-   *  items, escrow, NF-e). F1.x preenche. Sempre marca processed_at pra
-   *  não re-tentar no replay. */
+  /** Dispatcher. Codes com `data.ordersn` (status/rastreio/etiqueta/entrega)
+   *  disparam a ingestão em tempo real do pedido — mesmo pipeline do cron,
+   *  idempotente, com debounce de rajada. Sempre marca processed_at. */
   private async dispatchShopeeByCode(input: {
-    eventId:  string | null
-    pushCode: number | null
-    shopId:   string | null
-    parsed:   ShopeeWebhookBody | null
+    eventId:        string | null
+    pushCode:       number | null
+    shopId:         string | null
+    organizationId: string | null
+    parsed:         ShopeeWebhookBody | null
   }): Promise<void> {
-    const { eventId, pushCode, shopId } = input
+    const { eventId, pushCode, shopId, organizationId, parsed } = input
 
-    // Doc Shopee Open Platform v2 push codes (BR pode incluir extras):
-    //   1  = TEST_PUSH / heartbeat                    → noop
-    //   3  = ORDER_STATUS                             → F1.x orders
-    //   4  = ITEM_PROMOTION                           → F1.x items
-    //   5  = OPEN_API_AUTHORIZATION_EXPIRY            → marca conexão
-    //   6  = ITEM_VIOLATION                           → F1.3 quality
-    //   12 = AUTH_PARTNER_REVOKED                     → marca conexão
-    //   15 = BRAZIL_NFE_STATUS                        → F1.x fiscal
-    //   * (outros)                                    → log + audit
+    // Push codes observados em prod (payloads reais 2026-06-12):
+    //   1  = test_push / heartbeat                       → noop
+    //   3  = ORDER_STATUS  {ordersn, status}             → re-ingestão
+    //   4  = TRACKING_NO   {ordersn, tracking_no}        → re-ingestão
+    //   5  = auth expiry                                  → audit
+    //   7/8/9 = promoções/reserved stock                  → audit
+    //   15 = SHIPPING_DOCUMENT {ordersn, status:READY}   → re-ingestão
+    //        (etiqueta pronta = janela do endereço aberto!)
+    //   30 = FULFILLMENT {ordersn, fulfillment_status}   → re-ingestão
     const tag =
       pushCode === 1  ? 'test_push'         :
       pushCode === 3  ? 'order_status'      :
-      pushCode === 4  ? 'item_promotion'    :
+      pushCode === 4  ? 'tracking_no'       :
       pushCode === 5  ? 'auth_expiry'       :
       pushCode === 6  ? 'item_violation'    :
       pushCode === 12 ? 'auth_revoked'      :
-      pushCode === 15 ? 'br_nfe_status'     :
+      pushCode === 15 ? 'shipping_document' :
+      pushCode === 30 ? 'fulfillment'       :
                         `code_${pushCode ?? 'null'}`
 
     this.logger.log(`[shopee.webhook] dispatch ${tag} shop=${shopId ?? '?'} event=${eventId ?? '?'}`)
 
-    // Marca processado (mesmo nos stubs — F1.x trocará por handlers reais).
+    // ── Pedido em tempo real ────────────────────────────────────────────────
+    const ORDER_CODES = [3, 4, 15, 30]
+    const orderSn = typeof parsed?.data?.ordersn === 'string' ? parsed.data.ordersn : null
+    if (
+      pushCode != null && ORDER_CODES.includes(pushCode) &&
+      orderSn && shopId && organizationId &&
+      process.env.SHOPEE_ORDER_SYNC === 'on' // mesmo gate de rollout do cron
+    ) {
+      try {
+        const r = await this.orders.ingestSingleOrder(organizationId, shopId, orderSn)
+        if (!r.ingested && r.reason !== 'debounce') {
+          this.logger.warn(`[shopee.webhook] ${tag} pedido=${orderSn}: ${r.reason}`)
+        }
+      } catch (e: unknown) {
+        // erro na ingestão NÃO derruba o ack — cron horário cobre o gap
+        this.logger.error(`[shopee.webhook] ingest ${orderSn} falhou: ${(e as Error)?.message ?? e}`)
+      }
+    }
+
     if (eventId) {
       await supabaseAdmin
         .from('marketplace_webhook_events')
