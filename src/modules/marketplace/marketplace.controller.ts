@@ -95,6 +95,26 @@ export class MarketplaceController {
       if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
       const ttlSec = Number(data?.expire_in ?? 14400)
 
+      // Nome REAL da loja (get_shop_info) — identifica a conta em toda a UI
+      // (seletor de loja, cards, dashboard). Fallback: "Shopee #id".
+      let nickname = `Shopee #${shopId}`
+      try {
+        const infoPath = '/api/v2/shop/get_shop_info'
+        const ts2 = Math.floor(Date.now() / 1000)
+        const sign2 = crypto.createHmac('sha256', partnerKey)
+          .update(`${partnerId}${infoPath}${ts2}${data.access_token}${shopId}`).digest('hex')
+        const qs2 = new URLSearchParams({
+          partner_id: partnerId, timestamp: String(ts2),
+          access_token: data.access_token, shop_id: String(shopId), sign: sign2,
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: info } = await axios.get<any>(`${SHOPEE_BASE}${infoPath}?${qs2.toString()}`)
+        const shopName = (info?.response?.shop_name ?? info?.shop_name ?? '').trim()
+        if (shopName) nickname = shopName
+      } catch (e: unknown) {
+        this.logger.warn(`[shopee.callback] get_shop_info falhou (segue com fallback): ${(e as Error)?.message}`)
+      }
+
       const conn = await this.mp.upsertConnection({
         organization_id: user.orgId,
         platform:        'shopee',
@@ -102,7 +122,7 @@ export class MarketplaceController {
         access_token:    data.access_token,
         refresh_token:   data.refresh_token,
         expires_at:      new Date(Date.now() + ttlSec * 1000).toISOString(),
-        nickname:        `Shopee #${shopId}`,
+        nickname,
         status:          'connected',
       })
       return { ok: true, shop_id: shopId, nickname: conn.nickname }
