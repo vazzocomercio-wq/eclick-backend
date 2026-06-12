@@ -89,12 +89,13 @@ export class OrdersService {
   async listOrders(
     orgId: string | null,
     options: {
-      offset?:    number
-      limit?:     number
-      q?:         string
-      seller_id?: number
+      offset?:     number
+      limit?:      number
+      q?:          string
+      seller_id?:  number
       tab?:       'abertas' | 'em_preparacao' | 'despachadas' | 'pgto_pendente' | 'flex' | 'encerradas' | 'mediacao' | 'canceladas'
-      platform?:  'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all'
+      platform?:  'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all'
+      account_id?: string
     } = {},
   ) {
     const offset = Math.max(options.offset ?? 0, 0)
@@ -115,16 +116,20 @@ export class OrdersService {
 
     if (orgId)              q = q.eq('organization_id', orgId)
     if (options.seller_id)  q = q.eq('seller_id',       options.seller_id)
+    // Filtro por loja do canal (shop_id Shopee/TikTok carimbado no pedido)
+    if (options.account_id) q = q.eq('channel_account_id', options.account_id)
 
-    // Filtro de source: específico ou ambos (default ml+manual igual antes).
+    // Filtro de source: específico ou todos os canais do `orders`.
     if (options.platform === 'mercadolivre') {
       q = q.eq('source', 'mercadolivre')
     } else if (options.platform === 'manual') {
       q = q.eq('source', 'manual')
     } else if (options.platform === 'tiktok_shop') {
       q = q.eq('source', 'tiktok_shop')
+    } else if (options.platform === 'shopee') {
+      q = q.eq('source', 'shopee')
     } else {
-      q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
+      q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop', 'shopee'])
     }
 
     // Filtro de busca: matcheia external_order_id, sku ou buyer_name
@@ -202,9 +207,62 @@ export class OrdersService {
       } catch (err) {
         this.logger.warn(`[orders.list.enrich] falhou — seguindo sem enrich: ${(err as Error).message}`)
       }
+      // Identificação de canal/loja (nome da conta) + thumbnail via produto
+      // vinculado pros canais sem enrich de item (Shopee/TikTok/manual).
+      try {
+        await this.decorateChannelOrders(orgId, orders)
+      } catch (err) {
+        this.logger.warn(`[orders.list.decorate] falhou — seguindo sem decorate: ${(err as Error).message}`)
+      }
     }
 
     return { orders, total: count ?? 0 }
+  }
+
+  /** Decora a página de pedidos com: (a) `account_label` — nome da conta/loja
+   *  do pedido (nickname ML por seller_id; nome da loja Shopee/TikTok por
+   *  channel_account_id); (b) thumbnail do produto vinculado quando o canal
+   *  não tem enrich de item (Shopee/TikTok/manual). Best-effort, nunca lança. */
+  private async decorateChannelOrders(
+    orgId: string,
+    orders: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const nick = await this.ordersBuildNicknameMap(orgId)
+
+    // thumbnails: pedidos não-ML sem thumbnail mas com produto vinculado
+    const needThumb = orders.filter(o => {
+      const src = o.source as string | null
+      if (src === 'mercadolivre') return false
+      const items = o.order_items as Array<{ thumbnail?: string | null }> | undefined
+      return !!(o as { product_id?: string | null }).product_id && !!items?.length && !items[0].thumbnail
+    })
+    const productIds = [...new Set(needThumb.map(o => (o as { product_id?: string }).product_id!))]
+    const thumbByProduct = new Map<string, string>()
+    if (productIds.length > 0) {
+      const { data } = await supabaseAdmin
+        .from('products')
+        .select('id, photo_urls, images')
+        .in('id', productIds.slice(0, 200))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const p of (data ?? []) as any[]) {
+        const url = (Array.isArray(p.photo_urls) && p.photo_urls[0])
+          || (Array.isArray(p.images) && (p.images[0]?.url ?? p.images[0]))
+          || null
+        if (typeof url === 'string' && url) thumbByProduct.set(p.id, url)
+      }
+    }
+
+    for (const o of orders) {
+      const src       = (o.source as string | null) ?? null
+      const sellerId  = (o as { seller_id?: number | null }).seller_id ?? null
+      const accountId = (o as { channel_account_id?: string | null }).channel_account_id ?? null
+      o.account_label = this.ordersNicknameFor({ source: src, seller_id: sellerId }, nick, accountId)
+      const pid = (o as { product_id?: string | null }).product_id
+      if (pid && thumbByProduct.has(pid)) {
+        const items = o.order_items as Array<{ thumbnail?: string | null }> | undefined
+        if (items?.length && !items[0].thumbnail) items[0].thumbnail = thumbByProduct.get(pid)!
+      }
+    }
   }
 
   /** Lista pedidos da Loja Própria (tabela `storefront_orders`).
@@ -489,7 +547,8 @@ export class OrdersService {
   async listOrdersTabCounts(
     orgId: string | null,
     sellerId?: number,
-    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all',
+    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all',
+    accountId?: string,
   ): Promise<{
     abertas: number; em_preparacao: number; despachadas: number;
     pgto_pendente: number; flex: number; encerradas: number; mediacao: number;
@@ -501,12 +560,14 @@ export class OrdersService {
 
     const buildBase = () => {
       let q = supabaseAdmin.from('orders').select('*', { count: 'exact', head: true })
-      if (orgId)    q = q.eq('organization_id', orgId)
-      if (sellerId) q = q.eq('seller_id', sellerId)
+      if (orgId)     q = q.eq('organization_id', orgId)
+      if (sellerId)  q = q.eq('seller_id', sellerId)
+      if (accountId) q = q.eq('channel_account_id', accountId)
       if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
       else if (platform === 'manual')       q = q.eq('source', 'manual')
       else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
-      else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
+      else if (platform === 'shopee')       q = q.eq('source', 'shopee')
+      else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop', 'shopee'])
       return q
     }
 
@@ -584,7 +645,8 @@ export class OrdersService {
   async listOrdersKpis(
     orgId: string | null,
     sellerId?: number,
-    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all',
+    platform?: 'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all',
+    accountId?: string,
   ) {
     if (platform === 'storefront') {
       return this.listStorefrontKpis(orgId)
@@ -617,10 +679,12 @@ export class OrdersService {
         if (to)         q = q.lte('sold_at', to)
         if (orgId)      q = q.eq('organization_id', orgId)
         if (sellerId)   q = q.eq('seller_id', sellerId)
+        if (accountId)  q = q.eq('channel_account_id', accountId)
         if (platform === 'mercadolivre')      q = q.eq('source', 'mercadolivre')
         else if (platform === 'manual')       q = q.eq('source', 'manual')
         else if (platform === 'tiktok_shop')  q = q.eq('source', 'tiktok_shop')
-        else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop'])
+        else if (platform === 'shopee')       q = q.eq('source', 'shopee')
+        else                                  q = q.in('source', ['mercadolivre', 'manual', 'tiktok_shop', 'shopee'])
         q = q.range(pageStart, pageStart + PAGE_SIZE - 1)
 
         const { data, error } = await q
@@ -745,12 +809,13 @@ export class OrdersService {
   // /orders/financial-summary → espelha /ml/financial-summary, idem
   // Sem 401 quando ML não conectado; lê do `orders` unificado.
 
-  /** Constrói mapa de account_nickname combinando ML + TikTok (e mais canais). */
+  /** Constrói mapa de account_nickname combinando ML + TikTok + Shopee. */
   private async ordersBuildNicknameMap(orgId: string): Promise<{
     ml: Record<number, string>
     tiktokSeller: string | null
+    shopee: Record<string, string>
   }> {
-    const [mlRes, ttsRes] = await Promise.all([
+    const [mlRes, ttsRes, shopeeRes] = await Promise.all([
       supabaseAdmin
         .from('ml_connections')
         .select('seller_id, nickname')
@@ -760,20 +825,33 @@ export class OrdersService {
         .select('seller_name')
         .eq('organization_id', orgId)
         .maybeSingle<{ seller_name: string | null }>(),
+      supabaseAdmin
+        .from('marketplace_connections')
+        .select('shop_id, nickname')
+        .eq('organization_id', orgId)
+        .eq('platform', 'shopee'),
     ])
     const ml: Record<number, string> = {}
     for (const c of (mlRes.data ?? []) as Array<{ seller_id: number; nickname: string | null }>) {
       ml[c.seller_id] = c.nickname ?? `Conta #${c.seller_id}`
     }
-    return { ml, tiktokSeller: ttsRes.data?.seller_name ?? null }
+    const shopee: Record<string, string> = {}
+    for (const c of (shopeeRes.data ?? []) as Array<{ shop_id: number | string | null; nickname: string | null }>) {
+      if (c.shop_id != null) shopee[String(c.shop_id)] = c.nickname ?? `Shopee #${c.shop_id}`
+    }
+    return { ml, tiktokSeller: ttsRes.data?.seller_name ?? null, shopee }
   }
 
   private ordersNicknameFor(
     row: { source: string | null; seller_id: number | null },
-    nick: { ml: Record<number, string>; tiktokSeller: string | null },
+    nick: { ml: Record<number, string>; tiktokSeller: string | null; shopee: Record<string, string> },
+    channelAccountId?: string | null,
   ): string {
     if (row.source === 'tiktok_shop') return nick.tiktokSeller ?? 'TikTok Shop'
-    if (row.source === 'shopee') return 'Shopee'
+    if (row.source === 'shopee') {
+      if (channelAccountId && nick.shopee[channelAccountId]) return nick.shopee[channelAccountId]
+      return 'Shopee'
+    }
     if (row.source === 'storefront') return 'Loja Própria'
     if (row.source === 'manual') return 'Manual'
     if (row.seller_id != null && nick.ml[row.seller_id]) return nick.ml[row.seller_id]
@@ -803,20 +881,20 @@ export class OrdersService {
    *  Data-driven: percorre `orders` e devolve combos distintos com nickname +
    *  contagem. Alimenta o seletor unificado do dashboard. */
   async getAccountsWithSales(orgId: string): Promise<
-    Array<{ platform: string; seller_id: number | null; nickname: string; orders: number }>
+    Array<{ platform: string; seller_id: number | null; account_id: string | null; nickname: string; orders: number }>
   > {
     const nick = await this.ordersBuildNicknameMap(orgId)
     const PAGE_SIZE = 1000
     const SAFETY_CAP = 50_000
     const seen = new Map<
       string,
-      { platform: string; seller_id: number | null; nickname: string; orders: number }
+      { platform: string; seller_id: number | null; account_id: string | null; nickname: string; orders: number }
     >()
     let pageStart = 0
     while (pageStart < SAFETY_CAP) {
       const { data, error } = await supabaseAdmin
         .from('orders')
-        .select('platform, source, seller_id')
+        .select('platform, source, seller_id, channel_account_id')
         .eq('organization_id', orgId)
         .range(pageStart, pageStart + PAGE_SIZE - 1)
       if (error) throw error
@@ -824,25 +902,30 @@ export class OrdersService {
         platform: string | null
         source: string | null
         seller_id: number | null
+        channel_account_id: string | null
       }>
       for (const r of batch) {
         // `platform` é a coluna que os filtros do dashboard usam; cai pra
         // `source` quando platform vier nulo (ingestões antigas). Canoniza
         // aliases legados (mercado_livre/manual → mercadolivre).
         const platform = this.canonPlatform(r.platform ?? r.source ?? 'unknown')
-        const key = `${platform}:${r.seller_id ?? 'null'}`
+        // Loja do canal (shop_id Shopee/TikTok) separa contas dentro da mesma
+        // plataforma — multi-loja. ML continua agrupado por seller_id.
+        const key = `${platform}:${r.seller_id ?? 'null'}:${r.channel_account_id ?? 'null'}`
         const existing = seen.get(key)
         if (existing) {
           existing.orders++
         } else {
           seen.set(key, {
             platform,
-            seller_id: r.seller_id ?? null,
+            seller_id:  r.seller_id ?? null,
+            account_id: r.channel_account_id ?? null,
             // Usa a plataforma CANÔNICA como source — assim a entrada ML
             // mesclada (que pode ter 1ª linha 'manual') resolve pro nick ML.
             nickname: this.ordersNicknameFor(
               { source: platform, seller_id: r.seller_id },
               nick,
+              r.channel_account_id,
             ),
             orders: 1,
           })
@@ -1134,6 +1217,9 @@ interface DbOrderRow {
   id?:              string
   source:           string | null
   platform:         string | null
+  seller_id?:       number | null
+  channel_account_id?: string | null
+  product_id?:      string | null
   external_order_id: string
   status:           string | null
   shipping_id:      number | null
@@ -1182,12 +1268,49 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
   const itemRaw  = (raw.item     ?? {}) as Record<string, unknown>
   const billing  = (row.billing_address ?? {}) as Record<string, unknown>
 
+  // Endereço de entrega dos canais não-ML: Shopee/TikTok guardam o
+  // recipient_address no TOPO do raw_data (shape próprio de cada API).
+  // Normaliza pro shape canônico do card. Shopee pode vir MASCARADO
+  // ("****") quando o app não tem acesso a dados sensíveis — mascara
+  // vira null pra não poluir a tela.
+  const unmask = (v: unknown): string | null => {
+    if (typeof v !== 'string' || !v.trim()) return null
+    return /^\*+$/.test(v.trim()) ? null : v
+  }
+  let channelReceiverAddr: Record<string, unknown> | undefined
+  if (row.source === 'shopee' && raw.recipient_address) {
+    const r = raw.recipient_address as Record<string, unknown>
+    channelReceiverAddr = {
+      zip_code:      unmask(r.zipcode),
+      street_name:   unmask(r.full_address),
+      street_number: null,
+      complement:    null,
+      neighborhood:  unmask(r.district) ?? unmask(r.town),
+      city:          unmask(r.city),
+      state:         unmask(r.state),
+      address_line:  unmask(r.full_address),
+    }
+  } else if (row.source === 'tiktok_shop' && raw.recipient_address) {
+    const r = raw.recipient_address as Record<string, unknown>
+    channelReceiverAddr = {
+      zip_code:      unmask(r.postal_code),
+      street_name:   unmask(r.address_line2) ?? unmask(r.full_address),
+      street_number: unmask(r.address_line3),
+      complement:    unmask(r.address_line4),
+      neighborhood:  unmask(r.address_line1),
+      city:          null,
+      state:         null,
+      address_line:  unmask(r.full_address),
+    }
+  }
+
   // Fallback para receiver_address: ML só retorna receiver_address em
   // /shipments/{id}, que o worker NÃO chama. billing_address vem do
   // billing-info v2 e é geralmente igual ao endereço de entrega — usa
   // como fallback pra não deixar o card "Endereço de entrega" vazio.
   const shippingReceiverAddr =
     (shipping.receiver_address as Record<string, unknown> | undefined) ??
+    channelReceiverAddr ??
     (Object.keys(billing).length > 0 ? {
       zip_code:      (billing.zip_code      as string) ?? (billing as { zip?: string }).zip ?? null,
       street_name:   (billing.street_name   as string) ?? null,
@@ -1223,17 +1346,49 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     sale_fee:             itemRaw.sale_fee      ?? row.platform_fee           ?? 0,
   }
 
+  // Shopee/TikTok: a linha do `orders` é POR SKU, mas raw_data.total_amount é
+  // do PEDIDO inteiro — usa o valor da linha (sale_price já é o total do SKU).
+  const isChannelRow = row.source === 'shopee' || row.source === 'tiktok_shop'
+  const rowTotal     = Number(row.sale_price ?? 0)
+  const totalAmount  = isChannelRow
+    ? rowTotal
+    : Number(raw.total_amount ?? ((row.sale_price ?? 0) * (row.quantity ?? 1)))
+
+  // Pagamento sintetizado pros canais sem payments[] no raw (Shopee/TikTok):
+  // método + valor + status aprovado quando o pedido está pago.
+  let payments = (raw.payments as unknown[]) ?? []
+  if (isChannelRow && (!Array.isArray(payments) || payments.length === 0)) {
+    const method = (raw.payment_method as string)
+      ?? ((raw.payment as Record<string, unknown> | undefined)?.payment_method_name as string)
+      ?? (raw.payment_method_name as string)
+      ?? null
+    if (method || rowTotal > 0) {
+      payments = [{
+        id:                0,
+        total_paid_amount: rowTotal,
+        installments:      1,
+        payment_type:      method ?? '—',
+        status:            row.status === 'cancelled' ? 'cancelled'
+                         : row.status === 'pending' || row.status === 'payment_in_process' ? 'pending'
+                         : 'approved',
+      }]
+    }
+  }
+
   return {
     order_id:      Number(row.external_order_id) || row.external_order_id,
     source:        row.source ?? null,
     platform:      row.platform ?? null,
+    seller_id:     row.seller_id ?? null,
+    channel_account_id: row.channel_account_id ?? null,
+    product_id:    row.product_id ?? null,
     status:        row.status,
     status_detail: raw.status_detail ?? null,
     date_created:  raw.date_created ?? row.sold_at ?? row.created_at,
     date_closed:   raw.date_closed ?? null,
-    total_amount:  Number(raw.total_amount ?? ((row.sale_price ?? 0) * (row.quantity ?? 1))),
+    total_amount:  totalAmount,
     paid_amount:   raw.paid_amount ?? null,
-    payments:      raw.payments ?? [],
+    payments,
     mediations:    raw.mediations ?? [],
     tags:          raw.tags ?? [],
     // Carrinho/agrupamento — quando ML agrupa pedidos do mesmo comprador
@@ -1263,14 +1418,20 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
       // OrderCard acessa receiver_address.zip_code sem optional chaining —
       // mantém objeto (vazio se sem dados) em vez de null pra não quebrar a UI.
       receiver_address:        shippingReceiverAddr,
-      receiver_name:           (shipping as { receiver_name?: string }).receiver_name           ?? null,
+      receiver_name:           (shipping as { receiver_name?: string }).receiver_name
+        ?? (isChannelRow ? unmask((raw.recipient_address as Record<string, unknown> | undefined)?.name) : null),
       receiver_cost:           (shipping as { receiver_cost?: number }).receiver_cost           ?? null,
       base_cost:               (shipping as { base_cost?: number }).base_cost                   ?? 0,
       estimated_delivery_date: (shipping as { estimated_delivery_date?: string }).estimated_delivery_date   ?? null,
-      posting_deadline:        (shipping as { posting_deadline?: string }).posting_deadline                 ?? null,
+      posting_deadline:        (shipping as { posting_deadline?: string }).posting_deadline
+        // Shopee informa o prazo de postagem no topo do raw (ship_by_date epoch)
+        ?? (row.source === 'shopee' && raw.ship_by_date
+              ? new Date(Number(raw.ship_by_date) * 1000).toISOString()
+              : null),
       date_created:            (shipping as { date_created?: string }).date_created                         ?? null,
       substatus:               (shipping as { substatus?: string }).substatus                               ?? null,
-      tracking_number:         (shipping as { tracking_number?: string }).tracking_number                   ?? null,
+      tracking_number:         (shipping as { tracking_number?: string }).tracking_number
+        ?? (isChannelRow ? ((raw.tracking_number as string) || null) : null),
       tracking_method:         (shipping as { tracking_method?: string }).tracking_method                   ?? null,
       service_id:              (shipping as { service_id?: number }).service_id                             ?? null,
       lead_time:               (shipping as { lead_time?: Record<string, unknown> }).lead_time              ?? null,

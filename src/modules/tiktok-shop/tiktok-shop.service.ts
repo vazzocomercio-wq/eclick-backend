@@ -600,6 +600,28 @@ export class TikTokShopService {
     }
   }
 
+  /** Status TikTok → shipping_status canônico (mesmo vocabulário do ML), pra
+   *  o pedido cair na aba certa da tela central (Em Preparação/Despachadas/
+   *  Encerradas). UNPAID/ON_HOLD não têm envio → null (aba Abertas). */
+  private mapTtsShippingStatus(s?: string): string | null {
+    switch ((s ?? '').toUpperCase()) {
+      case 'AWAITING_SHIPMENT':
+      case 'AWAITING_COLLECTION':
+      case 'PARTIALLY_SHIPPING':
+        return 'ready_to_ship'
+      case 'IN_TRANSIT':
+        return 'in_transit'
+      case 'DELIVERED':
+      case 'COMPLETED':
+        return 'delivered'
+      case 'CANCELLED':
+      case 'CANCEL':
+        return 'cancelled'
+      default:
+        return null
+    }
+  }
+
   /** Upsert de UM pedido: tabela isolada + espelho no modelo unificado `orders`
    *  (tela central, com ML/manual). product_id=NULL → ZERO impacto no estoque
    *  (cron de estoque só lê platform='mercadolivre' + product_id not null).
@@ -638,7 +660,7 @@ export class TikTokShopService {
     // pago pelo vendedor, rateado por SKU), cost_price/tax/margem (do produto
     // vinculado, quando há vínculo). Permite dashboards/financeiro verem
     // margem real por produto+canal.
-    await this.mirrorOrderLines(orgId, o).catch((e) =>
+    await this.mirrorOrderLines(orgId, o, shopId).catch((e) =>
       this.logger.warn(`[tts] espelho orders falhou (${o.id}): ${e instanceof Error ? e.message : String(e)}`),
     )
 
@@ -716,7 +738,7 @@ export class TikTokShopService {
    *    link em product_listings). Sem vínculo, ficam NULL (revenue conta;
    *    margem só após vincular).
    */
-  private async mirrorOrderLines(orgId: string, o: TtsOrder): Promise<void> {
+  private async mirrorOrderLines(orgId: string, o: TtsOrder, shopId: string | null = null): Promise<void> {
     const items = o.line_items ?? []
     if (!items.length) return
 
@@ -788,7 +810,18 @@ export class TikTokShopService {
     const shippingFee = Number(o.payment?.shipping_fee ?? 0) || 0
     const status = this.mapTtsStatus(o.status)
     const soldAt = o.create_time ? new Date(o.create_time * 1000).toISOString() : null
-    const buyer = o.recipient_address?.name ?? null
+    // Comprador: a API do TikTok entrega CPF + nome fiscal (cpf_name) no topo
+    // do pedido (BR, pra NF-e) e o telefone/nome no recipient_address. Esses
+    // campos alimentam a unificação de clientes + enriquecimento (triggers
+    // sync_buyer_to_unified / enqueue_order_communication no insert).
+    const oAny = o as unknown as Record<string, unknown>
+    const cpfDigits = String(oAny.cpf ?? '').replace(/\D/g, '') || null
+    const buyer = (String(oAny.cpf_name ?? '').trim() || null) ?? o.recipient_address?.name ?? null
+    const buyerEmail = (String(oAny.buyer_email ?? '').trim() || null)
+    const phoneRaw = String((o.recipient_address as unknown as { phone_number?: string })?.phone_number ?? '')
+    // telefone vem parcialmente mascarado ("(+55)249******03") → só usa se completo
+    const buyerPhone = /\*/.test(phoneRaw) ? null : (phoneRaw.replace(/\D/g, '') || null)
+    const shippingStatus = this.mapTtsShippingStatus(o.status)
     const nowIso = new Date().toISOString()
 
     // Upsert 1 row por SKU vendido.
@@ -837,7 +870,13 @@ export class TikTokShopService {
           contribution_margin,
           contribution_margin_pct,
           status,
+          shipping_status: shippingStatus,
+          channel_account_id: shopId ? String(shopId) : null,
           buyer_name: buyer,
+          buyer_doc_number: cpfDigits,
+          buyer_doc_type: cpfDigits ? (cpfDigits.length === 14 ? 'CNPJ' : 'CPF') : null,
+          buyer_email: buyerEmail,
+          buyer_phone: buyerPhone,
           sold_at: soldAt,
           raw_data: o as unknown as Record<string, unknown>,
           updated_at: nowIso,

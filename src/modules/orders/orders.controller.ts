@@ -33,21 +33,23 @@ export class OrdersController {
     return this.orders.getManualOrders(user.orgId!, Number(offset ?? 0), Number(limit ?? 20))
   }
 
-  /** GET /orders/list?offset=&limit=&q=&seller_id=&tab=&platform=
+  /** GET /orders/list?offset=&limit=&q=&seller_id=&tab=&platform=&account_id=
    *  Lista pedidos do DB (sales-aggregator sync) com filtro server-side
    *  por tab — corrige paginacao quando filter client-side reduzia resultados.
    *  platform=storefront lê de storefront_orders (Loja Própria).
+   *  account_id = loja do canal (channel_account_id: shop_id Shopee/TikTok).
    */
   @Get('list')
   @RequirePermission('orders.view')
   listOrders(
     @ReqUser() user: ReqUserPayload,
-    @Query('offset')    offset?:   string,
-    @Query('limit')     limit?:    string,
-    @Query('q')         q?:        string,
-    @Query('seller_id') sellerId?: string,
-    @Query('tab')       tab?:      string,
-    @Query('platform')  platform?: string,
+    @Query('offset')     offset?:    string,
+    @Query('limit')      limit?:     string,
+    @Query('q')          q?:         string,
+    @Query('seller_id')  sellerId?:  string,
+    @Query('tab')        tab?:       string,
+    @Query('platform')   platform?:  string,
+    @Query('account_id') accountId?: string,
   ) {
     const validTabs = ['abertas','em_preparacao','despachadas','pgto_pendente','flex','encerradas','mediacao','canceladas'] as const
     const safeTab = (validTabs as readonly string[]).includes(tab ?? '')
@@ -55,42 +57,47 @@ export class OrdersController {
       : undefined
     const safePlatform = sanitizePlatform(platform)
     return this.orders.listOrders(user.orgId, {
-      offset:    offset ? Number(offset) : 0,
-      limit:     limit  ? Number(limit)  : 20,
+      offset:     offset ? Number(offset) : 0,
+      limit:      limit  ? Number(limit)  : 20,
       q,
-      seller_id: sellerId ? Number(sellerId) : undefined,
-      tab:       safeTab,
-      platform:  safePlatform,
+      seller_id:  sellerId ? Number(sellerId) : undefined,
+      tab:        safeTab,
+      platform:   safePlatform,
+      account_id: accountId || undefined,
     })
   }
 
-  /** GET /orders/list/kpis?seller_id=&platform= */
+  /** GET /orders/list/kpis?seller_id=&platform=&account_id= */
   @Get('list/kpis')
   @RequirePermission('orders.view')
   listOrdersKpis(
     @ReqUser() user: ReqUserPayload,
-    @Query('seller_id') sellerId?: string,
-    @Query('platform')  platform?: string,
+    @Query('seller_id')  sellerId?:  string,
+    @Query('platform')   platform?:  string,
+    @Query('account_id') accountId?: string,
   ) {
     return this.orders.listOrdersKpis(
       user.orgId,
       sellerId ? Number(sellerId) : undefined,
       sanitizePlatform(platform),
+      accountId || undefined,
     )
   }
 
-  /** GET /orders/list/tab-counts?seller_id=&platform= */
+  /** GET /orders/list/tab-counts?seller_id=&platform=&account_id= */
   @Get('list/tab-counts')
   @RequirePermission('orders.view')
   listOrdersTabCounts(
     @ReqUser() user: ReqUserPayload,
-    @Query('seller_id') sellerId?: string,
-    @Query('platform')  platform?: string,
+    @Query('seller_id')  sellerId?:  string,
+    @Query('platform')   platform?:  string,
+    @Query('account_id') accountId?: string,
   ) {
     return this.orders.listOrdersTabCounts(
       user.orgId,
       sellerId ? Number(sellerId) : undefined,
       sanitizePlatform(platform),
+      accountId || undefined,
     )
   }
 
@@ -160,12 +167,13 @@ export class OrdersController {
 
 function sanitizePlatform(
   raw?: string,
-): 'mercadolivre' | 'manual' | 'tiktok_shop' | 'storefront' | 'all' | undefined {
+): 'mercadolivre' | 'manual' | 'tiktok_shop' | 'shopee' | 'storefront' | 'all' | undefined {
   if (!raw) return undefined
   const v = raw.toLowerCase()
   if (v === 'mercadolivre' || v === 'ml')   return 'mercadolivre'
   if (v === 'manual')                       return 'manual'
   if (v === 'tiktok_shop' || v === 'tiktok') return 'tiktok_shop'
+  if (v === 'shopee')                       return 'shopee'
   if (v === 'storefront' || v === 'loja')   return 'storefront'
   if (v === 'all' || v === 'todas')         return 'all'
   return undefined

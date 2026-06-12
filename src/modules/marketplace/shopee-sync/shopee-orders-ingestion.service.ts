@@ -173,9 +173,17 @@ export class ShopeeOrdersIngestionService {
     const status = this.mapStatus(od?.order_status)
     const soldAt = od?.create_time ? new Date(od.create_time * 1000).toISOString() : null
     const rcpt = od?.recipient_address ?? null
-    const buyer = rcpt?.name ?? od?.buyer_username ?? null
-    const phone = rcpt?.phone ? String(rcpt.phone).replace(/\D/g, '') || null : null
-    const cpf = od?.buyer_cpf_id ? String(od.buyer_cpf_id).replace(/\D/g, '') || null : null
+    // A Shopee MASCARA dados sensíveis ("****") quando o app não tem o acesso
+    // "Sensitive Data" — campo mascarado vira null e cai pro buyer_username
+    // (sempre aberto), que identifica o comprador na tela e no CRM.
+    const unmasked = (v: unknown): string | null => {
+      const s = typeof v === 'string' ? v.trim() : ''
+      return s && !/^\*+$/.test(s) ? s : null
+    }
+    const buyer = unmasked(rcpt?.name) ?? unmasked(od?.buyer_username) ?? null
+    const phone = unmasked(rcpt?.phone) ? String(rcpt!.phone).replace(/\D/g, '') || null : null
+    const cpf = unmasked(od?.buyer_cpf_id) ? String(od!.buyer_cpf_id).replace(/\D/g, '') || null : null
+    const buyerUsername = unmasked(od?.buyer_username)
     const nowIso = new Date().toISOString()
 
     let n = 0
@@ -222,6 +230,7 @@ export class ShopeeOrdersIngestionService {
           shipping_status:    this.mapShippingStatus(od?.order_status),
           channel_account_id: String(shopId),  // carimbo da loja (multi-loja dropship)
           buyer_name:        buyer,
+          buyer_username:    buyerUsername,
           buyer_phone:       phone,
           buyer_doc_number:  cpf,
           sold_at:           soldAt,
