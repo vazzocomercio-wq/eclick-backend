@@ -1641,7 +1641,8 @@ export class ShopeeAdapter extends MarketplaceAdapter {
 
   /** Cria um Voucher (cupom) na loja. `POST /api/v2/voucher/add_voucher`.
    *  reward_type: 1=valor fixo (discount_amount R$), 2=percentual (percentage
-   *  1-99 + max_price teto R$ opcional). voucher_type: 1=loja toda, 2=produtos
+   *  1-99 + max_price teto R$ — OBRIGATÓRIO no percentual, calibrado live
+   *  2026-06-12: "max_price is required"). voucher_type: 1=loja toda, 2=produtos
    *  (item_id_list, máx 50). voucher_code: 1-5 chars A-Z/0-9 (a Shopee prefixa
    *  com o código da loja). Datas Unix s; start >= agora. ⚠️ cria voucher REAL. */
   async addVoucher(conn: MpConnection, args: {

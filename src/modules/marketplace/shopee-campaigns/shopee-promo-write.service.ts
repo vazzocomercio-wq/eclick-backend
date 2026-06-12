@@ -124,6 +124,16 @@ export class ShopeePromoWriteService {
     const preview = await this.previewVoucher(orgId, input)
     this.enforceGate(preview, input.accept_warning)
 
+    // calibração live 2026-06-12: max_price é OBRIGATÓRIO em voucher percentual
+    // ("max_price is required for discount percentage voucher"). Sem teto
+    // informado, deriva o equivalente a "sem teto": cobre o maior item avaliado.
+    let maxPrice = input.max_price
+    if (input.reward_type === 2 && !(Number(maxPrice) > 0)) {
+      const topPrice = Math.max(...preview.items.map(i => Number(i.price) || 0), Number(input.min_basket_price) || 0, 1)
+      maxPrice = Math.ceil(topPrice * (Number(input.percentage) || 0) / 100) || 1
+      this.logger.log(`[shopee.promo] max_price derivado automaticamente: R$${maxPrice} (maior item R$${topPrice} × ${input.percentage}%)`)
+    }
+
     const { conn, adapter } = await this.resolveShop(orgId, input.shop_id ?? null)
     let voucherId: number
     try {
@@ -136,7 +146,7 @@ export class ShopeePromoWriteService {
         rewardType:     input.reward_type,
         discountAmount: input.discount_amount,
         percentage:     input.percentage,
-        maxPrice:       input.max_price,
+        maxPrice,
         minBasketPrice: Math.max(0, Number(input.min_basket_price) || 0),
         usageQuantity:  Math.floor(Number(input.usage_quantity)),
         itemIdList:     input.item_ids,
