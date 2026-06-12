@@ -284,8 +284,9 @@ export class ReviewCentralService {
 
   /** Telefone do alerta resolvido NA HORA do envio: override manual >
    *  Equipe do SaaS > time do Active (cadastrou o número depois em qualquer
-   *  um dos dois, passa a funcionar sem reconfigurar). */
-  private async resolveAlertPhone(cfg: ReviewCentralConfig): Promise<string | null> {
+   *  um dos dois, passa a funcionar sem reconfigurar). Público: o SAC de
+   *  devoluções (ReturnsSacBridgeService) reusa o mesmo operador. */
+  async resolveAlertPhone(cfg: ReviewCentralConfig): Promise<string | null> {
     if (cfg.notification_phone) return cfg.notification_phone
     if (!cfg.notification_operator_id) return null
 
