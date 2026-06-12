@@ -11,6 +11,7 @@ interface JourneyStepShape {
 interface OrderRow {
   id:                string
   external_order_id: string
+  source:            string | null
   buyer_name:        string | null
   buyer_doc_number:  string | null
   buyer_doc_type:    string | null
@@ -29,6 +30,7 @@ export interface OrderFullDetail {
   order: {
     id:                string
     external_order_id: string
+    source:            string | null
     buyer_name:        string | null
     buyer_doc_number:  string | null
     buyer_doc_type:    string | null
@@ -98,7 +100,7 @@ export class OrderDetailService {
     const { data: orderRow, error: oErr } = await supabaseAdmin
       .from('orders')
       .select(
-        'id, external_order_id, buyer_name, buyer_doc_number, buyer_doc_type, ' +
+        'id, external_order_id, source, buyer_name, buyer_doc_number, buyer_doc_type, ' +
         'buyer_email, buyer_phone, product_title, sale_price, sold_at, ' +
         'shipping_status, shipping_id, status, payment_status',
       )
@@ -300,6 +302,7 @@ export class OrderDetailService {
       order: {
         id:                order.id,
         external_order_id: order.external_order_id,
+        source:            order.source ?? null,
         buyer_name:        order.buyer_name,
         buyer_doc_number:  order.buyer_doc_number,
         buyer_doc_type:    order.buyer_doc_type,
