@@ -1375,8 +1375,11 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     }
   }
 
+  // order_id numérico SÓ quando seguro: id TikTok tem 18 dígitos e estoura o
+  // Number do JS (precisão 2^53) — número arredondado quebra o full-detail.
+  const idNum = Number(row.external_order_id)
   return {
-    order_id:      Number(row.external_order_id) || row.external_order_id,
+    order_id:      Number.isSafeInteger(idNum) && idNum > 0 ? idNum : row.external_order_id,
     source:        row.source ?? null,
     platform:      row.platform ?? null,
     seller_id:     row.seller_id ?? null,

@@ -102,7 +102,8 @@ export class OrderDetailService {
       .select(
         'id, external_order_id, source, buyer_name, buyer_doc_number, buyer_doc_type, ' +
         'buyer_email, buyer_phone, product_title, sale_price, sold_at, ' +
-        'shipping_status, shipping_id, status, payment_status',
+        'shipping_status, shipping_id, status, payment_status, ' +
+        'shopee_buyer_uid:raw_data->>buyer_user_id, shopee_buyer_username:raw_data->>buyer_username',
       )
       .eq('organization_id', orgId)
       .eq('external_order_id', externalOrderId)
@@ -113,22 +114,31 @@ export class OrderDetailService {
     if (!orderRow) throw new NotFoundException('Pedido não encontrado')
     const order = orderRow as unknown as OrderRow
 
-    // ── 2. Customer (por CPF, caso disponível) ──────────────────────────
+    // ── 2. Customer (CPF; fallback Shopee por shopee_buyer_id) ──────────
     let customer: OrderFullDetail['customer'] = null
     let enrichmentProvider: string | null = null
 
-    if (order.buyer_doc_number) {
-      const cpfClean = order.buyer_doc_number.replace(/\D/g, '')
-      const { data: cRaw } = await supabaseAdmin
+    const shopeeBuyerId = (order as unknown as { shopee_buyer_uid?: string | null; shopee_buyer_username?: string | null })
+    const shopeeId = order.source === 'shopee'
+      ? (shopeeBuyerId.shopee_buyer_uid || shopeeBuyerId.shopee_buyer_username || null)
+      : null
+
+    if (order.buyer_doc_number || shopeeId) {
+      let cq = supabaseAdmin
         .from('unified_customers')
         .select(
           'id, display_name, cpf, phone, email, validated_whatsapp, city, state, ' +
           'enrichment_status, enrichment_quality, enriched_at',
         )
         .eq('organization_id', orgId)
-        .eq('cpf', cpfClean)
         .eq('is_deleted', false)
-        .maybeSingle()
+      if (order.buyer_doc_number) {
+        cq = cq.eq('cpf', order.buyer_doc_number.replace(/\D/g, ''))
+      } else {
+        // Shopee mascara o CPF — a identidade do cliente é o buyer_user_id
+        cq = cq.eq('shopee_buyer_id', shopeeId!)
+      }
+      const { data: cRaw } = await cq.limit(1).maybeSingle()
       const c = cRaw as unknown as {
         id:                  string
         display_name:        string | null
