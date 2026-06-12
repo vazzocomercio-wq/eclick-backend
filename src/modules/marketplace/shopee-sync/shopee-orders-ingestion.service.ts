@@ -246,6 +246,11 @@ export class ShopeeOrdersIngestionService {
         ...od,
         recipient_address: newMasked && prevOpen ? prevRcpt : od?.recipient_address,
         buyer_cpf_id: unmasked(od?.buyer_cpf_id) ?? unmasked(prevRaw.buyer_cpf_id) ?? od?.buyer_cpf_id,
+        // mediations é enxertado pelo sync de devoluções (returns API) — o
+        // detail do pedido não traz isso, então preserva no re-sync.
+        ...(Array.isArray(prevRaw.mediations) && prevRaw.mediations.length
+          ? { mediations: prevRaw.mediations }
+          : {}),
       }
     }
     const nowIso = new Date().toISOString()

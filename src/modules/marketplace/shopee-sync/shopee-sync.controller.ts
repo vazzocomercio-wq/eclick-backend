@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Body, UseGuards, HttpCode, HttpStatus, BadRequestException,
+  Controller, Get, Post, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
@@ -9,6 +9,7 @@ import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-orders-ingestion.service'
 import { ShopeeEscrowIngestService } from './shopee-escrow-ingest.service'
 import { ShopeeStockSyncService } from './shopee-stock-sync.service'
+import { ShopeeReturnsSyncService } from './shopee-returns-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -29,6 +30,7 @@ export class ShopeeSyncController {
     private readonly orders:    ShopeeOrdersIngestionService,
     private readonly escrow:    ShopeeEscrowIngestService,
     private readonly stock:     ShopeeStockSyncService,
+    private readonly returns:   ShopeeReturnsSyncService,
   ) {}
 
   @Post('products')
@@ -78,6 +80,28 @@ export class ShopeeSyncController {
     const orgId = user.orgId
     void this.escrow.ingest(orgId, { limit: 600 }).catch(() => { /* logado no service */ })
     return { started: true }
+  }
+
+  /** Pós-venda Fase C — Ingestão manual de devoluções (returns API) →
+   *  marketplace_returns + enxerto em orders.raw_data->mediations. */
+  @Post('returns')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('orders.view')
+  async syncReturns(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.returns.syncReturns(user.orgId)
+  }
+
+  /** Lista devoluções Shopee pro front (tela Reclamações, canal Shopee). */
+  @Get('returns')
+  @RequirePermission('orders.view')
+  async listReturns(
+    @ReqUser() user: ReqUserPayload,
+    @Query('status')  status?: string,
+    @Query('shop_id') shopId?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.returns.list(user.orgId, { status, shopId })
   }
 
   /** F18 Fase C — Propaga o disponível do ledger (products.stock) pros anúncios

@@ -312,6 +312,44 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  /** Devoluções/reembolsos da loja (returns API). Paginado por page_no
+   *  (0-based) — devolve a página crua + flag more. Shape validado live:
+   *  return_sn, order_sn, status (REQUESTED/PROCESSING/ACCEPTED/JUDGING/
+   *  REFUND_PAID/CLOSED/CANCELLED...), reason, text_reason, refund_amount,
+   *  currency, create_time/update_time (epoch s), due_date, item[],
+   *  user{username}, image[], buyer_videos[], tracking_number,
+   *  needs_logistics, negotiation/seller_proof quando em disputa. */
+  async listReturns(
+    conn: MpConnection,
+    opts: { pageNo?: number; pageSize?: number; createTimeFrom?: Date; createTimeTo?: Date } = {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ returns: any[]; more: boolean }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/returns/get_return_list'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+      page_no:   String(opts.pageNo ?? 0),
+      page_size: String(opts.pageSize ?? 50),
+    })
+    if (opts.createTimeFrom) qs.set('create_time_from', String(Math.floor(opts.createTimeFrom.getTime() / 1000)))
+    if (opts.createTimeTo)   qs.set('create_time_to',   String(Math.floor(opts.createTimeTo.getTime() / 1000)))
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`,
+      tag: 'shopee.listReturns',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    return {
+      returns: data?.response?.return ?? [],
+      more:    Boolean(data?.response?.more),
+    }
+  }
+
   /** CPF top-level (raro). Address inline em recipient_address. Phone é
    * o melhor enrichment fallback quando CPF vier null. */
   async extractBuyerBilling(

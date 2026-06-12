@@ -33,6 +33,7 @@ import { ShopeeEscrowIngestService } from './shopee-sync/shopee-escrow-ingest.se
 import { ShopeeListingLinkService } from './shopee-sync/shopee-listing-link.service'
 import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.controller'
 import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
+import { ShopeeReturnsSyncService } from './shopee-sync/shopee-returns-sync.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
@@ -72,6 +73,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeEscrowIngestService,       // Fase 2.3 — escrow real → platform_charges
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
+    ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
