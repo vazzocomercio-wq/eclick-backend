@@ -71,36 +71,62 @@ export class DataStoneProvider extends BaseEnrichmentProvider {
     }
   }
 
-  /** Map a /persons/ row into the common shape. */
+  /** Map a /persons/ row into the common shape.
+   *
+   *  Shape REAL da API (validado live 2026-06-12 — a versão anterior lia
+   *  chaves que não existem e perdia fone/endereço/nascimento):
+   *    [{ name, cpf (NUMBER — perde zero à esquerda!), birthday "yyyy-MM-dd",
+   *       gender "F"|"M", mother_name,
+   *       mobile_phones: [{ddd, number, priority, whatsapp_datetime, ...}],
+   *       land_lines:    [{ddd, number, priority, ...}],
+   *       emails:        [{email, priority}],
+   *       addresses:     [{type, street, number, complement, neighborhood,
+   *                        city, district (=UF!), postal_code, priority}] }] */
   private mapPerson(r: Record<string, unknown>): EnrichmentResult['data'] {
-    const phonesRaw = Array.isArray(r.telefones ?? r.phones) ? (r.telefones ?? r.phones) as Array<Record<string, unknown>> : []
-    const emailsRaw = Array.isArray(r.emails)               ? r.emails               as Array<Record<string, unknown>> : []
-    const addr      = (r.endereco ?? r.address) as Record<string, unknown> | undefined
+    type PhoneRow = { ddd?: number | string; number?: string; phone?: string; priority?: number; whatsapp_datetime?: string | null; is_whatsapp?: boolean; is_active?: boolean }
+    const byPriority = <T extends { priority?: number }>(arr: T[]) =>
+      [...arr].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+
+    const mobile = Array.isArray(r.mobile_phones) ? r.mobile_phones as PhoneRow[] : []
+    const land   = Array.isArray(r.land_lines)    ? r.land_lines    as PhoneRow[] : []
+    const legacy = Array.isArray(r.telefones ?? r.phones) ? (r.telefones ?? r.phones) as PhoneRow[] : []
+    // celulares primeiro (WhatsApp mora aqui), depois fixos; legacy = compat
+    const phonesRaw = [...byPriority(mobile), ...byPriority(land), ...legacy]
+
+    const emailsRaw = Array.isArray(r.emails) ? byPriority(r.emails as Array<{ email?: string; priority?: number }>) : []
+    const addrList  = Array.isArray(r.addresses) ? byPriority(r.addresses as Array<Record<string, unknown> & { priority?: number }>) : []
+    const addr      = addrList[0] ?? ((r.endereco ?? r.address) as Record<string, unknown> | undefined)
+
+    // cpf vem como NUMBER → zero à esquerda some; repõe com padStart(11)
+    const cpfDigits = String(r.cpf ?? '').replace(/\D/g, '')
+    const cpfPadded = cpfDigits ? cpfDigits.padStart(11, '0') : undefined
 
     return {
       full_name:  ((r.nome ?? r.name) as string) ?? undefined,
-      cpf:        ((r.cpf as string) ?? '').replace(/\D/g, '') || undefined,
-      birth_date: (r.data_nascimento as string)?.slice(0, 10),
+      cpf:        cpfPadded,
+      birth_date: ((r.birthday as string) ?? (r.data_nascimento as string))?.slice(0, 10),
       gender:     (r.sexo === 'F' || r.gender === 'F') ? 'F'
                 : (r.sexo === 'M' || r.gender === 'M') ? 'M' : undefined,
-      mother_name: (r.nome_mae as string) ?? undefined,
+      mother_name: ((r.mother_name ?? r.nome_mae) as string) ?? undefined,
       phones: phonesRaw.slice(0, 5).map(t => ({
-        number:      String(`${t.ddd ?? ''}${t.phone ?? t.number ?? ''}`).replace(/\D/g, ''),
-        is_whatsapp: t.is_whatsapp === true,
-        is_active:   t.is_active   !== false,
-      })),
+        number:      String(`${t.ddd ?? ''}${t.number ?? t.phone ?? ''}`).replace(/\D/g, ''),
+        // whatsapp_datetime preenchido = WhatsApp visto nesse número
+        is_whatsapp: t.is_whatsapp === true || !!t.whatsapp_datetime,
+        is_active:   t.is_active !== false,
+      })).filter(p => p.number.length >= 10),
       emails: emailsRaw.slice(0, 5).map(e => ({
-        address:  String((e as { email?: string }).email ?? e ?? ''),
-        is_valid: ((e as { status_email?: string }).status_email ?? 'valid') === 'valid',
-      })),
+        address:  String(e.email ?? ''),
+        is_valid: true,
+      })).filter(e => e.address.includes('@')),
       address: addr ? {
-        cep:          String(addr.cep ?? '').replace(/\D/g, ''),
-        street:       String(addr.logradouro ?? addr.street ?? ''),
-        number:       String(addr.numero ?? addr.number ?? ''),
-        complement:   String(addr.complemento ?? addr.complement ?? ''),
-        neighborhood: String(addr.bairro ?? addr.neighborhood ?? ''),
-        city:         String(addr.cidade ?? addr.city ?? ''),
-        state:        String(addr.uf ?? addr.state ?? ''),
+        cep:          String(addr.postal_code ?? addr.cep ?? '').replace(/\D/g, ''),
+        street:       [addr.type, addr.street ?? addr.logradouro].filter(Boolean).join(' ').trim(),
+        number:       String(addr.number ?? addr.numero ?? ''),
+        complement:   String(addr.complement ?? addr.complemento ?? ''),
+        neighborhood: String(addr.neighborhood ?? addr.bairro ?? ''),
+        city:         String(addr.city ?? addr.cidade ?? ''),
+        // "district" da DataStone é a UF (validado live: district:"SP")
+        state:        String(addr.district ?? addr.uf ?? addr.state ?? ''),
       } : undefined,
     }
   }
@@ -110,12 +136,16 @@ export class DataStoneProvider extends BaseEnrichmentProvider {
     try {
       const data = await this.get('/persons/', { cpf: cpf.replace(/\D/g, '') }, creds)
       if (!data) return { ...EMPTY_RESULT, quality: 'error', error: 'sem creds', duration_ms: elapsed(t0) }
-      const mapped = this.mapPerson(data)
+      // resposta é ARRAY de pessoas (validado live); compat com {results:[...]}/objeto
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const row = (Array.isArray(data) ? data[0] : ((data as any).results?.[0] ?? data)) as Record<string, unknown> | undefined
+      if (!row) return { ...EMPTY_RESULT, quality: 'empty', duration_ms: elapsed(t0), cost_cents: this.DEFAULT_COST_CENTS }
+      const mapped = this.mapPerson(row)
       return {
         success: !!mapped.full_name,
         quality: mapped.full_name ? (mapped.phones?.length ? 'full' : 'partial') : 'empty',
         data: { ...mapped, cpf: cpf.replace(/\D/g, '') },
-        raw_response: data, cost_cents: this.DEFAULT_COST_CENTS, duration_ms: elapsed(t0),
+        raw_response: row, cost_cents: this.DEFAULT_COST_CENTS, duration_ms: elapsed(t0),
       }
     } catch (e: any) {
       return { ...EMPTY_RESULT, quality: 'error', error: e?.response?.data?.detail ?? e?.message ?? '', duration_ms: elapsed(t0) }
