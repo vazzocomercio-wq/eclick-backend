@@ -162,6 +162,7 @@ export class ShopeeStockSyncService {
       let status = 'success'
       let errorMsg: string | null = null
       let httpStatus = 200
+      let sentQty = qty
       try {
         await adapter.updateStock(conn, {
           externalProductId:   l.listing_id,
@@ -171,19 +172,45 @@ export class ShopeeStockSyncService {
         })
         pushed++
       } catch (e: unknown) {
-        failed++
-        status = 'error'
-        errorMsg = (e as Error)?.message ?? 'erro desconhecido'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        httpStatus = (e as any)?.response?.status ?? 500
-        this.logger.warn(`[shopee.stock] item=${l.listing_id} model=${l.variation_id ?? ''} falhou: ${errorMsg}`)
+        // Item em campanha (flash sale/promoção) com estoque reservado: a Shopee
+        // não aceita valor abaixo do reservado. Clampa pro mínimo aceito — deixar
+        // o anúncio no valor antigo (possivelmente muito acima do real) é risco
+        // maior de oversell. Quando a campanha acabar, o próximo push corrige pro
+        // valor exato do ledger. NÃO clampa quando a intenção é pausar (qty=0).
+        const reserve = (e as Error & { reserveStock?: number })?.reserveStock
+        if (typeof reserve === 'number' && qty > 0 && qty < reserve) {
+          try {
+            await adapter.updateStock(conn, {
+              externalProductId:   l.listing_id,
+              externalVariationId: l.variation_id || null,
+              quantity:            reserve,
+              locationId,
+            })
+            pushed++
+            sentQty = reserve
+            errorMsg = `campanha Shopee reserva ${reserve} un (> ledger ${qty}) — enviado ${reserve}; corrige sozinho quando a campanha acabar`
+            this.logger.warn(`[shopee.stock] item=${l.listing_id} em campanha: clamp ${qty}→${reserve}`)
+          } catch (e2: unknown) {
+            failed++
+            status = 'error'
+            errorMsg = (e2 as Error)?.message ?? 'erro desconhecido'
+            this.logger.warn(`[shopee.stock] item=${l.listing_id} clamp p/ reservado=${reserve} também falhou: ${errorMsg}`)
+          }
+        } else {
+          failed++
+          status = 'error'
+          errorMsg = (e as Error)?.message ?? 'erro desconhecido'
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          httpStatus = (e as any)?.response?.status ?? 500
+          this.logger.warn(`[shopee.stock] item=${l.listing_id} model=${l.variation_id ?? ''} falhou: ${errorMsg}`)
+        }
       }
       await supabaseAdmin.from('stock_sync_logs').insert({
         product_id:    productId,
         channel:       'shopee',
         listing_id:    l.listing_id,
-        sent_quantity: qty,
-        confirmed_quantity: status === 'success' ? qty : null,
+        sent_quantity: sentQty,
+        confirmed_quantity: status === 'success' ? sentQty : null,
         status,
         error_message: errorMsg,
         http_status:   httpStatus,

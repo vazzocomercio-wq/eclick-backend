@@ -696,14 +696,21 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       exec: () => axios.post<any>(url, body),
     })
     this.logger.log(`[shopee.updateStock] item=${itemId} model=${modelId} stock=${stock} → ${JSON.stringify(data)}`)
-    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
 
-    // A API pode devolver 200 com falha por model em failure_list.
+    // O failure_list vem MESMO quando há erro top-level (ex: error_busi_update_stock_failed
+    // com message genérica) — extrair o failed_reason antes, senão o motivo real se perde.
     const failures = data?.response?.failure_list ?? data?.response?.failed_list ?? []
     if (Array.isArray(failures) && failures.length) {
       const f0 = failures[0]
-      throw new Error(`Shopee update_stock falhou model=${f0?.model_id}: ${f0?.failed_reason ?? f0?.reason ?? 'desconhecido'}`)
+      const reason = f0?.failed_reason ?? f0?.reason ?? data?.message ?? 'desconhecido'
+      const err = new Error(`Shopee update_stock falhou model=${f0?.model_id}: ${reason}`) as Error & { reserveStock?: number }
+      // "Stock should be larger than 125 (reserve stock number)" = item em campanha
+      // (flash sale/promoção) com estoque reservado — Shopee não aceita valor abaixo.
+      const m = /larger than (\d+)\s*\(reserve stock/i.exec(String(reason))
+      if (m) err.reserveStock = Number(m[1])
+      throw err
     }
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
 
     return {
       ok: true,
