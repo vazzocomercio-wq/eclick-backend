@@ -57,6 +57,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Playbook IA de devoluções Shopee — classifica a solicitação do comprador
+  // (legítima/suspeita/abuso) e recomenda a ação (aceitar/disputar/coletar
+  // evidência) com chance de ganho de disputa. Sonnet: decisão com $ real.
+  shopee_return_playbook: {
+    label:       'Playbook de devoluções (Shopee)',
+    description: 'Analisa devoluções e recomenda aceitar, disputar ou coletar evidência',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   // Pós-venda Shopee — sugere resposta no chat (sellerchat) usando contexto
   // da conversa + pedido. Sonnet pra qualidade (paridade c/ ml_question_suggest).
   shopee_chat_suggest: {

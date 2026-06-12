@@ -35,6 +35,8 @@ import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.c
 import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
 import { ShopeeReturnsSyncService } from './shopee-sync/shopee-returns-sync.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
+import { ShopeeReturnsPlaybookService } from './shopee-returns-playbook/shopee-returns-playbook.service'
+import { ShopeeReturnsPlaybookController } from './shopee-returns-playbook/shopee-returns-playbook.controller'
 import { ShopeeChatService } from './shopee-chat/shopee-chat.service'
 import { ShopeeChatController } from './shopee-chat/shopee-chat.controller'
 import { ShopeeReviewsService } from './shopee-reviews/shopee-reviews.service'
@@ -62,6 +64,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeSyncController,       // F0.7 — POST /shopee/sync/products (sync real)
     ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
     ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
+    ShopeeReturnsPlaybookController, // Playbook IA de devoluções — recomendação + ações (accept/dispute)
     ShopeeChatController,        // Pós-venda B — chat sellerchat (dormante até permissão do app)
     ShopeeReviewsController,     // Central de Avaliações — reviews + resposta IA
     ReviewCentralController,     // Central de Avaliações — config automação + sync ML
@@ -87,6 +90,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações
+    ShopeeReturnsPlaybookService,    // Playbook IA de devoluções — motor regras+IA, copiloto e auto opt-in (gate RETURN_PLAYBOOK)
     ShopeeChatService,               // Pós-venda Fase B — chat sellerchat (gate SHOPEE_CHAT_SYNC)
     ShopeeReviewsService,            // Central de Avaliações (gate SHOPEE_REVIEW_SYNC)
     ReviewCentralService,            // Automação: positiva auto-responde, negativa → WA + funil Active (gate REVIEW_AUTOPILOT)

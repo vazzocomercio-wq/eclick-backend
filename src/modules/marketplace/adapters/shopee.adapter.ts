@@ -350,6 +350,108 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  // ── returns API de AÇÃO (playbook de devoluções) ────────────────────────
+  // Probe 2026-06-12 confirmou escopo de ESCRITA liberado (todos os endpoints
+  // validam params em vez de error_api_permission). Shapes do detail/dispute
+  // reasons validados live na loja Vazzo.
+
+  /** GET genérico da returns API (sign shop-level + querystring). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async returnsGet(conn: MpConnection, apiPath: string, extra: Record<string, string>): Promise<any> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign, ...extra,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: `shopee.returns${apiPath.split('/').pop()}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    return data?.response ?? {}
+  }
+
+  /** POST genérico da returns API (ações). NÃO lança em erro da Shopee —
+   *  devolve {error,message,response} cru pro caller converter em mensagem
+   *  acionável (e calibrar shapes pelo log na 1ª execução real). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async returnsPost(conn: MpConnection, apiPath: string, body: Record<string, unknown>): Promise<any> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: `shopee.returns${apiPath.split('/').pop()}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`, body),
+    })
+    this.logger.log(`[shopee.returns.action] ${apiPath} body=${JSON.stringify(body).slice(0, 300)} → ${JSON.stringify(data).slice(0, 500)}`)
+    return data
+  }
+
+  /** Detalhe RICO de uma devolução — muito mais que a list: negotiation
+   *  (oferta pendente do comprador, counter_limit), seller_proof, prazos
+   *  extras (return_ship_due_date), logistics_status, validation_type. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getReturnDetail(conn: MpConnection, returnSn: string): Promise<any> {
+    return this.returnsGet(conn, '/api/v2/returns/get_return_detail', { return_sn: returnSn })
+  }
+
+  /** Motivos de disputa válidos PRA ESTA devolução + requisitos de evidência
+   *  (texto em PT-BR vindo da própria Shopee). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getReturnDisputeReasons(conn: MpConnection, returnSn: string): Promise<any[]> {
+    const resp = await this.returnsGet(conn, '/api/v2/returns/get_return_dispute_reason', { return_sn: returnSn })
+    return resp?.dispute_reason_list ?? []
+  }
+
+  /** Soluções disponíveis (oferta de reembolso parcial/total sem devolução,
+   *  com elegibilidade + teto de valor). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getReturnSolutions(conn: MpConnection, returnSn: string): Promise<any> {
+    return this.returnsGet(conn, '/api/v2/returns/get_available_solutions', { return_sn: returnSn })
+  }
+
+  /** ⚠️ ESCRITA REAL — aceita a devolução/reembolso (confirm). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async confirmReturn(conn: MpConnection, returnSn: string): Promise<any> {
+    return this.returnsPost(conn, '/api/v2/returns/confirm', { return_sn: returnSn })
+  }
+
+  /** ⚠️ ESCRITA REAL — abre disputa contra a devolução. dispute_reason vem
+   *  do getReturnDisputeReasons; images = URLs de evidência (fotos do
+   *  recebimento ou as do próprio comprador quando provam a NOSSA tese). */
+  async disputeReturn(conn: MpConnection, returnSn: string, opts: {
+    email?:             string
+    disputeReason:      number
+    disputeTextReason?: string
+    images?:            string[]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }): Promise<any> {
+    const body: Record<string, unknown> = {
+      return_sn:      returnSn,
+      dispute_reason: opts.disputeReason,
+    }
+    if (opts.email)             body.email = opts.email
+    if (opts.disputeTextReason) body.dispute_text_reason = opts.disputeTextReason
+    if (opts.images?.length)    body.image = opts.images
+    return this.returnsPost(conn, '/api/v2/returns/dispute', body)
+  }
+
+  /** ⚠️ ESCRITA REAL — aceita a OFERTA pendente do comprador (negotiation). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async acceptReturnOffer(conn: MpConnection, returnSn: string): Promise<any> {
+    return this.returnsPost(conn, '/api/v2/returns/accept_offer', { return_sn: returnSn })
+  }
+
   // ── avaliações (product/get_comment + reply_comment) ────────────────────
 
   /** Avaliações da loja (shop-level, paginado por cursor). Shape validado
