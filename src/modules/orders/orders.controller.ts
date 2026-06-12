@@ -101,6 +101,15 @@ export class OrdersController {
     )
   }
 
+  /** GET /orders/channels-overview — resumo por canal não-ML (Shopee, TikTok
+   *  Shop, Loja Própria) pra tela Canais de Venda: contas conectadas, anúncios
+   *  e vendas/receita do mês corrente (BRT). ML continua nos endpoints /ml/*. */
+  @Get('channels-overview')
+  @RequirePermission('orders.view')
+  getChannelsOverview(@ReqUser() user: ReqUserPayload) {
+    return this.orders.getChannelsOverview(user.orgId!)
+  }
+
   /** GET /orders/accounts — lista contas que têm venda na org, por plataforma.
    *  Data-driven: só aparece plataforma/conta com pedido. Alimenta o seletor
    *  unificado do dashboard (ML × N contas + Shopee + TikTok + …). */

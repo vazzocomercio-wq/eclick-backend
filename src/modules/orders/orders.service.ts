@@ -877,6 +877,164 @@ export class OrdersService {
     return [...out]
   }
 
+  // ── Canais de Venda: resumo por canal não-ML ─────────────────────────────
+
+  /** Vendas do mês corrente (BRT) de um canal na tabela `orders`.
+   *  Pedido = external_order_id distinto (a tabela é 1 linha por SKU);
+   *  receita = Σ sale_price das linhas pagas/enviadas/entregues. */
+  private async monthSalesBySource(orgId: string, source: 'shopee' | 'tiktok_shop', monthStartIso: string) {
+    const { data } = await supabaseAdmin
+      .from('orders')
+      .select('external_order_id, sale_price')
+      .eq('organization_id', orgId)
+      .eq('source', source)
+      .gte('sold_at', monthStartIso)
+      .in('status', ['paid', 'shipped', 'delivered'])
+      .limit(10_000)
+    const ids = new Set<string>()
+    let revenue = 0
+    for (const r of (data ?? []) as Array<{ external_order_id: string; sale_price: number | null }>) {
+      ids.add(r.external_order_id)
+      revenue += Number(r.sale_price) || 0
+    }
+    return { orders: ids.size, revenue: Math.round(revenue * 100) / 100 }
+  }
+
+  /** Resumo dos canais não-ML pra tela Canais de Venda: contas conectadas,
+   *  anúncios e vendas/receita do mês corrente (00:00 BRT do dia 1º). ML fica
+   *  fora — a tela já consome /ml/connections, /ml/listings/counts e
+   *  /ml/orders/kpis. Loja Própria vende em `storefront_orders` (schema
+   *  próprio), Shopee/TikTok no `orders` unificado. */
+  async getChannelsOverview(orgId: string): Promise<{
+    month_start: string
+    shopee: {
+      connected: boolean
+      accounts: Array<{ id: string; name: string; status: string; expires_at: string | null; listings: number }>
+      listings: { total: number; active: number | null }
+      month: { orders: number; revenue: number }
+    }
+    tiktok_shop: {
+      connected: boolean
+      accounts: Array<{ id: string; name: string; status: string; expires_at: string | null; listings: number }>
+      listings: { total: number; active: number | null }
+      month: { orders: number; revenue: number }
+    }
+    storefront: {
+      connected: boolean
+      accounts: Array<{ id: string; name: string; status: string; expires_at: string | null; listings: number }>
+      listings: { total: number; active: number | null }
+      month: { orders: number; revenue: number }
+    }
+  }> {
+    // 00:00 BRT (UTC-3) do dia 1º do mês corrente, em UTC.
+    const brtNow = new Date(Date.now() - 3 * 3_600_000)
+    const monthStartIso = new Date(Date.UTC(brtNow.getUTCFullYear(), brtNow.getUTCMonth(), 1, 3)).toISOString()
+
+    const [shopeeConns, shopeeListings, shopeeMonth, ttsCreds, ttsProducts, ttsMonth, sfListings, sfOrders] =
+      await Promise.all([
+        supabaseAdmin
+          .from('marketplace_connections')
+          .select('shop_id, nickname, status, expires_at')
+          .eq('organization_id', orgId)
+          .eq('platform', 'shopee'),
+        // anúncios sincronizados por loja (snapshot do Algorithm Score — sem
+        // status do anúncio, então o card mostra "anúncios", não "ativos").
+        supabaseAdmin
+          .schema('shopee')
+          .from('v_latest_algo_score')
+          .select('shop_id')
+          .eq('organization_id', orgId)
+          .limit(10_000),
+        this.monthSalesBySource(orgId, 'shopee', monthStartIso),
+        supabaseAdmin
+          .from('tiktok_shop_credentials')
+          .select('shop_id, seller_name, status, access_expires_at')
+          .eq('organization_id', orgId),
+        supabaseAdmin
+          .from('tiktok_shop_products')
+          .select('status')
+          .eq('organization_id', orgId)
+          .limit(10_000),
+        this.monthSalesBySource(orgId, 'tiktok_shop', monthStartIso),
+        // produtos publicados na vitrine (anúncio storefront em product_listings;
+        // a tabela não tem org → escopo via join no produto dono).
+        supabaseAdmin
+          .from('product_listings')
+          .select('id, products!inner(organization_id)', { count: 'exact', head: true })
+          .eq('platform', 'storefront')
+          .eq('is_active', true)
+          .eq('products.organization_id', orgId),
+        supabaseAdmin
+          .from('storefront_orders')
+          .select('total, status')
+          .eq('organization_id', orgId)
+          .gte('created_at', monthStartIso)
+          .limit(10_000),
+      ])
+
+    // Shopee: anúncios por loja + contas
+    const listingsByShop = new Map<string, number>()
+    for (const r of (shopeeListings.data ?? []) as Array<{ shop_id: number | string }>) {
+      const k = String(r.shop_id)
+      listingsByShop.set(k, (listingsByShop.get(k) ?? 0) + 1)
+    }
+    const shopeeAccounts = ((shopeeConns.data ?? []) as Array<{
+      shop_id: number | string | null; nickname: string | null; status: string | null; expires_at: string | null
+    }>).map(c => ({
+      id:         String(c.shop_id ?? ''),
+      name:       c.nickname ?? `Shopee #${c.shop_id}`,
+      status:     c.status ?? 'connected',
+      expires_at: c.expires_at,
+      listings:   listingsByShop.get(String(c.shop_id ?? '')) ?? 0,
+    }))
+    const shopeeTotal = shopeeAccounts.reduce((s, a) => s + a.listings, 0)
+
+    // TikTok: produtos ACTIVATE = anúncios ativos
+    const ttsRows = (ttsProducts.data ?? []) as Array<{ status: string | null }>
+    const ttsActive = ttsRows.filter(r => r.status === 'ACTIVATE').length
+    const ttsAccounts = ((ttsCreds.data ?? []) as Array<{
+      shop_id: string | number | null; seller_name: string | null; status: string | null; access_expires_at: string | null
+    }>).map(c => ({
+      id:         String(c.shop_id ?? ''),
+      name:       c.seller_name ?? 'TikTok Shop',
+      status:     c.status ?? 'connected',
+      expires_at: c.access_expires_at,
+      listings:   ttsRows.length,
+    }))
+
+    // Loja Própria: pedidos pagos do mês
+    const sfRows = (sfOrders.data ?? []) as Array<{ total: number | null; status: string }>
+    const sfPaid = sfRows.filter(r => r.status === 'paid')
+    const sfCount = sfListings.count ?? 0
+
+    return {
+      month_start: monthStartIso,
+      shopee: {
+        connected: shopeeAccounts.length > 0,
+        accounts:  shopeeAccounts,
+        listings:  { total: shopeeTotal, active: null },
+        month:     shopeeMonth,
+      },
+      tiktok_shop: {
+        connected: ttsAccounts.length > 0,
+        accounts:  ttsAccounts,
+        listings:  { total: ttsRows.length, active: ttsActive },
+        month:     ttsMonth,
+      },
+      storefront: {
+        connected: sfCount > 0,
+        accounts:  sfCount > 0
+          ? [{ id: 'loja', name: 'Loja Própria', status: 'connected', expires_at: null, listings: sfCount }]
+          : [],
+        listings:  { total: sfCount, active: sfCount },
+        month: {
+          orders:  sfPaid.length,
+          revenue: Math.round(sfPaid.reduce((s, r) => s + (Number(r.total) || 0), 0) * 100) / 100,
+        },
+      },
+    }
+  }
+
   /** Lista as contas que têm venda na org, agrupadas por (plataforma, seller_id).
    *  Data-driven: percorre `orders` e devolve combos distintos com nickname +
    *  contagem. Alimenta o seletor unificado do dashboard. */
