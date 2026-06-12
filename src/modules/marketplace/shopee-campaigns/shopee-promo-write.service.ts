@@ -328,7 +328,9 @@ export class ShopeePromoWriteService {
           'NUNCA sugira acima do max_safe_pct do item. Elasticidade: giro baixo + estoque alto → mais agressivo; giro alto → conservador.',
         userPrompt: JSON.stringify({ products: facts }),
       })
-      const parsed = JSON.parse(out.text) as { suggestions?: Array<{ item_id: number; suggested_pct: number; rationale?: string }> }
+      // o modelo às vezes embrulha o JSON em cerca markdown (```json … ```)
+      const cleaned = out.text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim()
+      const parsed = JSON.parse(cleaned) as { suggestions?: Array<{ item_id: number; suggested_pct: number; rationale?: string }> }
       const byId = new Map(facts.map(f => [f.item_id, f]))
       const suggestions = (parsed.suggestions ?? [])
         .filter(s => byId.has(Number(s.item_id)))
