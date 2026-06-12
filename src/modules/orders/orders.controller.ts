@@ -159,6 +159,7 @@ export class OrdersController {
     @Query('status')    status?:  string,
     @Query('seller_id') sellerId?: string,
     @Query('platforms') platforms?: string,
+    @Query('kpis_only') kpisOnly?: string,
   ) {
     const platformsList = platforms
       ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
@@ -170,6 +171,7 @@ export class OrdersController {
       status,
       sellerId ? Number(sellerId) : undefined,
       platformsList,
+      kpisOnly === 'true',
     )
   }
 }

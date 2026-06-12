@@ -1103,21 +1103,26 @@ export class OrdersService {
     statusFilter?: string
     sellerIdFilter?: number
     platformsFilter?: string[]
+    /** Quando true, NÃO seleciona os JSONB pesados (raw_data, billing_address).
+     *  Usado pelo modo kpisOnly: os KPIs/donut só dependem das colunas escalares,
+     *  então pular esses blobs corta a leitura do DB + serialização (o raw_data
+     *  é o JSON inteiro do pedido do marketplace — a coluna mais pesada). */
+    lightweight?: boolean
   }): Promise<OrdersReportRow[]> {
     const PAGE_SIZE = 1000
     const SAFETY_CAP = 50_000
     const rows: OrdersReportRow[] = []
     let pageStart = 0
+    const COLS_BASE =
+      'id, source, platform, external_order_id, status, sold_at, seller_id, ' +
+      'sku, product_title, quantity, sale_price, platform_fee, cost_price, ' +
+      'tax_amount, shipping_cost, shipping_buyer_paid, contribution_margin, ' +
+      'contribution_margin_pct, gross_profit, marketplace_listing_id'
+    const cols = opts.lightweight ? COLS_BASE : `${COLS_BASE}, raw_data, billing_address`
     while (pageStart < SAFETY_CAP) {
       let q = supabaseAdmin
         .from('orders')
-        .select(
-          'id, source, platform, external_order_id, status, sold_at, seller_id, ' +
-            'sku, product_title, quantity, sale_price, platform_fee, cost_price, ' +
-            'tax_amount, shipping_cost, shipping_buyer_paid, contribution_margin, ' +
-            'contribution_margin_pct, gross_profit, raw_data, marketplace_listing_id, ' +
-            'billing_address',
-        )
+        .select(cols)
         .eq('organization_id', opts.orgId)
       if (opts.dateFrom) q = q.gte('sold_at', opts.dateFrom)
       if (opts.dateTo) q = q.lte('sold_at', opts.dateTo)
@@ -1221,8 +1226,13 @@ export class OrdersService {
     statusFilter?: string,
     sellerIdFilter?: number,
     platforms?: string[],
+    /** Quando true, devolve só os KPIs/donut (orders: []) e busca as linhas
+     *  sem os JSONB pesados. O dashboard chama assim — ele só lê `.kpis`, então
+     *  montar/serializar o array de pedidos do mês inteiro era puro desperdício
+     *  (≈248KB jogados fora a cada carregamento). */
+    kpisOnly = false,
   ) {
-    const nick = await this.ordersBuildNicknameMap(orgId)
+    const nick = kpisOnly ? null : await this.ordersBuildNicknameMap(orgId)
     // Normaliza pra dia-inteiro em BRT (igual getRecentOrders). Sem isso,
     // date_to='YYYY-MM-DD' vira meia-noite UTC e EXCLUI os pedidos de hoje.
     // Defensivo: só anexa hora quando vier data pura (sem 'T').
@@ -1230,6 +1240,7 @@ export class OrdersService {
     const isoTo = dateTo && !dateTo.includes('T') ? `${dateTo}T23:59:59.999-03:00` : dateTo
     const allRows = await this.ordersFetchRowsForReport({
       orgId, dateFrom: isoFrom, dateTo: isoTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
+      lightweight: kpisOnly,
     })
 
     let faturamento = 0, canceladas = 0
@@ -1239,10 +1250,31 @@ export class OrdersService {
     let qtd_com_custo = 0, qtd_sem_custo = 0
     let fat_com_custo = 0
 
-    const enrichedOrders = allRows.map((row) => {
+    // Acumulação dos KPIs — sempre roda, sobre as colunas escalares (não toca
+    // raw_data). A montagem do array enriquecido é separada e condicional.
+    for (const row of allRows) {
       const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
       const isCancelled = row.status === 'cancelled'
       const isInvalid = row.status === 'invalid'
+      if (!isCancelled && !isInvalid) {
+        const costPrice = row.cost_price != null ? Number(row.cost_price) : null
+        faturamento += totalAmount
+        tarifa_total += Number(row.platform_fee ?? 0)
+        frete_vendedor_total += Number(row.shipping_cost ?? 0)
+        frete_comprador_total += Number(row.shipping_buyer_paid ?? 0)
+        custo_total += costPrice ?? 0
+        imposto_total += row.tax_amount != null ? Number(row.tax_amount) : 0
+        qtd_aprovadas++
+        if (costPrice != null && costPrice > 0) { qtd_com_custo++; fat_com_custo += totalAmount }
+        else qtd_sem_custo++
+      } else if (isCancelled) {
+        canceladas += totalAmount; qtd_canceladas++
+      }
+    }
+
+    const enrichedOrders = kpisOnly ? [] : allRows.map((row) => {
+      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      const isCancelled = row.status === 'cancelled'
       const tarifaML = Number(row.platform_fee ?? 0)
       const freteVendedor = Number(row.shipping_cost ?? 0)
       const freteComprador = Number(row.shipping_buyer_paid ?? 0)
@@ -1254,20 +1286,6 @@ export class OrdersService {
       const contribMargin = row.contribution_margin != null ? Number(row.contribution_margin) : null
       const contribMarginPct = row.contribution_margin_pct != null ? Number(row.contribution_margin_pct) : null
 
-      if (!isCancelled && !isInvalid) {
-        faturamento += totalAmount
-        tarifa_total += tarifaML
-        frete_vendedor_total += freteVendedor
-        frete_comprador_total += freteComprador
-        custo_total += costPrice ?? 0
-        imposto_total += taxAmount ?? 0
-        qtd_aprovadas++
-        if (costPrice != null && costPrice > 0) { qtd_com_custo++; fat_com_custo += totalAmount }
-        else qtd_sem_custo++
-      } else if (isCancelled) {
-        canceladas += totalAmount; qtd_canceladas++
-      }
-
       const raw = (row.raw_data ?? {}) as Record<string, unknown>
       const itemRaw = (raw.item ?? {}) as Record<string, unknown>
       const shipping = (raw.shipping ?? {}) as Record<string, unknown>
@@ -1278,7 +1296,7 @@ export class OrdersService {
         platform: row.platform,
         status: row.status,
         date_created: (raw.date_created as string) ?? row.sold_at,
-        account_nickname: this.ordersNicknameFor(row, nick),
+        account_nickname: this.ordersNicknameFor(row, nick!),
         seller_id: row.seller_id,
         item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
         title: (itemRaw.title as string) ?? row.product_title,
