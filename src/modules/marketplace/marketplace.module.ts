@@ -20,6 +20,8 @@ import { ShopeeCampaignsService } from './shopee-campaigns/shopee-campaigns.serv
 import { CampaignMarginService } from './shopee-campaigns/campaign-margin.service'
 import { ShopeeMarketingService } from './shopee-campaigns/shopee-marketing.service'
 import { ShopeeMarketingController } from './shopee-campaigns/shopee-marketing.controller'
+import { ShopeePromoWriteService } from './shopee-campaigns/shopee-promo-write.service'
+import { ShopeePromoWriteController } from './shopee-campaigns/shopee-promo-write.controller'
 import { ShopeeRadarController } from './shopee-radar/shopee-radar.controller'
 import { ShopeeRadarService } from './shopee-radar/shopee-radar.service'
 import { ShopeeCreativeController } from './shopee-creative/shopee-creative.controller'
@@ -69,6 +71,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
     ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
     ShopeeReturnsPlaybookController, // Playbook IA de devoluções — recomendação + ações (accept/dispute)
+    ShopeePromoWriteController,  // F18 Promo write — voucher + flash sale do painel (trava de margem)
     ShopeeChatController,        // Pós-venda B — chat sellerchat (dormante até permissão do app)
     ShopeeReviewsController,     // Central de Avaliações — reviews + resposta IA
     ReviewCentralController,     // Central de Avaliações — config automação + sync ML
@@ -86,6 +89,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeCampaignsService,          // F1.4 — Campaign Center (READ-ONLY Sprint 1)
     CampaignMarginService,           // F3.1 — gate de margem pós-comissão
     ShopeeMarketingService,          // F18 Marketing inteligente — motor de recomendação
+    ShopeePromoWriteService,         // F18 Promo write — voucher/flash sale com trava de margem
     ShopeeRadarService,              // F1.5 — Radar de mercado Shopee
     ShopeeCreativePublisherService,  // F1.7 — guard de pré-publicação
     ShopeeProductSyncService,        // F0.7 — sync de produtos reais → algo score

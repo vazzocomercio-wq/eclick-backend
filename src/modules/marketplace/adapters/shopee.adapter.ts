@@ -1506,16 +1506,19 @@ export class ShopeeAdapter extends MarketplaceAdapter {
   }
 
   // ── F18 Marketing inteligente — probe de escopo do módulo Flash Sale ────────
-  /** Lê os time slots de Oferta Relâmpago da loja (próximos dias). Serve de
+  /** Lê os time slots de Oferta Relâmpago da loja (próximos 7 dias). Serve de
    *  PROBE de escopo do módulo shop_flash_sale: se devolver 403, o app não tem
-   *  permissão de gestão de promoções (igual ao bloqueio do Ads). Read-only. */
-  async getFlashSaleTimeSlots(conn: MpConnection): Promise<{ ok: boolean; slots: unknown[]; error?: string }> {
+   *  permissão de gestão de promoções (igual ao bloqueio do Ads). Read-only.
+   *  Path correto = get_time_slot_id (o antigo get_shop_flash_sale_time_slot_id
+   *  dava 404). start_time precisa ser > agora (buffer 120s contra clock skew —
+   *  validado live: now seco deu "start_time should be >= now"). */
+  async getFlashSaleTimeSlots(conn: MpConnection): Promise<{ ok: boolean; slots: Array<{ timeslot_id: number; start_time: number; end_time: number }>; error?: string }> {
     const { accessToken, shopId } = this.requireShop(conn)
     const { partnerId } = this.partnerEnv()
-    const path = '/api/v2/shop_flash_sale/get_shop_flash_sale_time_slot_id'
+    const path = '/api/v2/shop_flash_sale/get_time_slot_id'
     const ts   = Math.floor(Date.now() / 1000)
     const sign = this.signShop(path, ts, accessToken, shopId)
-    const startTime = ts
+    const startTime = ts + 120
     const endTime   = ts + 7 * 86400
     const qs = new URLSearchParams({
       partner_id: partnerId, timestamp: String(ts),
@@ -1609,6 +1612,157 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       exec: () => axios.post<any>(url, { discount_id: discountId }),
     })
     if (data?.error) throw new Error(`Shopee deleteDiscount ${data.error}: ${data.message}`)
+  }
+
+  // ══ F18 Promo WRITE — Voucher + Shop Flash Sale (Campaign Center escrita) ══
+  // Probe 2026-06-12: módulo voucher + shop_flash_sale SEM bloqueio de escopo
+  // (≠ Ads/add_item). Todos os writes logam o raw (parse defensivo) — shapes
+  // calibram na 1ª chamada real.
+
+  /** Helper POST shop-level assinado (boilerplate dos writes de promoção). */
+  private async postPromo(conn: MpConnection, apiPath: string, body: Record<string, unknown>, tag: string): Promise<unknown> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url  = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    this.logger.log(`[${tag}] → ${JSON.stringify(data)?.slice(0, 400)}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((data as any)?.error) throw new Error(`Shopee ${apiPath.split('/').pop()} ${(data as any).error}: ${(data as any).message}`)
+    return data
+  }
+
+  /** Cria um Voucher (cupom) na loja. `POST /api/v2/voucher/add_voucher`.
+   *  reward_type: 1=valor fixo (discount_amount R$), 2=percentual (percentage
+   *  1-99 + max_price teto R$ opcional). voucher_type: 1=loja toda, 2=produtos
+   *  (item_id_list, máx 50). voucher_code: 1-5 chars A-Z/0-9 (a Shopee prefixa
+   *  com o código da loja). Datas Unix s; start >= agora. ⚠️ cria voucher REAL. */
+  async addVoucher(conn: MpConnection, args: {
+    name: string; code: string; startTime: number; endTime: number
+    voucherType: 1 | 2; rewardType: 1 | 2
+    discountAmount?: number; percentage?: number; maxPrice?: number
+    minBasketPrice: number; usageQuantity: number
+    itemIdList?: number[]; displayStartTime?: number
+  }): Promise<{ voucher_id: number; raw: unknown }> {
+    const body: Record<string, unknown> = {
+      voucher_name:     args.name.slice(0, 100),
+      voucher_code:     args.code.slice(0, 5).toUpperCase(),
+      start_time:       args.startTime,
+      end_time:         args.endTime,
+      voucher_type:     args.voucherType,
+      reward_type:      args.rewardType,
+      usage_quantity:   args.usageQuantity,
+      min_basket_price: args.minBasketPrice,
+    }
+    if (args.rewardType === 1) body.discount_amount = args.discountAmount
+    if (args.rewardType === 2) {
+      body.percentage = args.percentage
+      if (args.maxPrice != null && args.maxPrice > 0) body.max_price = args.maxPrice
+    }
+    if (args.voucherType === 2 && args.itemIdList?.length) body.item_id_list = args.itemIdList.slice(0, 50)
+    if (args.displayStartTime != null) body.display_start_time = args.displayStartTime
+    const data = await this.postPromo(conn, '/api/v2/voucher/add_voucher', body, 'shopee.addVoucher')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const id = (data as any)?.response?.voucher_id
+    if (!id) throw new Error(`Shopee add_voucher sem voucher_id: ${JSON.stringify(data)?.slice(0, 200)}`)
+    return { voucher_id: Number(id), raw: data }
+  }
+
+  /** Atualiza um Voucher existente. `POST /api/v2/voucher/update_voucher`.
+   *  Campos opcionais — só envia o que mudou (Shopee restringe edição após
+   *  início: período/quantidade ainda editáveis, desconto não). */
+  async updateVoucher(conn: MpConnection, args: {
+    voucherId: number; name?: string; startTime?: number; endTime?: number
+    minBasketPrice?: number; usageQuantity?: number; maxPrice?: number
+  }): Promise<{ raw: unknown }> {
+    const body: Record<string, unknown> = { voucher_id: args.voucherId }
+    if (args.name != null)           body.voucher_name = args.name.slice(0, 100)
+    if (args.startTime != null)      body.start_time = args.startTime
+    if (args.endTime != null)        body.end_time = args.endTime
+    if (args.minBasketPrice != null) body.min_basket_price = args.minBasketPrice
+    if (args.usageQuantity != null)  body.usage_quantity = args.usageQuantity
+    if (args.maxPrice != null)       body.max_price = args.maxPrice
+    const data = await this.postPromo(conn, '/api/v2/voucher/update_voucher', body, 'shopee.updateVoucher')
+    return { raw: data }
+  }
+
+  /** Encerra um Voucher EM ANDAMENTO agora. `POST /api/v2/voucher/end_voucher`.
+   *  (Voucher upcoming usa delete_voucher.) */
+  async endVoucher(conn: MpConnection, voucherId: number): Promise<{ raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/voucher/end_voucher', { voucher_id: voucherId }, 'shopee.endVoucher')
+    return { raw: data }
+  }
+
+  /** Apaga um Voucher AINDA NÃO INICIADO. `POST /api/v2/voucher/delete_voucher`. */
+  async deleteVoucher(conn: MpConnection, voucherId: number): Promise<{ raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/voucher/delete_voucher', { voucher_id: voucherId }, 'shopee.deleteVoucher')
+    return { raw: data }
+  }
+
+  /** Cria uma Oferta Relâmpago (sessão vazia) num time slot. `POST
+   *  /api/v2/shop_flash_sale/add_shop_flash_sale`. Itens entram depois via
+   *  addShopFlashSaleItems. ⚠️ cria flash sale REAL (agendada no slot). */
+  async createShopFlashSale(conn: MpConnection, timeslotId: number): Promise<{ flash_sale_id: number; raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/shop_flash_sale/add_shop_flash_sale', { timeslot_id: timeslotId }, 'shopee.addFlashSale')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const id = (data as any)?.response?.flash_sale_id
+    if (!id) throw new Error(`Shopee add_shop_flash_sale sem flash_sale_id: ${JSON.stringify(data)?.slice(0, 200)}`)
+    return { flash_sale_id: Number(id), raw: data }
+  }
+
+  /** Adiciona itens a uma Oferta Relâmpago. `POST /api/v2/shop_flash_sale/
+   *  add_shop_flash_sale_items`. Item COM variação → models[]; SEM variação →
+   *  ainda assim a Shopee espera models com model_id 0 (parse defensivo: a
+   *  failed_items[] da resposta diz o motivo por item). stock = qtd reservada
+   *  pra promo (≤ estoque real). ⚠️ promo REAL. */
+  async addShopFlashSaleItems(conn: MpConnection, args: {
+    flashSaleId: number
+    items: Array<{
+      item_id: number
+      purchase_limit?: number
+      models: Array<{ model_id: number; input_promo_price: number; stock: number }>
+    }>
+  }): Promise<{ failed: unknown[]; raw: unknown }> {
+    const body = {
+      flash_sale_id: args.flashSaleId,
+      items: args.items.map(it => ({
+        item_id: it.item_id,
+        purchase_limit: it.purchase_limit ?? 0,
+        models: it.models.map(m => ({ model_id: m.model_id, input_promo_price: m.input_promo_price, stock: m.stock })),
+      })),
+    }
+    const data = await this.postPromo(conn, '/api/v2/shop_flash_sale/add_shop_flash_sale_items', body, 'shopee.addFlashSaleItems')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const failed = ((data as any)?.response?.failed_items ?? []) as unknown[]
+    return { failed, raw: data }
+  }
+
+  /** Habilita/desabilita uma Oferta Relâmpago. `POST /api/v2/shop_flash_sale/
+   *  update_shop_flash_sale`. status: 1=enable, 2=disable. */
+  async updateShopFlashSale(conn: MpConnection, args: { flashSaleId: number; status: 1 | 2 }): Promise<{ raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/shop_flash_sale/update_shop_flash_sale', { flash_sale_id: args.flashSaleId, status: args.status }, 'shopee.updateFlashSale')
+    return { raw: data }
+  }
+
+  /** Remove uma Oferta Relâmpago inteira. `POST /api/v2/shop_flash_sale/
+   *  delete_shop_flash_sale`. (Rollback do create.) */
+  async deleteShopFlashSale(conn: MpConnection, flashSaleId: number): Promise<{ raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/shop_flash_sale/delete_shop_flash_sale', { flash_sale_id: flashSaleId }, 'shopee.deleteFlashSale')
+    return { raw: data }
+  }
+
+  /** Remove itens de uma Oferta Relâmpago. `POST /api/v2/shop_flash_sale/
+   *  delete_shop_flash_sale_items`. */
+  async deleteShopFlashSaleItems(conn: MpConnection, args: { flashSaleId: number; itemIds: number[] }): Promise<{ raw: unknown }> {
+    const data = await this.postPromo(conn, '/api/v2/shop_flash_sale/delete_shop_flash_sale_items', { flash_sale_id: args.flashSaleId, item_ids: args.itemIds }, 'shopee.deleteFlashSaleItems')
+    return { raw: data }
   }
 
   /** F1.3 — Snapshot de métricas da loja (módulo account_health).

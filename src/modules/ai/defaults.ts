@@ -66,6 +66,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // F18 Promo write — sugere o % ideal de desconto por produto (giro 60d ×
+  // margem × elasticidade) pro wizard de voucher/flash sale. jsonMode.
+  shopee_promo_suggest: {
+    label:       'Sugestão de desconto (promoções Shopee)',
+    description: 'Sugere o percentual ideal de desconto por produto em vouchers e ofertas relâmpago',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   // Pós-venda Shopee — sugere resposta no chat (sellerchat) usando contexto
   // da conversa + pedido. Sonnet pra qualidade (paridade c/ ml_question_suggest).
   shopee_chat_suggest: {
