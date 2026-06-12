@@ -142,15 +142,26 @@ export class ShopeeReturnsPlaybookService {
       rationale  = 'O comprador alega que não recebeu, mas o pedido consta como entregue no rastreio. Disputa com evidência de entrega tem alta chance de ganho.'
     }
 
-    // R2 — recuperar o item custa mais do que ele vale → aceitar é a decisão econômica
+    // R2 — recuperar o item custa mais do que ele vale → aceitar é a decisão econômica.
+    // Só prefere a OFERTA pendente do comprador se ela custa MENOS OU IGUAL ao
+    // reembolso normal (caso real: comprador ofereceu R$31,80 = item+frete contra
+    // reembolso de R$23,80 — aceitar a oferta pagaria R$8 a mais).
     if (!action && row.needs_logistics && economics.recoverable_value != null
         && economics.recoverable_value <= economics.cost_to_recover) {
       rulesFired.push('recovery_costs_more_than_item')
-      const offerOk = negotiation?.negotiation_status === 'PENDING_RESPOND'
-      action     = offerOk ? 'accept_offer' : 'accept'
+      const refund = Number(row.refund_amount ?? 0)
+      const offerAmount = negotiation?.negotiation_status === 'PENDING_RESPOND'
+        ? Number(negotiation?.latest_offer_amount ?? NaN)
+        : NaN
+      const offerCheaper = Number.isFinite(offerAmount) && offerAmount <= refund
+      action     = offerCheaper ? 'accept_offer' : 'accept'
       confidence = 0.9
-      rationale  = `Receber o item de volta custa ~R$ ${economics.cost_to_recover.toFixed(2)} (frete reverso + manuseio) e o custo dos itens é R$ ${economics.recoverable_value.toFixed(2)} — brigar/recuperar sai mais caro que aceitar o reembolso de R$ ${Number(row.refund_amount ?? 0).toFixed(2)}.`
-      if (offerOk) rationale += ' Há uma oferta do comprador pendente — aceitar a oferta encerra sem logística reversa.'
+      rationale  = `Receber o item de volta custa ~R$ ${economics.cost_to_recover.toFixed(2)} (frete reverso + manuseio) e o custo dos itens é R$ ${economics.recoverable_value.toFixed(2)} — brigar/recuperar sai mais caro que aceitar o reembolso de R$ ${refund.toFixed(2)}.`
+      if (offerCheaper) {
+        rationale += ` A oferta pendente do comprador (R$ ${offerAmount.toFixed(2)}) é menor/igual ao reembolso — aceitar a oferta sai mais barato.`
+      } else if (Number.isFinite(offerAmount)) {
+        rationale += ` ⚠️ Há uma oferta pendente do comprador de R$ ${offerAmount.toFixed(2)}, MAIOR que o reembolso — aceitar a devolução normal é mais barato que a oferta.`
+      }
     }
 
     // Camada IA — casos cinzas (ou refina a regra com a fala/fotos do comprador)
@@ -268,7 +279,7 @@ export class ShopeeReturnsPlaybookService {
         `Você é o analista de devoluções de um seller da Shopee Brasil. Avalie a solicitação e decida a ` +
         `melhor ação econômica pro vendedor, sendo justo com compradores legítimos. Ações possíveis: ` +
         `"accept" (aceitar devolução/reembolso — caso legítimo ou brigar custa mais), ` +
-        `"accept_offer" (aceitar a oferta pendente do comprador), ` +
+        `"accept_offer" (aceitar a oferta pendente do comprador — SÓ quando o valor da oferta é menor ou igual ao reembolso normal), ` +
         `"dispute" (disputar — só com evidência concreta e boa chance de ganho), ` +
         `"collect_evidence" (esperar o item chegar e documentar antes de decidir), ` +
         `"monitor" (fluxo padrão, sem ação especial). ` +
