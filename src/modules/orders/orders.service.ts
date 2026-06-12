@@ -651,11 +651,15 @@ export class OrdersService {
     if (platform === 'storefront') {
       return this.listStorefrontKpis(orgId)
     }
-    const now = new Date()
-    const todayFr = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
-    const curFrom = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-    const prvFrom = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString()
-    const prvTo   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59).toISOString()
+    // Cortes de dia/mês em HORÁRIO DE BRASÍLIA (servidor roda em UTC — sem
+    // isso "hoje" começava às 21h BRT da véspera e o 1º do mês vazava).
+    // BRT = UTC-3 fixo (sem horário de verão desde 2019).
+    const nowBrt = new Date(Date.now() - 3 * 3600_000)
+    const by = nowBrt.getUTCFullYear(), bm = nowBrt.getUTCMonth(), bd = nowBrt.getUTCDate()
+    const todayFr = new Date(Date.UTC(by, bm, bd, 3)).toISOString()      // 00:00 BRT
+    const curFrom = new Date(Date.UTC(by, bm, 1, 3)).toISOString()
+    const prvFrom = new Date(Date.UTC(by, bm - 1, 1, 3)).toISOString()
+    const prvTo   = new Date(Date.UTC(by, bm, 1, 3) - 1000).toISOString() // 23:59:59 BRT do último dia
 
     type Agg = { count: number; revenue: number; pending_shipment: number; in_transit: number; delivered: number; by_day: Array<{ date: string; count: number; revenue: number }> }
 
@@ -665,14 +669,14 @@ export class OrdersService {
       // truncados (caso real Vazzo abril/2026: 1222 pedidos viraram 1000).
       const PAGE_SIZE  = 1000
       const SAFETY_CAP = 50_000  // ~1.5y mesmo pra contas grandes
-      type Row = { sold_at: string; sale_price: number; quantity: number; shipping_status: string | null }
+      type Row = { sold_at: string; source: string | null; sale_price: number; quantity: number; shipping_status: string | null }
       const allRows: Row[] = []
       let pageStart = 0
 
       while (pageStart < SAFETY_CAP) {
         let q = supabaseAdmin
           .from('orders')
-          .select('sold_at, sale_price, quantity, status, shipping_status')
+          .select('sold_at, source, sale_price, quantity, status, shipping_status')
           .gte('sold_at', from)
           .neq('status', 'cancelled')
           .neq('status', 'invalid')
@@ -700,7 +704,7 @@ export class OrdersService {
       let count = 0, revenue = 0, pendingShipment = 0, inTransit = 0, delivered = 0
       for (const row of allRows) {
         const d = (row.sold_at ?? '').substring(0, 10)
-        const orderRevenue = (row.sale_price ?? 0) * (row.quantity ?? 1)
+        const orderRevenue = rowRevenue(row)
         if (d) {
           byDay[d] = byDay[d] ?? { count: 0, revenue: 0 }
           byDay[d].count++
@@ -1187,7 +1191,7 @@ export class OrdersService {
         else if (cityRaw && typeof cityRaw === 'object')
           shippingCity = (cityRaw as { name?: string }).name ?? null
       }
-      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      const totalAmount = rowRevenue(row)
       return {
         id: row.external_order_id,
         source: row.source,
@@ -1253,7 +1257,7 @@ export class OrdersService {
     // Acumulação dos KPIs — sempre roda, sobre as colunas escalares (não toca
     // raw_data). A montagem do array enriquecido é separada e condicional.
     for (const row of allRows) {
-      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      const totalAmount = rowRevenue(row)
       const isCancelled = row.status === 'cancelled'
       const isInvalid = row.status === 'invalid'
       if (!isCancelled && !isInvalid) {
@@ -1273,7 +1277,7 @@ export class OrdersService {
     }
 
     const enrichedOrders = kpisOnly ? [] : allRows.map((row) => {
-      const totalAmount = Number(row.sale_price ?? 0) * Number(row.quantity ?? 1)
+      const totalAmount = rowRevenue(row)
       const isCancelled = row.status === 'cancelled'
       const tarifaML = Number(row.platform_fee ?? 0)
       const freteVendedor = Number(row.shipping_cost ?? 0)
@@ -1431,6 +1435,17 @@ interface DbOrderRow {
   has_problem:      boolean | null
   problem_note:     string | null
   problem_severity: string | null
+}
+
+/** Receita REAL de 1 linha de `orders` por canal:
+ *  - ML/manual: sale_price é o preço UNITÁRIO → multiplica por quantity.
+ *  - Shopee/TikTok: sale_price JÁ é o TOTAL da linha (unit × qty embutido no
+ *    espelho por SKU) → multiplicar de novo INFLAVA a receita (caso real
+ *    Vazzo jun/2026: tela R$13.892 vs real R$7.914). */
+function rowRevenue(row: { source?: string | null; sale_price?: number | null; quantity?: number | null }): number {
+  const price = Number(row.sale_price ?? 0)
+  if (row.source === 'shopee' || row.source === 'tiktok_shop') return price
+  return price * Number(row.quantity ?? 1)
 }
 
 /** Converte row da tabela orders pro shape consumido por PedidosTable

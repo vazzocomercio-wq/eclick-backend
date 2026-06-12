@@ -1,5 +1,5 @@
 import {
-  Controller, Post, UseGuards, HttpCode, HttpStatus, BadRequestException,
+  Controller, Post, Body, UseGuards, HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
@@ -55,13 +55,16 @@ export class ShopeeSyncController {
     return this.campaigns.syncCampaigns(user.orgId)
   }
 
-  /** F1.6 — Ingestão de pedidos Shopee na CENTRAL (source='shopee'). */
+  /** F1.6 — Ingestão de pedidos Shopee na CENTRAL (source='shopee').
+   *  body.days controla a janela (default 60; o botão "Sincronizar" da tela
+   *  de pedidos manda 3 pra responder dentro do timeout do proxy). */
   @Post('orders')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.view')
-  async syncOrders(@ReqUser() user: ReqUserPayload) {
+  async syncOrders(@ReqUser() user: ReqUserPayload, @Body() body?: { days?: number }) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    return this.orders.syncOrders(user.orgId)
+    const days = Math.min(Math.max(Number(body?.days ?? 0) || 0, 0), 90) || undefined
+    return this.orders.syncOrders(user.orgId, days)
   }
 
   /** Fase 2.3 — Ingere o repasse real (escrow) dos pedidos concluídos →
