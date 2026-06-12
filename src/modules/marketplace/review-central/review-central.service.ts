@@ -231,33 +231,81 @@ export class ReviewCentralService {
     return (data?.id as string | undefined) ?? orgId
   }
 
-  /** Lista os operadores do Active pro seletor da tela (com/sem WhatsApp). */
+  /** Lista os operadores pro seletor: Equipe do SaaS (Configurações →
+   *  Equipe, onde o WhatsApp é cadastrado) + time do Active (merge por
+   *  user_id — mesmo Supabase, mesmos usuários). */
   async listOperators(orgId: string): Promise<OperatorOption[]> {
+    const byUser = new Map<string, OperatorOption>()
+
+    // 1) Equipe do SaaS (fonte primária — tem o campo WhatsApp na tela)
+    const { data: saasMembers } = await supabaseAdmin
+      .from('organization_members')
+      .select('user_id, role, whatsapp_phone')
+      .eq('organization_id', orgId)
+    for (const m of saasMembers ?? []) {
+      let name: string | null = null
+      try {
+        const { data: u } = await supabaseAdmin.auth.admin.getUserById(m.user_id as string)
+        name = (u?.user?.user_metadata?.full_name as string | undefined)
+          ?? (u?.user?.email as string | undefined) ?? null
+      } catch { /* sem nome, segue */ }
+      byUser.set(m.user_id as string, {
+        user_id:        m.user_id as string,
+        display_name:   name,
+        whatsapp_phone: (m.whatsapp_phone as string | null) ?? null,
+        role:           (m.role as string | null) ?? null,
+        status:         'active',
+      })
+    }
+
+    // 2) Time do Active (completa nome/fone e membros só-do-CRM)
     const activeOrgId = await this.resolveActiveOrgId(orgId)
-    const { data } = await supabaseAdmin
+    const { data: activeMembers } = await supabaseAdmin
       .schema('active')
       .from('org_members')
       .select('user_id, display_name, whatsapp_phone, role, status')
       .eq('org_id', activeOrgId)
       .neq('status', 'suspended')
-      .order('display_name')
-    return (data ?? []) as OperatorOption[]
+    for (const m of (activeMembers ?? []) as OperatorOption[]) {
+      const prev = byUser.get(m.user_id)
+      if (prev) {
+        byUser.set(m.user_id, {
+          ...prev,
+          display_name:   prev.display_name ?? m.display_name,
+          whatsapp_phone: prev.whatsapp_phone ?? m.whatsapp_phone,
+        })
+      } else {
+        byUser.set(m.user_id, m)
+      }
+    }
+
+    return [...byUser.values()].sort((a, b) => (a.display_name ?? '').localeCompare(b.display_name ?? ''))
   }
 
-  /** Telefone do alerta: override manual (legado) > cadastro do operador no
-   *  Active NA HORA do envio (cadastrou depois, funciona sem reconfigurar). */
+  /** Telefone do alerta resolvido NA HORA do envio: override manual >
+   *  Equipe do SaaS > time do Active (cadastrou o número depois em qualquer
+   *  um dos dois, passa a funcionar sem reconfigurar). */
   private async resolveAlertPhone(cfg: ReviewCentralConfig): Promise<string | null> {
     if (cfg.notification_phone) return cfg.notification_phone
     if (!cfg.notification_operator_id) return null
+
+    const { data: saas } = await supabaseAdmin
+      .from('organization_members')
+      .select('whatsapp_phone')
+      .eq('organization_id', cfg.organization_id)
+      .eq('user_id', cfg.notification_operator_id)
+      .maybeSingle()
+    if (saas?.whatsapp_phone) return saas.whatsapp_phone as string
+
     const activeOrgId = await this.resolveActiveOrgId(cfg.organization_id)
-    const { data } = await supabaseAdmin
+    const { data: act } = await supabaseAdmin
       .schema('active')
       .from('org_members')
       .select('whatsapp_phone')
       .eq('org_id', activeOrgId)
       .eq('user_id', cfg.notification_operator_id)
       .maybeSingle()
-    return (data?.whatsapp_phone as string | undefined) ?? null
+    return (act?.whatsapp_phone as string | undefined) ?? null
   }
 
   // ── Negativa: WhatsApp pro operador ──────────────────────────────────────
