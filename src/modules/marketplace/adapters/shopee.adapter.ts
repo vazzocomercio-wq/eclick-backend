@@ -213,7 +213,7 @@ export class ShopeeAdapter extends MarketplaceAdapter {
         shop_id:                  String(shopId),
         sign,
         order_sn_list:            chunk.join(','),
-        response_optional_fields: 'item_list,total_amount,actual_shipping_fee,estimated_shipping_fee,payment_method,buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,pay_time',
+        response_optional_fields: 'item_list,total_amount,actual_shipping_fee,estimated_shipping_fee,payment_method,buyer_cpf_id,recipient_address,buyer_user_id,buyer_username,pay_time,invoice_data',
       })
       const { data } = await this.callShopee({
         key:  `shop:${shopId}`,

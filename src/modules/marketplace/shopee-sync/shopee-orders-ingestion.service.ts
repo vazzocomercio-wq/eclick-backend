@@ -173,17 +173,52 @@ export class ShopeeOrdersIngestionService {
     const status = this.mapStatus(od?.order_status)
     const soldAt = od?.create_time ? new Date(od.create_time * 1000).toISOString() : null
     const rcpt = od?.recipient_address ?? null
-    // A Shopee MASCARA dados sensíveis ("****") quando o app não tem o acesso
-    // "Sensitive Data" — campo mascarado vira null e cai pro buyer_username
-    // (sempre aberto), que identifica o comprador na tela e no CRM.
+    // A Shopee só expõe dados do comprador (CPF/endereço/fone) DURANTE a
+    // preparação do pedido (READY_TO_SHIP) — é a janela da NF-e/etiqueta.
+    // Depois de despachado, a API devolve tudo MASCARADO ("****"). Por isso:
+    // (1) capturamos os dados ABERTOS quando o cron pega o pedido na janela;
+    // (2) NUNCA sobrescrevemos um valor capturado com a versão mascarada do
+    //     re-sync seguinte (preserva do row existente).
     const unmasked = (v: unknown): string | null => {
       const s = typeof v === 'string' ? v.trim() : ''
       return s && !/^\*+$/.test(s) ? s : null
     }
-    const buyer = unmasked(rcpt?.name) ?? unmasked(od?.buyer_username) ?? null
-    const phone = unmasked(rcpt?.phone) ? String(rcpt!.phone).replace(/\D/g, '') || null : null
-    const cpf = unmasked(od?.buyer_cpf_id) ? String(od!.buyer_cpf_id).replace(/\D/g, '') || null : null
+
+    // valores já capturados em syncs anteriores (janela aberta)
+    const { data: prevRow } = await supabaseAdmin
+      .from('orders')
+      .select('buyer_doc_number, buyer_phone, buyer_name, raw_data')
+      .eq('source', 'shopee')
+      .eq('external_order_id', String(od?.order_sn))
+      .limit(1)
+      .maybeSingle<{ buyer_doc_number: string | null; buyer_phone: string | null; buyer_name: string | null; raw_data: Record<string, unknown> | null }>()
+
+    const buyerOpen = unmasked(rcpt?.name)
+    const buyer = buyerOpen
+      ?? (unmasked(prevRow?.buyer_name) && prevRow!.buyer_name !== unmasked(od?.buyer_username) ? prevRow!.buyer_name : null)
+      ?? unmasked(od?.buyer_username)
+      ?? null
+    const phone = (unmasked(rcpt?.phone) ? String(rcpt!.phone).replace(/\D/g, '') || null : null)
+      ?? prevRow?.buyer_phone ?? null
+    const cpf = (unmasked(od?.buyer_cpf_id) ? String(od!.buyer_cpf_id).replace(/\D/g, '') || null : null)
+      ?? prevRow?.buyer_doc_number ?? null
     const buyerUsername = unmasked(od?.buyer_username)
+
+    // raw_data: se o detalhe novo veio mascarado mas o raw anterior tem o
+    // endereço/CPF abertos, preserva os campos abertos no raw armazenado
+    // (o card lê o endereço de entrega do raw).
+    let rawToStore: Record<string, unknown> = od as Record<string, unknown>
+    const prevRaw = prevRow?.raw_data
+    if (prevRaw) {
+      const prevRcpt = prevRaw.recipient_address as Record<string, unknown> | undefined
+      const newMasked = !unmasked(rcpt?.full_address)
+      const prevOpen  = !!(prevRcpt && unmasked(prevRcpt.full_address))
+      rawToStore = {
+        ...od,
+        recipient_address: newMasked && prevOpen ? prevRcpt : od?.recipient_address,
+        buyer_cpf_id: unmasked(od?.buyer_cpf_id) ?? unmasked(prevRaw.buyer_cpf_id) ?? od?.buyer_cpf_id,
+      }
+    }
     const nowIso = new Date().toISOString()
 
     let n = 0
@@ -234,7 +269,7 @@ export class ShopeeOrdersIngestionService {
           buyer_phone:       phone,
           buyer_doc_number:  cpf,
           sold_at:           soldAt,
-          raw_data:          od as Record<string, unknown>,
+          raw_data:          rawToStore,
           updated_at:        nowIso,
         },
         { onConflict: 'source,external_order_id,sku' },
