@@ -83,13 +83,15 @@ export class ShopeeSyncController {
   }
 
   /** Pós-venda Fase C — Ingestão manual de devoluções (returns API) →
-   *  marketplace_returns + enxerto em orders.raw_data->mediations. */
+   *  marketplace_returns + enxerto em orders.raw_data->mediations.
+   *  body.days estende a janela (default 30, cap 365) pra backfill. */
   @Post('returns')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('orders.view')
-  async syncReturns(@ReqUser() user: ReqUserPayload) {
+  async syncReturns(@ReqUser() user: ReqUserPayload, @Body() body?: { days?: number }) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    return this.returns.syncReturns(user.orgId)
+    const days = Math.min(Math.max(Number(body?.days ?? 0) || 0, 0), 365) || undefined
+    return this.returns.syncReturns(user.orgId, days)
   }
 
   /** Lista devoluções Shopee pro front (tela Reclamações, canal Shopee). */

@@ -350,6 +350,127 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     }
   }
 
+  // ── sellerchat (chat com comprador) ─────────────────────────────────────
+  // ⚠️ Exige a permissão "Chat" do app no Open Platform (hoje o app e-Click
+  // recebe error_api_permission — ação do user no console). Shapes baseados
+  // na doc v2 — parse defensivo + log do raw pra calibrar na 1ª chamada real.
+
+  /** Lista conversas do sellerchat (mais recentes primeiro). */
+  async chatGetConversationList(
+    conn: MpConnection,
+    opts: { pageSize?: number; nextTimestampNano?: string; type?: 'all' | 'unread' | 'pinned' } = {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ conversations: any[]; nextTimestampNano: string | null; more: boolean }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/sellerchat/get_conversation_list'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+      direction: 'latest',
+      type:      opts.type ?? 'all',
+      page_size: String(opts.pageSize ?? 25),
+    })
+    if (opts.nextTimestampNano) qs.set('next_timestamp_nano', opts.nextTimestampNano)
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.chatList',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    const resp = data?.response ?? {}
+    return {
+      conversations:     resp.conversations ?? [],
+      nextTimestampNano: resp.page_result?.next_cursor?.next_message_time_nano ?? null,
+      more:              Boolean(resp.page_result?.more ?? resp.more),
+    }
+  }
+
+  /** Mensagens de UMA conversa (mais recentes primeiro; offset pagina pra trás). */
+  async chatGetMessages(
+    conn: MpConnection,
+    conversationId: string,
+    opts: { pageSize?: number; offset?: string } = {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<{ messages: any[]; nextOffset: string | null }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/sellerchat/get_message'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+      conversation_id: conversationId,
+      page_size:       String(opts.pageSize ?? 30),
+    })
+    if (opts.offset) qs.set('offset', opts.offset)
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.chatMessages',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    const resp = data?.response ?? {}
+    return {
+      messages:   resp.messages ?? [],
+      nextOffset: resp.page_result?.next_offset ?? null,
+    }
+  }
+
+  /** Envia mensagem de TEXTO pro comprador. ⚠️ mensagem REAL pro cliente. */
+  async chatSendMessage(
+    conn: MpConnection,
+    toId: number | string,
+    text: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/sellerchat/send_message'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = { to_id: Number(toId), message_type: 'text', content: { text } }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.chatSend',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    this.logger.log(`[shopee.chatSend] to=${toId} → ${JSON.stringify(data?.response ?? data).slice(0, 300)}`)
+    return data?.response ?? data
+  }
+
+  /** Marca a conversa como lida até a mensagem informada. */
+  async chatReadConversation(
+    conn: MpConnection,
+    conversationId: string,
+    lastReadMessageId: string,
+  ): Promise<void> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/sellerchat/read_conversation'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = { conversation_id: conversationId, last_read_message_id: lastReadMessageId }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.chatRead',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+  }
+
   /** CPF top-level (raro). Address inline em recipient_address. Phone é
    * o melhor enrichment fallback quando CPF vier null. */
   async extractBuyerBilling(

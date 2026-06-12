@@ -49,6 +49,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'openai', model: 'gpt-image-1' },
     fallback:    null,
   },
+  // Pós-venda Shopee — sugere resposta no chat (sellerchat) usando contexto
+  // da conversa + pedido. Sonnet pra qualidade (paridade c/ ml_question_suggest).
+  shopee_chat_suggest: {
+    label:       'Sugestão de resposta (chat Shopee)',
+    description: 'Gera resposta sugerida para mensagens do chat da Shopee',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   // Sprint ML Questions AI — sugere resposta pra pergunta do ML usando
   // contexto do anúncio + histórico P&R. Sonnet pra qualidade.
   ml_question_suggest: {

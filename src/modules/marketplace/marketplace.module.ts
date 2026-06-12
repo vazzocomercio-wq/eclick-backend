@@ -35,13 +35,16 @@ import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.c
 import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
 import { ShopeeReturnsSyncService } from './shopee-sync/shopee-returns-sync.service'
 import { ShopeeTokenRefreshWorker } from './shopee-sync/shopee-token-refresh.worker'
+import { ShopeeChatService } from './shopee-chat/shopee-chat.service'
+import { ShopeeChatController } from './shopee-chat/shopee-chat.controller'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
+import { AiModule } from '../ai/ai.module'
 
 @Module({
   // forwardRef(StockModule): venda Shopee → baixa estoque mestre (ingestão de
   // pedidos) precisa do StockService, e StockModule já importa este módulo
   // (ShopeeStockSyncService no recalcAndPropagate).
-  imports:     [MercadolivreModule, ChannelSettingsModule, forwardRef(() => StockModule)], // ML billing + comissão canal (F1.6 orders)
+  imports:     [MercadolivreModule, ChannelSettingsModule, AiModule, forwardRef(() => StockModule)], // ML billing + comissão canal (F1.6 orders) + IA (chat suggest)
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores
@@ -52,6 +55,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeSyncController,       // F0.7 — POST /shopee/sync/products (sync real)
     ShopeeListingLinkController, // F18 Fase A — vínculo anúncio↔produto (auto/manual + status)
     ShopeeMarketingController,   // F18 Marketing inteligente — recomendações + probe escopo
+    ShopeeChatController,        // Pós-venda B — chat sellerchat (dormante até permissão do app)
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -74,6 +78,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações
+    ShopeeChatService,               // Pós-venda Fase B — chat sellerchat (gate SHOPEE_CHAT_SYNC)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
   ],
   exports:     [
