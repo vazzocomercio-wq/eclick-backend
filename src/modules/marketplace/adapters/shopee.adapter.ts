@@ -1993,4 +1993,66 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       return false
     }
   }
+
+  // ── Auto-Boost (boost GRATUITO "Impulsionar agora") ──────────────────────
+  // Validado live 2026-06-12 nas 2 lojas Vazzo: 5 slots simultâneos por loja
+  // (6º item → product.error_busi "reached shop's bump slot limit"), cada
+  // boost dura 4h (cool_down_second ≈ 14400 logo após o boost).
+
+  /** Itens em boost AGORA na loja, com o tempo restante de cada um. */
+  async getBoostedList(conn: MpConnection): Promise<Array<{ item_id: number; cool_down_second: number }>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/get_boosted_list'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.getBoostedList',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (data?.response?.item_list ?? []).map((it: any) => ({
+      item_id:          Number(it.item_id),
+      cool_down_second: Number(it.cool_down_second ?? 0),
+    }))
+  }
+
+  /** Aplica o boost gratuito em até 5 itens. Resposta separa sucesso/falha
+   *  (falha por item vem em failure_list quando parcial; estourar o teto de
+   *  slots vem como erro top-level product.error_busi). */
+  async boostItems(conn: MpConnection, itemIds: Array<number | string>): Promise<{
+    success: number[]
+    failures: Array<{ item_id: number; reason: string }>
+  }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/product/boost_item'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const url = `${SHOPEE_BASE}${apiPath}?` + new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+    }).toString()
+    const body = { item_id_list: itemIds.slice(0, 5).map(Number) }
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.boostItem',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(url, body),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    const success = (data?.response?.success_list?.item_id_list ?? []).map(Number)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const failures = (data?.response?.failure_list ?? []).map((f: any) => ({
+      item_id: Number(f?.item_id),
+      reason:  String(f?.failed_reason ?? f?.reason ?? 'desconhecido'),
+    }))
+    this.logger.log(`[shopee.boost] shop=${shopId} ok=${success.length} fail=${failures.length}`)
+    return { success, failures }
+  }
 }

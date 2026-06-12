@@ -46,6 +46,8 @@ import { ReviewCentralController } from './review-central/review-central.control
 import { MlReviewsSyncService } from './review-central/ml-reviews-sync.service'
 import { ReturnsSacBridgeService } from './returns-sac/returns-sac.service'
 import { ReturnsSacController } from './returns-sac/returns-sac.controller'
+import { ShopeeAutoBoostService } from './shopee-boost/shopee-auto-boost.service'
+import { ShopeeBoostController } from './shopee-boost/shopee-boost.controller'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { WaRouterModule } from '../wa-router/wa-router.module'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
@@ -71,6 +73,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeReviewsController,     // Central de Avaliações — reviews + resposta IA
     ReviewCentralController,     // Central de Avaliações — config automação + sync ML
     ReturnsSacController,        // SAC — devolução → card no funil do Active + Vincular SAC do pedido
+    ShopeeBoostController,       // Auto-Boost — boost gratuito inteligente (overview/config/run)
   ],
   providers:   [
     MercadoLivreAdapter, MagaluAdapter, ShopeeAdapter,
@@ -100,6 +103,7 @@ import { AiModule } from '../ai/ai.module'
     MlReviewsSyncService,            // Avaliações do ML (gate ML_REVIEW_SYNC; sem resposta pública)
     ReturnsSacBridgeService,         // SAC — devoluções → funil Active (gate RETURNS_SAC_SYNC)
     ShopeeTokenRefreshWorker,        // F0.2 — refresh proativo de token (@Cron 1h)
+    ShopeeAutoBoostService,          // Auto-Boost — cron 30min gate SHOPEE_AUTO_BOOST + opt-in por loja
   ],
   exports:     [
     MarketplaceService, MarketplaceAdapterRegistry,
