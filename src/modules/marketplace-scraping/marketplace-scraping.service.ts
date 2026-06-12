@@ -368,6 +368,19 @@ export class MarketplaceScrapingService {
   /** Detecta plataforma da URL e roteia. Usado pelo POST /campaigns/import-from-url.
    * orgId obrigatório pra autenticar /products/{id} quando for catálogo ML. */
   async scrapeFromUrl(url: string, orgId: string): Promise<ListingSummary> {
+    // TikTok Shop: bloqueio anti-robô por design (captcha pra server-side,
+    // dados só via JS no navegador, e até pros bots de preview só vem o logo
+    // genérico — sondado 2026-06-11). Erro PRECISO em vez de "não suportada":
+    // o caminho robusto é a extensão Chrome do e-Click (roadmap W.8), que lê
+    // a página aberta no navegador do usuário, onde não há bloqueio.
+    if (/tiktok\.com|tiktokv\.com/i.test(url)) {
+      throw new BadRequestException(
+        'O TikTok bloqueia a leitura automática de páginas de produto (captcha anti-robô). ' +
+        'Alternativas: (1) importe o MESMO produto pelo link do anúncio do concorrente no Mercado Livre ou na Shopee; ' +
+        '(2) a extensão Chrome do e-Click (em desenvolvimento) vai importar direto da página aberta no seu navegador.',
+      )
+    }
+
     const platform = this.scraper.detectPlatform(url)
     if (platform === 'mercadolivre') {
       const normalized = this.normalizeMlUrl(url)
