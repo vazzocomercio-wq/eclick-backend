@@ -123,8 +123,9 @@ export class FulfillmentService {
     let items: SeedItem[] = []
     let sourceOrderIds: string[] = []
     let totalCents: number | null = null
-    let sellerId: number | null = null     // conta ML (Onda A)
-    let storeSlug: string | null = null    // conta loja própria (Onda A)
+    let sellerId: number | null = null         // conta ML (Onda A)
+    let channelAccountId: string | null = null // conta Shopee/TikTok (shop_id) (Onda A)
+    let storeSlug: string | null = null        // conta loja própria (Onda A)
 
     if (input.source === 'marketplace') {
       const externalId = input.externalOrderId
@@ -132,9 +133,9 @@ export class FulfillmentService {
       if (!externalId) throw new BadRequestException('Informe externalOrderId ou orderId do pedido de marketplace.')
       const { data: rows } = await supabaseAdmin
         .from('orders')
-        .select('id, sku, product_title, quantity, sale_price, buyer_name, platform, seller_id')
+        .select('id, sku, product_title, quantity, sale_price, buyer_name, platform, seller_id, channel_account_id')
         .eq('organization_id', orgId).eq('external_order_id', externalId)
-      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; platform: string | null; seller_id: number | null }>
+      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; platform: string | null; seller_id: number | null; channel_account_id: string | null }>
       if (orderRows.length === 0) throw new NotFoundException('Pedido de marketplace não encontrado.')
       sourceId = externalId
       reference = externalId
@@ -144,6 +145,9 @@ export class FulfillmentService {
       totalCents = Math.round(orderRows.reduce((s, r) => s + (Number(r.sale_price) || 0), 0) * 100) || null
       items = orderRows.map((r) => ({ sku: r.sku, title: r.product_title ?? undefined, qty: r.quantity || 1 }))
       sellerId = orderRows[0].seller_id != null ? Number(orderRows[0].seller_id) : null
+      // Identidade da loja: ML usa seller_id; Shopee/TikTok usam channel_account_id (shop_id).
+      // Sem isso, lojas diferentes da MESMA plataforma colapsam numa conta só.
+      channelAccountId = orderRows[0].channel_account_id != null ? String(orderRows[0].channel_account_id) : null
     } else if (input.source === 'storefront') {
       if (!input.orderId) throw new BadRequestException('Informe orderId (storefront_orders.id).')
       const { data: so } = await supabaseAdmin
@@ -214,8 +218,10 @@ export class FulfillmentService {
     let externalAccountId: string | null = null
     let accountLabel: string | null = null
     if (input.source === 'marketplace' && sellerId != null) {
-      externalAccountId = String(sellerId)
+      externalAccountId = String(sellerId)                         // ML
       accountLabel = await this.accounts.mlNicknameForSeller(orgId, sellerId)
+    } else if (input.source === 'marketplace' && channelAccountId) {
+      externalAccountId = channelAccountId                          // Shopee/TikTok (shop_id)
     } else if (input.source === 'storefront') {
       externalAccountId = storeSlug ?? 'loja'
     } else if (input.source === 'b2b') {
@@ -982,9 +988,33 @@ export class FulfillmentService {
     const map = new Map<string, Record<string, unknown>>()
     if (foIds.length === 0) return map
     const { data } = await supabaseAdmin
-      .from('fulfillment_orders').select('id, reference, channel, source_type, customer, items_count, status')
+      .from('fulfillment_orders').select('id, reference, channel, source_type, customer, items_count, status, account_id, company_id')
       .eq('organization_id', orgId).in('id', foIds)
-    for (const r of (data ?? []) as Array<Record<string, unknown>>) map.set(r.id as string, r)
+    const orders = (data ?? []) as Array<Record<string, unknown>>
+    // Rótulo de conta/empresa: sem isso a fila mostra só "mercadolivre" genérico e o
+    // operador não distingue as contas (ex.: VAZZO_ vs V20251215…, Shopee, loja).
+    const accIds = [...new Set(orders.map((o) => o.account_id as string | null).filter((x): x is string => !!x))]
+    const compIds = [...new Set(orders.map((o) => o.company_id as string | null).filter((x): x is string => !!x))]
+    const accMap = new Map<string, { label: string | null; platform: string }>()
+    const compMap = new Map<string, string>()
+    if (accIds.length) {
+      const { data: a } = await supabaseAdmin.from('fulfillment_accounts').select('id, label, platform').in('id', accIds)
+      for (const r of (a ?? []) as Array<{ id: string; label: string | null; platform: string }>) accMap.set(r.id, { label: r.label, platform: r.platform })
+    }
+    if (compIds.length) {
+      const { data: c } = await supabaseAdmin.from('fulfillment_companies').select('id, name').in('id', compIds)
+      for (const r of (c ?? []) as Array<{ id: string; name: string }>) compMap.set(r.id, r.name)
+    }
+    for (const r of orders) {
+      const accId = r.account_id as string | null
+      const compId = r.company_id as string | null
+      map.set(r.id as string, {
+        ...r,
+        accountLabel: accId ? accMap.get(accId)?.label ?? null : null,
+        platform: accId ? accMap.get(accId)?.platform ?? null : null,
+        companyName: compId ? compMap.get(compId) ?? null : null,
+      })
+    }
     return map
   }
 
