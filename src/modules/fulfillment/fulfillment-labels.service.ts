@@ -52,8 +52,14 @@ export class FulfillmentLabelsService {
   /** Gera/recupera a etiqueta de um pedido. Para ML busca a etiqueta REAL;
    *  pra loja/B2B gera ZPL simples. Pedido ML Full devolve format 'NONE'
    *  (envio gerenciado pelo ML — sem etiqueta do vendedor). */
-  async generate(orgId: string, fo: FulfillmentOrderRow, items: Array<{ sku: string; title?: string | null; qty: number }>): Promise<LabelResult> {
+  async generate(orgId: string, fo: FulfillmentOrderRow, items: Array<{ sku: string; title?: string | null; qty: number }>, opts?: { testMode?: boolean }): Promise<LabelResult> {
     if (fo.source_type === 'marketplace' && (fo.channel ?? '') === 'mercadolivre') {
+      // Modo teste: NÃO chama a API do ML (baixar a etiqueta real marca o envio como
+      // "impresso" lá). Gera ZPL SIMULADO pra exercitar o fluxo sem mandar nada à plataforma.
+      if (opts?.testMode) {
+        const zpl = await this.generateZplLabel(orgId, fo, items)
+        return { ...zpl, note: 'TESTE — etiqueta simulada (modo teste: nada enviado ao Mercado Livre).' }
+      }
       try {
         return await this.generateMlLabel(orgId, fo)
       } catch (e) {

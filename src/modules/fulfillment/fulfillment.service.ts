@@ -721,7 +721,11 @@ export class FulfillmentService {
   async printLabel(orgId: string, userId: string, fulfillmentOrderId: string) {
     const fo = await this.getFo(orgId, fulfillmentOrderId)
     const items = await this.itemsByFoOne(orgId, fulfillmentOrderId)
-    const result = await this.labels.generate(orgId, fo, items)
+    // Modo teste (settings.test_mode): etiqueta de ML sai simulada, sem chamar a API
+    // do ML — garante que nada é enviado à plataforma durante a fase de validação.
+    const st = await this.getSettings(orgId)
+    const testMode = !!(st.settings as { test_mode?: boolean } | null)?.test_mode
+    const result = await this.labels.generate(orgId, fo, items, { testMode })
 
     // Mercado Envios Full: sem etiqueta do vendedor (ML gerencia). Não cria
     // registro de etiqueta nem marca como expedido — não há ação de despacho.
