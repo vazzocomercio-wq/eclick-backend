@@ -191,9 +191,115 @@ export class ChannelSettingsService {
     return this.getEstimatedTakeRatePct(orgId, channel, opts.fallback ?? 0)
   }
 
+  // ── CRUD de regras de take por faixa/categoria (gestão pela UI) ────────────
+
+  /** Lista TODAS as regras do canal (com id, pra gestão). Mais específica 1º. */
+  async listFeeRules(orgId: string, channel: Channel): Promise<FeeRuleRow[]> {
+    this.assertChannel(channel)
+    const { data } = await supabaseAdmin
+      .from('channel_fee_rules')
+      .select('id, channel, category_id, min_price, max_price, estimated_take_rate_pct, fixed_fee, effective_from, effective_to, notes')
+      .eq('organization_id', orgId)
+      .eq('channel', channel)
+      .order('category_id', { ascending: true, nullsFirst: true })
+      .order('min_price', { ascending: true, nullsFirst: true })
+    return (data ?? []) as FeeRuleRow[]
+  }
+
+  /** Cria uma regra de take. estimated_take_rate_pct obrigatório (0-100). */
+  async createFeeRule(orgId: string, channel: Channel, input: FeeRuleInput): Promise<FeeRuleRow> {
+    this.assertChannel(channel)
+    const pct = Number(input.estimated_take_rate_pct)
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new BadRequestException('estimated_take_rate_pct fora do intervalo (0-100)')
+    }
+    const min = input.min_price == null ? null : Number(input.min_price)
+    const max = input.max_price == null ? null : Number(input.max_price)
+    if (min != null && max != null && max <= min) {
+      throw new BadRequestException('max_price deve ser maior que min_price')
+    }
+    const row = {
+      organization_id: orgId,
+      channel,
+      category_id: input.category_id?.trim() || null,
+      min_price: min,
+      max_price: max,
+      estimated_take_rate_pct: pct,
+      fixed_fee: input.fixed_fee == null ? 0 : Number(input.fixed_fee),
+      effective_from: input.effective_from || new Date().toISOString().slice(0, 10),
+      notes: input.notes ?? null,
+    }
+    const { data, error } = await supabaseAdmin
+      .from('channel_fee_rules')
+      .insert(row)
+      .select('id, channel, category_id, min_price, max_price, estimated_take_rate_pct, fixed_fee, effective_from, effective_to, notes')
+      .maybeSingle<FeeRuleRow>()
+    if (error || !data) throw new BadRequestException(`Falha ao criar regra: ${error?.message ?? 'unknown'}`)
+    return data
+  }
+
+  /** Atualiza uma regra (escopo org). */
+  async updateFeeRule(orgId: string, id: string, patch: Partial<FeeRuleInput>): Promise<FeeRuleRow> {
+    const upd: Record<string, unknown> = {}
+    if (patch.estimated_take_rate_pct != null) {
+      const pct = Number(patch.estimated_take_rate_pct)
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) throw new BadRequestException('estimated_take_rate_pct fora do intervalo (0-100)')
+      upd.estimated_take_rate_pct = pct
+    }
+    if (patch.category_id !== undefined) upd.category_id = patch.category_id?.trim() || null
+    if (patch.min_price !== undefined) upd.min_price = patch.min_price == null ? null : Number(patch.min_price)
+    if (patch.max_price !== undefined) upd.max_price = patch.max_price == null ? null : Number(patch.max_price)
+    if (patch.fixed_fee !== undefined) upd.fixed_fee = patch.fixed_fee == null ? 0 : Number(patch.fixed_fee)
+    if (patch.effective_from !== undefined) upd.effective_from = patch.effective_from
+    if (patch.notes !== undefined) upd.notes = patch.notes
+    const { data, error } = await supabaseAdmin
+      .from('channel_fee_rules')
+      .update(upd)
+      .eq('id', id)
+      .eq('organization_id', orgId)
+      .select('id, channel, category_id, min_price, max_price, estimated_take_rate_pct, fixed_fee, effective_from, effective_to, notes')
+      .maybeSingle<FeeRuleRow>()
+    if (error || !data) throw new BadRequestException(`Falha ao atualizar regra: ${error?.message ?? 'não encontrada'}`)
+    return data
+  }
+
+  /** Remove uma regra (escopo org). */
+  async deleteFeeRule(orgId: string, id: string): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin
+      .from('channel_fee_rules')
+      .delete()
+      .eq('id', id)
+      .eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Falha ao remover regra: ${error.message}`)
+    return { ok: true }
+  }
+
   private assertChannel(channel: string): void {
     if (!VALID_CHANNELS.has(channel as Channel)) {
       throw new BadRequestException(`channel inválido: ${channel}`)
     }
   }
+}
+
+/** Regra completa (com id) pra gestão na UI. */
+export interface FeeRuleRow {
+  id: string
+  channel: Channel
+  category_id: string | null
+  min_price: number | null
+  max_price: number | null
+  estimated_take_rate_pct: number
+  fixed_fee: number
+  effective_from: string
+  effective_to: string | null
+  notes: string | null
+}
+export interface FeeRuleInput {
+  category_id?: string | null
+  min_price?: number | null
+  max_price?: number | null
+  estimated_take_rate_pct: number
+  fixed_fee?: number | null
+  effective_from?: string
+  notes?: string | null
 }
