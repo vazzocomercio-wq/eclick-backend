@@ -259,7 +259,7 @@ export class ShopeeListingLinkService {
     }
 
     // F18 Fase B — comissão Shopee da org (igual ao sync de pedidos) p/ margem.
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const items = ((rows ?? []) as any[]).map(r => {

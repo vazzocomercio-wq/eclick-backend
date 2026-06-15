@@ -32,13 +32,14 @@ export class ChannelSettingsController {
     return this.svc.get(u.orgId, channel as Channel)
   }
 
-  /** Atualiza/cria a config de UM canal (commission_pct, commission_fixed, notes). */
+  /** Atualiza/cria a config de UM canal (estimated_take_rate_pct, commission_fixed,
+   *  notes). Aceita o nome legado `commission_pct` por back-compat. */
   @Patch(':channel')
   @RequirePermission('settings.update')
   upsert(
     @ReqUser() u: ReqUserPayload,
     @Param('channel') channel: string,
-    @Body() body: { commission_pct?: number; commission_fixed?: number; notes?: string | null },
+    @Body() body: { estimated_take_rate_pct?: number; commission_pct?: number; commission_fixed?: number; notes?: string | null },
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.upsert(u.orgId, channel as Channel, body ?? {})

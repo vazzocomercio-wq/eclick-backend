@@ -801,7 +801,7 @@ export class TikTokShopService {
     }
 
     // Custos do canal — comissão configurada da org pro tiktok_shop.
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'tiktok_shop', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'tiktok_shop', 0)
 
     // Sub_total e frete vindos do payment do pedido (rateio por SKU).
     const subTotalAll =

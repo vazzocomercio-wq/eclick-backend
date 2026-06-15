@@ -93,7 +93,7 @@ export class ShopeeMarketingService {
     const cost = prod?.cost_price != null ? Number(prod.cost_price) : null
     if (cost == null || cost <= 0) throw new BadRequestException('Produto sem custo cadastrado — sem custo não dá pra garantir a margem da promoção.')
 
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     const { data: org } = await supabaseAdmin.from('organizations').select('min_campaign_margin_pct').eq('id', orgId).maybeSingle<{ min_campaign_margin_pct: number | null }>()
     const floorPct = org?.min_campaign_margin_pct ?? 8
 
@@ -223,7 +223,7 @@ export class ShopeeMarketingService {
 
     // 1) anúncios vinculados + produto + margem (reuso do keystone)
     const status = await this.link.getLinkStatus(orgId)
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     if (commissionPct === 0) {
       warnings.push('Comissão Shopee = 0% (Configurações › Canais). As margens estão otimistas; o piso de margem só fica real com a comissão configurada.')
     }

@@ -287,7 +287,7 @@ export class ShopeePromoWriteService {
   }> {
     if (!itemIds?.length) throw new BadRequestException('Informe os itens (item_ids) pra sugerir desconto.')
     const status = await this.link.getLinkStatus(orgId)
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     const floor = await this.floorPct(orgId)
     const wanted = new Set(itemIds.map(Number))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -374,7 +374,7 @@ export class ShopeePromoWriteService {
    *  desconto único. Motor canônico CampaignMarginService + comissão real. */
   private async previewByDiscount(orgId: string, shopId: number | null, discountPct: number, itemIds: number[] | null): Promise<PromoPreview> {
     const status = await this.link.getLinkStatus(orgId)
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     const floor = await this.floorPct(orgId)
     const wanted = itemIds ? new Set(itemIds.map(Number)) : null
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -442,7 +442,7 @@ export class ShopeePromoWriteService {
   private async flashItemsDetail(orgId: string, conn: MpConnection, items: FlashItemInput[]): Promise<FlashItemDetail[]> {
     const adapter = (await this.mp.resolveByShop(orgId, conn.shop_id!, 'shopee'))?.adapter as ShopeeAdapter
     const status = await this.link.getLinkStatus(orgId)
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const byItem = new Map((status.items as any[]).map(i => [Number(i.item_id), i]))
     const out: FlashItemDetail[] = []

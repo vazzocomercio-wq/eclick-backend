@@ -103,7 +103,7 @@ export class ShopeeOrdersIngestionService {
     const details = await this.adapter.fetchOrderDetails(conn, sns)
 
     // comissão do canal shopee (org) — fallback 0 se não configurado.
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
 
     let lines = 0
     let failed = 0
@@ -157,7 +157,7 @@ export class ShopeeOrdersIngestionService {
     if (!details.length) return { ingested: false, reason: 'detail vazio' }
     const od = details[0]
 
-    const commissionPct = await this.channelSettings.getCommissionPct(orgId, 'shopee', 0)
+    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
     await this.captureOpenRecipient(conn, od)
     const lines = await this.mirrorOrder(orgId, od, commissionPct, Number(shopId))
     this.logger.log(`[shopee.orders.push] pedido=${orderSn} shop=${shopId} linhas=${lines} (tempo real)`)

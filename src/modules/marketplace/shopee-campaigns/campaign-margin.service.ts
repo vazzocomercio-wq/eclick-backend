@@ -37,7 +37,25 @@ export class CampaignMarginService {
 
     const price        = Math.max(0, input.price)
     const discountPct  = clamp01(input.discount_pct ?? 0)
-    const shopeeCom    = clamp01(input.shopee_commission_pct ?? 0.14) // Shopee BR ~14% default
+    // Take rate Shopee (0-1): usa o valor passado (novo nome ou legado); se não
+    // vier, lê o take ESTIMADO configurado da org (org_channel_settings, 0-100);
+    // último recurso = 0.14 (comissão pura — quase nunca usado, só se a org
+    // nunca configurou o take). Evita subestimar o custo Shopee na avaliação.
+    const explicitTake = input.estimated_take_rate_pct ?? input.shopee_commission_pct
+    let takeRate: number
+    if (explicitTake != null) {
+      takeRate = explicitTake
+    } else {
+      const { data: cs } = await supabaseAdmin
+        .from('org_channel_settings')
+        .select('estimated_take_rate_pct')
+        .eq('organization_id', orgId)
+        .eq('channel', 'shopee')
+        .maybeSingle()
+      const pct = Number((cs as { estimated_take_rate_pct: number } | null)?.estimated_take_rate_pct)
+      takeRate = Number.isFinite(pct) && pct > 0 ? pct / 100 : 0.14
+    }
+    const shopeeCom    = clamp01(takeRate)
     const affiliateCom = clamp01(input.affiliate_commission_pct ?? 0)
     const cost         = Math.max(0, input.cost ?? 0)
     const shipping     = Math.max(0, input.shipping ?? 0)
@@ -95,7 +113,10 @@ export interface MarginEvalInput {
   price:                    number
   /** Desconto da campanha (0-1). */
   discount_pct?:            number
-  /** Comissão Shopee (0-1). Default 0.14 (~14% BR). */
+  /** Take rate Shopee estimado (0-1): comissão + serviço + transação + programas.
+   *  Se omitido, usa o configurado da org (org_channel_settings). */
+  estimated_take_rate_pct?: number
+  /** @deprecated Alias de `estimated_take_rate_pct` (0-1). */
   shopee_commission_pct?:   number
   /** Comissão de afiliado se promovido via afiliado (0-1). */
   affiliate_commission_pct?: number
