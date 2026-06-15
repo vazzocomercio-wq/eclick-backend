@@ -168,21 +168,23 @@ export class ShopeeCreativePublisherService {
       throw new BadRequestException('Publicação Shopee desabilitada (credenciais Open Platform ausentes).')
     }
 
-    // Idempotência: se este anúncio (listing) já tem uma publicação Shopee
-    // 'published', NÃO cria outro item — evita duplicar por duplo-clique /
-    // reenvio. Só no publish real (dry-run e teste deleteAfter passam direto).
+    // Idempotência POR LOJA: se este anúncio (listing) já tem publicação Shopee
+    // 'published' NESTA loja (seller_id), NÃO cria outro item — evita duplicar
+    // por duplo-clique / reenvio. ⚠️ o filtro de loja é essencial p/ multi-conta:
+    // sem ele, publicar na 1ª loja travava a publicação do MESMO anúncio na 2ª.
+    // Só no publish real (dry-run e teste deleteAfter passam direto).
     if (draft.listing_id && !opts?.dryRun && !opts?.deleteAfter) {
-      const { data: dup } = await supabaseAdmin
+      let dq = supabaseAdmin
         .from('creative_publications')
         .select('external_id')
         .eq('listing_id', draft.listing_id)
         .eq('marketplace', 'shopee')
         .eq('status', 'published')
-        .limit(1)
-        .maybeSingle<{ external_id: string | null }>()
+      if (draft.shop_id != null) dq = dq.eq('seller_id', draft.shop_id)
+      const { data: dup } = await dq.limit(1).maybeSingle<{ external_id: string | null }>()
       if (dup?.external_id) {
         throw new BadRequestException(
-          `Este anúncio já foi publicado na Shopee (item ${dup.external_id}). Recarregue a página para ver a publicação.`,
+          `Este anúncio já foi publicado nesta loja Shopee (item ${dup.external_id}). Recarregue a página para ver a publicação.`,
         )
       }
     }
@@ -401,6 +403,8 @@ export class ShopeeCreativePublisherService {
           marketplace:     'shopee',
           status:          'published',
           idempotency_key: randomUUID(),
+          // loja DONA da publicação — alimenta a dedup por loja (multi-conta)
+          seller_id:       conn.shop_id ?? null,
           price:           price > 0 ? price : null,
           external_id:     String(item_id),
           external_url:    `https://shopee.com.br/product/${conn.shop_id}/${item_id}`,
