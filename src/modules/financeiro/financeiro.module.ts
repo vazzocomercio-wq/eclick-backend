@@ -9,12 +9,15 @@ import { ShippingRatesController } from './shipping-rates.controller'
 import { ShippingRatesService } from './shipping-rates.service'
 import { ChargesController } from './charges.controller'
 import { MlBillingIngestService } from './ml-billing-ingest.service'
+import { ChannelTakeReconcileController } from './channel-take-reconcile.controller'
+import { ChannelTakeReconcileService } from './channel-take-reconcile.service'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
+import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
 @Module({
-  imports: [MercadolivreModule],
-  controllers: [FinanceiroController, OperatingCostsController, ResultDreController, ShippingRatesController, ChargesController],
-  providers: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService],
-  exports: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService],
+  imports: [MercadolivreModule, ChannelSettingsModule],
+  controllers: [FinanceiroController, OperatingCostsController, ResultDreController, ShippingRatesController, ChargesController, ChannelTakeReconcileController],
+  providers: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService, ChannelTakeReconcileService],
+  exports: [FinanceiroService, OperatingCostsService, ResultDreService, ShippingRatesService, MlBillingIngestService, ChannelTakeReconcileService],
 })
 export class FinanceiroModule {}
