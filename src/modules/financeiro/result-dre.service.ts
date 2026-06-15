@@ -38,7 +38,7 @@ export class ResultDreService {
     const orders = await this.fetchOrders(orgId, start, endExcl)
     let revenue = 0, cmvKnown = 0, tax = 0, units = 0, revenueWithCost = 0
     for (const o of orders) {
-      const lineRev = num(o.sale_price) * num(o.quantity)
+      const lineRev = lineRevenue(o.source, o.sale_price, o.quantity)
       revenue += lineRev
       tax += num(o.tax_amount)
       units += num(o.quantity)
@@ -111,7 +111,7 @@ export class ResultDreService {
     let totCmvKnown = 0, totRevWithCost = 0
     for (const o of orders) {
       const pid = o.product_id
-      const lineRev = num(o.sale_price) * num(o.quantity)
+      const lineRev = lineRevenue(o.source, o.sale_price, o.quantity)
       const ext = o.external_order_id
       if (ext) {
         orderRev.set(ext, (orderRev.get(ext) ?? 0) + lineRev)
@@ -179,12 +179,12 @@ export class ResultDreService {
 
   /** Pedidos não-cancelados do período (paginado). */
   private async fetchOrders(orgId: string, startIso: string, endExclIso: string) {
-    const out: Array<{ product_id: string | null; product_title: string | null; sku: string | null; quantity: number; sale_price: number; cost_price: number | null; tax_amount: number | null; external_order_id: string | null }> = []
+    const out: Array<{ source: string | null; product_id: string | null; product_title: string | null; sku: string | null; quantity: number; sale_price: number; cost_price: number | null; tax_amount: number | null; external_order_id: string | null }> = []
     const PAGE = 1000
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabaseAdmin
         .from('orders')
-        .select('product_id, product_title, sku, quantity, sale_price, cost_price, tax_amount, external_order_id')
+        .select('source, product_id, product_title, sku, quantity, sale_price, cost_price, tax_amount, external_order_id')
         .eq('organization_id', orgId)
         .neq('status', 'cancelled')
         .gte('sold_at', startIso)
@@ -292,4 +292,13 @@ function num(v: unknown): number {
 }
 function r2(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+/** Fontes cujo orders.sale_price já é o TOTAL da linha (qty embutida na
+ *  ingestão Shopee/TikTok) — NÃO multiplicar por quantity. ML grava unitário. */
+const TOTAL_PRICE_SOURCES = new Set(['shopee', 'tiktok_shop'])
+function lineRevenue(source: string | null, salePrice: unknown, quantity: unknown): number {
+  return source && TOTAL_PRICE_SOURCES.has(source)
+    ? num(salePrice)
+    : num(salePrice) * num(quantity)
 }

@@ -6,7 +6,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import type { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
-import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, ChannelFeeRule, pickRuleTakeRate } from '../../channel-settings/channel-settings.service'
 import { StockService } from '../../stock/stock.service'
 
 /** F18 F1.6 — Ingestão de pedidos Shopee na tabela unificada `public.orders`.
@@ -102,8 +102,9 @@ export class ShopeeOrdersIngestionService {
     const sns = summaries.map(s => s.external_order_id).filter(Boolean)
     const details = await this.adapter.fetchOrderDetails(conn, sns)
 
-    // comissão do canal shopee (org) — fallback 0 se não configurado.
+    // take rate do canal shopee (org): achatado (fallback) + regras por faixa.
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
 
     let lines = 0
     let failed = 0
@@ -113,7 +114,7 @@ export class ShopeeOrdersIngestionService {
         // documento de envio expõe o endereço que o get_order_detail mascara.
         // Best-effort — enxerta no od antes do mirror (que persiste/preserva).
         await this.captureOpenRecipient(conn, od)
-        lines += await this.mirrorOrder(orgId, od, commissionPct, shopId)
+        lines += await this.mirrorOrder(orgId, od, commissionPct, shopId, feeRules)
       } catch (e: unknown) {
         failed++
         this.logger.warn(`[shopee.orders] pedido falhou: ${(e as Error)?.message}`)
@@ -158,8 +159,9 @@ export class ShopeeOrdersIngestionService {
     const od = details[0]
 
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
     await this.captureOpenRecipient(conn, od)
-    const lines = await this.mirrorOrder(orgId, od, commissionPct, Number(shopId))
+    const lines = await this.mirrorOrder(orgId, od, commissionPct, Number(shopId), feeRules)
     this.logger.log(`[shopee.orders.push] pedido=${orderSn} shop=${shopId} linhas=${lines} (tempo real)`)
     return { ingested: lines > 0 }
   }
@@ -193,7 +195,7 @@ export class ShopeeOrdersIngestionService {
    *  `shopId` carimba a conta no pedido (channel_account_id) pro dropship
    *  distinguir multi-loja. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async mirrorOrder(orgId: string, od: any, commissionPct: number, shopId: number): Promise<number> {
+  private async mirrorOrder(orgId: string, od: any, commissionPct: number, shopId: number, feeRules: ChannelFeeRule[] = []): Promise<number> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const items: any[] = Array.isArray(od?.item_list) ? od.item_list : []
     if (!items.length) return 0
@@ -299,7 +301,9 @@ export class ShopeeOrdersIngestionService {
     for (const g of groups.values()) {
       const link = linkByItemId.get(g.item_id) ?? null
       const sale_price = round2(g.sale_total)
-      const platform_fee = round2(sale_price * commissionPct / 100)
+      // take por faixa de ticket do pedido; cai no achatado se não houver regra.
+      const takePct = pickRuleTakeRate(feeRules, sale_price) ?? commissionPct
+      const platform_fee = round2(sale_price * takePct / 100)
       const shipping_cost = subTotalAll > 0 ? round2(shippingFee * sale_price / subTotalAll) : 0
       const cost_price = link?.cost_price != null ? round2(Number(link.cost_price) * g.qty) : null
 

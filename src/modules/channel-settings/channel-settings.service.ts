@@ -132,9 +132,9 @@ export class ChannelSettingsService {
       channel,
       updated_at: new Date().toISOString(),
     }
-    // dual-write: escreve a coluna nova E a legada enquanto ambas coexistem
-    // (back-compat com o backend antigo durante a janela de deploy).
-    if (pct != null) { row.estimated_take_rate_pct = pct; row.commission_pct = pct }
+    // Fase 1 já está 100% no ar — escreve só a coluna nova. A coluna legada
+    // commission_pct é removida na migration de limpeza desta fase.
+    if (pct != null) row.estimated_take_rate_pct = pct
     if (fixed != null) row.commission_fixed = fixed
     if (patch.notes !== undefined) row.notes = patch.notes
     const { data, error } = await supabaseAdmin
