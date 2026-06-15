@@ -593,6 +593,33 @@ export class MercadolivreController {
     return this.ml.getClaimActionsHistory(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
   }
 
+  // GET /ml/claims/:id/resolution — ações disponíveis + recomendação IA
+  @Get('claims/:id/resolution')
+  @RequirePermission('orders.view')
+  getClaimResolution(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Query('seller_id') sellerId?: string,
+  ) {
+    return this.ml.getClaimResolution(user.orgId!, id, sellerId ? Number(sellerId) : undefined)
+  }
+
+  // POST /ml/claims/:id/action — executa a resolução escolhida no ML
+  @Post('claims/:id/action')
+  @RequirePermission('orders.update_status')
+  executeClaimAction(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { action: string; seller_id?: number; message?: string; receiver_role?: 'complainant' | 'mediator' | 'respondent'; attachments?: string[] },
+  ) {
+    if (!body?.action) throw new BadRequestException('action obrigatório')
+    return this.ml.executeClaimAction(user.orgId!, id, body.seller_id, body.action, {
+      message:       body.message,
+      receiver_role: body.receiver_role,
+      attachments:   body.attachments,
+    })
+  }
+
   // POST /ml/claims/:id/messages
   @Post('claims/:id/messages')
   @RequirePermission('orders.update_status')

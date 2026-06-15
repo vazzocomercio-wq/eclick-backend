@@ -3,7 +3,25 @@ import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MlListingPricesService } from './ml-listing-prices.service'
 import { MlShippingCostService } from './ml-shipping-cost.service'
+import { LlmService } from '../ai/llm.service'
 import { estimateSaleFee } from '../../common/margin'
+
+// Rótulos amigáveis (PT-BR) das ações de resolução de reclamação do ML.
+// O código cru vem em players[respondent].available_actions[].action. Estes
+// rótulos vão tanto no prompt da IA quanto na resposta da API (front exibe).
+const CLAIM_ACTION_LABELS: Record<string, string> = {
+  refund:                     'Reembolsar o comprador (devolve 100% e encerra a favor dele)',
+  open_dispute:               'Discordar e abrir disputa (o ML analisa as evidências)',
+  allow_return:               'Autorizar a devolução do produto',
+  send_message_to_complainant:'Responder o comprador',
+  send_message_to_mediator:   'Falar com o mediador do ML',
+  return_review_ok:           'Aprovar o produto devolvido (chegou OK) e reembolsar',
+  return_review_fail:         'Recusar o produto devolvido (veio errado/danificado)',
+  return_review_unified_ok:   'Aprovar a devolução unificada (chegou OK)',
+  return_review_unified_fail: 'Recusar a devolução unificada (veio errado/danificado)',
+}
+const claimActionLabel = (a: string): string =>
+  CLAIM_ACTION_LABELS[a] ?? a.replace(/_/g, ' ')
 
 // redeploy - organization_id now nullable
 const ML_BASE = 'https://api.mercadolibre.com'
@@ -158,6 +176,7 @@ export class MercadolivreService {
   constructor(
     private readonly listingPrices: MlListingPricesService,
     private readonly shippingCost: MlShippingCostService,
+    private readonly llm: LlmService,
   ) {}
 
   // ── OAuth ────────────────────────────────────────────────────────────────
@@ -1562,21 +1581,40 @@ export class MercadolivreService {
    *
    * `status=opened` é OBRIGATÓRIO (sem filtro, ML 400). `role` removido —
    * não é param válido.
+   *
+   * MULTI-CONTA: faz fan-out em TODAS as contas ML da org (a busca usa o token
+   * de cada conta e só retorna os claims dela), mescla os resultados e carimba
+   * `seller_id` (a conta dona) em cada claim — o front usa isso pra direcionar
+   * detalhe/mensagens/ações pra conta certa. Sem fan-out, a tela mostrava só os
+   * claims da conta padrão (ex: Vazzo) e escondia os da outra (ex: Casa Luz).
    */
   async getClaims(orgId: string, sellerIdFilter?: number) {
     try {
-      const { token } = await this.getTokenForOrg(orgId, sellerIdFilter)
-      const { data: body } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/search`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { status: 'opened', limit: 50 },
-      })
-      // Normaliza pra { data, total } que o frontend espera
-      return {
-        data:  body?.data ?? [],
-        total: body?.paging?.total ?? body?.data?.length ?? 0,
-      }
+      const accounts = sellerIdFilter != null
+        ? [await this.getTokenForOrg(orgId, sellerIdFilter)]
+        : await this.getAllTokensForOrg(orgId)
+
+      const perAccount = await Promise.all(accounts.map(async ({ token, sellerId }) => {
+        try {
+          const { data: body } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/search`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { status: 'opened', limit: 50 },
+          })
+          const list = (body?.data ?? []) as any[]
+          // carimba a conta dona pra resolução multi-conta no front/back
+          return list.map(c => ({ ...c, seller_id: c.seller_id ?? sellerId }))
+        } catch (e: any) {
+          const st = e?.response?.status
+          // conta sem acesso a claims — ignora silenciosamente, não derruba as outras
+          if (st === 401 || st === 403 || st === 404) return []
+          throw e
+        }
+      }))
+
+      const data = perAccount.flat()
+      return { data, total: data.length }
     } catch (err: any) {
-      const status = err?.response?.status ?? 500
+      const status = err?.response?.status ?? err?.status ?? 500
       // Expected for accounts without claims access — return empty silently.
       if (status === 401 || status === 403 || status === 404) return { data: [], total: 0 }
       console.error('[claims] ML error:', status, err?.response?.data?.message ?? err?.message)
@@ -1654,6 +1692,194 @@ export class MercadolivreService {
     } catch (err: any) {
       if (err?.response?.status === 404) return { history: [] }
       throw err
+    }
+  }
+
+  /**
+   * Resolve o token da conta DONA de um claim. Se `sellerId` vier (o front
+   * carimba pelo seller_id do claim), usa direto. Senão, tenta cada conta ML
+   * da org até uma conseguir ler o claim (GET 200) — robusto pra multi-conta
+   * mesmo quando o front não souber a conta.
+   */
+  private async resolveClaimAuth(
+    orgId: string, claimId: number | string, sellerId?: number,
+  ): Promise<{ token: string; sellerId: number }> {
+    if (sellerId != null) return this.getTokenForOrg(orgId, sellerId)
+    const accounts = await this.getAllTokensForOrg(orgId)
+    for (const acc of accounts) {
+      try {
+        await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}`, {
+          headers: { Authorization: `Bearer ${acc.token}` },
+        })
+        return acc
+      } catch { /* não é dessa conta — tenta a próxima */ }
+    }
+    throw new NotFoundException('Reclamação não encontrada em nenhuma conta ML conectada')
+  }
+
+  /**
+   * Copiloto de resolução: lê as ações disponíveis (players[respondent]
+   * .available_actions) + detalhe + thread da mediação e devolve:
+   *   - actions: [{ action, label, mandatory, due_date }]
+   *   - recommendation: { recommended_action, rationale, confidence, watch_out }
+   * A recomendação é da IA e-Click (feature ml_claim_resolution); se a IA
+   * falhar, recommendation volta null (as ações continuam aparecendo).
+   */
+  async getClaimResolution(orgId: string, claimId: number | string, sellerId?: number) {
+    const { token, sellerId: ownerSeller } = await this.resolveClaimAuth(orgId, claimId, sellerId)
+    const headers = { Authorization: `Bearer ${token}` }
+
+    const { data: claim } = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}`, { headers })
+    const respondent = (claim?.players ?? []).find((p: any) => p.role === 'respondent')
+    const rawActions = (respondent?.available_actions ?? []) as Array<{ action: string; mandatory?: boolean; due_date?: string | null }>
+    const actions = rawActions.map(a => ({
+      action:    a.action,
+      label:     claimActionLabel(a.action),
+      mandatory: a.mandatory ?? false,
+      due_date:  a.due_date ?? null,
+    }))
+
+    // contexto pra IA (best-effort, não derruba se algum falhar)
+    let detail: any = null
+    let messages: any[] = []
+    try {
+      const r = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}/detail`, { headers })
+      detail = r.data
+    } catch { /* sem detalhe */ }
+    try {
+      const r = await axios.get(`${ML_BASE}/post-purchase/v1/claims/${claimId}/messages`, { headers })
+      messages = Array.isArray(r.data) ? r.data : (r.data?.messages ?? r.data?.data ?? [])
+    } catch { /* sem mensagens */ }
+
+    const recommendation = await this.recommendClaimResolution(orgId, {
+      reason:   claim?.reason_id ?? claim?.reason?.id ?? null,
+      type:     claim?.type ?? null,
+      stage:    claim?.stage ?? null,
+      detail,
+      messages,
+      actions,
+    })
+
+    return { seller_id: ownerSeller, actions, recommendation }
+  }
+
+  /** IA recomenda a melhor ação de resolução. Retorna null se não houver ação
+   *  acionável ou se a IA falhar (recomendação é opcional). */
+  private async recommendClaimResolution(
+    orgId: string,
+    ctx: {
+      reason: string | null; type: string | null; stage: string | null
+      detail: any; messages: any[]
+      actions: Array<{ action: string; label: string }>
+    },
+  ): Promise<{ recommended_action: string; rationale: string; confidence: number; watch_out: string } | null> {
+    // ações de "só mandar mensagem" não são decisão de resolução — ignora
+    const decisionable = ctx.actions.filter(a => !a.action.startsWith('send_message'))
+    if (decisionable.length === 0) return null
+
+    const stripHtml = (s: string) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    const lastMessages = (ctx.messages || []).slice(-6).map((m: any) => ({
+      de:  m.sender_role ?? '?',
+      txt: stripHtml(m.message ?? m.text ?? '').slice(0, 400),
+    }))
+
+    const systemPrompt = [
+      'Você é um especialista em pós-venda do Mercado Livre que ajuda o VENDEDOR a decidir como resolver uma reclamação/mediação.',
+      'Responda SEMPRE em JSON válido, em português do Brasil, linguagem simples (o vendedor é leigo).',
+      'Pense no custo e na reputação: reembolsar encerra rápido e protege a reputação; disputar só vale quando há evidência forte a favor do vendedor (ex.: rastreio consta entregue, fotos que contrariam o comprador).',
+      'Recomende UMA ação dentre as DISPONÍVEIS (use exatamente o código em "action"). Nunca invente uma ação fora da lista.',
+    ].join(' ')
+
+    const userPrompt = JSON.stringify({
+      reclamacao: {
+        motivo: ctx.reason, tipo: ctx.type, fase: ctx.stage,
+        titulo: ctx.detail?.title ?? null,
+        problema: ctx.detail?.problem ?? null,
+        descricao: stripHtml(ctx.detail?.description ?? '') || null,
+        prazo: ctx.detail?.due_date ?? null,
+        quem_age_agora: ctx.detail?.action_responsible ?? null,
+      },
+      ultimas_mensagens: lastMessages,
+      acoes_disponiveis: decisionable.map(a => ({ action: a.action, descricao: a.label })),
+      formato_resposta: {
+        recommended_action: 'um dos action disponíveis',
+        rationale: 'por que essa é a melhor escolha, 2-3 frases',
+        confidence: 'número de 0 a 1',
+        watch_out: 'um risco/cuidado curto antes de executar',
+      },
+    })
+
+    try {
+      const { text } = await this.llm.generateText({
+        orgId, feature: 'ml_claim_resolution',
+        systemPrompt, userPrompt, jsonMode: true, maxTokens: 500,
+      })
+      const parsed = JSON.parse(text)
+      const valid = decisionable.some(a => a.action === parsed?.recommended_action)
+      if (!parsed?.recommended_action || !valid) return null
+      let confidence = Number(parsed.confidence)
+      if (!Number.isFinite(confidence)) confidence = 0.6
+      confidence = Math.max(0, Math.min(1, confidence))
+      return {
+        recommended_action: String(parsed.recommended_action),
+        rationale:          String(parsed.rationale ?? '').slice(0, 600),
+        confidence,
+        watch_out:          String(parsed.watch_out ?? '').slice(0, 300),
+      }
+    } catch (e: any) {
+      console.error('[claim-resolution] IA falhou:', e?.message)
+      return null
+    }
+  }
+
+  /**
+   * Executa uma ação de resolução escolhida pelo vendedor no ML.
+   * POST /post-purchase/v1/claims/{id}/actions/{action}.
+   * - Ações de mensagem são roteadas pra rota dedicada send-message.
+   * - Gate ML_CLAIMS_WRITE=on (segurança: reembolso mexe em dinheiro real).
+   * - SEMPRE disparada por clique+confirmação do usuário na tela.
+   */
+  async executeClaimAction(
+    orgId: string,
+    claimId: number | string,
+    sellerId: number | undefined,
+    action: string,
+    opts?: { message?: string; receiver_role?: 'complainant' | 'mediator' | 'respondent'; attachments?: string[] },
+  ) {
+    if (!action) throw new BadRequestException('action obrigatório')
+
+    if (process.env.ML_CLAIMS_WRITE !== 'on') {
+      throw new HttpException(
+        'O envio de resoluções ao Mercado Livre está desativado nesta conta. Fale com o suporte para liberar (ML_CLAIMS_WRITE).',
+        403,
+      )
+    }
+
+    // ações de mensagem → rota dedicada (a API usa /actions/send-message)
+    if (action === 'send_message_to_complainant' || action === 'send_message_to_mediator' || action === 'send-message') {
+      if (!opts?.message?.trim()) throw new BadRequestException('Mensagem obrigatória para responder')
+      const receiver_role = action === 'send_message_to_mediator' ? 'mediator' : (opts?.receiver_role ?? 'complainant')
+      return this.sendClaimMessage(orgId, claimId, sellerId, {
+        receiver_role, message: opts.message.trim(), attachments: opts.attachments,
+      })
+    }
+
+    const { token } = await this.resolveClaimAuth(orgId, claimId, sellerId)
+    try {
+      const { data } = await axios.post(
+        `${ML_BASE}/post-purchase/v1/claims/${claimId}/actions/${action}`,
+        opts?.message?.trim() ? { message: opts.message.trim() } : {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      return { ok: true, action, data }
+    } catch (err: any) {
+      const status = err?.response?.status ?? 500
+      const mlMsg: string = err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? ''
+      console.error('[claim-action] ML error:', status, action, mlMsg)
+      if (status === 403) throw new HttpException(`O Mercado Livre recusou essa ação (sem permissão): ${mlMsg}`, 403)
+      if (status === 400) throw new HttpException(`O Mercado Livre recusou os dados dessa ação: ${mlMsg}`, 400)
+      if (status === 404) throw new HttpException('Ação não disponível para essa reclamação no momento.', 404)
+      throw new HttpException(mlMsg || 'Erro ao executar ação no Mercado Livre', status)
     }
   }
 

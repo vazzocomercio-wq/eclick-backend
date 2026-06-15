@@ -233,6 +233,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Reclamações ML — copiloto de resolução. Lê motivo + problema + thread da
+  // mediação + ações disponíveis e recomenda a melhor decisão (reembolsar,
+  // disputar, revisar devolução, responder) com justificativa e confiança.
+  ml_claim_resolution: {
+    label:       'Resolução de reclamação (ML)',
+    description: 'Recomenda a melhor ação de resolução para uma reclamação/mediação do ML',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
   // Radar IA C3 — insight de Concorrentes Vinculados. Lê preço/visitas/venda
   // estimada dos concorrentes e gera uma leitura curta e acionável. Haiku pra
   // latência baixa + custo mínimo (roda ao abrir a tela de comparação).
