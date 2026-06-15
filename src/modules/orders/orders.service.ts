@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, Logger } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { AccountLabelsService } from '../account-labels/account-labels.service'
 import { computeContributionMargin, estimateSaleFee, round2 } from '../../common/margin'
 // F17-C: escopo por conta. Import dos arquivos concretos (não do barrel) —
 // regra preventiva do outage pós-Wave-16.
@@ -29,7 +30,10 @@ export interface CreateManualOrderDto {
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name)
 
-  constructor(private readonly ml: MercadolivreService) {}
+  constructor(
+    private readonly ml: MercadolivreService,
+    private readonly accountLabels: AccountLabelsService,
+  ) {}
 
   async createManualOrder(orgId: string, dto: CreateManualOrderDto, scope?: AccountScope | null) {
     // Pedido manual não pertence a nenhuma conta de marketplace — fora da
@@ -853,9 +857,10 @@ export class OrdersService {
   private async ordersBuildNicknameMap(orgId: string): Promise<{
     ml: Record<number, string>
     tiktokSeller: string | null
+    tiktok: Record<string, string>
     shopee: Record<string, string>
   }> {
-    const [mlRes, ttsRes, shopeeRes] = await Promise.all([
+    const [mlRes, ttsRes, shopeeRes, labels] = await Promise.all([
       supabaseAdmin
         .from('ml_connections')
         .select('seller_id, nickname')
@@ -870,24 +875,33 @@ export class OrdersService {
         .select('shop_id, nickname')
         .eq('organization_id', orgId)
         .eq('platform', 'shopee'),
+      // nomes customizados pelo user — têm prioridade sobre o nickname cru
+      this.accountLabels.getMap(orgId),
     ])
+    const mlLabels     = labels['mercadolivre'] ?? {}
+    const shopeeLabels = labels['shopee']       ?? {}
+    const tiktokLabels = labels['tiktok_shop']  ?? {}
+
     const ml: Record<number, string> = {}
     for (const c of (mlRes.data ?? []) as Array<{ seller_id: number; nickname: string | null }>) {
-      ml[c.seller_id] = c.nickname ?? `Conta #${c.seller_id}`
+      ml[c.seller_id] = mlLabels[String(c.seller_id)] ?? c.nickname ?? `Conta #${c.seller_id}`
     }
     const shopee: Record<string, string> = {}
     for (const c of (shopeeRes.data ?? []) as Array<{ shop_id: number | string | null; nickname: string | null }>) {
-      if (c.shop_id != null) shopee[String(c.shop_id)] = c.nickname ?? `Shopee #${c.shop_id}`
+      if (c.shop_id != null) shopee[String(c.shop_id)] = shopeeLabels[String(c.shop_id)] ?? c.nickname ?? `Shopee #${c.shop_id}`
     }
-    return { ml, tiktokSeller: ttsRes.data?.seller_name ?? null, shopee }
+    return { ml, tiktokSeller: ttsRes.data?.seller_name ?? null, tiktok: tiktokLabels, shopee }
   }
 
   private ordersNicknameFor(
     row: { source: string | null; seller_id: number | null },
-    nick: { ml: Record<number, string>; tiktokSeller: string | null; shopee: Record<string, string> },
+    nick: { ml: Record<number, string>; tiktokSeller: string | null; tiktok: Record<string, string>; shopee: Record<string, string> },
     channelAccountId?: string | null,
   ): string {
-    if (row.source === 'tiktok_shop') return nick.tiktokSeller ?? 'TikTok Shop'
+    if (row.source === 'tiktok_shop') {
+      if (channelAccountId && nick.tiktok[channelAccountId]) return nick.tiktok[channelAccountId]
+      return nick.tiktokSeller ?? 'TikTok Shop'
+    }
     if (row.source === 'shopee') {
       if (channelAccountId && nick.shopee[channelAccountId]) return nick.shopee[channelAccountId]
       return 'Shopee'

@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { MlListingPricesService } from './ml-listing-prices.service'
 import { MlShippingCostService } from './ml-shipping-cost.service'
 import { LlmService } from '../ai/llm.service'
+import { AccountLabelsService } from '../account-labels/account-labels.service'
 import { estimateSaleFee } from '../../common/margin'
 
 // Rótulos amigáveis (PT-BR) das ações de resolução de reclamação do ML.
@@ -177,6 +178,7 @@ export class MercadolivreService {
     private readonly listingPrices: MlListingPricesService,
     private readonly shippingCost: MlShippingCostService,
     private readonly llm: LlmService,
+    private readonly accountLabels: AccountLabelsService,
   ) {}
 
   // ── OAuth ────────────────────────────────────────────────────────────────
@@ -290,7 +292,14 @@ export class MercadolivreService {
       .select('seller_id, expires_at, nickname, created_at, updated_at, organization_id')
       .eq('organization_id', orgId)
       .order('updated_at', { ascending: false })
-    return data || []
+    const rows = data || []
+    // sobrescreve o nickname cru do ML pelo nome customizado (account_labels),
+    // pra a identidade da conta ser a mesma em todo o sistema (tags, seletores)
+    const labels = (await this.accountLabels.getMap(orgId))['mercadolivre'] ?? {}
+    return rows.map((r: { seller_id: number; nickname: string | null }) => ({
+      ...r,
+      nickname: labels[String(r.seller_id)] ?? r.nickname,
+    }))
   }
 
   // ── Multi-account helpers ─────────────────────────────────────────────────

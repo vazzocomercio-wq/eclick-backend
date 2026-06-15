@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { StockModule } from '../stock/stock.module'
+import { AccountLabelsModule } from '../account-labels/account-labels.module'
 import { MercadoLivreAdapter } from './adapters/ml.adapter'
 import { MagaluAdapter } from './adapters/magalu.adapter'
 import { ShopeeAdapter } from './adapters/shopee.adapter'
@@ -59,7 +60,7 @@ import { AiModule } from '../ai/ai.module'
   // forwardRef(StockModule): venda Shopee → baixa estoque mestre (ingestão de
   // pedidos) precisa do StockService, e StockModule já importa este módulo
   // (ShopeeStockSyncService no recalcAndPropagate).
-  imports:     [MercadolivreModule, ChannelSettingsModule, AiModule, ActiveBridgeModule, WaRouterModule, forwardRef(() => StockModule)], // ML billing + comissão canal + IA + ponte Active/WA (Central de Avaliações)
+  imports:     [MercadolivreModule, ChannelSettingsModule, AiModule, ActiveBridgeModule, WaRouterModule, AccountLabelsModule, forwardRef(() => StockModule)], // ML billing + comissão canal + IA + ponte Active/WA (Central de Avaliações) + nomes de conta
   controllers: [
     MarketplaceController, MarketplaceWebhooksController,
     ShopeeListingsController,  // F1.2 — GET /shopee/listings/scores

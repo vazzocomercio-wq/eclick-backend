@@ -1,10 +1,11 @@
-import { Controller, Get, Post, Body, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common'
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common'
 import { OrdersService, CreateManualOrderDto } from './orders.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
 // F17-C: escopo por conta — import do arquivo concreto (regra anti-ciclo).
 import { AccountScopeService, AccountScope } from '../rbac/account-scope.service'
+import { AccountLabelsService } from '../account-labels/account-labels.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -14,6 +15,7 @@ export class OrdersController {
   constructor(
     private readonly orders: OrdersService,
     private readonly scopes: AccountScopeService,
+    private readonly accountLabels: AccountLabelsService,
   ) {}
 
   /** F17-C: escopo por conta do user (null = irrestrito). */
@@ -138,6 +140,38 @@ export class OrdersController {
   async getAccounts(@ReqUser() user: ReqUserPayload) {
     const scope = await this.scopeOf(user)
     return this.orders.getAccountsWithSales(user.orgId!, scope)
+  }
+
+  // ── Nomes customizados de conta/loja (identidade em todo o sistema) ──────
+  // GET /orders/account-labels — labels já definidos
+  @Get('account-labels')
+  @RequirePermission('orders.view')
+  listAccountLabels(@ReqUser() user: ReqUserPayload) {
+    return this.accountLabels.list(user.orgId!)
+  }
+
+  // PUT /orders/account-labels  { platform, account_key, display_name }
+  @Put('account-labels')
+  @RequirePermission('settings.update')
+  upsertAccountLabel(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: { platform: string; account_key: string | number; display_name: string },
+  ) {
+    if (!body?.platform || body.account_key == null || body.account_key === '') {
+      throw new BadRequestException('platform e account_key são obrigatórios')
+    }
+    return this.accountLabels.upsert(user.orgId!, body.platform, body.account_key, body.display_name ?? '')
+  }
+
+  // DELETE /orders/account-labels/:platform/:key — volta ao nome cru
+  @Delete('account-labels/:platform/:key')
+  @RequirePermission('settings.update')
+  removeAccountLabel(
+    @ReqUser() user: ReqUserPayload,
+    @Param('platform') platform: string,
+    @Param('key') key: string,
+  ) {
+    return this.accountLabels.remove(user.orgId!, platform, key)
   }
 
   // ── TT-5c: agnóstico de canal pra dashboard + financeiro ────────────────

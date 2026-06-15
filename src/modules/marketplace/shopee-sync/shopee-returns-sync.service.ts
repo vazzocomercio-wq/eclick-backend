@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../../common/supabase'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
+import { AccountLabelsService } from '../../account-labels/account-labels.service'
 import type { MpConnection } from '../adapters/base'
 
 /** Fase C pós-venda — Ingestão de DEVOLUÇÕES/reembolsos Shopee.
@@ -27,6 +28,7 @@ export class ShopeeReturnsSyncService {
     private readonly mp:          MarketplaceService,
     private readonly adapter:     ShopeeAdapter,
     private readonly productSync: ShopeeProductSyncService,
+    private readonly accountLabels: AccountLabelsService,
   ) {}
 
   @Cron('45 */2 * * *', { name: 'shopee-returns-sync' })
@@ -197,9 +199,14 @@ export class ShopeeReturnsSyncService {
       .select('shop_id, nickname')
       .eq('organization_id', orgId)
       .eq('platform', 'shopee')
+    // nome customizado (account_labels) tem prioridade sobre o nickname cru
+    const labels = (await this.accountLabels.getMap(orgId))['shopee'] ?? {}
     const shops = (conns ?? [])
       .filter(c => c.shop_id != null)
-      .map(c => ({ shop_id: String(c.shop_id), nickname: (c.nickname as string) ?? `Shopee #${c.shop_id}` }))
+      .map(c => ({
+        shop_id:  String(c.shop_id),
+        nickname: labels[String(c.shop_id)] ?? (c.nickname as string) ?? `Shopee #${c.shop_id}`,
+      }))
 
     return { returns: data ?? [], shops }
   }

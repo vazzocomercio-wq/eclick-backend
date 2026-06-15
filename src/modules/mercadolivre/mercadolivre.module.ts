@@ -9,9 +9,10 @@ import { MlShippingCostService } from './ml-shipping-cost.service'
 import { ScraperModule } from '../scraper/scraper.module'
 import { AiModule } from '../ai/ai.module'
 import { MlAiCoreModule } from '../ml-ai-core/ml-ai-core.module'
+import { AccountLabelsModule } from '../account-labels/account-labels.module'
 
 @Module({
-  imports: [ScraperModule, AiModule, MlAiCoreModule],
+  imports: [ScraperModule, AiModule, MlAiCoreModule, AccountLabelsModule],
   controllers: [MercadolivreController],
   providers: [MercadolivreService, MlBillingFetcherService, OrderDetailService, MlQuestionsAiService, MlListingPricesService, MlShippingCostService],
   exports: [MercadolivreService, MlBillingFetcherService, OrderDetailService, MlQuestionsAiService, MlListingPricesService, MlShippingCostService],
