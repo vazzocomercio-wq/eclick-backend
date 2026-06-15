@@ -33,15 +33,20 @@ export class ChannelTakeReconcileService {
     const ym = month ?? prevMonthKey()
     const { start, endExcl } = monthRange(ym)
 
-    // receita por pedido (não-cancelado) + total
+    // receita por pedido (não-cancelado) + total. Coleta as LINHAS (com product_id)
+    // pra ratear a taxa do pedido por categoria depois.
     const orderRev = new Map<string, number>()
+    const lines: Array<{ ext: string; productId: string | null; rev: number }> = []
     let revenue = 0
     for await (const o of pageOrders(orgId, channel, start, endExcl)) {
       // ⚠️ orders.sale_price já é o TOTAL da linha (qty embutida na ingestão),
       // igual ao order_selling_price do escrow — NÃO multiplicar por quantity.
       const rev = num(o.sale_price)
       revenue += rev
-      if (o.external_order_id) orderRev.set(o.external_order_id, (orderRev.get(o.external_order_id) ?? 0) + rev)
+      if (o.external_order_id) {
+        orderRev.set(o.external_order_id, (orderRev.get(o.external_order_id) ?? 0) + rev)
+        lines.push({ ext: o.external_order_id, productId: o.product_id ?? null, rev })
+      }
     }
 
     // taxa real por pedido (charge−credit, exceto ads) + total
@@ -77,6 +82,11 @@ export class ChannelTakeReconcileService {
       }
     })
 
+    // quebra por CATEGORIA do produto: rateia a taxa real do pedido entre suas
+    // linhas (proporcional à receita) e agrupa por products.category. Dá o take
+    // REAL por categoria pra calibrar regras (sem fabricar número).
+    const byCategory = await this.takeByCategory(orgId, lines, orderRev, orderFee)
+
     const row = {
       organization_id: orgId,
       channel,
@@ -88,6 +98,7 @@ export class ChannelTakeReconcileService {
       diff_pct: diff,
       flagged,
       by_bucket: byBucket,
+      by_category: byCategory,
       computed_at: new Date().toISOString(),
     }
     const { error } = await supabaseAdmin
@@ -101,6 +112,52 @@ export class ChannelTakeReconcileService {
       this.logger.log(`[reconcile] ${channel} ${ym} org=${orgId.slice(0, 8)}: real ${observed}% vs config ${configured}% (Δ ${diff})`)
     }
     return row
+  }
+
+  /** Take real por categoria de produto: rateia a taxa do pedido entre as
+   *  linhas (por receita) → products.category. Top 12 categorias por receita. */
+  private async takeByCategory(
+    orgId: string,
+    lines: Array<{ ext: string; productId: string | null; rev: number }>,
+    orderRev: Map<string, number>,
+    orderFee: Map<string, number>,
+  ): Promise<Array<{ category: string; orders: number; revenue: number; fees: number; observed_take_pct: number | null }>> {
+    // categoria por produto (org-scoped, em chunks)
+    const pids = [...new Set(lines.map(l => l.productId).filter((x): x is string => !!x))]
+    const catByProduct = new Map<string, string>()
+    for (let i = 0; i < pids.length; i += 200) {
+      const { data } = await supabaseAdmin
+        .from('products')
+        .select('id, category')
+        .eq('organization_id', orgId)
+        .in('id', pids.slice(i, i + 200))
+      for (const p of (data ?? []) as Array<{ id: string; category: string | null }>) {
+        const c = (p.category ?? '').trim()
+        if (c) catByProduct.set(p.id, c)
+      }
+    }
+    const agg = new Map<string, { rev: number; fee: number; orders: Set<string> }>()
+    for (const ln of lines) {
+      const cat = ln.productId ? catByProduct.get(ln.productId) : null
+      if (!cat) continue
+      const total = orderRev.get(ln.ext) ?? 0
+      const fee = orderFee.get(ln.ext)
+      if (total <= 0 || fee == null) continue
+      const feeShare = fee * (ln.rev / total)        // rateio proporcional à receita
+      const a = agg.get(cat) ?? { rev: 0, fee: 0, orders: new Set<string>() }
+      a.rev += ln.rev; a.fee += feeShare; a.orders.add(ln.ext)
+      agg.set(cat, a)
+    }
+    return [...agg.entries()]
+      .map(([category, a]) => ({
+        category,
+        orders: a.orders.size,
+        revenue: r2(a.rev),
+        fees: r2(a.fee),
+        observed_take_pct: a.rev > 0 ? r2((a.fee / a.rev) * 100) : null,
+      }))
+      .sort((x, y) => y.revenue - x.revenue)
+      .slice(0, 12)
   }
 
   /** Último resultado persistido (pra UI). */
@@ -140,7 +197,7 @@ async function* pageOrders(orgId: string, channel: string, startIso: string, end
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabaseAdmin
       .from('orders')
-      .select('external_order_id, sale_price, quantity')
+      .select('external_order_id, product_id, sale_price, quantity')
       .eq('organization_id', orgId)
       .eq('source', channel)
       .neq('status', 'cancelled')
@@ -148,7 +205,7 @@ async function* pageOrders(orgId: string, channel: string, startIso: string, end
       .lt('sold_at', endExclIso)
       .range(from, from + PAGE - 1)
     if (error) break
-    const rows = (data ?? []) as Array<{ external_order_id: string | null; sale_price: number; quantity: number }>
+    const rows = (data ?? []) as Array<{ external_order_id: string | null; product_id: string | null; sale_price: number; quantity: number }>
     for (const r of rows) yield r
     if (rows.length < PAGE) break
   }

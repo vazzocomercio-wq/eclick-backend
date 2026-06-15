@@ -251,7 +251,7 @@ export class ShopeeListingLinkService {
       const chunk = pidList.slice(i, i + 200)
       const { data: prods, error: pErr } = await supabaseAdmin
         .from('products')
-        .select('id, sku, name, cost_price, price, stock, tax_percentage, tax_on_freight')
+        .select('id, sku, name, cost_price, price, stock, tax_percentage, tax_on_freight, category')
         .in('id', chunk)
       if (pErr) throw new Error(`products: ${pErr.message}`)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -281,8 +281,9 @@ export class ShopeeListingLinkService {
         tax_amount: number; contribution_margin: number; contribution_margin_pct: number
       } | null = null
       if (prod && prod.cost_price != null && price != null && price > 0) {
-        // take por faixa de ticket do anúncio; cai no achatado se não houver regra
-        const itemTakePct = pickRuleTakeRate(feeRules, price) ?? flatTakePct
+        // take por categoria + faixa de ticket do anúncio (regra mais específica
+        // ganha); cai no achatado se não houver regra.
+        const itemTakePct = pickRuleTakeRate(feeRules, price, prod.category ?? null) ?? flatTakePct
         const saleFee = round2(price * itemTakePct / 100)
         const m = computeContributionMargin({
           price, saleFee, shipping: 0,
