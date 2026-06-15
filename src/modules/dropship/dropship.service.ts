@@ -2313,6 +2313,13 @@ export class DropshipService {
       created.push({ id: oc.id, oc_number: oc.oc_number, gross_total: Number(oc.gross_total) })
     }
 
+    // Atualiza os indicadores do parceiro (vendas 30d, CMV, pendente a pagar) após gerar OCs
+    try {
+      await this.recalculatePartnerRollups(orgId)
+    } catch (e) {
+      this.logger.warn(`[oc-gen] recalcular rollups falhou: ${e instanceof Error ? e.message : e}`)
+    }
+
     return created
   }
 
@@ -3705,7 +3712,119 @@ export class DropshipService {
         this.logger.warn(`[scores] supplier ${p.supplier_id}: ${e instanceof Error ? e.message : e}`)
       }
     }
+    // Recalcula também os indicadores 30d / pendente a pagar / performance
+    try {
+      await this.recalculatePartnerRollups(orgId)
+    } catch (e) {
+      this.logger.warn(`[scores] rollups: ${e instanceof Error ? e.message : e}`)
+    }
     return { calculated }
+  }
+
+  /**
+   * Recalcula os indicadores agregados de cada parceiro dropship:
+   *  - supplier_dropship_profiles: orders_30d, revenue_30d, cmv_30d,
+   *    pending_payable, active_dropship_skus
+   *  - suppliers: total_orders_count, total_ordered_value_brl, last_order_at,
+   *    on_time_delivery_rate (aba Histórico do fornecedor)
+   * Esses campos existiam no schema desde a fundação do dropship mas nunca
+   * eram populados — ficavam sempre em 0/null.
+   */
+  async recalculatePartnerRollups(orgId: string): Promise<{ updated: number }> {
+    const { data: profiles } = await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .select('supplier_id')
+      .eq('organization_id', orgId)
+    if (!profiles || profiles.length === 0) return { updated: 0 }
+
+    const since30Iso = new Date(Date.now() - 30 * 86400000).toISOString()
+    let updated = 0
+    for (const p of profiles) {
+      try {
+        await this.computeRollupForSupplier(orgId, p.supplier_id, since30Iso)
+        updated++
+      } catch (e) {
+        this.logger.warn(`[rollups] supplier ${p.supplier_id}: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    return { updated }
+  }
+
+  private async computeRollupForSupplier(orgId: string, supplierId: string, since30Iso: string): Promise<void> {
+    // Identificações dos últimos 30 dias (vendas dropship do parceiro)
+    const { data: identRaw } = await supabaseAdmin
+      .from('dropship_order_identifications')
+      .select('quantity, sale_price, cost_at_sale, identified_at, shipped_at, dropship_status')
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+      .gte('identified_at', since30Iso)
+    const ident = (identRaw ?? []) as Array<{ quantity: number | null; sale_price: number | null; cost_at_sale: number | null; identified_at: string | null; shipped_at: string | null; dropship_status: string | null }>
+    const valid = ident.filter(r => r.dropship_status !== 'cancelled')
+    const orders_30d = valid.length
+    const revenue_30d = valid.reduce((s, r) => s + Number(r.sale_price ?? 0), 0)
+    const cmv_30d = valid.reduce((s, r) => s + Number(r.cost_at_sale ?? 0), 0)
+
+    // SKUs dropship ativos do parceiro
+    const { count: activeSkus } = await supabaseAdmin
+      .from('supplier_products')
+      .select('id', { count: 'exact', head: true })
+      .eq('supplier_id', supplierId)
+      .eq('dropship_status', 'active')
+
+    // OCs do parceiro (todas) — pendente a pagar e métricas de performance
+    const { data: ocsRaw } = await supabaseAdmin
+      .from('dropship_purchase_orders')
+      .select('net_total, gross_total, status, generation_date, created_at')
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+    const ocs = (ocsRaw ?? []) as Array<{ net_total: number | null; gross_total: number | null; status: string; generation_date: string | null; created_at: string | null }>
+    const PENDING = new Set(['generated', 'sent', 'viewed', 'approved', 'approved_with_notes', 'in_payable', 'partially_paid'])
+    const pending_payable = ocs
+      .filter(o => PENDING.has(o.status))
+      .reduce((s, o) => s + Number(o.net_total ?? o.gross_total ?? 0), 0)
+
+    const r2 = (n: number) => Math.round(n * 100) / 100
+    await supabaseAdmin
+      .from('supplier_dropship_profiles')
+      .update({
+        orders_30d,
+        revenue_30d: r2(revenue_30d),
+        cmv_30d: r2(cmv_30d),
+        pending_payable: r2(pending_payable),
+        active_dropship_skus: activeSkus ?? 0,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('organization_id', orgId)
+      .eq('supplier_id', supplierId)
+
+    // Performance na tabela suppliers (aba Histórico)
+    const ocCount = ocs.length
+    const ocValue = ocs.reduce((s, o) => s + Number(o.gross_total ?? 0), 0)
+    const lastOrderAt = ocs
+      .map(o => o.generation_date ?? o.created_at)
+      .filter((d): d is string => Boolean(d))
+      .sort()
+      .pop() ?? null
+
+    // On-time: % de pedidos despachados em até 48h (regra de ship lead dropship)
+    const shipped = ident.filter(r => r.shipped_at && r.identified_at)
+    const onTime = shipped.filter(r => {
+      const ms = new Date(r.shipped_at as string).getTime() - new Date(r.identified_at as string).getTime()
+      return ms <= 48 * 3600000
+    }).length
+    const onTimeRate = shipped.length > 0 ? Math.round((onTime / shipped.length) * 1000) / 10 : null
+
+    await supabaseAdmin
+      .from('suppliers')
+      .update({
+        total_orders_count: ocCount,
+        total_ordered_value_brl: r2(ocValue),
+        last_order_at: lastOrderAt,
+        on_time_delivery_rate: onTimeRate,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('organization_id', orgId)
+      .eq('id', supplierId)
   }
 
   async calculatePartnerScore(
