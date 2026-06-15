@@ -286,6 +286,23 @@ function monthRange(ym: string): { start: string; endExcl: string } {
   const endExcl = new Date(Date.UTC(y, m, 1)).toISOString()
   return { start, endExcl }
 }
+/**
+ * Fontes cujo `orders.sale_price` já é o TOTAL da linha (quantity embutida na
+ * ingestão — 1 row por SKU com `sale_total`). As demais (mercadolivre, manual,
+ * storefront) gravam o preço UNITÁRIO e precisam de × quantity.
+ *
+ * ⚠️ Ao adicionar um marketplace novo: se a ingestão dele grava sale_price como
+ * total da linha (padrão Shopee/TikTok), inclua o source aqui — senão a DRE
+ * dobra a receita dele em pedidos com quantity>1.
+ */
+const TOTAL_PRICE_SOURCES = new Set(['shopee', 'tiktok_shop'])
+
+/** Receita da linha respeitando a semântica de sale_price de cada fonte. */
+function lineRevenue(source: string | null, salePrice: unknown, quantity: unknown): number {
+  const sp = num(salePrice)
+  return source && TOTAL_PRICE_SOURCES.has(source) ? sp : sp * num(quantity)
+}
+
 function num(v: unknown): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
