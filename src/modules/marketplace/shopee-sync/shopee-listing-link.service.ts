@@ -7,7 +7,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
-import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, pickRuleTakeRate } from '../../channel-settings/channel-settings.service'
 
 /** F18 Fase A — Vínculo anúncio Shopee ↔ produto do catálogo (keystone).
  *
@@ -258,8 +258,11 @@ export class ShopeeListingLinkService {
       for (const p of (prods ?? []) as any[]) prodById.set(p.id, p)
     }
 
-    // F18 Fase B — comissão Shopee da org (igual ao sync de pedidos) p/ margem.
-    const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    // F18 Fase B — take rate Shopee da org p/ margem. Lê o achatado (fallback) +
+    // as regras por FAIXA DE TICKET (channel_fee_rules) uma vez; cada anúncio
+    // resolve por faixa via pickRuleTakeRate (preço do item), caindo no achatado.
+    const flatTakePct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules    = await this.channelSettings.getFeeRules(orgId, 'shopee')
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const items = ((rows ?? []) as any[]).map(r => {
@@ -278,7 +281,9 @@ export class ShopeeListingLinkService {
         tax_amount: number; contribution_margin: number; contribution_margin_pct: number
       } | null = null
       if (prod && prod.cost_price != null && price != null && price > 0) {
-        const saleFee = round2(price * commissionPct / 100)
+        // take por faixa de ticket do anúncio; cai no achatado se não houver regra
+        const itemTakePct = pickRuleTakeRate(feeRules, price) ?? flatTakePct
+        const saleFee = round2(price * itemTakePct / 100)
         const m = computeContributionMargin({
           price, saleFee, shipping: 0,
           cost:          Number(prod.cost_price),
@@ -287,7 +292,7 @@ export class ShopeeListingLinkService {
         })
         margin = {
           price,
-          commission_pct:          commissionPct,
+          commission_pct:          itemTakePct,
           sale_fee:                saleFee,
           cost:                    round2(Number(prod.cost_price)),
           tax_amount:              m.taxAmount,

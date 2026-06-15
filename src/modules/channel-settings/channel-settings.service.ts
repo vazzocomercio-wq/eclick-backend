@@ -42,6 +42,46 @@ function toSetting(r: ChannelSettingRow): ChannelSetting {
   return { ...r, estimated_take_rate_pct: pct, commission_pct: pct }
 }
 
+/** Regra de take rate por faixa de ticket/categoria (channel_fee_rules). */
+export interface ChannelFeeRule {
+  category_id:             string | null
+  min_price:               number | null
+  max_price:               number | null
+  estimated_take_rate_pct: number
+  fixed_fee:               number
+}
+
+/** Escolhe a regra mais ESPECÍFICA que casa com (price, categoryId) — função
+ *  pura, pra callers em lote resolverem N itens sem N queries. Especificidade:
+ *  categoria casada > genérica; entre faixas que casam, a mais estreita.
+ *  Retorna null se nenhuma regra casa (caller cai no take achatado). */
+export function pickRuleTakeRate(
+  rules: ChannelFeeRule[],
+  price: number | null | undefined,
+  categoryId?: string | null,
+): number | null {
+  const p = Number(price)
+  const matches = rules.filter(r => {
+    if (r.category_id != null && r.category_id !== categoryId) return false
+    if (!Number.isFinite(p)) return r.min_price == null && r.max_price == null
+    if (r.min_price != null && p < r.min_price) return false
+    if (r.max_price != null && p >= r.max_price) return false
+    return true
+  })
+  if (!matches.length) return null
+  matches.sort((a, b) => {
+    // 1) categoria específica primeiro
+    const cat = (b.category_id != null ? 1 : 0) - (a.category_id != null ? 1 : 0)
+    if (cat !== 0) return cat
+    // 2) faixa mais estreita primeiro
+    const wa = (a.max_price ?? Infinity) - (a.min_price ?? 0)
+    const wb = (b.max_price ?? Infinity) - (b.min_price ?? 0)
+    return wa - wb
+  })
+  const pct = Number(matches[0].estimated_take_rate_pct)
+  return Number.isFinite(pct) ? pct : null
+}
+
 /** Custos por canal (org × canal) — take rate estimado %, taxa fixa, etc.
  *  Fonte da estimativa do platform_fee dos pedidos quando a API do canal NÃO
  *  devolve a taxa real no order (caso TikTok — só vem em Statements; Shopee — só
@@ -114,6 +154,41 @@ export class ChannelSettingsService {
     const s = await this.get(orgId, channel)
     if (s == null || !Number.isFinite(Number(s.estimated_take_rate_pct))) return fallback
     return Number(s.estimated_take_rate_pct)
+  }
+
+  /** Regras de take por faixa/categoria vigentes na data (default hoje). Lê uma
+   *  vez e o caller resolve N itens em memória via `pickRuleTakeRate`. */
+  async getFeeRules(orgId: string, channel: Channel, onDate?: string): Promise<ChannelFeeRule[]> {
+    this.assertChannel(channel)
+    const day = (onDate ?? new Date().toISOString()).slice(0, 10)
+    const { data } = await supabaseAdmin
+      .from('channel_fee_rules')
+      .select('category_id, min_price, max_price, estimated_take_rate_pct, fixed_fee, effective_from, effective_to')
+      .eq('organization_id', orgId)
+      .eq('channel', channel)
+      .lte('effective_from', day)
+    const rows = (data ?? []) as Array<ChannelFeeRule & { effective_from: string; effective_to: string | null }>
+    return rows
+      .filter(r => r.effective_to == null || r.effective_to >= day)
+      .map(({ category_id, min_price, max_price, estimated_take_rate_pct, fixed_fee }) => ({
+        category_id, min_price, max_price,
+        estimated_take_rate_pct: Number(estimated_take_rate_pct),
+        fixed_fee: Number(fixed_fee) || 0,
+      }))
+  }
+
+  /** Take rate efetivo (%) pra UM item: tenta a regra por faixa/categoria; se
+   *  nenhuma casa, cai no take achatado de org_channel_settings (e depois no
+   *  fallback). Pra callers de item único (ex.: calculadora de campanha). */
+  async resolveTakeRatePct(
+    orgId: string,
+    channel: Channel,
+    opts: { price?: number | null; categoryId?: string | null; date?: string; fallback?: number } = {},
+  ): Promise<number> {
+    const rules = await this.getFeeRules(orgId, channel, opts.date)
+    const byRule = pickRuleTakeRate(rules, opts.price, opts.categoryId)
+    if (byRule != null) return byRule
+    return this.getEstimatedTakeRatePct(orgId, channel, opts.fallback ?? 0)
   }
 
   private assertChannel(channel: string): void {

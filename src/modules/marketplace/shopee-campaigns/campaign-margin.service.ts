@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../../common/supabase'
 import { computeContributionMargin, round2 } from '../../../common/margin'
+import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
 
 /** F18 F3.1 — Gate de margem de campanha Shopee.
  *
@@ -15,6 +16,8 @@ import { computeContributionMargin, round2 } from '../../../common/margin'
 @Injectable()
 export class CampaignMarginService {
   private readonly logger = new Logger(CampaignMarginService.name)
+
+  constructor(private readonly channelSettings: ChannelSettingsService) {}
 
   /** Avalia margem. Inputs em R$ (não centavos) pro alinhamento com margin.ts.
    *  discount_pct/commission em escala 0-1; tax em 0-100. */
@@ -37,31 +40,24 @@ export class CampaignMarginService {
 
     const price        = Math.max(0, input.price)
     const discountPct  = clamp01(input.discount_pct ?? 0)
+    // Preço efetivo após desconto — base pra escolher a faixa de take.
+    const effectivePrice = round2(price * (1 - discountPct))
     // Take rate Shopee (0-1): usa o valor passado (novo nome ou legado); se não
-    // vier, lê o take ESTIMADO configurado da org (org_channel_settings, 0-100);
-    // último recurso = 0.14 (comissão pura — quase nunca usado, só se a org
-    // nunca configurou o take). Evita subestimar o custo Shopee na avaliação.
+    // vier, resolve por FAIXA DE TICKET (channel_fee_rules) com fallback no take
+    // achatado da org (org_channel_settings); último recurso = 0.14 (comissão
+    // pura — só se a org nunca configurou). Evita subestimar o custo Shopee.
     const explicitTake = input.estimated_take_rate_pct ?? input.shopee_commission_pct
     let takeRate: number
     if (explicitTake != null) {
       takeRate = explicitTake
     } else {
-      const { data: cs } = await supabaseAdmin
-        .from('org_channel_settings')
-        .select('estimated_take_rate_pct')
-        .eq('organization_id', orgId)
-        .eq('channel', 'shopee')
-        .maybeSingle()
-      const pct = Number((cs as { estimated_take_rate_pct: number } | null)?.estimated_take_rate_pct)
-      takeRate = Number.isFinite(pct) && pct > 0 ? pct / 100 : 0.14
+      const pct = await this.channelSettings.resolveTakeRatePct(orgId, 'shopee', { price: effectivePrice })
+      takeRate = pct > 0 ? pct / 100 : 0.14
     }
     const shopeeCom    = clamp01(takeRate)
     const affiliateCom = clamp01(input.affiliate_commission_pct ?? 0)
     const cost         = Math.max(0, input.cost ?? 0)
     const shipping     = Math.max(0, input.shipping ?? 0)
-
-    // Preço efetivo após desconto da campanha
-    const effectivePrice = round2(price * (1 - discountPct))
 
     // saleFee agregado = comissão Shopee + comissão afiliado (ambas sobre o
     // preço efetivo — é o que a Shopee/afiliado retêm da venda promocional)
