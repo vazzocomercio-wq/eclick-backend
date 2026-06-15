@@ -1814,7 +1814,16 @@ export class MercadolivreService {
         orgId, feature: 'ml_claim_resolution',
         systemPrompt, userPrompt, jsonMode: true, maxTokens: 500,
       })
-      const parsed = JSON.parse(text)
+      // alguns modelos embrulham o JSON em cerca markdown (```json ... ```)
+      // mesmo com jsonMode — limpa a cerca / extrai o objeto antes do parse
+      let clean = (text ?? '').trim()
+      const fence = clean.match(/```(?:json)?\s*([\s\S]*?)```/i)
+      if (fence) clean = fence[1].trim()
+      else {
+        const a = clean.indexOf('{'); const b = clean.lastIndexOf('}')
+        if (a >= 0 && b > a) clean = clean.slice(a, b + 1)
+      }
+      const parsed = JSON.parse(clean)
       const valid = decisionable.some(a => a.action === parsed?.recommended_action)
       if (!parsed?.recommended_action || !valid) return null
       let confidence = Number(parsed.confidence)
