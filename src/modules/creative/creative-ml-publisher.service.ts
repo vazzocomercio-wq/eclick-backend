@@ -101,6 +101,9 @@ export interface MlAttributeSpec {
   hint?:             string
   /** Unidade default (number_unit) — ex: W, cm, g. Usado pra normalizar valores. */
   default_unit?:     string
+  /** Unidades aceitas (number_unit) — ex: POWER → [W, kW]. Valida a unidade do
+   *  valor: se vier inválida (ex.: "v"/volts em Potência), troca pela default. */
+  allowed_units?:    Array<{ id: string; name: string }>
 }
 
 export interface PublishMlOpts extends PreviewBuildOpts {
@@ -325,6 +328,7 @@ export class CreativeMlPublisherService {
         values:           a.values,
         hint:             a.hint,
         default_unit:     a.default_unit,
+        allowed_units:    (a as { allowed_units?: Array<{ id: string; name: string }> }).allowed_units,
       }))
   }
 
@@ -351,6 +355,7 @@ export class CreativeMlPublisherService {
         values:           a.values,
         hint:             a.hint,
         default_unit:     a.default_unit,
+        allowed_units:    (a as { allowed_units?: Array<{ id: string; name: string }> }).allowed_units,
       }))
   }
 
@@ -516,16 +521,27 @@ export class CreativeMlPublisherService {
       )
     }
 
-    // Normaliza atributos number_unit: valor nu ("15") sem unidade →
-    // "15 W" (default_unit da categoria). Sem isso o ML rejeita ("unit is
-    // not valid").
+    // Normaliza atributos number_unit (ex.: POWER/Potência): garante <número> +
+    // UNIDADE VÁLIDA da categoria. Casos tratados:
+    //  - valor nu ("50")            → "50 W" (default_unit)
+    //  - unidade INVÁLIDA ("50v")   → "50 W"  ← a IA às vezes manda volts (do
+    //    "Bivolt"/"50w" do título); sem isso o ML DESCARTA a Potência inteira.
+    //  - unidade válida ("5 kW")    → mantém (kW está em allowed_units)
     const specById = new Map<string, MlAttributeSpec>()
     for (const s of [...requiredAttrs, ...recommendedAttrs]) specById.set(s.id, s)
     for (const a of attributesPayload) {
       const spec = specById.get(a.id)
-      if (spec?.value_type === 'number_unit' && spec.default_unit
-          && a.value_name && /^[\d.,]+$/.test(a.value_name.trim())) {
-        a.value_name = `${a.value_name.trim()} ${spec.default_unit}`
+      if (spec?.value_type !== 'number_unit' || !spec.default_unit || !a.value_name) continue
+      const m = a.value_name.trim().match(/^([\d.,]+)\s*(.*)$/)
+      if (!m) continue
+      const num = m[1]
+      const unit = (m[2] ?? '').trim()
+      const valid = new Set(
+        [spec.default_unit, ...(spec.allowed_units ?? []).map(u => u.id)].map(u => u.toLowerCase()),
+      )
+      // sem unidade OU unidade fora das aceitas → aplica a default da categoria
+      if (!unit || !valid.has(unit.toLowerCase())) {
+        a.value_name = `${num} ${spec.default_unit}`
       }
     }
 
@@ -815,6 +831,25 @@ export class CreativeMlPublisherService {
   }
 
   /**
+   * Sobe a descrição do anúncio numa chamada SEPARADA. O ML IGNORA a descrição
+   * embutida no corpo do POST /items (o anúncio nasce sem descrição) — ela só
+   * cola via /items/{id}/description. POST cria; se já existir (raro), PUT.
+   */
+  private async postItemDescription(token: string, itemId: string, plainText: string): Promise<void> {
+    const cfg = {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 30_000,
+    }
+    const body = { plain_text: plainText }
+    try {
+      await axios.post(`${ML_BASE}/items/${itemId}/description`, body, cfg)
+    } catch {
+      // já existe (ou POST não aceito) → atualiza
+      await axios.put(`${ML_BASE}/items/${itemId}/description`, body, cfg)
+    }
+  }
+
+  /**
    * Define o preço de atacado (preço por quantidade B2B) de um item já
    * publicado: `POST /items/{id}/prices/standard/quantity`. Mantém o preço
    * `standard` atual e adiciona uma faixa de atacado a partir de `minQty`
@@ -966,6 +1001,20 @@ export class CreativeMlPublisherService {
 
       // POST /items — autenticado (com fallback de título)
       const item = await this.postItemToMl(token, mlBody)
+
+      // Descrição: o ML IGNORA a descrição embutida no POST /items → precisa de
+      // uma chamada SEPARADA, senão o anúncio nasce SEM descrição. Fail-isolated:
+      // o item já está publicado; se a descrição falhar, só loga (não derruba).
+      const descText = (mlBody.description as { plain_text?: string } | undefined)?.plain_text?.trim()
+      if (descText) {
+        try {
+          await this.postItemDescription(token, item.id, descText)
+          this.logger.log(`[creative.ml.publish] ✓ descrição enviada (${descText.length} chars) item=${item.id}`)
+        } catch (e) {
+          this.logger.warn(`[creative.ml.publish] descrição não subiu item=${item.id}: ${(e as Error)?.message}`)
+        }
+      }
+
       const externalPictureIds = (item.pictures ?? [])
         .map(p => p.id)
         .filter(Boolean)
