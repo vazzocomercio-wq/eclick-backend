@@ -100,6 +100,46 @@ export class ShopeeCreativePublisherService {
     }
   }
 
+  /** Wrapper público do publish: além de publicar, REGISTRA a tentativa quando
+   *  ela FALHA (bloqueio do gate OU erro/rejeição da Shopee) em
+   *  creative_publications (status='failed'). Antes só sucesso era gravado e a
+   *  causa da falha sumia (só aparecia na tela). Agora toda falha fica auditável
+   *  — com o motivo exato e QUAL loja (seller_id). dry-run não é registrado. */
+  async publish(orgId: string, draft: ShopeeDraftListing, opts?: { dryRun?: boolean; deleteAfter?: boolean }): Promise<Awaited<ReturnType<ShopeeCreativePublisherService['runPublish']>>> {
+    try {
+      const r = await this.runPublish(orgId, draft, opts)
+      if (!r.ok && !opts?.dryRun) {
+        await this.recordPublishFailure(orgId, draft, (r.blockers ?? []).join(' · ') || 'Publicação bloqueada (gate de relevância).')
+      }
+      return r
+    } catch (e) {
+      if (!opts?.dryRun) await this.recordPublishFailure(orgId, draft, (e as Error)?.message ?? 'Erro desconhecido na publicação.')
+      throw e
+    }
+  }
+
+  /** Grava uma tentativa de publicação que FALHOU. NÃO-FATAL e só grava quando há
+   *  listing + creative_product (FKs da tabela). seller_id = a loja Shopee que
+   *  falhou — é o que responde "por que deu erro na loja X". */
+  private async recordPublishFailure(orgId: string, draft: ShopeeDraftListing, message: string): Promise<void> {
+    if (!draft.listing_id || !draft.creative_product_id) return
+    try {
+      await supabaseAdmin.from('creative_publications').insert({
+        organization_id: orgId,
+        listing_id:      draft.listing_id,
+        product_id:      draft.creative_product_id,
+        marketplace:     'shopee',
+        status:          'failed',
+        idempotency_key: randomUUID(),
+        seller_id:       draft.shop_id ?? null,
+        error_message:   String(message).slice(0, 2000),
+      })
+      this.logger.warn(`[shopee.publish] FALHA registrada org=${orgId} shop=${draft.shop_id ?? '?'} listing=${draft.listing_id}: ${message}`)
+    } catch (e) {
+      this.logger.warn(`[shopee.publish] registro de FALHA em creative_publications não gravou: ${(e as Error)?.message}`)
+    }
+  }
+
   /** F18 Fase F — Publica de fato no Shopee (esteira IA Criativo → add_item).
    *  Monta o anúncio a partir do rascunho + dados do produto do catálogo
    *  (peso/dimensão/fotos/descrição/marca). Sobe imagens, recomenda categoria,
@@ -108,7 +148,7 @@ export class ShopeeCreativePublisherService {
    *
    *  opts.dryRun → só monta e devolve o payload (não cria). opts.deleteAfter →
    *  cria e deleta logo em seguida (validação ao vivo sem deixar lixo). */
-  async publish(orgId: string, draft: ShopeeDraftListing, opts?: { dryRun?: boolean; deleteAfter?: boolean }): Promise<{
+  private async runPublish(orgId: string, draft: ShopeeDraftListing, opts?: { dryRun?: boolean; deleteAfter?: boolean }): Promise<{
     ok: boolean
     item_id?: number
     category_id?: number | null
