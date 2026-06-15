@@ -37,7 +37,9 @@ export class ChannelTakeReconcileService {
     const orderRev = new Map<string, number>()
     let revenue = 0
     for await (const o of pageOrders(orgId, channel, start, endExcl)) {
-      const rev = num(o.sale_price) * num(o.quantity)
+      // ⚠️ orders.sale_price já é o TOTAL da linha (qty embutida na ingestão),
+      // igual ao order_selling_price do escrow — NÃO multiplicar por quantity.
+      const rev = num(o.sale_price)
       revenue += rev
       if (o.external_order_id) orderRev.set(o.external_order_id, (orderRev.get(o.external_order_id) ?? 0) + rev)
     }
