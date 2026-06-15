@@ -46,45 +46,89 @@ type SupEntry   = { lead: number; safety: number; type: string; name: string }
 @Injectable()
 export class ComprasService {
 
+  // Busca TODAS as linhas paginando. O Supabase/PostgREST devolve no máximo
+  // 1000 linhas por requisição — sem isto, catálogos com mais de 1000 SKUs
+  // (caso da Vazzo, ~2.6k) eram truncados silenciosamente.
+  private async fetchAllPages<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+    const PAGE = 1000
+    const all: T[] = []
+    let from = 0
+    for (;;) {
+      const { data, error } = await build(from, from + PAGE - 1)
+      if (error) throw new HttpException(error.message, 500)
+      const rows = (data ?? []) as T[]
+      all.push(...rows)
+      if (rows.length < PAGE) break
+      from += PAGE
+    }
+    return all
+  }
+
+  // Executa um filtro .in('product_id', [...]) em lotes pequenos. Uma lista
+  // gigante de UUIDs estourava o tamanho da URL e o PostgREST respondia HTTP
+  // 400 — o erro era engolido e o mapa de vendas ficava vazio (tudo "parado").
+  private async fetchInChunks<T>(ids: string[], build: (slice: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+    const CHUNK = 150
+    const all: T[] = []
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const { data, error } = await build(ids.slice(i, i + CHUNK))
+      if (error) throw new HttpException(error.message, 500)
+      all.push(...((data ?? []) as T[]))
+    }
+    return all
+  }
+
   private async fetchRawData(orgId: string) {
     const now    = Date.now()
     const since90 = new Date(now - 90 * 86400000).toISOString()
     const since30 = new Date(now - 30 * 86400000).toISOString()
     const since7  = new Date(now - 7  * 86400000).toISOString()
 
-    const { data: products, error: pErr } = await supabaseAdmin
-      .from('products')
-      .select('id, name, sku, cost_price, photo_urls, supply_type, abc_class')
-      .eq('organization_id', orgId)
-    if (pErr) throw new HttpException(pErr.message, 500)
+    type ProductRow = { id: string; name: string; sku: string | null; cost_price: number | null; photo_urls: string[] | null; supply_type: string | null; abc_class: string | null }
+    type OrderRow   = { product_id: string | null; quantity: number | null; sold_at: string | null; contribution_margin_pct: number | null }
+    type StockRow   = { product_id: string | null; quantity: number | null }
+    type SupRow     = { product_id: string | null; lead_time_days: number | null; safety_days: number | null; suppliers: unknown }
 
-    const productIds = (products ?? []).map(p => p.id)
-    if (productIds.length === 0) {
-      return { products: [], salesMap: new Map<string, SalesEntry>(), stockMap: new Map<string, number>(), supplierMap: new Map<string, SupEntry>() }
-    }
-
-    const [ordersRes, stockRes, supRes] = await Promise.all([
+    const products = await this.fetchAllPages<ProductRow>((from, to) =>
       supabaseAdmin
-        .from('orders')
-        .select('product_id, quantity, sold_at, contribution_margin_pct')
+        .from('products')
+        .select('id, name, sku, cost_price, photo_urls, supply_type, abc_class')
         .eq('organization_id', orgId)
-        .gte('sold_at', since90)
-        .in('product_id', productIds),
-      supabaseAdmin
-        .from('product_stock')
-        .select('product_id, quantity')
-        .in('product_id', productIds),
-      supabaseAdmin
-        .from('supplier_products')
-        .select('product_id, lead_time_days, safety_days, suppliers(name, supplier_type)')
-        .eq('is_preferred', true)
-        .in('product_id', productIds),
+        .order('id', { ascending: true })
+        .range(from, to))
+
+    const productIds = products.map(p => p.id)
+    if (productIds.length === 0) {
+      return { products: [] as ProductRow[], salesMap: new Map<string, SalesEntry>(), stockMap: new Map<string, number>(), supplierMap: new Map<string, SupEntry>() }
+    }
+    const productIdSet = new Set(productIds)
+
+    const [orders, stockRows, supRows] = await Promise.all([
+      // Pedidos: filtra por org + janela de 90 dias, paginado. NÃO usa mais
+      // .in(productIds) — a tabela orders já é da org, então a URL fica curta.
+      this.fetchAllPages<OrderRow>((from, to) =>
+        supabaseAdmin
+          .from('orders')
+          .select('product_id, quantity, sold_at, contribution_margin_pct')
+          .eq('organization_id', orgId)
+          .gte('sold_at', since90)
+          .order('id', { ascending: true })
+          .range(from, to)),
+      // product_stock não tem organization_id → filtra por product_id em lotes.
+      this.fetchInChunks<StockRow>(productIds, slice =>
+        supabaseAdmin.from('product_stock').select('product_id, quantity').in('product_id', slice)),
+      this.fetchInChunks<SupRow>(productIds, slice =>
+        supabaseAdmin
+          .from('supplier_products')
+          .select('product_id, lead_time_days, safety_days, suppliers(name, supplier_type)')
+          .eq('is_preferred', true)
+          .in('product_id', slice)),
     ])
 
     // Sales map
     const salesMap = new Map<string, SalesEntry>()
-    for (const o of ordersRes.data ?? []) {
-      if (!o.product_id) continue
+    for (const o of orders) {
+      if (!o.product_id || !productIdSet.has(o.product_id)) continue
       const e = salesMap.get(o.product_id) ?? { s7: 0, s30: 0, s90: 0, margins: [] }
       const qty = Number(o.quantity ?? 0)
       e.s90 += qty
@@ -97,14 +141,14 @@ export class ComprasService {
 
     // Stock map (SUM per product in case of multiple rows)
     const stockMap = new Map<string, number>()
-    for (const s of stockRes.data ?? []) {
+    for (const s of stockRows) {
       if (!s.product_id) continue
       stockMap.set(s.product_id, (stockMap.get(s.product_id) ?? 0) + Number(s.quantity ?? 0))
     }
 
     // Supplier map
     const supplierMap = new Map<string, SupEntry>()
-    for (const sp of supRes.data ?? []) {
+    for (const sp of supRows) {
       if (!sp.product_id) continue
       const supRaw = (sp as unknown as { suppliers: { name: string; supplier_type: string } | { name: string; supplier_type: string }[] | null }).suppliers
       const sup = Array.isArray(supRaw) ? supRaw[0] ?? null : supRaw
@@ -116,7 +160,7 @@ export class ComprasService {
       })
     }
 
-    return { products: products ?? [], salesMap, stockMap, supplierMap }
+    return { products, salesMap, stockMap, supplierMap }
   }
 
   async getInteligencia(orgId: string, filters: {
