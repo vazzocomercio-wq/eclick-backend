@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+const sharp = require('sharp') as typeof import('sharp')
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { CreativeService, type CreativeProduct, type CreativeBriefing } from './creative.service'
@@ -926,6 +927,13 @@ export class CreativeImagePipelineService {
       .eq('id', img.id)
 
     try {
+      // Briefing carrega a MEDIDA-ALVO (image_format) que o user escolheu —
+      // usada no resize final. Carregado aqui pra valer tanto no modo template
+      // quanto no fallback (antes só era lido no fallback).
+      const job      = await this.getJobById(img.job_id)
+      const briefing = job ? await this.creative.getBriefing(img.organization_id, job.briefing_id) : null
+      const targetSize = parseImageFormatToSize(briefing?.image_format)
+
       let sourceUrls: string[]
 
       if (refs.length > 0) {
@@ -938,8 +946,6 @@ export class CreativeImagePipelineService {
       } else {
         // Modo fallback Sprint 1: main image + logo opcional
         const product = await this.creative.getProduct(img.organization_id, img.product_id)
-        const job = await this.getJobById(img.job_id)
-        const briefing = job ? await this.creative.getBriefing(img.organization_id, job.briefing_id) : null
         sourceUrls = [await this.creative.signImage(product.main_image_storage_path, 600)]
         if (briefing?.use_logo && briefing.logo_storage_path) {
           sourceUrls.push(await this.creative.signImage(briefing.logo_storage_path, 600))
@@ -959,7 +965,29 @@ export class CreativeImagePipelineService {
       const first = out.images[0]
       if (!first?.b64) throw new Error('gpt-image-1 não retornou b64')
 
-      const buffer = Buffer.from(first.b64, 'base64')
+      let buffer: Buffer = Buffer.from(first.b64, 'base64')
+
+      // Garante a MEDIDA EXATA escolhida pelo user. Os modelos não respeitam
+      // dimensões arbitrárias (Gemini devolve ~1024², gpt-image-1 só 1024/1536),
+      // então redimensionamos o PNG final pro WxH pedido. fit:'fill' = pixel
+      // exato; quadrado→quadrado (caso comum 1200×1200) é upscale limpo sem
+      // distorção. Se o resize falhar, mantém o nativo em vez de perder a imagem.
+      let outputSize: string = targetSize ? `${targetSize.width}x${targetSize.height}` : 'native'
+      if (targetSize) {
+        try {
+          buffer = await sharp(buffer)
+            .resize(targetSize.width, targetSize.height, { fit: 'fill' })
+            .png()
+            .toBuffer()
+        } catch (resizeErr) {
+          this.logger.warn(
+            `[creative.image] img ${img.id} resize p/ ${targetSize.width}x${targetSize.height} ` +
+            `falhou: ${(resizeErr as Error).message} — mantendo tamanho nativo`,
+          )
+          outputSize = 'native'
+        }
+      }
+
       const storagePath = `${img.organization_id}/${img.product_id}/images/${img.id}.png`
       const { error: upErr } = await supabaseAdmin.storage
         .from('creative')
@@ -981,6 +1009,7 @@ export class CreativeImagePipelineService {
             fallback_used:      out.fallbackUsed,
             primary_error:      out.primaryError ?? null,
             source_image_count: sourceUrls.length,
+            output_size:        outputSize,
             generated_at:       new Date().toISOString(),
           },
           error_message: null,
@@ -1325,6 +1354,22 @@ export class CreativeImagePipelineService {
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n))
+}
+
+/**
+ * Converte o image_format do briefing (ex: "1200x1200", "1000x1000",
+ * "1200x1500", "800x800") nas dimensões-alvo em pixels. Retorna null quando
+ * o valor não casa com o padrão WxH (formatos legados/desconhecidos), caso em
+ * que o pipeline mantém o tamanho nativo do modelo sem redimensionar.
+ */
+function parseImageFormatToSize(fmt: string | null | undefined): { width: number; height: number } | null {
+  if (!fmt) return null
+  const m = /^(\d{2,5})\s*[xX]\s*(\d{2,5})$/.exec(fmt.trim())
+  if (!m) return null
+  const width  = Number(m[1])
+  const height = Number(m[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 16 || height < 16) return null
+  return { width, height }
 }
 
 /**
