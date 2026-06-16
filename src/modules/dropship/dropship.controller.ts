@@ -46,6 +46,15 @@ export class DropshipController {
     return this.svc.listPartners(orgId, { status, q })
   }
 
+  // ⚠️ Rotas estáticas (partners/scores) DEVEM vir antes de partners/:id,
+  // senão o NestJS casa "scores" como :id e tenta usá-lo como UUID (HTTP 500).
+  @Get('partners/scores')
+  @RequirePermission('products.view')
+  async listScores(@Headers('authorization') auth: string) {
+    const orgId = await this.resolveOrgId(auth)
+    return this.svc.listPartnerScores(orgId)
+  }
+
   @Get('partners/:id')
   @RequirePermission('products.view')
   async getPartner(
@@ -570,13 +579,6 @@ export class DropshipController {
   }
 
   // ── Scores (Sprint 11) ────────────────────────────────────────────────────
-
-  @Get('partners/scores')
-  @RequirePermission('products.view')
-  async listScores(@Headers('authorization') auth: string) {
-    const orgId = await this.resolveOrgId(auth)
-    return this.svc.listPartnerScores(orgId)
-  }
 
   @Get('partners/:supplierId/score-history')
   @RequirePermission('products.view')
