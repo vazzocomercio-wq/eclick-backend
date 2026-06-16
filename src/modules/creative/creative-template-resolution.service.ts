@@ -288,16 +288,17 @@ export class CreativeTemplateResolutionService {
 
   /**
    * Resolve refs pra uma TemplatePosition + um produto + (opcional) briefing.
-   * Ordem de prioridade:
-   *   1. use_reference_ids[] — refs fixos (curated ou da org)
+   * Ordem de prioridade (a ORDEM importa — o modelo de imagem ancora no 1º frame
+   * como o sujeito da cena):
+   *   0. use_product_reference              — imagem principal do produto PRIMEIRO (o produto real)
+   *   1. use_reference_ids[] — refs fixos (curated ou da org; SÓ inspiração de estilo)
    *   2. reference_match.by_position_default — refs que servem essa position
    *   3. reference_match.by_category        — refs da mesma categoria do produto
    *   4. reference_match.by_tags            — refs com overlap de tags
-   *   5. use_product_reference              — appende a imagem principal do produto
-   *   6. use_brand_logo                     — appende o logo do briefing
+   *   5. use_brand_logo                     — appende o logo do briefing (overlay, por último)
    *
    * Sempre dedup por id. Respeita limit (default 3, hard cap 6) APENAS
-   * pros itens 2-4 (refs do banco). Items 1, 5, 6 sempre incluem (são explícitos).
+   * pros itens 2-4 (refs do banco). Items 0, 1, 5 sempre incluem (são explícitos).
    */
   async resolveReferencesForPosition(
     orgId: string,
@@ -326,7 +327,28 @@ export class CreativeTemplateResolutionService {
     const catalog = product.product_id ? await this.loadCatalog(orgId, product.product_id) : null
     const categoryMlId = catalog?.category_ml_id ?? null
 
-    // 1. Fixed IDs
+    // 0. Imagem principal do produto PRIMEIRO — ancora o modelo no produto real
+    //    como sujeito da cena. Antes vinha por último (depois de N referências de
+    //    OUTROS produtos), e o modelo acabava reproduzindo uma referência errada
+    //    no macro/packshot em vez do produto enviado. Produto-primeiro corrige isso.
+    if (position.use_product_reference) {
+      try {
+        const url = await maybeSign('creative', product.main_image_storage_path)
+        out.push({
+          id:             `product:${product.id}`,
+          name:           product.name,
+          storage_bucket: 'creative',
+          storage_path:   product.main_image_storage_path,
+          signed_url:     url,
+          source:         'product_main',
+          reference_id:   null,
+        })
+      } catch (e) {
+        warnings.push(`use_product_reference: falha ao assinar imagem do produto: ${(e as Error).message}`)
+      }
+    }
+
+    // 1. Fixed IDs (inspiração de estilo — OUTROS produtos)
     if (position.use_reference_ids && position.use_reference_ids.length > 0) {
       const fixedRows = await this.loadReferencesByIds(orgId, position.use_reference_ids)
       for (const r of fixedRows) {
@@ -400,25 +422,7 @@ export class CreativeTemplateResolutionService {
       await pushDynamic(rows, 'tag_match')
     }
 
-    // 5. Product main image (bucket 'creative')
-    if (position.use_product_reference) {
-      try {
-        const url = await maybeSign('creative', product.main_image_storage_path)
-        out.push({
-          id:             `product:${product.id}`,
-          name:           product.name,
-          storage_bucket: 'creative',
-          storage_path:   product.main_image_storage_path,
-          signed_url:     url,
-          source:         'product_main',
-          reference_id:   null,
-        })
-      } catch (e) {
-        warnings.push(`use_product_reference: falha ao assinar imagem do produto: ${(e as Error).message}`)
-      }
-    }
-
-    // 6. Brand logo (bucket 'creative')
+    // 5. Brand logo (bucket 'creative') — sempre por último (overlay, não é o sujeito)
     if (position.use_brand_logo) {
       if (!briefing) {
         warnings.push('use_brand_logo: nenhum briefing fornecido — logo não disponível')
