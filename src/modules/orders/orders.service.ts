@@ -1192,7 +1192,7 @@ export class OrdersService {
     const rows: OrdersReportRow[] = []
     let pageStart = 0
     const COLS_BASE =
-      'id, source, platform, external_order_id, status, sold_at, seller_id, ' +
+      'id, source, platform, external_order_id, status, sold_at, seller_id, channel_account_id, ' +
       'sku, product_title, quantity, sale_price, platform_fee, cost_price, ' +
       'tax_amount, shipping_cost, shipping_buyer_paid, contribution_margin, ' +
       'contribution_margin_pct, gross_profit, marketplace_listing_id'
@@ -1279,7 +1279,7 @@ export class OrdersService {
         date_created: (raw.date_created as string) ?? row.sold_at,
         total_amount: totalAmount,
         seller_id: row.seller_id,
-        account_nickname: this.ordersNicknameFor(row, nick),
+        account_nickname: this.ordersNicknameFor(row, nick, row.channel_account_id),
         items: [{
           item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
           title: (itemRaw.title as string) ?? row.product_title,
@@ -1382,7 +1382,7 @@ export class OrdersService {
         platform: row.platform,
         status: row.status,
         date_created: (raw.date_created as string) ?? row.sold_at,
-        account_nickname: this.ordersNicknameFor(row, nick!),
+        account_nickname: this.ordersNicknameFor(row, nick!, row.channel_account_id),
         seller_id: row.seller_id,
         item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
         title: (itemRaw.title as string) ?? row.product_title,
@@ -1458,6 +1458,7 @@ type OrdersReportRow = {
   status: string | null
   sold_at: string | null
   seller_id: number | null
+  channel_account_id: string | null
   sku: string | null
   product_title: string | null
   quantity: number | null
