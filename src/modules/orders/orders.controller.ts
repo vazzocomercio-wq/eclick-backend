@@ -189,6 +189,7 @@ export class OrdersController {
     @Query('date_to')   dateTo?:   string,
     @Query('seller_id') sellerId?: string,
     @Query('platforms') platforms?: string,
+    @Query('account_id') accountId?: string,
   ) {
     const platformsList = platforms
       ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
@@ -203,6 +204,7 @@ export class OrdersController {
       sellerId ? Number(sellerId) : undefined,
       platformsList,
       scope,
+      accountId || undefined,
     )
   }
 
@@ -217,6 +219,7 @@ export class OrdersController {
     @Query('seller_id') sellerId?: string,
     @Query('platforms') platforms?: string,
     @Query('kpis_only') kpisOnly?: string,
+    @Query('account_id') accountId?: string,
   ) {
     const platformsList = platforms
       ? platforms.split(',').map((s) => s.trim()).filter(Boolean)
@@ -231,6 +234,7 @@ export class OrdersController {
       platformsList,
       kpisOnly === 'true',
       scope,
+      accountId || undefined,
     )
   }
 }

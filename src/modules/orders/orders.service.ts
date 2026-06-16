@@ -1184,6 +1184,8 @@ export class OrdersService {
     lightweight?: boolean
     /** F17-C: escopo por conta do user. */
     scope?: AccountScope | null
+    /** Filtro por loja do canal (Shopee/TikTok) — channel_account_id. */
+    channelAccountId?: string | null
   }): Promise<OrdersReportRow[]> {
     const PAGE_SIZE = 1000
     const SAFETY_CAP = 50_000
@@ -1203,6 +1205,7 @@ export class OrdersService {
       if (opts.dateFrom) q = q.gte('sold_at', opts.dateFrom)
       if (opts.dateTo) q = q.lte('sold_at', opts.dateTo)
       if (opts.sellerIdFilter != null) q = q.eq('seller_id', opts.sellerIdFilter)
+      if (opts.channelAccountId) q = q.eq('channel_account_id', opts.channelAccountId)
       q = applyOrdersScope(q, opts.scope)
       if (opts.statusFilter && opts.statusFilter !== 'all') q = q.eq('status', opts.statusFilter)
       if (opts.platformsFilter && opts.platformsFilter.length > 0) {
@@ -1229,13 +1232,14 @@ export class OrdersService {
     sellerIdFilter?: number,
     platforms?: string[],
     scope?: AccountScope | null,
+    channelAccountId?: string | null,
   ) {
     assertScopeAllowsSeller(scope, sellerIdFilter)
     const nick = await this.ordersBuildNicknameMap(orgId)
     const isoFrom = dateFrom ? `${dateFrom}T00:00:00.000-03:00` : null
     const isoTo = dateTo ? `${dateTo}T23:59:59.999-03:00` : null
     const allRows = await this.ordersFetchRowsForReport({
-      orgId, dateFrom: isoFrom, dateTo: isoTo, sellerIdFilter, platformsFilter: platforms, scope,
+      orgId, dateFrom: isoFrom, dateTo: isoTo, sellerIdFilter, platformsFilter: platforms, scope, channelAccountId,
     })
 
     const sliceStart = Math.max(offset, 0)
@@ -1311,6 +1315,7 @@ export class OrdersService {
      *  (≈248KB jogados fora a cada carregamento). */
     kpisOnly = false,
     scope?: AccountScope | null,
+    channelAccountId?: string | null,
   ) {
     assertScopeAllowsSeller(scope, sellerIdFilter)
     const nick = kpisOnly ? null : await this.ordersBuildNicknameMap(orgId)
@@ -1321,7 +1326,7 @@ export class OrdersService {
     const isoTo = dateTo && !dateTo.includes('T') ? `${dateTo}T23:59:59.999-03:00` : dateTo
     const allRows = await this.ordersFetchRowsForReport({
       orgId, dateFrom: isoFrom, dateTo: isoTo, statusFilter, sellerIdFilter, platformsFilter: platforms,
-      lightweight: kpisOnly, scope,
+      lightweight: kpisOnly, scope, channelAccountId,
     })
 
     let faturamento = 0, canceladas = 0
