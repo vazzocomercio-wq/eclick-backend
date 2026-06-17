@@ -112,11 +112,13 @@ export class FulfillmentCartsService {
     return [...bySku.values()].filter((p) => !measured.has(p.sku))
   }
 
-  /** Grava as medidas de um produto (por SKU ou productId). */
-  async measureProduct(orgId: string, input: { productId?: string; sku?: string; width_cm: number; length_cm: number; height_cm: number }): Promise<{ ok: true; sku: string | null }> {
+  /** Grava as medidas (e peso) de um produto (por SKU ou productId) no catálogo real. */
+  async measureProduct(orgId: string, input: { productId?: string; sku?: string; width_cm: number; length_cm: number; height_cm: number; weight_kg?: number | null }): Promise<{ ok: true; sku: string | null }> {
     const w = Number(input.width_cm), l = Number(input.length_cm), h = Number(input.height_cm)
     if (!(w > 0 && l > 0 && h > 0)) throw new BadRequestException('Informe L×C×A (cm) maiores que zero.')
-    let q = supabaseAdmin.from('products').update({ width_cm: w, length_cm: l, height_cm: h, updated_at: new Date().toISOString() }).eq('organization_id', orgId)
+    const row: Record<string, unknown> = { width_cm: w, length_cm: l, height_cm: h, updated_at: new Date().toISOString() }
+    if (input.weight_kg != null && Number(input.weight_kg) > 0) row.weight_kg = Number(input.weight_kg)
+    let q = supabaseAdmin.from('products').update(row).eq('organization_id', orgId)
     if (input.productId) q = q.eq('id', input.productId)
     else if (input.sku) q = q.eq('sku', input.sku)
     else throw new BadRequestException('Informe o produto (productId ou sku).')

@@ -527,7 +527,7 @@ export class FulfillmentController {
     return this.carts.productsToMeasure(this.org(u), warehouseId)
   }
   @Post('products/measure')
-  measureProduct(@ReqUser() u: ReqUserPayload, @Body() body: { productId?: string; sku?: string; width_cm: number; length_cm: number; height_cm: number }) {
+  measureProduct(@ReqUser() u: ReqUserPayload, @Body() body: { productId?: string; sku?: string; width_cm: number; length_cm: number; height_cm: number; weight_kg?: number | null }) {
     return this.carts.measureProduct(this.org(u), body)
   }
 
