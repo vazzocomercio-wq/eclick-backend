@@ -168,9 +168,9 @@ export class TrendsScoreService {
     const sys =
       'Você é um analista de sourcing de e-commerce brasileiro. Recebe os números de tendência de ' +
       'um produto campeão de vendas no Mercado Livre e escreve uma recomendação curta e acionável ' +
-      'sobre comprar para revender. Seja direto, em pt-BR, no máximo 2 frases. ' +
-      'Como ainda não temos o custo do fornecedor, SEMPRE lembre que a margem precisa ser validada ' +
-      'com a cotação de compra antes de fechar. Responda em JSON: {"rationale": string}.'
+      'sobre comprar para revender. Seja direto, em pt-BR, no máximo 2 frases, em texto corrido ' +
+      '(sem JSON, sem markdown, sem aspas). Como ainda não temos o custo do fornecedor, SEMPRE ' +
+      'lembre que a margem precisa ser validada com a cotação de compra antes de fechar.'
     const usr = JSON.stringify({
       produto: p.name, categoria: p.category_name, preco_mercado_brl: priceBrl,
       trend_score: round(c.trend_score), rank_best_seller: c.best_seller_rank,
@@ -180,10 +180,10 @@ export class TrendsScoreService {
     try {
       const out = await this.llm.generateText({
         orgId, feature: 'trends_buy_decision', systemPrompt: sys, userPrompt: usr,
-        maxTokens: 220, temperature: 0.4, jsonMode: true,
+        maxTokens: 220, temperature: 0.4,
       })
-      const parsed = JSON.parse(out.text) as { rationale?: string }
-      if (parsed.rationale) return parsed.rationale
+      const txt = (out.text ?? '').trim()
+      if (txt.length >= 10) return txt.slice(0, 600)
     } catch (e) {
       this.logger.warn(`[trends.score] IA racional falhou p/ ${p.external_id}: ${e instanceof Error ? e.message : e}`)
     }
