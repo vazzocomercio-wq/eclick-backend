@@ -3,6 +3,12 @@ import { supabaseAdmin } from '../../common/supabase'
 
 export type PickProfile = 'single' | 'mono_multi' | 'multi'
 
+/** Teto de sanidade do volume de UMA unidade (cm³). Acima disso a medida é quase
+ *  certamente erro de cadastro (ex.: mm lançado como cm, ou dimensão da caixa do ML) —
+ *  o item é tratado como "a medir" em vez de estourar o cálculo do carrinho.
+ *  300.000 cm³ = 0,3 m³ (cabe quase tudo do catálogo de iluminação/casa). */
+export const SUSPECT_UNIT_VOLUME_CM3 = 300_000
+
 export interface PickingCart {
   id: string
   warehouse_id: string | null
@@ -97,7 +103,10 @@ export class FulfillmentCartsService {
       const { data } = await supabaseAdmin.from('products').select('sku, width_cm, length_cm, height_cm')
         .eq('organization_id', orgId).in('sku', skus.slice(i, i + 300))
       for (const p of (data ?? []) as Array<{ sku: string; width_cm: number | null; length_cm: number | null; height_cm: number | null }>) {
-        if (p.width_cm && p.length_cm && p.height_cm) measured.add(p.sku)
+        if (p.width_cm && p.length_cm && p.height_cm) {
+          const v = Number(p.width_cm) * Number(p.length_cm) * Number(p.height_cm)
+          if (v <= SUSPECT_UNIT_VOLUME_CM3) measured.add(p.sku) // medida absurda → continua na lista "a medir"
+        }
       }
     }
     return [...bySku.values()].filter((p) => !measured.has(p.sku))
@@ -126,7 +135,8 @@ export class FulfillmentCartsService {
       const { data } = await supabaseAdmin.from('products').select('sku, width_cm, length_cm, height_cm')
         .eq('organization_id', orgId).in('sku', unique.slice(i, i + 300))
       for (const p of (data ?? []) as Array<{ sku: string; width_cm: number | null; length_cm: number | null; height_cm: number | null }>) {
-        const v = (p.width_cm && p.length_cm && p.height_cm) ? Number(p.width_cm) * Number(p.length_cm) * Number(p.height_cm) : null
+        let v = (p.width_cm && p.length_cm && p.height_cm) ? Number(p.width_cm) * Number(p.length_cm) * Number(p.height_cm) : null
+        if (v != null && v > SUSPECT_UNIT_VOLUME_CM3) v = null // medida absurda → trata como sem medida
         if (!map.has(p.sku)) map.set(p.sku, v)
       }
     }
