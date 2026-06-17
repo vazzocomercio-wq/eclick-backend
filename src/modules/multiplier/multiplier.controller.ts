@@ -76,6 +76,21 @@ export class MultiplierController {
     return this.svc.importCompetitor(this.orgOf(user), user.id, body)
   }
 
+  /** Cópia em LOTE: N anúncios × N contas/plataformas → rascunhos (e publica
+   *  em background se publish=true). Usado pela bulk bar da página de anúncios. */
+  @Post('batch')
+  @HttpCode(HttpStatus.OK)
+  batch(
+    @ReqUser() user: ReqUserPayload,
+    @Body() body: {
+      items: Array<{ product_id?: string | null; platform?: string | null; listing_id?: string | null }>
+      targets: Array<{ platform: MultiplierTarget; account_id?: string | null }>
+      publish?: boolean
+    },
+  ) {
+    return this.svc.batchCopy(this.orgOf(user), user.id, body)
+  }
+
   /** Cria a proposta de multiplicação (payload já adaptado ao destino). */
   @Post('drafts')
   createDraft(

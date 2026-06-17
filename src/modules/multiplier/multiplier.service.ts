@@ -12,6 +12,7 @@ import { LlmService } from '../ai/llm.service'
 import { StockService } from '../stock/stock.service'
 import { ShopeeStockSyncService } from '../marketplace/shopee-sync/shopee-stock-sync.service'
 import { MarketplaceScrapingService } from '../marketplace-scraping/marketplace-scraping.service'
+import { AccountLabelsService } from '../account-labels/account-labels.service'
 import {
   MULTIPLIER_TARGETS, MultiplierTarget, MultiplierPayload, MultiplierDraft, MultiplierCandidate,
   MultiplierVariation,
@@ -74,6 +75,7 @@ export class MultiplierService {
     private readonly stock:           StockService,
     private readonly shopeeStock:     ShopeeStockSyncService,
     private readonly scraping:        MarketplaceScrapingService,
+    private readonly accountLabels:   AccountLabelsService,
   ) {}
 
   // ── Destinos conectados ────────────────────────────────────────────────
@@ -93,13 +95,112 @@ export class MultiplierService {
         .eq('organization_id', orgId)
         .maybeSingle<{ status: string | null }>(),
     ])
+    // nome real das contas (account_labels) — ML já vem resolvido do
+    // getConnections; Shopee resolve aqui (listShops traz o apelido cru).
+    const labels = await this.accountLabels.getMap(orgId).catch(() => ({} as Record<string, Record<string, string>>))
+    const shopeeLabels = labels['shopee'] ?? {}
     return {
       mercadolivre: (mlConns as Array<{ seller_id: number | string; nickname: string | null }>)
         .filter(c => c.seller_id != null)
         .map(c => ({ seller_id: Number(c.seller_id), nickname: c.nickname ?? null })),
-      shopee:       shops,
+      shopee:       shops.map(s => ({ shop_id: s.shop_id, nickname: shopeeLabels[String(s.shop_id)] ?? s.nickname ?? null })),
       tiktok_shop:  { connected: tiktokConn.data?.status === 'connected' },
       storefront:   { connected: true },
+    }
+  }
+
+  // ── Cópia em LOTE (página de anúncios → N contas/plataformas) ───────────
+  //
+  // Recebe N anúncios (product_id direto OU platform+listing_id pra resolver)
+  // e N destinos (platform+account_id). Para cada combinação produto×destino:
+  // pula se já coberto / se for o próprio anúncio de origem; senão cria o
+  // rascunho (createDraft reusa toda a montagem/validação). publish=true →
+  // publica em BACKGROUND (draft→publicando→publicado/falhou na fila), pra a
+  // resposta voltar na hora sem timeout. Cap de 120 combinações por chamada.
+
+  async batchCopy(orgId: string, userId: string, body: {
+    items: Array<{ product_id?: string | null; platform?: string | null; listing_id?: string | null }>
+    targets: Array<{ platform: MultiplierTarget; account_id?: string | null }>
+    publish?: boolean
+  }): Promise<{
+    created: number; skipped: number; failed: number; publishing: number
+    results: Array<{ product_id: string | null; target: string; status: 'created' | 'skipped' | 'failed'; draft_id?: string; reason?: string }>
+  }> {
+    const items = (body.items ?? []).filter(Boolean)
+    const targets = (body.targets ?? []).filter(t => t?.platform)
+    if (!items.length) throw new BadRequestException('Selecione ao menos um anúncio.')
+    if (!targets.length) throw new BadRequestException('Escolha ao menos uma conta/plataforma de destino.')
+    targets.forEach(t => this.assertTarget(t.platform))
+    if (items.length * targets.length > 120) {
+      throw new BadRequestException('Muitas combinações de uma vez (máx 120). Selecione menos anúncios ou menos destinos.')
+    }
+
+    // resolve product_id de cada item (direto, ou via product_listings)
+    const resolved: Array<{ product_id: string | null; source_listing_id: string | null }> = []
+    for (const it of items) {
+      let pid = it.product_id ?? null
+      if (!pid && it.platform && it.listing_id) {
+        const { data } = await supabaseAdmin
+          .from('product_listings')
+          .select('product_id, products!inner(organization_id)')
+          .eq('products.organization_id', orgId)
+          .eq('platform', it.platform)
+          .eq('listing_id', it.listing_id)
+          .eq('is_active', true)
+          .limit(1)
+          .maybeSingle<{ product_id: string }>()
+        pid = data?.product_id ?? null
+      }
+      resolved.push({ product_id: pid, source_listing_id: it.listing_id ?? null })
+    }
+
+    const results: Array<{ product_id: string | null; target: string; status: 'created' | 'skipped' | 'failed'; draft_id?: string; reason?: string }> = []
+    const toPublish: string[] = []
+
+    for (const r of resolved) {
+      for (const t of targets) {
+        const targetLabel = t.account_id ? `${t.platform}:${t.account_id}` : t.platform
+        if (!r.product_id) {
+          results.push({ product_id: null, target: targetLabel, status: 'failed', reason: 'Anúncio sem produto vinculado — vincule ou crie o produto antes de copiar.' })
+          continue
+        }
+        try {
+          const draft = await this.createDraft(orgId, userId, {
+            product_id:        r.product_id,
+            target_platform:   t.platform,
+            target_account_id: t.account_id ?? null,
+            source_listing_id: r.source_listing_id,
+          })
+          if (draft.status === 'published') {
+            results.push({ product_id: r.product_id, target: targetLabel, status: 'skipped', draft_id: draft.id, reason: 'já publicado' })
+          } else {
+            results.push({ product_id: r.product_id, target: targetLabel, status: 'created', draft_id: draft.id })
+            if (body.publish && (draft.status === 'draft' || draft.status === 'failed')) toPublish.push(draft.id)
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          // "já tem anúncio ativo" / "draft aberto" = pulado, não erro
+          const skipped = /já tem anúncio ativo|já foi publicad/i.test(msg)
+          results.push({ product_id: r.product_id, target: targetLabel, status: skipped ? 'skipped' : 'failed', reason: msg })
+        }
+      }
+    }
+
+    // publica em background — não bloqueia a resposta (evita timeout em lote)
+    if (body.publish && toPublish.length) {
+      for (const id of toPublish) {
+        void this.publishDraft(orgId, userId, id)
+          .catch(e => this.logger.warn(`[multiplier.batch] publish bg draft=${id}: ${(e as Error)?.message}`))
+      }
+    }
+
+    const created = results.filter(r => r.status === 'created').length
+    return {
+      created,
+      skipped: results.filter(r => r.status === 'skipped').length,
+      failed:  results.filter(r => r.status === 'failed').length,
+      publishing: body.publish ? toPublish.length : 0,
+      results,
     }
   }
 
