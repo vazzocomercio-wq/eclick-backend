@@ -3,15 +3,20 @@ import { supabaseAdmin } from '../../common/supabase'
 
 export type LocationType = 'picking' | 'pulmao' | 'staging' | 'devolucao'
 export type SlotSource = 'manual' | 'import' | 'capture' | 'abc'
+/** Padrões de endereçamento suportados (o cliente escolhe qual usar). */
+export type AddressScheme = 'coluna_estante_nivel' | 'rua_estante_nivel_posicao'
+export const DEFAULT_ADDRESS_SCHEME: AddressScheme = 'coluna_estante_nivel'
 
 export interface WarehouseLocation {
   id: string
   warehouse_id: string
   code: string
-  rua: number | null
+  coluna: string | null     // padrão 1: letra estilo Excel (A,B,C…); a coluna É o setor/fila
+  setor: string | null      // padrão 1: nome do setor da coluna (ex.: "Pendentes") — opcional
+  rua: number | null        // padrão 2
   estante: number | null
   nivel: number | null
-  posicao: number | null
+  posicao: number | null    // padrão 2
   sequence: number
   location_type: LocationType
   is_active: boolean
@@ -31,24 +36,67 @@ export interface WarehouseLocation {
 export class FulfillmentLocationsService {
   private readonly logger = new Logger(FulfillmentLocationsService.name)
 
-  // ── Helpers de endereço ─────────────────────────────────────────────────────
-  /** Monta o código padrão R02-E05-N3-P01 a partir das partes. */
-  private buildCode(rua: number, estante: number, nivel: number, posicao: number): string {
+  // ── Helpers de endereço (suporta os 2 padrões) ───────────────────────────────
+  /** Letra(s) da coluna → número (A=1 … Z=26, AA=27 …). Infinito. */
+  private colToNum(coluna: string): number {
+    let n = 0
+    for (const ch of coluna.toUpperCase()) { const c = ch.charCodeAt(0) - 64; if (c < 1 || c > 26) break; n = n * 26 + c }
+    return n
+  }
+  /** Número → letra(s) da coluna (1=A … 27=AA …). */
+  private numToCol(n: number): string {
+    let s = ''
+    while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26) }
+    return s || 'A'
+  }
+  /** Padrão 1: A1-N1 = Coluna A, Estante 1, Nível 1. */
+  private buildCodeColuna(coluna: string, estante: number, nivel: number): string {
+    return `${coluna.toUpperCase()}${estante}-N${nivel}`
+  }
+  private seqColuna(coluna: string, estante: number, nivel: number): number {
+    return this.colToNum(coluna) * 1_000_000 + estante * 1_000 + nivel
+  }
+  /** Padrão 2: R02-E05-N3-P01. */
+  private buildCodeRua(rua: number, estante: number, nivel: number, posicao: number): string {
     const p2 = (n: number) => String(n).padStart(2, '0')
     return `R${p2(rua)}-E${p2(estante)}-N${nivel}-P${p2(posicao)}`
   }
-  /** Ordem de caminhada (rota): rua → estante → nível → posição. */
-  private buildSeq(rua: number, estante: number, nivel: number, posicao: number): number {
+  private seqRua(rua: number, estante: number, nivel: number, posicao: number): number {
     return rua * 1_000_000 + estante * 10_000 + nivel * 100 + posicao
   }
-  /** Tenta extrair as partes de um código no padrão R##-E##-N#-P##. */
-  private parseCode(code: string): { rua: number; estante: number; nivel: number; posicao: number } | null {
-    const m = /^R(\d+)-E(\d+)-N(\d+)-P(\d+)$/i.exec(code.trim())
-    if (!m) return null
-    return { rua: Number(m[1]), estante: Number(m[2]), nivel: Number(m[3]), posicao: Number(m[4]) }
+  /** Auto-detecta o padrão a partir do código e devolve partes + sequence. */
+  private parseCode(code: string): { scheme: AddressScheme; coluna: string | null; rua: number | null; estante: number; nivel: number; posicao: number | null; sequence: number } | null {
+    const c = (code ?? '').trim().toUpperCase()
+    const m1 = /^([A-Z]+)(\d+)-N(\d+)$/.exec(c)              // A1-N1
+    if (m1) {
+      const coluna = m1[1], estante = Number(m1[2]), nivel = Number(m1[3])
+      return { scheme: 'coluna_estante_nivel', coluna, rua: null, estante, nivel, posicao: null, sequence: this.seqColuna(coluna, estante, nivel) }
+    }
+    const m2 = /^R(\d+)-E(\d+)-N(\d+)-P(\d+)$/.exec(c)        // R02-E05-N3-P01
+    if (m2) {
+      const rua = Number(m2[1]), estante = Number(m2[2]), nivel = Number(m2[3]), posicao = Number(m2[4])
+      return { scheme: 'rua_estante_nivel_posicao', coluna: null, rua, estante, nivel, posicao, sequence: this.seqRua(rua, estante, nivel, posicao) }
+    }
+    return null
   }
   private normalizeCode(code: string): string {
     return (code ?? '').trim().toUpperCase()
+  }
+
+  // ── Padrão escolhido pelo cliente (fulfillment_settings.settings.address_scheme) ──
+  async getScheme(orgId: string): Promise<AddressScheme> {
+    const { data } = await supabaseAdmin.from('fulfillment_settings').select('settings').eq('organization_id', orgId).maybeSingle()
+    const s = (data as { settings?: { address_scheme?: string } } | null)?.settings?.address_scheme
+    return (s === 'rua_estante_nivel_posicao' || s === 'coluna_estante_nivel') ? s : DEFAULT_ADDRESS_SCHEME
+  }
+  async setScheme(orgId: string, scheme: AddressScheme): Promise<{ ok: true; scheme: AddressScheme }> {
+    if (scheme !== 'coluna_estante_nivel' && scheme !== 'rua_estante_nivel_posicao') throw new BadRequestException('Padrão de endereçamento inválido.')
+    const { data } = await supabaseAdmin.from('fulfillment_settings').select('settings').eq('organization_id', orgId).maybeSingle()
+    const settings = { ...((data as { settings?: Record<string, unknown> } | null)?.settings ?? {}), address_scheme: scheme }
+    const { error } = await supabaseAdmin.from('fulfillment_settings')
+      .upsert({ organization_id: orgId, settings, updated_at: new Date().toISOString() }, { onConflict: 'organization_id' })
+    if (error) throw new BadRequestException(`Erro ao salvar padrão: ${error.message}`)
+    return { ok: true, scheme }
   }
 
   // ── CRUD de endereços ───────────────────────────────────────────────────────
@@ -59,7 +107,7 @@ export class FulfillmentLocationsService {
     return (data ?? []) as WarehouseLocation[]
   }
 
-  async createLocation(orgId: string, input: { warehouseId: string; code?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }): Promise<{ ok: true; id: string }> {
+  async createLocation(orgId: string, input: { warehouseId: string; code?: string; coluna?: string; setor?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }): Promise<{ ok: true; id: string }> {
     if (!input.warehouseId) throw new BadRequestException('Informe o CD (warehouseId).')
     const row = this.locationRowFromInput(orgId, input)
     const { data, error } = await supabaseAdmin.from('warehouse_locations').insert(row).select('id').maybeSingle()
@@ -67,24 +115,25 @@ export class FulfillmentLocationsService {
     return { ok: true, id: (data as { id: string }).id }
   }
 
-  private locationRowFromInput(orgId: string, input: { warehouseId: string; code?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }): Record<string, unknown> {
-    let { rua, estante, nivel, posicao } = input
-    let code = input.code ? this.normalizeCode(input.code) : null
-    if (code && rua == null) {
-      const p = this.parseCode(code)
-      if (p) { rua = p.rua; estante = p.estante; nivel = p.nivel; posicao = p.posicao }
+  /** Monta a linha de endereço a partir do código (auto-detecta o padrão) ou das partes. */
+  private locationRowFromInput(orgId: string, input: { warehouseId: string; code?: string; coluna?: string; setor?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }): Record<string, unknown> {
+    const base = { organization_id: orgId, warehouse_id: input.warehouseId, location_type: input.type ?? 'picking' }
+    // 1) veio o código → auto-detecta o padrão
+    if (input.code) {
+      const p = this.parseCode(input.code)
+      if (!p) throw new BadRequestException('Código inválido. Use A1-N1 (coluna-estante-nível) ou R02-E05-N3-P01.')
+      return { ...base, code: this.normalizeCode(input.code), coluna: p.coluna, setor: input.setor ?? null, rua: p.rua, estante: p.estante, nivel: p.nivel, posicao: p.posicao, sequence: p.sequence }
     }
-    if (!code && rua != null && estante != null && nivel != null && posicao != null) {
-      code = this.buildCode(rua, estante, nivel, posicao)
+    // 2) veio coluna+estante+nível → padrão 1 (A1-N1)
+    if (input.coluna && input.estante != null && input.nivel != null) {
+      const coluna = input.coluna.toUpperCase()
+      return { ...base, code: this.buildCodeColuna(coluna, input.estante, input.nivel), coluna, setor: input.setor ?? null, rua: null, estante: input.estante, nivel: input.nivel, posicao: null, sequence: this.seqColuna(coluna, input.estante, input.nivel) }
     }
-    if (!code) throw new BadRequestException('Informe o código do endereço (ex.: R02-E05-N3-P01) ou rua/estante/nível/posição.')
-    const sequence = (rua != null && estante != null && nivel != null && posicao != null)
-      ? this.buildSeq(rua, estante, nivel, posicao) : 0
-    return {
-      organization_id: orgId, warehouse_id: input.warehouseId, code,
-      rua: rua ?? null, estante: estante ?? null, nivel: nivel ?? null, posicao: posicao ?? null,
-      sequence, location_type: input.type ?? 'picking',
+    // 3) veio rua+estante+nível+posição → padrão 2 (R02-E05-N3-P01)
+    if (input.rua != null && input.estante != null && input.nivel != null && input.posicao != null) {
+      return { ...base, code: this.buildCodeRua(input.rua, input.estante, input.nivel, input.posicao), coluna: null, setor: null, rua: input.rua, estante: input.estante, nivel: input.nivel, posicao: input.posicao, sequence: this.seqRua(input.rua, input.estante, input.nivel, input.posicao) }
     }
+    throw new BadRequestException('Informe o código (A1-N1 ou R02-E05-N3-P01) ou as partes do endereço.')
   }
 
   async updateLocation(orgId: string, id: string, patch: { is_active?: boolean; type?: LocationType; sequence?: number }): Promise<{ ok: true }> {
@@ -105,27 +154,40 @@ export class FulfillmentLocationsService {
     return { ok: true }
   }
 
-  /** Gera a malha de endereços de uma vez (ranges). Idempotente: pula os que já existem. */
+  /** Gera a malha de endereços de uma vez (ranges), no padrão escolhido. Idempotente. */
   async generateGrid(orgId: string, input: {
     warehouseId: string
-    ruaFrom: number; ruaTo: number; estanteFrom: number; estanteTo: number
-    nivelFrom: number; nivelTo: number; posicaoFrom: number; posicaoTo: number
+    scheme?: AddressScheme
+    // padrão 1 (coluna-estante-nível): colFrom/colTo são letras (A..E); setores opcional
+    colFrom?: string; colTo?: string; setores?: Record<string, string>
+    // padrão 2 (rua-estante-nível-posição)
+    ruaFrom?: number; ruaTo?: number; posicaoFrom?: number; posicaoTo?: number
+    // comum
+    estanteFrom: number; estanteTo: number; nivelFrom: number; nivelTo: number
     type?: LocationType
   }): Promise<{ ok: true; created: number; skipped: number }> {
     if (!input.warehouseId) throw new BadRequestException('Informe o CD (warehouseId).')
+    const scheme = input.scheme ?? await this.getScheme(orgId)
+    const type = input.type ?? 'picking'
     const rng = (a: number, b: number) => { const lo = Math.min(a, b), hi = Math.max(a, b); return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i) }
     const rows: Record<string, unknown>[] = []
-    for (const rua of rng(input.ruaFrom, input.ruaTo))
-      for (const estante of rng(input.estanteFrom, input.estanteTo))
-        for (const nivel of rng(input.nivelFrom, input.nivelTo))
-          for (const posicao of rng(input.posicaoFrom, input.posicaoTo))
-            rows.push({
-              organization_id: orgId, warehouse_id: input.warehouseId,
-              code: this.buildCode(rua, estante, nivel, posicao),
-              rua, estante, nivel, posicao,
-              sequence: this.buildSeq(rua, estante, nivel, posicao),
-              location_type: input.type ?? 'picking',
-            })
+    if (scheme === 'coluna_estante_nivel') {
+      const cFrom = this.colToNum(input.colFrom || 'A') || 1
+      const cTo = this.colToNum(input.colTo || input.colFrom || 'A') || cFrom
+      for (const cn of rng(cFrom, cTo)) {
+        const coluna = this.numToCol(cn)
+        const setor = input.setores?.[coluna] ?? null
+        for (const estante of rng(input.estanteFrom, input.estanteTo))
+          for (const nivel of rng(input.nivelFrom, input.nivelTo))
+            rows.push({ organization_id: orgId, warehouse_id: input.warehouseId, code: this.buildCodeColuna(coluna, estante, nivel), coluna, setor, rua: null, estante, nivel, posicao: null, sequence: this.seqColuna(coluna, estante, nivel), location_type: type })
+      }
+    } else {
+      for (const rua of rng(input.ruaFrom ?? 1, input.ruaTo ?? 1))
+        for (const estante of rng(input.estanteFrom, input.estanteTo))
+          for (const nivel of rng(input.nivelFrom, input.nivelTo))
+            for (const posicao of rng(input.posicaoFrom ?? 1, input.posicaoTo ?? 1))
+              rows.push({ organization_id: orgId, warehouse_id: input.warehouseId, code: this.buildCodeRua(rua, estante, nivel, posicao), coluna: null, setor: null, rua, estante, nivel, posicao, sequence: this.seqRua(rua, estante, nivel, posicao), location_type: type })
+    }
     if (rows.length === 0) return { ok: true, created: 0, skipped: 0 }
     if (rows.length > 20000) throw new BadRequestException('Malha muito grande (máx. 20.000 endereços por vez). Reduza os intervalos.')
 
@@ -145,6 +207,16 @@ export class FulfillmentLocationsService {
       created += Math.min(500, toInsert.length - i)
     }
     return { ok: true, created, skipped: rows.length - created }
+  }
+
+  /** Nomeia o setor de uma coluna inteira (padrão 1). Ex.: coluna A = "Pendentes". */
+  async setSector(orgId: string, warehouseId: string, coluna: string, setor: string | null): Promise<{ ok: true }> {
+    const col = (coluna ?? '').toUpperCase()
+    if (!col) throw new BadRequestException('Informe a coluna (letra).')
+    const { error } = await supabaseAdmin.from('warehouse_locations')
+      .update({ setor: setor || null }).eq('organization_id', orgId).eq('warehouse_id', warehouseId).eq('coluna', col)
+    if (error) throw new BadRequestException(`Erro ao nomear setor: ${error.message}`)
+    return { ok: true }
   }
 
   // ── Vínculo produto ↔ endereço ──────────────────────────────────────────────

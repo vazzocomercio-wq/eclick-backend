@@ -11,7 +11,7 @@ import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type 
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
 import { FulfillmentSefazService } from './fulfillment-sefaz.service'
-import { FulfillmentLocationsService, type LocationType } from './fulfillment-locations.service'
+import { FulfillmentLocationsService, type LocationType, type AddressScheme } from './fulfillment-locations.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -420,9 +420,30 @@ export class FulfillmentController {
   }
 
   // estáticos ANTES de :id (NestJS resolve por ordem de declaração)
+  @Get('locations/scheme')
+  getScheme(@ReqUser() u: ReqUserPayload) {
+    return this.locations.getScheme(this.org(u)).then((scheme) => ({ scheme }))
+  }
+
+  @Put('locations/scheme')
+  setScheme(@ReqUser() u: ReqUserPayload, @Body() body: { scheme: AddressScheme }) {
+    return this.locations.setScheme(this.org(u), body?.scheme)
+  }
+
   @Post('locations/generate')
-  generateLocations(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; ruaFrom: number; ruaTo: number; estanteFrom: number; estanteTo: number; nivelFrom: number; nivelTo: number; posicaoFrom: number; posicaoTo: number; type?: LocationType }) {
+  generateLocations(@ReqUser() u: ReqUserPayload, @Body() body: {
+    warehouseId: string; scheme?: AddressScheme
+    colFrom?: string; colTo?: string; setores?: Record<string, string>
+    ruaFrom?: number; ruaTo?: number; posicaoFrom?: number; posicaoTo?: number
+    estanteFrom: number; estanteTo: number; nivelFrom: number; nivelTo: number; type?: LocationType
+  }) {
     return this.locations.generateGrid(this.org(u), body)
+  }
+
+  @Post('locations/sector')
+  setSector(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; coluna: string; setor: string | null }) {
+    if (!body?.warehouseId || !body?.coluna) throw new BadRequestException('Informe o CD e a coluna.')
+    return this.locations.setSector(this.org(u), body.warehouseId, body.coluna, body.setor ?? null)
   }
 
   @Post('locations/import')
@@ -454,7 +475,7 @@ export class FulfillmentController {
   }
 
   @Post('locations')
-  createLocation(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; code?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }) {
+  createLocation(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; code?: string; coluna?: string; setor?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }) {
     return this.locations.createLocation(this.org(u), body)
   }
 
