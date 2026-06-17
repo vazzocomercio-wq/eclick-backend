@@ -11,6 +11,7 @@ import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type 
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
 import { FulfillmentSefazService } from './fulfillment-sefaz.service'
+import { FulfillmentLocationsService, type LocationType } from './fulfillment-locations.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -31,6 +32,7 @@ export class FulfillmentController {
     private readonly packaging: FulfillmentPackagingService,
     private readonly fiscal: FulfillmentFiscalService,
     private readonly sefaz: FulfillmentSefazService,
+    private readonly locations: FulfillmentLocationsService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -409,5 +411,72 @@ export class FulfillmentController {
   @Post('waves/:id/cancel')
   cancelWave(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
     return this.waves.cancelWave(this.org(u), id)
+  }
+
+  // ── Endereçamento de estoque (WMS slotting) ───────────────────────────
+  @Get('locations')
+  listLocations(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.locations.listLocations(this.org(u), warehouseId)
+  }
+
+  // estáticos ANTES de :id (NestJS resolve por ordem de declaração)
+  @Post('locations/generate')
+  generateLocations(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; ruaFrom: number; ruaTo: number; estanteFrom: number; estanteTo: number; nivelFrom: number; nivelTo: number; posicaoFrom: number; posicaoTo: number; type?: LocationType }) {
+    return this.locations.generateGrid(this.org(u), body)
+  }
+
+  @Post('locations/import')
+  importLocations(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; rows: Array<{ sku: string; code: string }> }) {
+    if (!body?.warehouseId) throw new BadRequestException('Informe o CD (warehouseId).')
+    return this.locations.bulkImport(this.org(u), body.warehouseId, body.rows ?? [])
+  }
+
+  @Post('locations/abc-suggest')
+  abcSuggest(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; apply?: boolean; limit?: number }) {
+    if (!body?.warehouseId) throw new BadRequestException('Informe o CD (warehouseId).')
+    return this.locations.abcSuggest(this.org(u), body.warehouseId, { apply: body.apply, limit: body.limit })
+  }
+
+  @Post('locations/assign')
+  assignProduct(@ReqUser() u: ReqUserPayload, @Body() body: { productId: string; warehouseId: string; code: string; isPrimary?: boolean }) {
+    if (!body?.productId || !body?.warehouseId || !body?.code) throw new BadRequestException('Informe produto, CD e endereço.')
+    return this.locations.assignProduct(this.org(u), { productId: body.productId, warehouseId: body.warehouseId, code: body.code, isPrimary: body.isPrimary })
+  }
+
+  @Delete('locations/assign/:id')
+  unassignProduct(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.locations.unassignProduct(this.org(u), id)
+  }
+
+  @Get('locations/product/:productId')
+  productLocations(@ReqUser() u: ReqUserPayload, @Param('productId') productId: string) {
+    return this.locations.productLocations(this.org(u), productId)
+  }
+
+  @Post('locations')
+  createLocation(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId: string; code?: string; rua?: number; estante?: number; nivel?: number; posicao?: number; type?: LocationType }) {
+    return this.locations.createLocation(this.org(u), body)
+  }
+
+  @Patch('locations/:id')
+  updateLocation(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { is_active?: boolean; type?: LocationType; sequence?: number }) {
+    return this.locations.updateLocation(this.org(u), id, body ?? {})
+  }
+
+  @Delete('locations/:id')
+  deleteLocation(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.locations.deleteLocation(this.org(u), id)
+  }
+
+  @Get('locations/:id/products')
+  locationProducts(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.locations.locationProducts(this.org(u), id)
+  }
+
+  // Capture-on-pick: bipou a prateleira de um item sem endereço → grava o vínculo
+  @Post('pick-tasks/:id/set-location')
+  setPickLocation(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { code: string }) {
+    if (!body?.code) throw new BadRequestException('Bipe o endereço da prateleira.')
+    return this.locations.setLocationForPickTask(this.org(u), id, body.code)
   }
 }

@@ -35,27 +35,33 @@ export class FulfillmentWaveService {
   }
 
   private async pickTasksOf(orgId: string, foIds: string[]) {
-    if (foIds.length === 0) return [] as Array<{ fulfillment_order_id: string; sku: string; title: string | null; expected_qty: number; expected_barcode: string | null; status: string }>
+    if (foIds.length === 0) return [] as Array<{ fulfillment_order_id: string; sku: string; title: string | null; expected_qty: number; expected_barcode: string | null; status: string; location_code: string | null; location_seq: number | null }>
     const { data } = await supabaseAdmin
-      .from('pick_tasks').select('fulfillment_order_id, sku, title, expected_qty, expected_barcode, status')
+      .from('pick_tasks').select('fulfillment_order_id, sku, title, expected_qty, expected_barcode, status, location_code, location_seq')
       .eq('organization_id', orgId).in('fulfillment_order_id', foIds)
-    return (data ?? []) as Array<{ fulfillment_order_id: string; sku: string; title: string | null; expected_qty: number; expected_barcode: string | null; status: string }>
+    return (data ?? []) as Array<{ fulfillment_order_id: string; sku: string; title: string | null; expected_qty: number; expected_barcode: string | null; status: string; location_code: string | null; location_seq: number | null }>
   }
 
-  /** Lista consolidada (por SKU) de uma onda: total a coletar × coletado × por-pedido. */
+  /** Lista consolidada (por SKU) de uma onda: total a coletar × coletado × por-pedido.
+   *  Ordenada pela ROTA (endereço de coleta) — o separador coleta numa volta só. */
   async consolidatedList(orgId: string, waveId: string, collected: Record<string, number> = {}) {
     const foIds = await this.orderIdsOfWave(orgId, waveId)
     const tasks = await this.pickTasksOf(orgId, foIds)
     const refs = await this.ordersInfo(orgId, foIds)
-    const bySku = new Map<string, { sku: string; title: string | null; expected_barcode: string | null; totalQty: number; perOrder: Array<{ foId: string; ref: string | null; qty: number }> }>()
+    const bySku = new Map<string, { sku: string; title: string | null; expected_barcode: string | null; locationCode: string | null; locationSeq: number | null; totalQty: number; perOrder: Array<{ foId: string; ref: string | null; qty: number }> }>()
     for (const t of tasks) {
-      const e = bySku.get(t.sku) ?? { sku: t.sku, title: t.title, expected_barcode: t.expected_barcode, totalQty: 0, perOrder: [] }
+      const e = bySku.get(t.sku) ?? { sku: t.sku, title: t.title, expected_barcode: t.expected_barcode, locationCode: t.location_code, locationSeq: t.location_seq, totalQty: 0, perOrder: [] }
       e.totalQty += t.expected_qty
       e.perOrder.push({ foId: t.fulfillment_order_id, ref: refs.get(t.fulfillment_order_id)?.reference ?? null, qty: t.expected_qty })
       if (!e.expected_barcode && t.expected_barcode) e.expected_barcode = t.expected_barcode
+      if (e.locationCode == null && t.location_code) { e.locationCode = t.location_code; e.locationSeq = t.location_seq }
       bySku.set(t.sku, e)
     }
-    return [...bySku.values()].map((e) => ({ ...e, collectedQty: collected[e.sku] ?? 0 }))
+    // ordena pela rota: endereço (sequence) primeiro, sem endereço por último
+    const BIG = Number.MAX_SAFE_INTEGER
+    return [...bySku.values()]
+      .sort((a, b) => (a.locationSeq ?? BIG) - (b.locationSeq ?? BIG))
+      .map((e) => ({ ...e, collectedQty: collected[e.sku] ?? 0 }))
   }
 
   // ── CRUD / fluxo ────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { FulfillmentAiService } from './fulfillment-ai.service'
 import { FulfillmentLabelsService, FULFILLMENT_BUCKET } from './fulfillment-labels.service'
 import { FulfillmentAccountsService, type PlatformTiming } from './fulfillment-accounts.service'
+import { FulfillmentLocationsService } from './fulfillment-locations.service'
 import {
   DEFAULT_FULFILLMENT_SETTINGS,
   type ActionType, type FulfillmentSettings, type SeedItem, type SourceType,
@@ -26,6 +27,7 @@ export class FulfillmentService {
     private readonly ai: FulfillmentAiService,
     private readonly labels: FulfillmentLabelsService,
     private readonly accounts: FulfillmentAccountsService,
+    private readonly locations: FulfillmentLocationsService,
   ) {}
 
   // ════════════════════════════════════════════════════════════════════
@@ -267,19 +269,27 @@ export class FulfillmentService {
 
     // Enriquece EAN do catálogo (por SKU) pra bipagem
     const eanBySku = await this.lookupEans(orgId, items.map((i) => i.sku))
+    // Endereço de coleta (WMS slotting) — onde pegar cada item no CD
+    const locBySku = await this.locations.lookupLocationsBySku(orgId, warehouseId, items.map((i) => i.sku))
 
-    const pickRows = items.map((it) => ({
-      organization_id:      orgId,
-      warehouse_id:         warehouseId,
-      fulfillment_order_id: foId,
-      product_id:           it.productId ?? null,
-      sku:                  it.sku,
-      title:                it.title ?? null,
-      expected_qty:         it.qty,
-      expected_barcode:     it.barcode ?? eanBySku.get(it.sku) ?? null,
-      sla_deadline:         effectiveDeadline,
-      status:               'pending',
-    }))
+    const pickRows = items.map((it) => {
+      const loc = locBySku.get(it.sku)
+      return {
+        organization_id:      orgId,
+        warehouse_id:         warehouseId,
+        fulfillment_order_id: foId,
+        product_id:           it.productId ?? null,
+        sku:                  it.sku,
+        title:                it.title ?? null,
+        expected_qty:         it.qty,
+        expected_barcode:     it.barcode ?? eanBySku.get(it.sku) ?? null,
+        sla_deadline:         effectiveDeadline,
+        location_id:          loc?.id ?? null,
+        location_code:        loc?.code ?? null,
+        location_seq:         loc?.seq ?? null,
+        status:               'pending',
+      }
+    })
     const { error: pErr } = await supabaseAdmin.from('pick_tasks').insert(pickRows)
     if (pErr) throw new BadRequestException(`Erro ao criar tarefas de separação: ${pErr.message}`)
 
@@ -523,12 +533,13 @@ export class FulfillmentService {
   async pickQueue(orgId: string, warehouseId?: string) {
     let q = supabaseAdmin
       .from('pick_tasks')
-      .select('id, fulfillment_order_id, sku, title, expected_qty, picked_qty, expected_barcode, status, priority, sla_deadline, warehouse_id')
+      .select('id, fulfillment_order_id, sku, title, expected_qty, picked_qty, expected_barcode, status, priority, sla_deadline, warehouse_id, location_id, location_code, location_seq')
       .eq('organization_id', orgId)
       .in('status', ['pending', 'in_progress'])
       .order('priority', { ascending: true })
       .order('sla_deadline', { ascending: true, nullsFirst: false })
       .order('created_at', { ascending: true })
+      .order('location_seq', { ascending: true, nullsFirst: false })
       .limit(200)
     if (warehouseId) q = q.eq('warehouse_id', warehouseId)
     const { data } = await q
