@@ -150,7 +150,12 @@ export class TrendsCollectorService {
     for (const c of top) {
       const prod = await this.resolveProduct(c.id, token)
       if (!prod) continue
-      await this.upsertProduct(orgId, catId, catName, c.id, c.position, prod)
+      // buy_box_winner costuma vir null no catálogo → preço real vem dos itens
+      let priceCents = prod.buy_box_winner?.price != null
+        ? Math.round(prod.buy_box_winner.price * 100)
+        : null
+      if (priceCents == null) priceCents = await this.fetchPriceCents(c.id, token)
+      await this.upsertProduct(orgId, catId, catName, c.id, priceCents, prod)
       result.resolved++
     }
   }
@@ -166,13 +171,27 @@ export class TrendsCollectorService {
     }
   }
 
+  /** Preço de referência = menor preço entre os itens que vendem o produto de
+   *  catálogo (o que o comprador vê). buy_box_winner do /products vem null. */
+  private async fetchPriceCents(productId: string, token: string): Promise<number | null> {
+    try {
+      const res = await axios.get(`${ML_API}/products/${productId}/items`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      const prices = (res.data?.results ?? [])
+        .map((r: { price?: number }) => r.price)
+        .filter((p: unknown): p is number => typeof p === 'number' && p > 0)
+      if (!prices.length) return null
+      return Math.round(Math.min(...prices) * 100)
+    } catch {
+      return null
+    }
+  }
+
   private async upsertProduct(
     orgId: string, catId: string, catName: string | null,
-    externalId: string, position: number, prod: CatalogProduct,
+    externalId: string, priceCents: number | null, prod: CatalogProduct,
   ): Promise<void> {
-    const priceCents = prod.buy_box_winner?.price != null
-      ? Math.round(prod.buy_box_winner.price * 100)
-      : null
     const now = new Date().toISOString()
 
     const { error } = await supabaseAdmin.from('trends_products').upsert({
