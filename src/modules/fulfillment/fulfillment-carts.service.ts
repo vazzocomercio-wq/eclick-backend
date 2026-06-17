@@ -166,24 +166,36 @@ export class FulfillmentCartsService {
     const lines = [...bySku.values()].sort((a, b) => a.seq - b.seq)
     const vols = await this.productVolumesBySku(orgId, lines.map((l) => l.sku))
 
-    const carts: Array<{ index: number; volumeUsed: number; volumeCap: number; items: Array<{ sku: string; title: string | null; qty: number; locationCode: string | null }> }> = []
+    type CartItem = { sku: string; title: string | null; qty: number; locationCode: string | null; split: boolean }
+    type Cart = { index: number; volumeUsed: number; volumeCap: number; items: CartItem[] }
+    const newCart = (index: number): Cart => ({ index, volumeUsed: 0, volumeCap: Math.round(cap), items: [] })
+    const carts: Cart[] = []
     const toMeasure: Array<{ sku: string; title: string | null }> = []
-    let cur = { index: 1, volumeUsed: 0, volumeCap: Math.round(cap), items: [] as Array<{ sku: string; title: string | null; qty: number; locationCode: string | null }> }
+    const oversized: Array<{ sku: string; title: string | null; unitVolumeCm3: number }> = []
+    let cur = newCart(1)
     for (const ln of lines) {
       const unit = vols.get(ln.sku)
       if (unit == null) { toMeasure.push({ sku: ln.sku, title: ln.title }); continue }
-      const lineVol = unit * ln.qty
-      // abre novo carrinho se estourar (e o atual já tem item); item maior que o carrinho fica sozinho
-      if (cur.items.length > 0 && cur.volumeUsed + lineVol > cap) {
-        carts.push(cur)
-        cur = { index: cur.index + 1, volumeUsed: 0, volumeCap: Math.round(cap), items: [] }
+      if (unit > cap) { oversized.push({ sku: ln.sku, title: ln.title, unitVolumeCm3: Math.round(unit) }); continue } // 1 unidade não cabe nem sozinha
+      // DIVIDE o lote entre carrinhos: enche o carrinho atual com quantas unidades couberem,
+      // ao encher abre o próximo (o mesmo SKU pode aparecer em mais de um carrinho = parcial).
+      let remaining = ln.qty
+      while (remaining > 0) {
+        let fit = Math.floor((cap - cur.volumeUsed) / unit)
+        if (fit <= 0) {
+          if (cur.items.length > 0) carts.push(cur)
+          cur = newCart(cur.index + 1)
+          fit = Math.floor(cap / unit)
+        }
+        const take = Math.min(fit, remaining)
+        cur.items.push({ sku: ln.sku, title: ln.title, qty: take, locationCode: ln.locationCode, split: take < ln.qty })
+        cur.volumeUsed = Math.round(cur.volumeUsed + take * unit)
+        remaining -= take
       }
-      cur.items.push({ sku: ln.sku, title: ln.title, qty: ln.qty, locationCode: ln.locationCode })
-      cur.volumeUsed = Math.round(cur.volumeUsed + lineVol)
     }
     if (cur.items.length > 0) carts.push(cur)
 
-    const plan = { cartName: (cart as PickingCart).name, capacity: Math.round(cap), carts, toMeasure, generatedAt: null as string | null }
+    const plan = { cartName: (cart as PickingCart).name, capacity: Math.round(cap), carts, toMeasure, oversized, generatedAt: null as string | null }
     await supabaseAdmin.from('fulfillment_waves').update({ cart_id: cartId, cart_plan: plan }).eq('id', waveId).eq('organization_id', orgId)
     return { ok: true, carts: carts.length, toMeasure: toMeasure.length, plan }
   }
