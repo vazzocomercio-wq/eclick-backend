@@ -253,6 +253,7 @@ export class TikTokShopController {
     @Query('q') q?: string,
     @Query('offset') offset?: string,
     @Query('limit') limit?: string,
+    @Query('sort') sort?: string,
   ) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.listListings(u.orgId, {
@@ -260,6 +261,7 @@ export class TikTokShopController {
       q,
       offset: offset ? Number(offset) : undefined,
       limit: limit ? Number(limit) : undefined,
+      sort,
     })
   }
 

@@ -808,6 +808,7 @@ export class MercadolivreController {
     @Query('limit') limit?: string,
     @Query('q') q?: string,
     @Query('seller_id') sellerId?: string,
+    @Query('sort') sort?: string,
   ) {
     const sid = sellerId ? Number(sellerId) : undefined
     return this.ml.getListings(
@@ -817,6 +818,7 @@ export class MercadolivreController {
       Number(limit ?? 20),
       q,
       Number.isFinite(sid) ? sid : undefined,
+      sort,
     )
   }
 }

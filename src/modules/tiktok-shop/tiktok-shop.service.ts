@@ -133,6 +133,9 @@ export interface TkListing {
   category: string | null
   sku_count: number
   synced_at: string | null
+  /** epoch (s) do produto no TikTok — usados só pra ordenar a lista. */
+  create_time?: number | null
+  update_time?: number | null
 }
 
 /** Abas da página (mesmo vocabulário do ML). */
@@ -1786,6 +1789,11 @@ export class TikTokShopService {
       const skus = raw?.skus ?? []
       const category = this.leafCategory(raw?.category_chains)
       const multi = skus.length > 1
+      // create_time/update_time vêm no raw do detalhe TikTok (epoch s) — não
+      // declarados em TtsProduct; lidos por cast só pra ordenar a lista.
+      const rawTimes = raw as ({ create_time?: number; update_time?: number } | null)
+      const createTime = rawTimes?.create_time ?? null
+      const updateTime = rawTimes?.update_time ?? null
 
       if (skus.length === 0) {
         // Produto sem detalhe ainda (search leve): linha mínima.
@@ -1805,6 +1813,8 @@ export class TikTokShopService {
           category,
           sku_count: 0,
           synced_at: r.synced_at,
+          create_time: createTime,
+          update_time: updateTime,
         })
         continue
       }
@@ -1838,6 +1848,8 @@ export class TikTokShopService {
           category,
           sku_count: skus.length,
           synced_at: r.synced_at,
+          create_time: createTime,
+          update_time: updateTime,
         })
       }
     }
@@ -1847,7 +1859,7 @@ export class TikTokShopService {
   /** Lista anúncios TikTok (nível SKU) com filtro de aba + busca + paginação. */
   async listListings(
     orgId: string,
-    opts: { status?: string; q?: string; offset?: number; limit?: number } = {},
+    opts: { status?: string; q?: string; offset?: number; limit?: number; sort?: string } = {},
   ): Promise<{ items: TkListing[]; total: number }> {
     const all = await this.buildListingRows(orgId)
     const tab = (opts.status ?? '').toLowerCase()
@@ -1865,6 +1877,20 @@ export class TikTokShopService {
           r.tts_product_id.includes(q),
       )
     }
+
+    // Ordenação (espelha o ML): created_desc/asc por create_time,
+    // updated_desc por update_time. Sem sort = default (synced_at desc do
+    // buildListingRows). Itens sem timestamp vão pro fim.
+    const cmp = (a: number | null | undefined, b: number | null | undefined, dir: 1 | -1) => {
+      const av = a ?? null, bv = b ?? null
+      if (av === bv) return 0
+      if (av === null) return 1
+      if (bv === null) return -1
+      return av < bv ? dir : -dir
+    }
+    if (opts.sort === 'created_desc') filtered = [...filtered].sort((a, b) => cmp(a.create_time, b.create_time, -1))
+    else if (opts.sort === 'created_asc') filtered = [...filtered].sort((a, b) => cmp(a.create_time, b.create_time, 1))
+    else if (opts.sort === 'updated_desc') filtered = [...filtered].sort((a, b) => cmp(a.update_time, b.update_time, -1))
 
     const total = filtered.length
     const offset = Math.max(0, opts.offset ?? 0)

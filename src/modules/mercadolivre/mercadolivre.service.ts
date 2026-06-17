@@ -1910,7 +1910,16 @@ export class MercadolivreService {
     offset: number,
     limit: number,
     q?: string,
+    sort?: string,
   ): Promise<{ items: any[]; total: number }> {
+    // Ordenação (param `orders` da search de itens do ML). Só no browse
+    // (sem termo); com busca o ML mescla 2 chamadas e a ordem perde sentido.
+    const ML_ORDERS: Record<string, string> = {
+      created_desc: 'start_time_desc',
+      created_asc:  'start_time_asc',
+      updated_desc: 'last_updated_desc',
+    }
+    const orders = sort ? ML_ORDERS[sort] : undefined
     // Busca unificada — o termo casa contra qualquer dado relevante do anúncio:
     //   - código MLB (com ou sem prefixo) → resolve o item direto
     //   - senão → busca por título (q) E por SKU exato (seller_sku) na API ML
@@ -1925,7 +1934,7 @@ export class MercadolivreService {
     if (!term) {
       const { data: search } = await axios.get(searchUrl, {
         headers: authHeaders,
-        params: { status, offset, limit },
+        params: { status, offset, limit, ...(orders ? { orders } : {}) },
       })
       ids = search.results ?? []
       total = search.paging?.total ?? 0
@@ -2037,7 +2046,7 @@ export class MercadolivreService {
     return { items, total }
   }
 
-  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string, sellerIdFilter?: number) {
+  async getListings(orgId: string, status = 'active', offset = 0, limit = 20, q?: string, sellerIdFilter?: number, sort?: string) {
     const all = await this.getAllConnectionsForOrg(orgId)
     if (!all.length) throw new UnauthorizedException('ML não conectado')
 
@@ -2055,7 +2064,7 @@ export class MercadolivreService {
       try {
         const token = await this.refreshIfNeeded(conn)
         const { items, total } = await this.fetchListingsForAccount(
-          conn.seller_id, token, status, offset, limit, q,
+          conn.seller_id, token, status, offset, limit, q, sort,
         )
         allItems = allItems.concat(items.map(i => ({
           ...i,
