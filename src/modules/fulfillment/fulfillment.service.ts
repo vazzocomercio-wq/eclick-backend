@@ -4,6 +4,7 @@ import { FulfillmentAiService } from './fulfillment-ai.service'
 import { FulfillmentLabelsService, FULFILLMENT_BUCKET } from './fulfillment-labels.service'
 import { FulfillmentAccountsService, type PlatformTiming } from './fulfillment-accounts.service'
 import { FulfillmentLocationsService } from './fulfillment-locations.service'
+import { computePickProfile } from './fulfillment-carts.service'
 import {
   DEFAULT_FULFILLMENT_SETTINGS,
   type ActionType, type FulfillmentSettings, type SeedItem, type SourceType,
@@ -261,6 +262,7 @@ export class FulfillmentService {
         shipment_id:     timing?.shipmentId ?? null,
         scheduled_pickup_from: timing?.scheduledFrom ?? null,
         scheduled_pickup_to:   timing?.scheduledTo ?? null,
+        pick_profile:    computePickProfile(items),
         status:          'received',
       })
       .select('id').maybeSingle()
@@ -1003,7 +1005,7 @@ export class FulfillmentService {
     const map = new Map<string, Record<string, unknown>>()
     if (foIds.length === 0) return map
     const { data } = await supabaseAdmin
-      .from('fulfillment_orders').select('id, reference, channel, source_type, customer, items_count, status, account_id, company_id')
+      .from('fulfillment_orders').select('id, reference, channel, source_type, customer, items_count, status, account_id, company_id, pick_profile')
       .eq('organization_id', orgId).in('id', foIds)
     const orders = (data ?? []) as Array<Record<string, unknown>>
     // Rótulo de conta/empresa: sem isso a fila mostra só "mercadolivre" genérico e o

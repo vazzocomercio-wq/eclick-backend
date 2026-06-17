@@ -12,6 +12,7 @@ import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem 
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
 import { FulfillmentSefazService } from './fulfillment-sefaz.service'
 import { FulfillmentLocationsService, type LocationType, type AddressScheme } from './fulfillment-locations.service'
+import { FulfillmentCartsService } from './fulfillment-carts.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -33,6 +34,7 @@ export class FulfillmentController {
     private readonly fiscal: FulfillmentFiscalService,
     private readonly sefaz: FulfillmentSefazService,
     private readonly locations: FulfillmentLocationsService,
+    private readonly carts: FulfillmentCartsService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -499,5 +501,40 @@ export class FulfillmentController {
   setPickLocation(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { code: string }) {
     if (!body?.code) throw new BadRequestException('Bipe o endereço da prateleira.')
     return this.locations.setLocationForPickTask(this.org(u), id, body.code)
+  }
+
+  // ── Carrinhos de coleta (cubagem) ─────────────────────────────────────
+  @Get('carts')
+  listCarts(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.carts.listCarts(this.org(u), warehouseId)
+  }
+  @Post('carts')
+  createCart(@ReqUser() u: ReqUserPayload, @Body() body: { warehouseId?: string | null; name: string; width_cm: number; length_cm: number; height_cm: number; fill_factor?: number }) {
+    return this.carts.createCart(this.org(u), body)
+  }
+  @Patch('carts/:id')
+  updateCart(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { name?: string; width_cm?: number; length_cm?: number; height_cm?: number; fill_factor?: number; is_active?: boolean }) {
+    return this.carts.updateCart(this.org(u), id, body ?? {})
+  }
+  @Delete('carts/:id')
+  deleteCart(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.carts.deleteCart(this.org(u), id)
+  }
+
+  // ── Medição de produtos (tela de medição: bipar + digitar) ────────────
+  @Get('products-to-measure')
+  productsToMeasure(@ReqUser() u: ReqUserPayload, @Query('warehouse_id') warehouseId?: string) {
+    return this.carts.productsToMeasure(this.org(u), warehouseId)
+  }
+  @Post('products/measure')
+  measureProduct(@ReqUser() u: ReqUserPayload, @Body() body: { productId?: string; sku?: string; width_cm: number; length_cm: number; height_cm: number }) {
+    return this.carts.measureProduct(this.org(u), body)
+  }
+
+  // ── Plano de carrinhos da onda ────────────────────────────────────────
+  @Post('waves/:id/cart-plan')
+  planWaveCarts(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { cartId: string }) {
+    if (!body?.cartId) throw new BadRequestException('Escolha um carrinho.')
+    return this.carts.planWaveCarts(this.org(u), id, body.cartId)
   }
 }
