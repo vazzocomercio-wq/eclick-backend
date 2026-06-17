@@ -127,6 +127,9 @@ export class ShopeeProductSyncService {
     const createTime = typeof raw?.create_time === 'number'
       ? new Date(raw.create_time * 1000).toISOString()
       : null
+    const updateTime = typeof raw?.update_time === 'number'
+      ? new Date(raw.update_time * 1000).toISOString()
+      : null
 
     return {
       shop_id:        shopId,
@@ -136,6 +139,7 @@ export class ShopeeProductSyncService {
       image_count:    imageUrls.length || null,
       price:          listing.price ?? null,
       created_at:     createTime,
+      updated_at:     updateTime,          // p/ ordenar a lista por "Últimos alterados"
       shop_metrics:   shopMetrics,        // pilar seller_quality real (shop-level)
       main_image_url: imageUrls[0] ?? null,
       item_sku:       raw?.item_sku ?? null,

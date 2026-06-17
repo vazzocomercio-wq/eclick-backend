@@ -77,6 +77,7 @@ export interface AlgoScoreInput {
   ctr?:                number | null         // 0-1 (cliques/impressões)
   conversion?:         number | null         // 0-1 (pedidos/cliques)
   created_at?:         Date | string | null  // pra new-product boost (< 90d)
+  updated_at?:         Date | string | null  // só pra ordenar a lista ("Últimos alterados")
 
   // Pillar 3 — Qualidade de loja
   shop_metrics?:       ShopMetricsInput | null

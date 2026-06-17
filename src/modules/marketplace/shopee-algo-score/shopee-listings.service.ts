@@ -30,6 +30,10 @@ export interface ListingScoreCard {
   top_issues:      AlgoScoreIssue[]
   total_issues:    number
   computed_at:     string
+  /** datas do ANÚNCIO na Shopee (do input_snapshot) — só pra ordenar a lista.
+   *  updated_at preenche após o próximo sync de produtos. */
+  created_at:      string | null
+  updated_at:      string | null
 }
 
 /** F18 F1.2 — Lê scores recentes da view shopee.v_latest_algo_score. */
@@ -85,6 +89,8 @@ export class ShopeeListingsService {
       top_issues:      issues.slice(0, 3),
       total_issues:    issues.length,
       computed_at:     r.computed_at,
+      created_at:      (snap.created_at as string | undefined) ?? null,
+      updated_at:      (snap.updated_at as string | undefined) ?? null,
     }
   }
 }
