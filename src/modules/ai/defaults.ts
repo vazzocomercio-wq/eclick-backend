@@ -396,6 +396,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Radar de Tendências — racional de decisão de compra. Lê os números de
+  // tendência de um produto campeão (rank, momentum, demanda) e escreve a
+  // recomendação acionável (comprar/observar/ignorar) lembrando de validar
+  // o custo do fornecedor. Haiku pra custo/latência (roda em lote por produto).
+  trends_buy_decision: {
+    label:       'Decisão de compra (Radar de Tendências)',
+    description: 'Lê os sinais de tendência do produto e escreve a recomendação de compra acionável (valida margem com o custo do fornecedor)',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
