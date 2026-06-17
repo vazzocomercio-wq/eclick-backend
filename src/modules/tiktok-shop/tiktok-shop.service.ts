@@ -1881,12 +1881,14 @@ export class TikTokShopService {
     // Ordenação (espelha o ML): created_desc/asc por create_time,
     // updated_desc por update_time. Sem sort = default (synced_at desc do
     // buildListingRows). Itens sem timestamp vão pro fim.
+    // dir=1 → ascendente (mais antigo primeiro); dir=-1 → descendente.
+    // nulos sempre no fim. a<b → -dir coloca o menor antes quando asc.
     const cmp = (a: number | null | undefined, b: number | null | undefined, dir: 1 | -1) => {
       const av = a ?? null, bv = b ?? null
       if (av === bv) return 0
       if (av === null) return 1
       if (bv === null) return -1
-      return av < bv ? dir : -dir
+      return av < bv ? -dir : dir
     }
     if (opts.sort === 'created_desc') filtered = [...filtered].sort((a, b) => cmp(a.create_time, b.create_time, -1))
     else if (opts.sort === 'created_asc') filtered = [...filtered].sort((a, b) => cmp(a.create_time, b.create_time, 1))
