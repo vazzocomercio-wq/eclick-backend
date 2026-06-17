@@ -156,6 +156,9 @@ export class MultiplierService {
 
     const results: Array<{ product_id: string | null; target: string; status: 'created' | 'skipped' | 'failed'; draft_id?: string; reason?: string }> = []
     const toPublish: string[] = []
+    // drafts cujo created_at é anterior a isto = reaproveitados (já existiam),
+    // não criados agora — 5s de folga pra latência.
+    const startIso = new Date(Date.now() - 5000).toISOString()
 
     for (const r of resolved) {
       for (const t of targets) {
@@ -174,7 +177,9 @@ export class MultiplierService {
           if (draft.status === 'published') {
             results.push({ product_id: r.product_id, target: targetLabel, status: 'skipped', draft_id: draft.id, reason: 'já publicado' })
           } else {
-            results.push({ product_id: r.product_id, target: targetLabel, status: 'created', draft_id: draft.id })
+            const reused = (draft.created_at ?? '') < startIso
+            results.push({ product_id: r.product_id, target: targetLabel, status: reused ? 'skipped' : 'created', draft_id: draft.id, reason: reused ? 'rascunho já existia na fila' : undefined })
+            // publica mesmo o reaproveitado se publish=true (ele ainda não foi publicado)
             if (body.publish && (draft.status === 'draft' || draft.status === 'failed')) toPublish.push(draft.id)
           }
         } catch (e) {
