@@ -1914,9 +1914,13 @@ export class MercadolivreService {
   ): Promise<{ items: any[]; total: number }> {
     // Ordenação (param `orders` da search de itens do ML). Só no browse
     // (sem termo); com busca o ML mescla 2 chamadas e a ordem perde sentido.
+    // Criação usa `date_created` (data REAL de criação, imutável) e não
+    // `start_time` (que reseta a cada relist). O ML honra asc/desc (validado
+    // em last_updated); quando todos os itens têm a mesma data (ex.: catálogo
+    // migrado no mesmo dia), asc/desc coincidem — é o dado, não o filtro.
     const ML_ORDERS: Record<string, string> = {
-      created_desc: 'start_time_desc',
-      created_asc:  'start_time_asc',
+      created_desc: 'date_created_desc',
+      created_asc:  'date_created_asc',
       updated_desc: 'last_updated_desc',
     }
     const orders = sort ? ML_ORDERS[sort] : undefined
