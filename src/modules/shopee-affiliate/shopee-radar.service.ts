@@ -106,8 +106,42 @@ export class ShopeeRadarService {
       scored++
     }
 
+    // persiste as keywords usadas (pro cron diário repetir a busca)
+    if (args.keywords?.length) {
+      await supabaseAdmin.schema('shopee').from('affiliate_connections')
+        .update({ radar_keywords: args.keywords }).eq('organization_id', orgId)
+    }
+
     this.logger.log(`[shopee.radar] org=${orgId} fetched=${byItem.size} upserted=${upserted} scored=${scored}`)
     return { fetched: byItem.size, upserted, scored, errors }
+  }
+
+  // ── Config + cron diário ─────────────────────────────────────────────────
+
+  async getSettings(orgId: string): Promise<{ auto: boolean; keywords: string[]; connected: boolean }> {
+    const { data } = await supabaseAdmin.schema('shopee').from('affiliate_connections')
+      .select('status, radar_auto, radar_keywords').eq('organization_id', orgId).maybeSingle()
+    const row = data as { status: string | null; radar_auto: boolean | null; radar_keywords: string[] | null } | null
+    return { auto: !!row?.radar_auto, keywords: row?.radar_keywords ?? [], connected: row?.status === 'active' }
+  }
+
+  async saveSettings(orgId: string, patch: { auto?: boolean; keywords?: string[] }): Promise<{ ok: true }> {
+    const upd: Record<string, unknown> = {}
+    if (patch.auto != null)     upd.radar_auto = patch.auto
+    if (patch.keywords != null) upd.radar_keywords = patch.keywords
+    if (Object.keys(upd).length) {
+      await supabaseAdmin.schema('shopee').from('affiliate_connections')
+        .update(upd).eq('organization_id', orgId)
+    }
+    return { ok: true }
+  }
+
+  /** Orgs com auto-ingestão ligada (pro worker diário). */
+  async autoIngestOrgs(): Promise<{ orgId: string; keywords: string[] }[]> {
+    const { data } = await supabaseAdmin.schema('shopee').from('affiliate_connections')
+      .select('organization_id, radar_keywords').eq('status', 'active').eq('radar_auto', true)
+    return ((data ?? []) as { organization_id: string; radar_keywords: string[] | null }[])
+      .map(r => ({ orgId: r.organization_id, keywords: r.radar_keywords ?? [] }))
   }
 
   // ── Champion Score (sourcing) ────────────────────────────────────────────────

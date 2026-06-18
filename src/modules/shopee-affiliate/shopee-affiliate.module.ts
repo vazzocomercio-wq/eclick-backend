@@ -14,6 +14,7 @@ import { AffiliateRegistrationService } from './affiliate-registration.service'
 import { AffiliateRegistrationController } from './affiliate-registration.controller'
 import { ShopeeRadarService } from './shopee-radar.service'
 import { ShopeeAffiliateApiService } from './shopee-affiliate-api.service'
+import { ShopeeRadarWorker } from './shopee-radar.worker'
 import { AiModule } from '../ai/ai.module'
 
 /** F18 Fase 2 + 4 — Lado Afiliado + A Ponte. Módulo SEPARADO do
@@ -32,7 +33,7 @@ import { AiModule } from '../ai/ai.module'
     AttributionService, ContentStudioService,
     MatchScoreService, MatchmakerService, PonteMetricsService,
     AffiliateRegistrationService,
-    ShopeeRadarService, ShopeeAffiliateApiService,
+    ShopeeRadarService, ShopeeAffiliateApiService, ShopeeRadarWorker,
   ],
   exports:     [
     OpportunityScoreService, ShopeeAffiliateService, LinkStudioService,

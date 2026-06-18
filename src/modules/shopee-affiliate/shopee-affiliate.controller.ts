@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Body, Query, Param, UseGuards, BadRequestException,
+  Controller, Get, Post, Patch, Body, Query, Param, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -32,6 +32,23 @@ export class ShopeeAffiliateController {
   async radarStatus(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return { connected: await this.affApi.hasCreds(user.orgId) }
+  }
+
+  /** GET /shopee-affiliate/radar/settings — auto diário + keywords salvas. */
+  @Get('radar/settings')
+  radarSettings(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.getSettings(user.orgId)
+  }
+
+  /** PATCH /shopee-affiliate/radar/settings { auto?, keywords? } */
+  @Patch('radar/settings')
+  saveRadarSettings(@ReqUser() user: ReqUserPayload, @Body() body: { auto?: boolean; keywords?: string[] }) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.saveSettings(user.orgId, {
+      auto: typeof body?.auto === 'boolean' ? body.auto : undefined,
+      keywords: Array.isArray(body?.keywords) ? body.keywords.filter(Boolean).slice(0, 20) : undefined,
+    })
   }
 
   /** POST /shopee-affiliate/radar/ingest { keywords?, cat_ids?, pages? } — busca produtos reais. */
