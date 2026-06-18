@@ -24,6 +24,11 @@ export class TrendsService {
     return { ...collect, scored }
   }
 
+  /** Árvore de categorias do ML pro seletor (raízes ou filhos de `parent`). */
+  listCategories(orgId: string, parentId?: string | null) {
+    return this.collector.listCategories(orgId, parentId)
+  }
+
   // ── leitura do radar ──────────────────────────────────────────────────────
 
   async radar(args: {

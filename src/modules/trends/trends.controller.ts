@@ -44,6 +44,13 @@ export class TrendsController {
     return this.svc.risingSearches(user.orgId, category ?? null)
   }
 
+  /** GET /trends/ml-categories?parent=MLB1574 — árvore de categorias (raízes ou filhos). */
+  @Get('ml-categories')
+  mlCategories(@ReqUser() user: ReqUserPayload, @Query('parent') parent?: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listCategories(user.orgId, parent ?? null)
+  }
+
   /** POST /trends/collect — dispara coleta + score agora (manual). */
   @Post('collect')
   collect(@ReqUser() user: ReqUserPayload) {

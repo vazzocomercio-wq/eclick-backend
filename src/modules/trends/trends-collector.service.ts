@@ -47,6 +47,32 @@ export class TrendsCollectorService {
 
   constructor(private readonly mercadolivre: MercadolivreService) {}
 
+  /** Navega a árvore de categorias do ML: sem parent = raízes; com parent =
+   *  subcategorias. Alimenta o seletor de categorias da tela. */
+  async listCategories(orgId: string, parentId?: string | null): Promise<{ id: string; name: string }[]> {
+    let token: string
+    try {
+      token = (await this.mercadolivre.getTokenForOrg(orgId)).token
+    } catch {
+      return []
+    }
+    try {
+      if (!parentId) {
+        const res = await axios.get(`${ML_API}/sites/${SITE}/categories`, {
+          headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+        })
+        return (res.data ?? []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }))
+      }
+      const res = await axios.get(`${ML_API}/categories/${parentId}`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      return (res.data?.children_categories ?? []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }))
+    } catch (e) {
+      this.logger.warn(`[trends.categories] falha parent=${parentId ?? 'root'}: ${this.errMsg(e)}`)
+      return []
+    }
+  }
+
   async collect(orgId: string, categories?: string[]): Promise<CollectResult> {
     const result: CollectResult = {
       searchTrends: 0, bestSellers: 0, resolved: 0, categories: 0, errors: [],
