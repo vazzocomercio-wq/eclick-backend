@@ -58,6 +58,13 @@ export class TrendsService {
 
     const live = await this.collector.getLiveAnalytics(orgId, product.external_id, days)
 
+    // estimativa de vendas = visitas × taxa de conversão (config da org).
+    // Vendas reais de concorrente o ML não expõe — isto é ESTIMATIVA.
+    const settings = await this.getSettings(orgId)
+    const conv = Number(settings.est_conversion_pct) || 1.5
+    const salesSeries = live.visits.map(v => ({ date: v.date, value: Math.round((v.total * conv / 100) * 10) / 10 }))
+    const salesTotal = Math.round(live.visitsTotal * conv / 100)
+
     const priceVals = priceSeries.map(p => p.value)
     const stats = (arr: number[]) => arr.length
       ? { min: Math.min(...arr), max: Math.max(...arr), avg: Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) }
@@ -73,12 +80,45 @@ export class TrendsService {
         avgPerDay: live.visits.length ? Math.round(live.visitsTotal / live.visits.length) : 0,
         peak:      live.visits.length ? live.visits.reduce((a, b) => (a.total >= b.total ? a : b)) : null,
       },
+      salesEstimate: {
+        available:     live.available,
+        conversionPct: conv,
+        series:        salesSeries,
+        total:         salesTotal,
+        perDay:        salesSeries.length ? Math.round((salesTotal / salesSeries.length) * 10) / 10 : 0,
+      },
       price:        { series: priceSeries, ...stats(priceVals), points: priceSeries.length },
       rank:         { series: rankSeries, best: rankSeries.length ? Math.min(...rankSeries.map(r => r.value)) : null, points: rankSeries.length },
       scoreHistory: { series: scoreSeries, points: scoreSeries.length },
-      salesAvailable: false,
+      salesReal: false,   // vendas reais não disponíveis (ML não expõe)
       days,
     }
+  }
+
+  // ── refresh diário da watchlist (produtos observados) ──────────────────────
+
+  /** Orgs que têm ≥1 produto na watchlist (pro cron diário). */
+  async orgsWithWatchlist(): Promise<string[]> {
+    const { data } = await supabaseAdmin.from('trends_watchlist').select('organization_id')
+    return [...new Set(((data ?? []) as { organization_id: string }[]).map(r => r.organization_id))]
+  }
+
+  /** Atualiza métricas (preço + visitas/dia) dos produtos observados de uma org
+   *  e grava o ponto de preço na série — pra acumular histórico na página deles. */
+  async refreshWatchlist(orgId: string): Promise<{ refreshed: number }> {
+    const { data } = await supabaseAdmin
+      .from('trends_watchlist')
+      .select('product_id, trends_products!inner(external_id)')
+      .eq('organization_id', orgId)
+    const rows = (data ?? []) as unknown as { product_id: string; trends_products: { external_id: string } }[]
+    let refreshed = 0
+    for (const r of rows) {
+      const ext = r.trends_products?.external_id
+      if (!ext) continue
+      await this.collector.refreshProductMetrics(orgId, ext)
+      refreshed++
+    }
+    return { refreshed }
   }
 
   // ── leitura do radar ──────────────────────────────────────────────────────
@@ -163,16 +203,17 @@ export class TrendsService {
     // default (não persiste até o usuário salvar)
     return {
       organization_id: orgId, platform: 'mercado_livre', categories: [],
-      target_margin_pct: 15, auto_enabled: false, updated_at: new Date().toISOString(),
+      target_margin_pct: 15, est_conversion_pct: 1.5, auto_enabled: false, updated_at: new Date().toISOString(),
     }
   }
 
-  async saveSettings(orgId: string, patch: Partial<Pick<TrendsSettings, 'categories' | 'target_margin_pct' | 'auto_enabled'>>) {
+  async saveSettings(orgId: string, patch: Partial<Pick<TrendsSettings, 'categories' | 'target_margin_pct' | 'est_conversion_pct' | 'auto_enabled'>>) {
     const { error } = await supabaseAdmin.from('trends_settings').upsert({
       organization_id: orgId,
-      ...(patch.categories        != null ? { categories: patch.categories } : {}),
-      ...(patch.target_margin_pct != null ? { target_margin_pct: patch.target_margin_pct } : {}),
-      ...(patch.auto_enabled      != null ? { auto_enabled: patch.auto_enabled } : {}),
+      ...(patch.categories         != null ? { categories: patch.categories } : {}),
+      ...(patch.target_margin_pct  != null ? { target_margin_pct: patch.target_margin_pct } : {}),
+      ...(patch.est_conversion_pct != null ? { est_conversion_pct: patch.est_conversion_pct } : {}),
+      ...(patch.auto_enabled       != null ? { auto_enabled: patch.auto_enabled } : {}),
       updated_at: new Date().toISOString(),
     }, { onConflict: 'organization_id' })
     if (error) throw new BadRequestException(error.message)

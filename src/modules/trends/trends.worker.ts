@@ -17,14 +17,27 @@ export class TrendsWorker {
     if (this.running) { this.logger.warn('[trends.cron] já rodando, pulando'); return }
     this.running = true
     try {
-      const orgs = await this.trends.autoEnabledOrgs()
-      this.logger.log(`[trends.cron] coleta diária — ${orgs.length} org(s) com auto_enabled`)
-      for (const orgId of orgs) {
+      const autoOrgs = await this.trends.autoEnabledOrgs()
+      this.logger.log(`[trends.cron] coleta diária — ${autoOrgs.length} org(s) com auto_enabled`)
+      for (const orgId of autoOrgs) {
         try {
           const r = await this.trends.collectAndScore(orgId)
           this.logger.log(`[trends.cron] org=${orgId} → ${r.bestSellers} best-sellers, ${r.scored} scored`)
         } catch (e) {
           this.logger.error(`[trends.cron] org=${orgId} falhou: ${e instanceof Error ? e.message : e}`)
+        }
+      }
+
+      // produtos OBSERVADOS (watchlist) refrescam todo dia, mesmo fora das
+      // categorias escaneadas — acumula preço/visitas na página deles.
+      const watchOrgs = (await this.trends.orgsWithWatchlist()).filter(o => !autoOrgs.includes(o))
+      this.logger.log(`[trends.cron] refresh watchlist — ${watchOrgs.length} org(s)`)
+      for (const orgId of watchOrgs) {
+        try {
+          const r = await this.trends.refreshWatchlist(orgId)
+          this.logger.log(`[trends.cron] watchlist org=${orgId} → ${r.refreshed} produtos`)
+        } catch (e) {
+          this.logger.error(`[trends.cron] watchlist org=${orgId} falhou: ${e instanceof Error ? e.message : e}`)
         }
       }
     } finally {

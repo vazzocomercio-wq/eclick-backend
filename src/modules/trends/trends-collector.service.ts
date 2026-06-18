@@ -176,12 +176,12 @@ export class TrendsCollectorService {
     for (const c of top) {
       const prod = await this.resolveProduct(c.id, token)
       if (!prod) continue
-      // buy_box_winner costuma vir null no catálogo → preço real vem dos itens
-      let priceCents = prod.buy_box_winner?.price != null
+      // item vencedor → preço (buy_box vem null no catálogo) + visitas/dia (7d)
+      const metrics = await this.resolveItemMetrics(c.id, token)
+      const priceCents = prod.buy_box_winner?.price != null
         ? Math.round(prod.buy_box_winner.price * 100)
-        : null
-      if (priceCents == null) priceCents = await this.fetchPriceCents(c.id, token)
-      await this.upsertProduct(orgId, catId, catName, c.id, priceCents, prod)
+        : metrics.priceCents
+      await this.upsertProduct(orgId, catId, catName, c.id, priceCents, prod, metrics.visitsPerDay)
       // série de preço (histórico p/ a tela de Análise) — só quando há preço
       if (priceCents != null) {
         await supabaseAdmin.from('trends_signals').insert({
@@ -190,6 +190,39 @@ export class TrendsCollectorService {
         })
       }
       result.resolved++
+    }
+  }
+
+  /** Resolve o item vencedor do produto de catálogo e devolve preço (menor) +
+   *  visitas/dia (média dos últimos 7d). 1-2 chamadas ML por produto. */
+  private async resolveItemMetrics(productId: string, token: string): Promise<{ priceCents: number | null; visitsPerDay: number | null }> {
+    let itemId: string | null = null
+    let priceCents: number | null = null
+    try {
+      const res = await axios.get(`${ML_API}/products/${productId}/items`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      const results = (res.data?.results ?? []) as { item_id?: string; price?: number }[]
+      const withPrice = results.filter(r => typeof r.price === 'number' && r.price! > 0)
+      if (withPrice.length) {
+        const cheapest = withPrice.reduce((a, b) => (a.price! <= b.price! ? a : b))
+        itemId = cheapest.item_id ?? null
+        priceCents = Math.round(cheapest.price! * 100)
+      } else if (results[0]?.item_id) {
+        itemId = results[0].item_id
+      }
+    } catch { return { priceCents, visitsPerDay: null } }
+
+    if (!itemId) return { priceCents, visitsPerDay: null }
+    try {
+      const v = await axios.get(`${ML_API}/items/${itemId}/visits/time_window?last=7&unit=day`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      const total = v.data?.total_visits ?? 0
+      const dias = (v.data?.results ?? []).length || 7
+      return { priceCents, visitsPerDay: Math.round(total / dias) }
+    } catch {
+      return { priceCents, visitsPerDay: null }
     }
   }
 
@@ -242,6 +275,25 @@ export class TrendsCollectorService {
     }
   }
 
+  /** Refresh diário de UM produto observado: atualiza preço + visitas/dia e
+   *  grava o ponto de preço na série (histórico acumula na página do produto). */
+  async refreshProductMetrics(orgId: string, externalId: string): Promise<void> {
+    let token: string
+    try { token = (await this.mercadolivre.getTokenForOrg(orgId)).token } catch { return }
+    const m = await this.resolveItemMetrics(externalId, token)
+    const patch: Record<string, unknown> = { last_seen_at: new Date().toISOString() }
+    if (m.priceCents != null)   patch.price_ref_cents = m.priceCents
+    if (m.visitsPerDay != null) patch.visits_per_day = m.visitsPerDay
+    await supabaseAdmin.from('trends_products').update(patch)
+      .eq('organization_id', orgId).eq('external_id', externalId)
+    if (m.priceCents != null) {
+      await supabaseAdmin.from('trends_signals').insert({
+        organization_id: orgId, platform: 'mercado_livre', signal_type: 'price',
+        external_id: externalId, metric_value: m.priceCents, payload: { source: 'watchlist_refresh' },
+      })
+    }
+  }
+
   private async resolveProduct(productId: string, token: string): Promise<CatalogProduct | null> {
     try {
       const res = await axios.get(`${ML_API}/products/${productId}`, {
@@ -253,30 +305,13 @@ export class TrendsCollectorService {
     }
   }
 
-  /** Preço de referência = menor preço entre os itens que vendem o produto de
-   *  catálogo (o que o comprador vê). buy_box_winner do /products vem null. */
-  private async fetchPriceCents(productId: string, token: string): Promise<number | null> {
-    try {
-      const res = await axios.get(`${ML_API}/products/${productId}/items`, {
-        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
-      })
-      const prices = (res.data?.results ?? [])
-        .map((r: { price?: number }) => r.price)
-        .filter((p: unknown): p is number => typeof p === 'number' && p > 0)
-      if (!prices.length) return null
-      return Math.round(Math.min(...prices) * 100)
-    } catch {
-      return null
-    }
-  }
-
   private async upsertProduct(
     orgId: string, catId: string, catName: string | null,
-    externalId: string, priceCents: number | null, prod: CatalogProduct,
+    externalId: string, priceCents: number | null, prod: CatalogProduct, visitsPerDay: number | null,
   ): Promise<void> {
     const now = new Date().toISOString()
 
-    const { error } = await supabaseAdmin.from('trends_products').upsert({
+    const row: Record<string, unknown> = {
       organization_id: orgId,
       platform:        'mercado_livre',
       external_id:     externalId,
@@ -290,7 +325,11 @@ export class TrendsCollectorService {
       thumbnail:       prod.pictures?.[0]?.url ?? null,
       url:             prod.permalink ?? null,
       last_seen_at:    now,
-    }, { onConflict: 'organization_id,platform,external_id', ignoreDuplicates: false })
+    }
+    if (visitsPerDay != null) row.visits_per_day = visitsPerDay
+
+    const { error } = await supabaseAdmin.from('trends_products').upsert(row,
+      { onConflict: 'organization_id,platform,external_id', ignoreDuplicates: false })
 
     if (error) this.logger.warn(`[trends.collect] upsert product ${externalId} falhou: ${error.message}`)
   }

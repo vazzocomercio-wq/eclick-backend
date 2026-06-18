@@ -59,12 +59,13 @@ export interface RadarCard extends TrendProductRow {
 }
 
 export interface TrendsSettings {
-  organization_id:   string
-  platform:          TrendPlatform
-  categories:        string[]
-  target_margin_pct: number
-  auto_enabled:      boolean
-  updated_at:        string
+  organization_id:    string
+  platform:           TrendPlatform
+  categories:         string[]
+  target_margin_pct:  number
+  est_conversion_pct: number
+  auto_enabled:       boolean
+  updated_at:         string
 }
 
 /** Resultado de uma rodada de coleta. */
