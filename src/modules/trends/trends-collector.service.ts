@@ -94,9 +94,19 @@ export class TrendsCollectorService {
     } catch {
       return { seller_id: sellerId, ok: false, error: 'Conta ML não conectada ou token inválido.' }
     }
+    // ML exige category_id no POST de catálogo — pega do item vencedor.
+    let categoryId: string | null = null
+    try {
+      const it = await axios.get(`${ML_API}/products/${externalId}/items`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      categoryId = (it.data?.results ?? [])[0]?.category_id ?? null
+    } catch { /* segue; ML reclama se faltar */ }
+
     const body = {
       catalog_product_id: externalId,
       catalog_listing:    true,
+      ...(categoryId ? { category_id: categoryId } : {}),
       price:              Math.round(priceCents) / 100,
       currency_id:        'BRL',
       available_quantity: Math.max(1, Math.floor(stock)),
