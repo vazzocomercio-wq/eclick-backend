@@ -51,6 +51,29 @@ export class TrendsController {
     return this.svc.listCategories(user.orgId, parent ?? null)
   }
 
+  /** GET /trends/ml-accounts — contas ML integradas (pro "copiar para minha conta"). */
+  @Get('ml-accounts')
+  mlAccounts(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.mlAccounts(user.orgId)
+  }
+
+  /** POST /trends/product/:id/clone { seller_ids, price_cents?, stock? } — PUBLICA anúncio de catálogo (ação real). */
+  @Post('product/:productId/clone')
+  clone(
+    @ReqUser() user: ReqUserPayload,
+    @Param('productId') productId: string,
+    @Body() body: { seller_ids: number[]; price_cents?: number; stock?: number },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    if (!Array.isArray(body?.seller_ids) || !body.seller_ids.length) throw new BadRequestException('seller_ids obrigatório')
+    return this.svc.cloneProduct(user.orgId, productId, {
+      sellerIds:  body.seller_ids.map(Number),
+      priceCents: body.price_cents != null ? Math.round(Number(body.price_cents)) : undefined,
+      stock:      body.stock != null ? Math.floor(Number(body.stock)) : undefined,
+    })
+  }
+
   /** GET /trends/product/:productId/analytics?days=30 — análise profunda (visitas, preço, ranking, score). */
   @Get('product/:productId/analytics')
   analytics(

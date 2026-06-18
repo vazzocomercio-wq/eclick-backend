@@ -29,6 +29,33 @@ export class TrendsService {
     return this.collector.listCategories(orgId, parentId)
   }
 
+  /** Contas ML integradas da org (pro "copiar para minha conta"). */
+  mlAccounts(orgId: string) {
+    return this.collector.listMlAccounts(orgId)
+  }
+
+  /** Copia o produto analisado criando um anúncio de catálogo em cada conta.
+   *  Publicação REAL no ML. Preço default = preço de mercado do produto. */
+  async cloneProduct(orgId: string, productId: string, args: { sellerIds: number[]; priceCents?: number; stock?: number }) {
+    const { data: prod } = await supabaseAdmin
+      .from('trends_products').select('external_id, price_ref_cents, name')
+      .eq('organization_id', orgId).eq('id', productId).maybeSingle()
+    if (!prod) throw new BadRequestException('Produto não encontrado')
+    const p = prod as { external_id: string; price_ref_cents: number | null; name: string }
+
+    const priceCents = args.priceCents ?? p.price_ref_cents
+    if (priceCents == null || priceCents <= 0) throw new BadRequestException('Defina um preço de venda.')
+    if (!args.sellerIds?.length) throw new BadRequestException('Escolha pelo menos uma conta.')
+    const stock = args.stock ?? 1
+
+    const results = []
+    for (const sellerId of args.sellerIds) {
+      results.push(await this.collector.cloneToCatalog(orgId, p.external_id, sellerId, priceCents, stock))
+    }
+    this.logger.log(`[trends.clone] produto=${p.external_id} → ${results.filter(r => r.ok).length}/${results.length} contas OK`)
+    return { product: p.name, results }
+  }
+
   /** Análise profunda de UM produto: visitas (até 90d reais do ML), histórico de
    *  preço/ranking/score (dos snapshots), KPIs. Vendas/conversão de concorrente
    *  NÃO existem (ML bloqueia item de terceiro). */

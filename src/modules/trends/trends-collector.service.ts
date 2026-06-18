@@ -73,6 +73,54 @@ export class TrendsCollectorService {
     }
   }
 
+  /** Contas ML integradas da org (pro seletor de "copiar para minha conta"). */
+  async listMlAccounts(orgId: string): Promise<{ seller_id: number; nickname: string | null }[]> {
+    const { data } = await supabaseAdmin
+      .from('ml_connections')
+      .select('seller_id, nickname')
+      .eq('organization_id', orgId)
+    return ((data ?? []) as { seller_id: number; nickname: string | null }[])
+  }
+
+  /** Cria um anúncio de CATÁLOGO na conta `sellerId`, vinculado ao mesmo
+   *  produto de catálogo (title/fotos/ficha vêm do catálogo automaticamente).
+   *  Publicação REAL. Devolve item_id + permalink ou erro legível. */
+  async cloneToCatalog(orgId: string, externalId: string, sellerId: number, priceCents: number, stock: number): Promise<{
+    seller_id: number; ok: boolean; item_id?: string; permalink?: string; error?: string
+  }> {
+    let token: string
+    try {
+      token = (await this.mercadolivre.getTokenForOrg(orgId, sellerId)).token
+    } catch {
+      return { seller_id: sellerId, ok: false, error: 'Conta ML não conectada ou token inválido.' }
+    }
+    const body = {
+      catalog_product_id: externalId,
+      catalog_listing:    true,
+      price:              Math.round(priceCents) / 100,
+      currency_id:        'BRL',
+      available_quantity: Math.max(1, Math.floor(stock)),
+      condition:          'new',
+      listing_type_id:    'gold_special',
+      sale_terms: [
+        { id: 'WARRANTY_TYPE', value_name: 'Garantia do vendedor' },
+        { id: 'WARRANTY_TIME', value_name: '90 dias' },
+      ],
+    }
+    try {
+      const res = await axios.post(`${ML_API}/items`, body, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 20000,
+      })
+      return { seller_id: sellerId, ok: true, item_id: res.data?.id, permalink: res.data?.permalink }
+    } catch (e) {
+      // ML devolve mensagem útil (ex: produto não elegível, falta frete, etc.)
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.message || JSON.stringify(e.response?.data?.cause || e.response?.data) || e.message)
+        : (e instanceof Error ? e.message : String(e))
+      return { seller_id: sellerId, ok: false, error: String(msg).slice(0, 300) }
+    }
+  }
+
   async collect(orgId: string, categories?: string[]): Promise<CollectResult> {
     const result: CollectResult = {
       searchTrends: 0, bestSellers: 0, resolved: 0, categories: 0, errors: [],
