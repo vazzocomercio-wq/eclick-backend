@@ -96,6 +96,19 @@ export class ShopeeAffiliateApiService {
     }
   }
 
+  /** Busca UM produto pelo itemId (pro monitoramento diário de observados). */
+  async productById(orgId: string, itemId: number): Promise<ProductOffer | null> {
+    const query = `{ productOfferV2(itemId: ${itemId}, limit: 1) {
+      nodes { itemId productName commissionRate commission price sales imageUrl shopName shopId ratingStar priceDiscountRate productLink offerLink productCatIds }
+    } }`
+    try {
+      const data = await this.call<{ productOfferV2: { nodes: ProductOffer[] } }>(orgId, query)
+      return data?.productOfferV2?.nodes?.[0] ?? null
+    } catch {
+      return null
+    }
+  }
+
   /** Gera link de afiliado rastreável pra um produto (ângulo monetização). */
   async generateAffiliateLink(orgId: string, productLink: string, subId?: string): Promise<string | null> {
     const sub = subId ? `, subIds: ${JSON.stringify([subId])}` : ''

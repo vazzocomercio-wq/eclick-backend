@@ -144,6 +144,62 @@ export class ShopeeRadarService {
       .map(r => ({ orgId: r.organization_id, keywords: r.radar_keywords ?? [] }))
   }
 
+  // ── Observar (watchlist) — monitoramento diário garantido por itemId ─────────
+
+  async setWatch(orgId: string, itemId: number, watched: boolean): Promise<{ ok: true }> {
+    const { error } = await supabaseAdmin.schema('shopee').from('affiliate_offers')
+      .update({ watched }).eq('organization_id', orgId).eq('item_id', itemId)
+    if (error) throw new BadRequestException(error.message)
+    // ao observar, captura na hora pra começar a série (não espera o cron)
+    if (watched) { try { await this.refreshItem(orgId, itemId) } catch { /* best-effort */ } }
+    return { ok: true }
+  }
+
+  /** Orgs que têm ≥1 produto observado (pro cron). */
+  async orgsWithWatched(): Promise<string[]> {
+    const { data } = await supabaseAdmin.schema('shopee').from('affiliate_offers')
+      .select('organization_id').eq('watched', true)
+    return [...new Set(((data ?? []) as { organization_id: string }[]).map(r => r.organization_id))]
+  }
+
+  /** Re-busca todos os produtos observados de uma org pelo itemId (garante
+   *  histórico mesmo se saírem do top-vendas). Roda no cron diário. */
+  async refreshWatched(orgId: string): Promise<{ refreshed: number }> {
+    const { data } = await supabaseAdmin.schema('shopee').from('affiliate_offers')
+      .select('item_id').eq('organization_id', orgId).eq('watched', true)
+    const ids = ((data ?? []) as { item_id: number }[]).map(r => r.item_id)
+    let refreshed = 0
+    for (const id of ids) { if (await this.refreshItem(orgId, id)) refreshed++ }
+    return { refreshed }
+  }
+
+  /** Captura UM item agora: busca pelo itemId, recomputa champion (com momentum
+   *  vs venda anterior), atualiza a oferta e grava o ponto na série. */
+  private async refreshItem(orgId: string, itemId: number): Promise<boolean> {
+    const o = await this.api.productById(orgId, itemId)
+    if (!o) return false
+    // venda anterior pro momentum
+    const { data: prev } = await supabaseAdmin.schema('shopee').from('offer_signals')
+      .select('sales').eq('organization_id', orgId).eq('item_id', itemId)
+      .order('captured_at', { ascending: false }).limit(1).maybeSingle()
+    const prevSales = (prev as { sales: number | null } | null)?.sales ?? null
+    const champion = this.championScore(o, prevSales)
+    const decision = this.decide(champion, o.ratingStar)
+
+    await supabaseAdmin.schema('shopee').from('affiliate_offers').update({
+      sales_volume: o.sales, price_cents: Math.round(o.price * 100), discount_pct: o.priceDiscountRate,
+      rating: o.ratingStar, commission_rate: o.commissionRate, champion_score: champion,
+      buy_decision: decision, fetched_at: new Date().toISOString(),
+    }).eq('organization_id', orgId).eq('item_id', itemId)
+
+    await supabaseAdmin.schema('shopee').from('offer_signals').insert({
+      organization_id: orgId, item_id: itemId, sales: o.sales,
+      price_cents: Math.round(o.price * 100), discount_pct: o.priceDiscountRate,
+      rating: o.ratingStar, commission_rate: o.commissionRate, champion_score: champion,
+    })
+    return true
+  }
+
   // ── Champion Score (sourcing) ────────────────────────────────────────────────
 
   private championScore(o: ProductOffer, prevSales: number | null): number {
@@ -203,7 +259,7 @@ export class ShopeeRadarService {
 
   // ── Leitura ────────────────────────────────────────────────────────────────
 
-  async radar(args: { orgId: string; decision?: BuyDecision | null; minScore?: number | null; limit: number; offset: number }) {
+  async radar(args: { orgId: string; decision?: BuyDecision | null; minScore?: number | null; watched?: boolean; limit: number; offset: number }) {
     let q = supabaseAdmin.schema('shopee').from('affiliate_offers')
       .select('*', { count: 'exact' })
       .eq('organization_id', args.orgId)
@@ -211,6 +267,7 @@ export class ShopeeRadarService {
       .range(args.offset, args.offset + args.limit - 1)
     if (args.decision)         q = q.eq('buy_decision', args.decision)
     if (args.minScore != null) q = q.gte('champion_score', args.minScore)
+    if (args.watched)          q = q.eq('watched', true)
     const { data, count, error } = await q
     if (error) throw new BadRequestException(error.message)
     return { items: data ?? [], total: count ?? 0 }

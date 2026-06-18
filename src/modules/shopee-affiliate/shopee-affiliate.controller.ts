@@ -68,6 +68,7 @@ export class ShopeeAffiliateController {
     @ReqUser() user: ReqUserPayload,
     @Query('decision') decision?: string,
     @Query('min_score') minScoreRaw?: string,
+    @Query('watched') watchedRaw?: string,
     @Query('limit') limitRaw?: string,
     @Query('offset') offsetRaw?: string,
   ) {
@@ -76,8 +77,16 @@ export class ShopeeAffiliateController {
     return this.radar.radar({
       orgId: user.orgId, decision: dec,
       minScore: minScoreRaw != null ? Number(minScoreRaw) : null,
+      watched: watchedRaw === 'true',
       limit: clampInt(limitRaw, 50, 1, 200), offset: clampInt(offsetRaw, 0, 0),
     })
+  }
+
+  /** POST /shopee-affiliate/radar/product/:itemId/watch { watched } — observar/parar. */
+  @Post('radar/product/:itemId/watch')
+  watch(@ReqUser() user: ReqUserPayload, @Param('itemId') itemId: string, @Body() body: { watched: boolean }) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.setWatch(user.orgId, Number(itemId), body?.watched !== false)
   }
 
   /** GET /shopee-affiliate/radar/product/:itemId/analytics?days=30 */

@@ -26,6 +26,19 @@ export class ShopeeRadarWorker {
           this.logger.error(`[shopee.cron] org=${orgId} falhou: ${e instanceof Error ? e.message : e}`)
         }
       }
+
+      // produtos OBSERVADOS: re-busca por itemId (garante histórico mesmo fora
+      // do top-vendas), pra TODA org que tenha observados.
+      const watchOrgs = await this.radar.orgsWithWatched()
+      this.logger.log(`[shopee.cron] refresh observados — ${watchOrgs.length} org(s)`)
+      for (const orgId of watchOrgs) {
+        try {
+          const r = await this.radar.refreshWatched(orgId)
+          this.logger.log(`[shopee.cron] observados org=${orgId} → ${r.refreshed}`)
+        } catch (e) {
+          this.logger.error(`[shopee.cron] observados org=${orgId} falhou: ${e instanceof Error ? e.message : e}`)
+        }
+      }
     } finally {
       this.running = false
     }
