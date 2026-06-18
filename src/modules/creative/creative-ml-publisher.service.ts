@@ -383,6 +383,19 @@ export class CreativeMlPublisherService {
       warnings.push('Estoque inválido — informe quantidade não-negativa.')
     }
 
+    // Quantidade publicada = REGRA CENTRAL de estoque (físico + virtual −
+    // reservado − segurança), não o valor manual do form. Garante que o anúncio
+    // já NASCE com o estoque virtual (dropship) incluso, sem depender do recalc
+    // pós-publish (que só corrige se o SKU casar com catálogo). Sem registro de
+    // estoque no catálogo → mantém o valor manual informado.
+    let publishQty = Math.max(0, Math.floor(Number(opts.stock ?? 0)))
+    if (product.product_id) {
+      const stockCalc = await this.stock.calculateAvailable(product.product_id)
+      if (!stockCalc.no_stock_record) {
+        publishQty = Math.max(0, Math.floor(stockCalc.available))
+      }
+    }
+
     // Resolve imagens (preserva ordem que veio em opts.image_ids)
     const imageMap = new Map(approved_images.map(i => [i.id, i]))
     const orderedImages = (opts.image_ids ?? [])
@@ -558,7 +571,7 @@ export class CreativeMlPublisherService {
       category_id:         categoryId,
       price:               Number(opts.price ?? 0),
       currency_id:         'BRL',
-      available_quantity:  Math.max(0, Math.floor(Number(opts.stock ?? 0))),
+      available_quantity:  publishQty,
       buying_mode:         'buy_it_now',
       listing_type_id:     opts.listing_type ?? 'free',
       condition:           opts.condition ?? 'new',
@@ -941,7 +954,9 @@ export class CreativeMlPublisherService {
         listing_type:     opts.listing_type ?? 'free',
         condition:        opts.condition ?? 'new',
         price:            opts.price,
-        stock:            opts.stock,
+        // estoque registrado = o que de fato foi pro ML (regra central, c/ virtual),
+        // não o valor do form — vem do available_quantity calculado em buildPreview.
+        stock:            Number((preview.ml_payload as Record<string, unknown>).available_quantity ?? opts.stock),
         attributes:       opts.attributes ?? [],
         payload_sent:     preview.ml_payload,
       })
