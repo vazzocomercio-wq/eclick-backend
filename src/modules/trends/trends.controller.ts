@@ -58,6 +58,15 @@ export class TrendsController {
     return this.svc.mlAccounts(user.orgId)
   }
 
+  /** POST /trends/search { keyword } — busca produtos por palavra-chave + pontua. */
+  @Post('search')
+  search(@ReqUser() user: ReqUserPayload, @Body() body: { keyword: string }) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const kw = (body?.keyword ?? '').trim()
+    if (!kw) throw new BadRequestException('keyword obrigatória')
+    return this.svc.searchAndScore(user.orgId, kw.slice(0, 100))
+  }
+
   /** POST /trends/product/:id/clone { seller_ids, price_cents?, stock? } — PUBLICA anúncio de catálogo (ação real). */
   @Post('product/:productId/clone')
   clone(

@@ -73,6 +73,46 @@ export class TrendsCollectorService {
     }
   }
 
+  /** Busca produtos de catálogo por palavra-chave (a busca de ITENS foi
+   *  deprecada; a de PRODUTOS de catálogo `/products/search` funciona).
+   *  Resolve cada produto (nome/preço/foto/visitas) igual aos best sellers. */
+  async collectByKeyword(orgId: string, keyword: string): Promise<{ resolved: number; errors: string[] }> {
+    const result = { resolved: 0, errors: [] as string[] }
+    let token: string
+    try { token = (await this.mercadolivre.getTokenForOrg(orgId)).token }
+    catch { result.errors.push('Conta Mercado Livre não conectada.'); return result }
+
+    let ids: string[] = []
+    try {
+      const res = await axios.get(`${ML_API}/products/search`, {
+        params: { status: 'active', site_id: SITE, q: keyword },
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      ids = ((res.data?.results ?? []) as { id: string }[]).map(r => r.id).filter(Boolean).slice(0, TOP_N)
+    } catch (e) {
+      result.errors.push(`search "${keyword}": ${this.errMsg(e)}`)
+      return result
+    }
+
+    for (const id of ids) {
+      const prod = await this.resolveProduct(id, token)
+      if (!prod) continue
+      const metrics = await this.resolveItemMetrics(id, token)
+      const priceCents = prod.buy_box_winner?.price != null ? Math.round(prod.buy_box_winner.price * 100) : metrics.priceCents
+      await this.upsertProduct(orgId, null, `🔎 ${keyword}`, id, priceCents, prod, metrics.visitsPerDay)
+      if (priceCents != null) {
+        await supabaseAdmin.from('trends_signals').insert({
+          organization_id: orgId, platform: 'mercado_livre', signal_type: 'price',
+          external_id: id, metric_value: priceCents,
+          payload: metrics.origPriceCents != null ? { orig: metrics.origPriceCents } : {},
+        })
+      }
+      result.resolved++
+    }
+    this.logger.log(`[trends.search] org=${orgId} "${keyword}" → ${result.resolved} produtos`)
+    return result
+  }
+
   /** Contas ML integradas da org (pro seletor de "copiar para minha conta"). */
   async listMlAccounts(orgId: string): Promise<{ seller_id: number; nickname: string | null }[]> {
     const { data } = await supabaseAdmin
@@ -377,7 +417,7 @@ export class TrendsCollectorService {
   }
 
   private async upsertProduct(
-    orgId: string, catId: string, catName: string | null,
+    orgId: string, catId: string | null, catName: string | null,
     externalId: string, priceCents: number | null, prod: CatalogProduct, visitsPerDay: number | null,
   ): Promise<void> {
     const now = new Date().toISOString()

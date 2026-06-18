@@ -29,6 +29,13 @@ export class TrendsService {
     return this.collector.listCategories(orgId, parentId)
   }
 
+  /** Busca produtos por palavra-chave + pontua (igual ao collect, mas por busca). */
+  async searchAndScore(orgId: string, keyword: string): Promise<{ resolved: number; scored: number; errors: string[] }> {
+    const r = await this.collector.collectByKeyword(orgId, keyword)
+    const { scored } = await this.scorer.scoreOrg(orgId)
+    return { ...r, scored }
+  }
+
   /** Contas ML integradas da org (pro "copiar para minha conta"). */
   mlAccounts(orgId: string) {
     return this.collector.listMlAccounts(orgId)

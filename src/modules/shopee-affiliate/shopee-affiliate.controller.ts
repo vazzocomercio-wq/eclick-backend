@@ -9,6 +9,7 @@ import { AttributionService } from './attribution.service'
 import { ContentStudioService } from './content-studio.service'
 import { ShopeeRadarService } from './shopee-radar.service'
 import { ShopeeAffiliateApiService } from './shopee-affiliate-api.service'
+import { ShopeeSellerCategoryService } from './shopee-seller-category.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
@@ -23,6 +24,7 @@ export class ShopeeAffiliateController {
     private readonly content:     ContentStudioService,
     private readonly radar:       ShopeeRadarService,
     private readonly affApi:      ShopeeAffiliateApiService,
+    private readonly categories:  ShopeeSellerCategoryService,
   ) {}
 
   // ── Radar de Produtos Campeões (Sprint 2) ─────────────────────────────────
@@ -31,7 +33,21 @@ export class ShopeeAffiliateController {
   @Get('radar/status')
   async radarStatus(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
-    return { connected: await this.affApi.hasCreds(user.orgId) }
+    return { connected: await this.affApi.hasCreds(user.orgId), hasCategories: await this.categories.hasCategories() }
+  }
+
+  /** GET /shopee-affiliate/radar/categories?parent=100629 — árvore (raízes ou filhos). */
+  @Get('radar/categories')
+  radarCategories(@ReqUser() user: ReqUserPayload, @Query('parent') parent?: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.categories.list(parent ?? null)
+  }
+
+  /** POST /shopee-affiliate/radar/categories/sync — puxa a árvore do get_category. */
+  @Post('radar/categories/sync')
+  syncCategories(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.categories.sync(user.orgId)
   }
 
   /** GET /shopee-affiliate/radar/settings — auto diário + keywords salvas. */
