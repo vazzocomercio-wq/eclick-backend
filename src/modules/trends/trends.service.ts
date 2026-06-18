@@ -29,6 +29,58 @@ export class TrendsService {
     return this.collector.listCategories(orgId, parentId)
   }
 
+  /** Análise profunda de UM produto: visitas (até 90d reais do ML), histórico de
+   *  preço/ranking/score (dos snapshots), KPIs. Vendas/conversão de concorrente
+   *  NÃO existem (ML bloqueia item de terceiro). */
+  async productAnalytics(orgId: string, productId: string, days: number): Promise<Record<string, unknown>> {
+    const { data: prod } = await supabaseAdmin
+      .from('trends_products').select('*').eq('organization_id', orgId).eq('id', productId).maybeSingle()
+    if (!prod) throw new BadRequestException('Produto não encontrado')
+    const product = prod as { id: string; external_id: string; name: string; category_name: string | null; url: string | null; thumbnail: string | null; price_ref_cents: number | null }
+
+    const { data: sc } = await supabaseAdmin
+      .from('trends_scores').select('*').eq('organization_id', orgId).eq('product_id', productId).maybeSingle()
+
+    const since = new Date(Date.now() - days * 86400_000).toISOString()
+    const { data: sigs } = await supabaseAdmin
+      .from('trends_signals')
+      .select('signal_type, position, metric_value, captured_at')
+      .eq('organization_id', orgId)
+      .eq('external_id', product.external_id)
+      .in('signal_type', ['best_seller', 'price', 'score'])
+      .gte('captured_at', since)
+      .order('captured_at', { ascending: true })
+    const rows = (sigs ?? []) as { signal_type: string; position: number | null; metric_value: number | null; captured_at: string }[]
+
+    const rankSeries  = rows.filter(r => r.signal_type === 'best_seller' && r.position != null).map(r => ({ date: r.captured_at, value: r.position as number }))
+    const priceSeries = rows.filter(r => r.signal_type === 'price' && r.metric_value != null).map(r => ({ date: r.captured_at, value: r.metric_value as number }))
+    const scoreSeries = rows.filter(r => r.signal_type === 'score' && r.metric_value != null).map(r => ({ date: r.captured_at, value: r.metric_value as number }))
+
+    const live = await this.collector.getLiveAnalytics(orgId, product.external_id, days)
+
+    const priceVals = priceSeries.map(p => p.value)
+    const stats = (arr: number[]) => arr.length
+      ? { min: Math.min(...arr), max: Math.max(...arr), avg: Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) }
+      : { min: null, max: null, avg: null }
+
+    return {
+      product:      { ...product, current_price_cents: live.currentPriceCents ?? product.price_ref_cents },
+      score:        sc ?? null,
+      visits: {
+        available: live.available,
+        series:    live.visits,
+        total:     live.visitsTotal,
+        avgPerDay: live.visits.length ? Math.round(live.visitsTotal / live.visits.length) : 0,
+        peak:      live.visits.length ? live.visits.reduce((a, b) => (a.total >= b.total ? a : b)) : null,
+      },
+      price:        { series: priceSeries, ...stats(priceVals), points: priceSeries.length },
+      rank:         { series: rankSeries, best: rankSeries.length ? Math.min(...rankSeries.map(r => r.value)) : null, points: rankSeries.length },
+      scoreHistory: { series: scoreSeries, points: scoreSeries.length },
+      salesAvailable: false,
+      days,
+    }
+  }
+
   // ── leitura do radar ──────────────────────────────────────────────────────
 
   async radar(args: {

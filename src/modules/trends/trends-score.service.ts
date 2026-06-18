@@ -97,6 +97,12 @@ export class TrendsScoreService {
         components:          { ...comp },
         computed_at:         new Date().toISOString(),
       }, { onConflict: 'organization_id,product_id' })
+
+      // série de Trend Score (histórico p/ a tela de Análise)
+      await supabaseAdmin.from('trends_signals').insert({
+        organization_id: orgId, platform: 'mercado_livre', signal_type: 'score',
+        external_id: product.external_id, metric_value: round(comp.trend_score), payload: {},
+      })
       scored++
     }
 

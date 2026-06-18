@@ -182,7 +182,63 @@ export class TrendsCollectorService {
         : null
       if (priceCents == null) priceCents = await this.fetchPriceCents(c.id, token)
       await this.upsertProduct(orgId, catId, catName, c.id, priceCents, prod)
+      // série de preço (histórico p/ a tela de Análise) — só quando há preço
+      if (priceCents != null) {
+        await supabaseAdmin.from('trends_signals').insert({
+          organization_id: orgId, platform: 'mercado_livre', signal_type: 'price',
+          category_id: catId, external_id: c.id, metric_value: priceCents, payload: {},
+        })
+      }
       result.resolved++
+    }
+  }
+
+  /** Análise ao vivo de UM produto: resolve o item vencedor → visitas (até 90d,
+   *  histórico real do ML) + preço atual. Vendas/conversão NÃO existem pra item
+   *  de terceiro (ML bloqueia com 403/privacidade). */
+  async getLiveAnalytics(orgId: string, externalId: string, days: number): Promise<{
+    visits: { date: string; total: number }[]
+    visitsTotal: number
+    currentPriceCents: number | null
+    available: boolean
+  }> {
+    const empty = { visits: [], visitsTotal: 0, currentPriceCents: null, available: false }
+    let token: string
+    try { token = (await this.mercadolivre.getTokenForOrg(orgId)).token } catch { return empty }
+
+    // item vencedor + preço atual
+    let itemId: string | null = null
+    let currentPriceCents: number | null = null
+    try {
+      const res = await axios.get(`${ML_API}/products/${externalId}/items`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      const results = (res.data?.results ?? []) as { item_id?: string; price?: number }[]
+      const withPrice = results.filter(r => typeof r.price === 'number' && r.price! > 0)
+      if (withPrice.length) {
+        const cheapest = withPrice.reduce((a, b) => (a.price! <= b.price! ? a : b))
+        itemId = cheapest.item_id ?? null
+        currentPriceCents = Math.round(cheapest.price! * 100)
+      } else if (results[0]?.item_id) {
+        itemId = results[0].item_id
+      }
+    } catch { /* segue sem item */ }
+
+    if (!itemId) return { ...empty, currentPriceCents }
+
+    const last = Math.min(Math.max(days, 1), 150)
+    try {
+      const v = await axios.get(`${ML_API}/items/${itemId}/visits/time_window?last=${last}&unit=day`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+      })
+      const results = (v.data?.results ?? []) as { date?: string; total?: number }[]
+      const visits = results
+        .filter(r => r.date)
+        .map(r => ({ date: (r.date as string).slice(0, 10), total: r.total ?? 0 }))
+        .sort((a, b) => a.date.localeCompare(b.date))
+      return { visits, visitsTotal: v.data?.total_visits ?? 0, currentPriceCents, available: true }
+    } catch {
+      return { ...empty, currentPriceCents }
     }
   }
 

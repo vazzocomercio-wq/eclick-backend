@@ -51,6 +51,17 @@ export class TrendsController {
     return this.svc.listCategories(user.orgId, parent ?? null)
   }
 
+  /** GET /trends/product/:productId/analytics?days=30 — análise profunda (visitas, preço, ranking, score). */
+  @Get('product/:productId/analytics')
+  analytics(
+    @ReqUser() user: ReqUserPayload,
+    @Param('productId') productId: string,
+    @Query('days') daysRaw?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.productAnalytics(user.orgId, productId, clampInt(daysRaw, 30, 7, 90))
+  }
+
   /** POST /trends/collect — dispara coleta + score agora (manual). */
   @Post('collect')
   collect(@ReqUser() user: ReqUserPayload) {
