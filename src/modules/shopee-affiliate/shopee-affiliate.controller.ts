@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Body, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Body, Query, Param, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -7,10 +7,12 @@ import { ShopeeAffiliateService } from './shopee-affiliate.service'
 import { LinkStudioService } from './link-studio.service'
 import { AttributionService } from './attribution.service'
 import { ContentStudioService } from './content-studio.service'
+import { ShopeeRadarService } from './shopee-radar.service'
+import { ShopeeAffiliateApiService } from './shopee-affiliate-api.service'
 
 interface ReqUserPayload { id: string; orgId: string | null }
 
-/** F18 Fase 2 — Discovery / Link Studio / Attribution / Content Studio. */
+/** F18 Fase 2 — Discovery / Link Studio / Attribution / Content Studio + Radar de Campeões. */
 @Controller('shopee-affiliate')
 @UseGuards(SupabaseAuthGuard)
 export class ShopeeAffiliateController {
@@ -19,7 +21,61 @@ export class ShopeeAffiliateController {
     private readonly linkStudio:  LinkStudioService,
     private readonly attribution: AttributionService,
     private readonly content:     ContentStudioService,
+    private readonly radar:       ShopeeRadarService,
+    private readonly affApi:      ShopeeAffiliateApiService,
   ) {}
+
+  // ── Radar de Produtos Campeões (Sprint 2) ─────────────────────────────────
+
+  /** GET /shopee-affiliate/radar/status — Affiliate API conectada? */
+  @Get('radar/status')
+  async radarStatus(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return { connected: await this.affApi.hasCreds(user.orgId) }
+  }
+
+  /** POST /shopee-affiliate/radar/ingest { keywords?, cat_ids?, pages? } — busca produtos reais. */
+  @Post('radar/ingest')
+  ingest(@ReqUser() user: ReqUserPayload, @Body() body: { keywords?: string[]; cat_ids?: number[]; pages?: number }) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.ingest(user.orgId, {
+      keywords: Array.isArray(body?.keywords) ? body.keywords.filter(Boolean).slice(0, 20) : undefined,
+      catIds:   Array.isArray(body?.cat_ids) ? body.cat_ids.map(Number).filter(Number.isFinite).slice(0, 20) : undefined,
+      pagesPerQuery: body?.pages,
+    })
+  }
+
+  /** GET /shopee-affiliate/radar?decision=&min_score=&limit=&offset= */
+  @Get('radar')
+  radarList(
+    @ReqUser() user: ReqUserPayload,
+    @Query('decision') decision?: string,
+    @Query('min_score') minScoreRaw?: string,
+    @Query('limit') limitRaw?: string,
+    @Query('offset') offsetRaw?: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const dec = decision && ['comprar', 'observar', 'ignorar'].includes(decision) ? (decision as 'comprar' | 'observar' | 'ignorar') : null
+    return this.radar.radar({
+      orgId: user.orgId, decision: dec,
+      minScore: minScoreRaw != null ? Number(minScoreRaw) : null,
+      limit: clampInt(limitRaw, 50, 1, 200), offset: clampInt(offsetRaw, 0, 0),
+    })
+  }
+
+  /** GET /shopee-affiliate/radar/product/:itemId/analytics?days=30 */
+  @Get('radar/product/:itemId/analytics')
+  radarAnalytics(@ReqUser() user: ReqUserPayload, @Param('itemId') itemId: string, @Query('days') daysRaw?: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.productAnalytics(user.orgId, Number(itemId), clampInt(daysRaw, 30, 7, 90))
+  }
+
+  /** GET /shopee-affiliate/radar/product/:itemId/affiliate-link — gera link de afiliado. */
+  @Get('radar/product/:itemId/affiliate-link')
+  radarAffiliateLink(@ReqUser() user: ReqUserPayload, @Param('itemId') itemId: string) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.radar.affiliateLink(user.orgId, Number(itemId))
+  }
 
   // ── F2.6 Content Studio ───────────────────────────────────────────────
 
