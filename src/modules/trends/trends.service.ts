@@ -44,16 +44,22 @@ export class TrendsService {
     const since = new Date(Date.now() - days * 86400_000).toISOString()
     const { data: sigs } = await supabaseAdmin
       .from('trends_signals')
-      .select('signal_type, position, metric_value, captured_at')
+      .select('signal_type, position, metric_value, payload, captured_at')
       .eq('organization_id', orgId)
       .eq('external_id', product.external_id)
       .in('signal_type', ['best_seller', 'price', 'score'])
       .gte('captured_at', since)
       .order('captured_at', { ascending: true })
-    const rows = (sigs ?? []) as { signal_type: string; position: number | null; metric_value: number | null; captured_at: string }[]
+    const rows = (sigs ?? []) as { signal_type: string; position: number | null; metric_value: number | null; payload: { orig?: number } | null; captured_at: string }[]
 
     const rankSeries  = rows.filter(r => r.signal_type === 'best_seller' && r.position != null).map(r => ({ date: r.captured_at, value: r.position as number }))
-    const priceSeries = rows.filter(r => r.signal_type === 'price' && r.metric_value != null).map(r => ({ date: r.captured_at, value: r.metric_value as number }))
+    // série de preço: value=final, orig=cheio (quando há desconto), discountPct por dia
+    const priceSeries = rows.filter(r => r.signal_type === 'price' && r.metric_value != null).map(r => {
+      const value = r.metric_value as number
+      const orig = r.payload?.orig ?? null
+      const discountPct = orig != null && orig > value ? Math.round(((orig - value) / orig) * 1000) / 10 : null
+      return { date: r.captured_at, value, orig, discountPct }
+    })
     const scoreSeries = rows.filter(r => r.signal_type === 'score' && r.metric_value != null).map(r => ({ date: r.captured_at, value: r.metric_value as number }))
 
     const live = await this.collector.getLiveAnalytics(orgId, product.external_id, days)
@@ -70,8 +76,18 @@ export class TrendsService {
       ? { min: Math.min(...arr), max: Math.max(...arr), avg: Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) }
       : { min: null, max: null, avg: null }
 
+    const curFinal = live.currentPriceCents ?? product.price_ref_cents
+    const curOrig  = live.currentOrigPriceCents
+    const curDiscount = curOrig != null && curFinal != null && curOrig > curFinal
+      ? Math.round(((curOrig - curFinal) / curOrig) * 1000) / 10 : null
+
     return {
-      product:      { ...product, current_price_cents: live.currentPriceCents ?? product.price_ref_cents },
+      product: {
+        ...product,
+        current_price_cents:      curFinal,
+        current_orig_price_cents: curOrig,
+        current_discount_pct:     curDiscount,
+      },
       score:        sc ?? null,
       visits: {
         available: live.available,

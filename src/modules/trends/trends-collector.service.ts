@@ -182,11 +182,13 @@ export class TrendsCollectorService {
         ? Math.round(prod.buy_box_winner.price * 100)
         : metrics.priceCents
       await this.upsertProduct(orgId, catId, catName, c.id, priceCents, prod, metrics.visitsPerDay)
-      // série de preço (histórico p/ a tela de Análise) — só quando há preço
+      // série de preço (histórico p/ a tela de Análise) — só quando há preço.
+      // payload.orig = preço cheio quando há desconto (pra calcular % por dia).
       if (priceCents != null) {
         await supabaseAdmin.from('trends_signals').insert({
           organization_id: orgId, platform: 'mercado_livre', signal_type: 'price',
-          category_id: catId, external_id: c.id, metric_value: priceCents, payload: {},
+          category_id: catId, external_id: c.id, metric_value: priceCents,
+          payload: metrics.origPriceCents != null ? { orig: metrics.origPriceCents } : {},
         })
       }
       result.resolved++
@@ -195,34 +197,39 @@ export class TrendsCollectorService {
 
   /** Resolve o item vencedor do produto de catálogo e devolve preço (menor) +
    *  visitas/dia (média dos últimos 7d). 1-2 chamadas ML por produto. */
-  private async resolveItemMetrics(productId: string, token: string): Promise<{ priceCents: number | null; visitsPerDay: number | null }> {
+  private async resolveItemMetrics(productId: string, token: string): Promise<{ priceCents: number | null; origPriceCents: number | null; visitsPerDay: number | null }> {
     let itemId: string | null = null
     let priceCents: number | null = null
+    let origPriceCents: number | null = null
     try {
       const res = await axios.get(`${ML_API}/products/${productId}/items`, {
         headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
       })
-      const results = (res.data?.results ?? []) as { item_id?: string; price?: number }[]
+      const results = (res.data?.results ?? []) as { item_id?: string; price?: number; original_price?: number }[]
       const withPrice = results.filter(r => typeof r.price === 'number' && r.price! > 0)
       if (withPrice.length) {
         const cheapest = withPrice.reduce((a, b) => (a.price! <= b.price! ? a : b))
         itemId = cheapest.item_id ?? null
         priceCents = Math.round(cheapest.price! * 100)
+        // preço cheio (de) quando há desconto; só vale se > preço final
+        if (typeof cheapest.original_price === 'number' && cheapest.original_price > cheapest.price!) {
+          origPriceCents = Math.round(cheapest.original_price * 100)
+        }
       } else if (results[0]?.item_id) {
         itemId = results[0].item_id
       }
-    } catch { return { priceCents, visitsPerDay: null } }
+    } catch { return { priceCents, origPriceCents, visitsPerDay: null } }
 
-    if (!itemId) return { priceCents, visitsPerDay: null }
+    if (!itemId) return { priceCents, origPriceCents, visitsPerDay: null }
     try {
       const v = await axios.get(`${ML_API}/items/${itemId}/visits/time_window?last=7&unit=day`, {
         headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
       })
       const total = v.data?.total_visits ?? 0
       const dias = (v.data?.results ?? []).length || 7
-      return { priceCents, visitsPerDay: Math.round(total / dias) }
+      return { priceCents, origPriceCents, visitsPerDay: Math.round(total / dias) }
     } catch {
-      return { priceCents, visitsPerDay: null }
+      return { priceCents, origPriceCents, visitsPerDay: null }
     }
   }
 
@@ -233,31 +240,36 @@ export class TrendsCollectorService {
     visits: { date: string; total: number }[]
     visitsTotal: number
     currentPriceCents: number | null
+    currentOrigPriceCents: number | null
     available: boolean
   }> {
-    const empty = { visits: [], visitsTotal: 0, currentPriceCents: null, available: false }
+    const empty = { visits: [], visitsTotal: 0, currentPriceCents: null, currentOrigPriceCents: null, available: false }
     let token: string
     try { token = (await this.mercadolivre.getTokenForOrg(orgId)).token } catch { return empty }
 
-    // item vencedor + preço atual
+    // item vencedor + preço atual (final + cheio)
     let itemId: string | null = null
     let currentPriceCents: number | null = null
+    let currentOrigPriceCents: number | null = null
     try {
       const res = await axios.get(`${ML_API}/products/${externalId}/items`, {
         headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
       })
-      const results = (res.data?.results ?? []) as { item_id?: string; price?: number }[]
+      const results = (res.data?.results ?? []) as { item_id?: string; price?: number; original_price?: number }[]
       const withPrice = results.filter(r => typeof r.price === 'number' && r.price! > 0)
       if (withPrice.length) {
         const cheapest = withPrice.reduce((a, b) => (a.price! <= b.price! ? a : b))
         itemId = cheapest.item_id ?? null
         currentPriceCents = Math.round(cheapest.price! * 100)
+        if (typeof cheapest.original_price === 'number' && cheapest.original_price > cheapest.price!) {
+          currentOrigPriceCents = Math.round(cheapest.original_price * 100)
+        }
       } else if (results[0]?.item_id) {
         itemId = results[0].item_id
       }
     } catch { /* segue sem item */ }
 
-    if (!itemId) return { ...empty, currentPriceCents }
+    if (!itemId) return { ...empty, currentPriceCents, currentOrigPriceCents }
 
     const last = Math.min(Math.max(days, 1), 150)
     try {
@@ -269,9 +281,9 @@ export class TrendsCollectorService {
         .filter(r => r.date)
         .map(r => ({ date: (r.date as string).slice(0, 10), total: r.total ?? 0 }))
         .sort((a, b) => a.date.localeCompare(b.date))
-      return { visits, visitsTotal: v.data?.total_visits ?? 0, currentPriceCents, available: true }
+      return { visits, visitsTotal: v.data?.total_visits ?? 0, currentPriceCents, currentOrigPriceCents, available: true }
     } catch {
-      return { ...empty, currentPriceCents }
+      return { ...empty, currentPriceCents, currentOrigPriceCents }
     }
   }
 
@@ -289,7 +301,8 @@ export class TrendsCollectorService {
     if (m.priceCents != null) {
       await supabaseAdmin.from('trends_signals').insert({
         organization_id: orgId, platform: 'mercado_livre', signal_type: 'price',
-        external_id: externalId, metric_value: m.priceCents, payload: { source: 'watchlist_refresh' },
+        external_id: externalId, metric_value: m.priceCents,
+        payload: m.origPriceCents != null ? { orig: m.origPriceCents, source: 'watchlist_refresh' } : { source: 'watchlist_refresh' },
       })
     }
   }
