@@ -251,7 +251,7 @@ export class CanvaService {
       marketplace?: MarketplaceKey
       name?: string
     },
-  ): Promise<CanvaAssetRow> {
+  ): Promise<CanvaAssetRow[]> {
     const { designId, format, productId, campaignId, marketplace } = params
 
     if (!['png', 'jpg', 'pdf'].includes(format)) {
@@ -271,8 +271,10 @@ export class CanvaService {
       const design = await this.getDesign(orgId, designId)
       const assetName = params.name ?? design.title
 
-      // 2. Cria export job
+      // 2. Cria export job. O Canva devolve UMA url POR PÁGINA do design —
+      //    guardamos TODAS (na ordem) pra virar 1 imagem cada.
       let exportJobId: string
+      let urls: string[] = []
       try {
         const jobRes = await axios.post<{
           job: { id: string; status: 'in_progress' | 'success' | 'failed'; urls?: string[]; error?: { message?: string } }
@@ -289,62 +291,64 @@ export class CanvaService {
         )
         exportJobId = jobRes.data.job.id
         // Edge case: se já voltou success no primeiro shot
-        if (jobRes.data.job.status === 'success' && jobRes.data.job.urls?.[0]) {
-          return await this.persistExport(orgId, userId, {
-            designId, exportJobId, format, marketplace, assetName,
-            sourceUrl: jobRes.data.job.urls[0],
-            thumbnailUrl: design.thumbnail_url,
-            editUrl: design.edit_url,
-            productId, campaignId,
-          })
+        if (jobRes.data.job.status === 'success' && jobRes.data.job.urls?.length) {
+          urls = jobRes.data.job.urls
         }
       } catch (e) {
         this.logCanvaError('exports.create', e)
         throw this.canvaErrorToHttp('exports.create', e)
       }
 
-      // 3. Poll
-      const start = Date.now()
-      let resultUrl: string | null = null
-      while (Date.now() - start < EXPORT_TIMEOUT_MS) {
-        await new Promise(r => setTimeout(r, EXPORT_POLL_INTERVAL_MS))
-        try {
-          const pollRes = await axios.get<{
-            job: { id: string; status: 'in_progress' | 'success' | 'failed'; urls?: string[]; error?: { message?: string } }
-          }>(`${CANVA_API_BASE}/exports/${encodeURIComponent(exportJobId)}`, {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 10_000,
-          })
-          const j = pollRes.data.job
-          if (j.status === 'success') {
-            resultUrl = j.urls?.[0] ?? null
-            break
+      // 3. Poll (se ainda não temos as urls)
+      if (urls.length === 0) {
+        const start = Date.now()
+        while (Date.now() - start < EXPORT_TIMEOUT_MS) {
+          await new Promise(r => setTimeout(r, EXPORT_POLL_INTERVAL_MS))
+          try {
+            const pollRes = await axios.get<{
+              job: { id: string; status: 'in_progress' | 'success' | 'failed'; urls?: string[]; error?: { message?: string } }
+            }>(`${CANVA_API_BASE}/exports/${encodeURIComponent(exportJobId)}`, {
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: 10_000,
+            })
+            const j = pollRes.data.job
+            if (j.status === 'success') {
+              urls = j.urls ?? []
+              break
+            }
+            if (j.status === 'failed') {
+              throw new BadRequestException(`Export falhou: ${j.error?.message ?? 'erro desconhecido'}`)
+            }
+            // in_progress → continua
+          } catch (e) {
+            if (e instanceof BadRequestException) throw e
+            this.logCanvaError(`exports.poll`, e)
+            // erro transient — tenta de novo até timeout
           }
-          if (j.status === 'failed') {
-            throw new BadRequestException(`Export falhou: ${j.error?.message ?? 'erro desconhecido'}`)
-          }
-          // in_progress → continua
-        } catch (e) {
-          if (e instanceof BadRequestException) throw e
-          this.logCanvaError(`exports.poll`, e)
-          // erro transient — tenta de novo até timeout
         }
       }
-      if (!resultUrl) {
+      if (urls.length === 0) {
         throw new HttpException(
           'Export demorou mais que 30s. Tente novamente em alguns instantes.',
           HttpStatus.GATEWAY_TIMEOUT,
         )
       }
 
-      // 4. Persist (download + Storage + DB)
-      return await this.persistExport(orgId, userId, {
-        designId, exportJobId, format, marketplace, assetName,
-        sourceUrl: resultUrl,
-        thumbnailUrl: design.thumbnail_url,
-        editUrl: design.edit_url,
-        productId, campaignId,
-      })
+      // 4. Persist CADA página (em ordem) — download + Storage + DB.
+      const rows: CanvaAssetRow[] = []
+      for (let i = 0; i < urls.length; i++) {
+        const row = await this.persistExport(orgId, userId, {
+          designId, exportJobId, format, marketplace,
+          assetName: urls.length > 1 ? `${assetName} (${i + 1}/${urls.length})` : assetName,
+          sourceUrl: urls[i],
+          thumbnailUrl: design.thumbnail_url,
+          editUrl: design.edit_url,
+          productId, campaignId,
+          pageIndex: i,
+        })
+        rows.push(row)
+      }
+      return rows
     } finally {
       this.releaseExportSlot(orgId)
     }
@@ -365,6 +369,8 @@ export class CanvaService {
       editUrl: string
       productId?: string
       campaignId?: string
+      /** Índice da página (0-based) num design multi-página — ordena + evita colisão de path. */
+      pageIndex?: number
     },
   ): Promise<CanvaAssetRow> {
     // 1. Download
@@ -388,9 +394,10 @@ export class CanvaService {
     if (p.productId) await this.assertProductInOrg(orgId, p.productId)
     if (p.campaignId) await this.assertCampaignInOrg(orgId, p.campaignId)
 
-    // 3. Upload Storage
+    // 3. Upload Storage (page suffix evita colisão em designs multi-página)
     const ext = p.format === 'jpg' ? 'jpg' : p.format
-    const storagePath = `${orgId}/${p.designId}-${Date.now()}.${ext}`
+    const pageSuffix = p.pageIndex != null ? `-p${p.pageIndex}` : ''
+    const storagePath = `${orgId}/${p.designId}-${Date.now()}${pageSuffix}.${ext}`
     const { error: upErr } = await supabaseAdmin.storage
       .from(STORAGE_BUCKET)
       .upload(storagePath, buf, { contentType, upsert: true })
@@ -421,6 +428,7 @@ export class CanvaService {
         edit_url: p.editUrl,
         product_id: p.productId ?? null,
         campaign_id: p.campaignId ?? null,
+        metadata: { page_index: p.pageIndex ?? 0 },
       })
       .select('*')
       .single()
