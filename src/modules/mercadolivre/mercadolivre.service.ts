@@ -820,6 +820,37 @@ export class MercadolivreService {
     }
   }
 
+  /** Busca VÁRIOS candidatos de categoria por palavra (domain_discovery/search).
+   *  Usado pelo seletor manual de categoria — diferente de predictCategory que
+   *  só traz o top 1. Endpoint público. */
+  async searchCategories(query: string, limit = 8): Promise<Array<{
+    category_id:   string
+    category_name: string
+    domain_name:   string | null
+  }>> {
+    if (!query?.trim()) return []
+    try {
+      const { data } = await axios.get<Array<{
+        category_id:   string
+        category_name: string
+        domain_name?:  string
+      }>>(
+        `${ML_BASE}/sites/MLB/domain_discovery/search`,
+        { params: { q: query.slice(0, 60), limit: Math.max(1, Math.min(20, limit)) }, timeout: 10_000 },
+      )
+      const seen = new Set<string>()
+      const out: Array<{ category_id: string; category_name: string; domain_name: string | null }> = []
+      for (const d of (data ?? [])) {
+        if (!d.category_id || seen.has(d.category_id)) continue
+        seen.add(d.category_id)
+        out.push({ category_id: d.category_id, category_name: d.category_name, domain_name: d.domain_name ?? null })
+      }
+      return out
+    } catch {
+      return []
+    }
+  }
+
   /** Lista listing_types disponíveis em MLB (Free/Gold Especial/Gold Pro/Premium).
    *  Endpoint público (`/sites/MLB/listing_types`). Cache em memória 1h —
    *  raramente muda. */

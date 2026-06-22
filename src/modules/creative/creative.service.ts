@@ -1817,6 +1817,45 @@ export class CreativeService {
     return data as CreativeListing
   }
 
+  /** Busca candidatos de categoria ML por palavra (pro seletor manual). */
+  async searchMlCategories(query: string): Promise<Array<{ category_id: string; category_name: string; domain_name: string | null }>> {
+    return this.mercadolivre.searchCategories(query)
+  }
+
+  /**
+   * Define MANUALMENTE a categoria ML do anúncio (em vez do predict pelo título).
+   * Valida a categoria buscando os atributos dela e atualiza attributes_ml_suggested
+   * pra refletir a nova categoria. Lança 400 se a categoria não existir no ML.
+   */
+  async setListingMlCategory(orgId: string, listingId: string, categoryId: string): Promise<CreativeListing> {
+    await this.getListing(orgId, listingId) // tenant check
+    const cid = categoryId?.trim()
+    if (!cid) throw new BadRequestException('category_id obrigatório')
+
+    let suggested: Array<{ id: string; name: string }> = []
+    try {
+      const attrs = await this.mercadolivre.getCategoryAttributes(cid)
+      if (attrs.length === 0) throw new Error('sem atributos')
+      suggested = attrs.map(a => ({ id: a.id, name: a.name }))
+    } catch {
+      throw new BadRequestException(`Categoria ML "${cid}" inválida ou indisponível`)
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_listings')
+      .update({
+        category_ml_id:          cid,
+        attributes_ml_suggested: suggested,
+        updated_at:              new Date().toISOString(),
+      })
+      .eq('organization_id', orgId)
+      .eq('id', listingId)
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`setListingMlCategory: ${error.message}`)
+    return data as CreativeListing
+  }
+
   /**
    * Lista listing_types do ML (Free, Gold Especial, Gold Pro, Premium…).
    * Endpoint público, cache 1h via MercadolivreService.

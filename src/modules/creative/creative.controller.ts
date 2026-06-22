@@ -329,6 +329,28 @@ export class CreativeController {
     return this.svc.refreshMlCategory(this.orgOrThrow(u), id)
   }
 
+  /** GET /ml/search-categories?q= — candidatos de categoria ML por palavra (seletor manual). */
+  @Get('ml/search-categories')
+  @RequirePermission('products.view')
+  searchMlCategories(@ReqUser() u: ReqUserPayload, @Query('q') q?: string) {
+    this.orgOrThrow(u)
+    if (!q?.trim()) throw new BadRequestException('q obrigatório')
+    return this.svc.searchMlCategories(q.trim())
+  }
+
+  /** POST /listings/:id/set-ml-category — define manualmente a categoria ML do anúncio. */
+  @Post('listings/:id/set-ml-category')
+  @RequirePermission('products.update')
+  @HttpCode(HttpStatus.OK)
+  setMlCategory(
+    @ReqUser() u: ReqUserPayload,
+    @Param('id') id: string,
+    @Body() body: { category_id?: string },
+  ) {
+    if (!body?.category_id?.trim()) throw new BadRequestException('category_id obrigatório')
+    return this.svc.setListingMlCategory(this.orgOrThrow(u), id, body.category_id.trim())
+  }
+
   /** GET /ml/categories/:id/attributes-detail — retorna attributes formatados
    *  com flag `required` calculada (sub-sprint B vai usar pra ficha técnica). */
   @Get('ml/categories/:id/attributes-detail')
