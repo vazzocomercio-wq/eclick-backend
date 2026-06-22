@@ -10,6 +10,7 @@ import {
   type CreateProductDto,
   type UpdateProductDto,
   type CreateBriefingDto,
+  type QuickListingDto,
 } from './creative.service'
 import { CreativeImagePipelineService } from './creative-image-pipeline.service'
 import { CreativeVideoPipelineService } from './creative-video-pipeline.service'
@@ -140,6 +141,22 @@ export class CreativeController {
   ) {
     if (!body?.briefing_id) throw new BadRequestException('briefing_id obrigatório')
     return this.svc.importCatalogImagesAsCreativeImages(this.orgOrThrow(u), id, body.briefing_id)
+  }
+
+  /** POST /creative/quick-listing — caminho rápido "Imagens prontas": cria
+   *  produto + importa imagens (Canva/upload) como aprovadas + anúncio, e
+   *  devolve { creative_product_id, listing_id } pra cair na publicação. */
+  @Post('quick-listing')
+  @RequirePermission('products.update')
+  @HttpCode(HttpStatus.OK)
+  quickListing(@ReqUser() u: ReqUserPayload, @Body() body: QuickListingDto) {
+    if (!Array.isArray(body?.images) || body.images.length === 0) {
+      throw new BadRequestException('images obrigatório (≥1)')
+    }
+    if (!body.catalog_product_id && !body.name?.trim()) {
+      throw new BadRequestException('name obrigatório quando sem vínculo ao catálogo')
+    }
+    return this.svc.createQuickListing(this.orgOrThrow(u), u.id, body)
   }
 
   // ── Briefings ────────────────────────────────────────────────────────────

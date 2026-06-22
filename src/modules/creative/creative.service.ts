@@ -156,6 +156,35 @@ export interface CreateBriefingDto {
   selected_positions?: number[]
 }
 
+/** Caminho rápido — uma fonte de imagem pronta (Canva exportado ou upload). */
+export interface QuickListingImageSource {
+  /** URL acessível pra download (storage_url público do Canva ou signed URL do upload). */
+  url:   string
+  kind?: 'canva' | 'upload' | 'external'
+}
+
+/**
+ * Caminho rápido ("Imagens prontas"): cria anúncio a partir de imagens já
+ * prontas, pulando a geração por IA. Pode vincular a um produto do catálogo
+ * (puxa os dados pra enriquecer) ou seguir sem vínculo.
+ */
+export interface QuickListingDto {
+  /** Nome do produto. Obrigatório quando SEM vínculo; se vinculado, herda do catálogo. */
+  name?:                string
+  /** Vincula o anúncio a um produto do catálogo (puxa dados). NULL/omit = sem vínculo. */
+  catalog_product_id?:  string | null
+  target_marketplace?:  Marketplace
+  /** Imagens prontas (≥1). A 1ª vira a capa do produto. */
+  images:               QuickListingImageSource[]
+  /**
+   * Como preencher o texto do anúncio:
+   *  - 'catalog' (default se vinculado) → puxa título/descrição/ficha do catálogo
+   *  - 'ai'                             → gera com IA (LlmService)
+   *  - 'blank' (default sem vínculo)    → mínimo, preenchido na tela de publicação
+   */
+  text_mode?:           'catalog' | 'ai' | 'blank'
+}
+
 @Injectable()
 export class CreativeService {
   private readonly logger = new Logger(CreativeService.name)
@@ -584,6 +613,269 @@ export class CreativeService {
 
     this.logger.log(`[catalog-import] produto ${creativeProductId}: ${imported}/${photoUrls.length} fotos importadas`)
     return { imported, skipped: null }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // QUICK LISTING — caminho rápido ("Imagens prontas": Canva + upload externo)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Cria um anúncio a partir de imagens JÁ PRONTAS (designs exportados do Canva
+   * e/ou uploads externos), pulando a geração por IA. Reúne as peças que já
+   * existem: createProduct/createCreativeFromCatalogProduct + import de imagens
+   * aprovadas + listing (catálogo / IA / em branco). Devolve o listing pronto
+   * pra o frontend cair direto na tela de publicação.
+   */
+  async createQuickListing(
+    orgId:  string,
+    userId: string,
+    dto:    QuickListingDto,
+  ): Promise<{ creative_product_id: string; listing_id: string; images_imported: number }> {
+    const images = (dto.images ?? []).filter(i => i?.url?.trim())
+    if (images.length === 0) throw new BadRequestException('selecione ao menos 1 imagem')
+    const marketplace = dto.target_marketplace ?? 'mercado_livre'
+
+    // 1. A 1ª imagem vira a capa do produto (bucket privado `creative`).
+    const cover = await this.fetchAndUploadToCreativeBucket(orgId, `${orgId}/quick-main`, images[0].url)
+    const coverSigned = await this.signImage(cover.storage_path, 3600).catch(() => images[0].url)
+
+    // 2. Cria o produto — vinculado ao catálogo (puxa dados) ou avulso.
+    let product: CreativeProduct
+    if (dto.catalog_product_id) {
+      product = await this.createCreativeFromCatalogProduct(orgId, userId, dto.catalog_product_id, {
+        main_image_url:          coverSigned,
+        main_image_storage_path: cover.storage_path,
+      })
+    } else {
+      if (!dto.name?.trim()) throw new BadRequestException('name obrigatório quando sem vínculo')
+      product = await this.createProduct(orgId, userId, {
+        name:                    dto.name.trim(),
+        category:                'Diversos',
+        main_image_url:          coverSigned,
+        main_image_storage_path: cover.storage_path,
+      })
+    }
+
+    // 3. Briefing mínimo (só carimba o marketplace alvo).
+    const briefing = await this.createBriefing(orgId, product.id, { target_marketplace: marketplace })
+
+    // 4. Importa TODAS as imagens como creative_images APROVADAS.
+    const imported = await this.importImageSourcesAsApproved(orgId, product.id, briefing.id, images)
+    if (imported === 0) throw new BadRequestException('nenhuma imagem pôde ser importada — verifique as fontes')
+
+    // 5. Cria o anúncio textual conforme o modo escolhido.
+    const textMode = dto.text_mode ?? (dto.catalog_product_id ? 'catalog' : 'blank')
+    let listing: CreativeListing
+    if (textMode === 'ai') {
+      listing = await this.generateListing(orgId, product.id, briefing.id)
+    } else if (textMode === 'catalog' && product.product_id) {
+      listing = await this.createCatalogEnrichedListing(orgId, product, briefing)
+    } else {
+      listing = await this.createBlankListing(orgId, product, briefing)
+    }
+
+    this.logger.log(`[quick-listing] org=${orgId} produto=${product.id} listing=${listing.id} imgs=${imported} modo=${textMode}`)
+    return { creative_product_id: product.id, listing_id: listing.id, images_imported: imported }
+  }
+
+  /** Baixa uma imagem por URL e sobe pro bucket `creative`. Retorna o path. */
+  private async fetchAndUploadToCreativeBucket(
+    orgId:     string,
+    pathPrefix: string,
+    sourceUrl: string,
+  ): Promise<{ storage_path: string; content_type: string }> {
+    let resp: Response
+    try {
+      resp = await fetch(sourceUrl)
+    } catch (e) {
+      throw new BadRequestException(`baixar imagem falhou: ${(e as Error).message}`)
+    }
+    if (!resp.ok) throw new BadRequestException(`baixar imagem: HTTP ${resp.status}`)
+    const buffer = Buffer.from(await resp.arrayBuffer())
+    const contentType = resp.headers.get('content-type') || 'image/jpeg'
+    const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg'
+    const storagePath = `${pathPrefix}/${randomUUID()}.${ext}`
+    const { error } = await supabaseAdmin.storage
+      .from('creative')
+      .upload(storagePath, buffer, { contentType, upsert: true, cacheControl: '3600' })
+    if (error) throw new BadRequestException(`upload imagem: ${error.message}`)
+    return { storage_path: storagePath, content_type: contentType }
+  }
+
+  /**
+   * Importa um conjunto de fontes de imagem como creative_images APROVADAS sob
+   * um job de custo zero (`source = 'quick_import'`). Best-effort por imagem.
+   * Generaliza o que importCatalogImagesAsCreativeImages faz só pro catálogo.
+   */
+  private async importImageSourcesAsApproved(
+    orgId:             string,
+    creativeProductId: string,
+    briefingId:        string,
+    sources:           QuickListingImageSource[],
+  ): Promise<number> {
+    const nowIso = new Date().toISOString()
+    const { data: job, error: jobErr } = await supabaseAdmin
+      .from('creative_image_jobs')
+      .insert({
+        organization_id:  orgId,
+        product_id:       creativeProductId,
+        briefing_id:      briefingId,
+        status:           'completed',
+        requested_count:  sources.length,
+        completed_count:  sources.length,
+        approved_count:   sources.length,
+        max_cost_usd:     0,
+        total_cost_usd:   0,
+        prompts_metadata: { source: 'quick_import' },
+        started_at:       nowIso,
+        completed_at:     nowIso,
+      })
+      .select('id')
+      .single()
+    if (jobErr || !job) throw new BadRequestException(`quickImport.job: ${jobErr?.message}`)
+
+    let imported = 0
+    for (let i = 0; i < sources.length; i++) {
+      try {
+        const src = sources[i]
+        const resp = await fetch(src.url)
+        if (!resp.ok) { this.logger.warn(`[quick-import] img ${i} HTTP ${resp.status}`); continue }
+        const buffer = Buffer.from(await resp.arrayBuffer())
+        const contentType = resp.headers.get('content-type') || 'image/jpeg'
+        const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg'
+        const imageId = randomUUID()
+        const storagePath = `${orgId}/${creativeProductId}/images/${imageId}.${ext}`
+
+        const { error: upErr } = await supabaseAdmin.storage
+          .from('creative')
+          .upload(storagePath, buffer, { contentType, upsert: true, cacheControl: '3600' })
+        if (upErr) { this.logger.warn(`[quick-import] upload ${i}: ${upErr.message}`); continue }
+
+        const { error: insErr } = await supabaseAdmin
+          .from('creative_images')
+          .insert({
+            id:                  imageId,
+            job_id:              job.id,
+            product_id:          creativeProductId,
+            organization_id:     orgId,
+            position:            i + 1,
+            prompt_text:         src.kind === 'canva' ? 'Design importado do Canva' : 'Imagem enviada manualmente',
+            status:              'approved',
+            storage_path:        storagePath,
+            approved_at:         nowIso,
+            generation_metadata: { source: 'quick_import', kind: src.kind ?? 'external', original_url: src.url },
+          })
+        if (insErr) { this.logger.warn(`[quick-import] insert ${i}: ${insErr.message}`); continue }
+        imported++
+      } catch (e) {
+        this.logger.warn(`[quick-import] img ${i} falhou: ${(e as Error).message}`)
+      }
+    }
+
+    this.logger.log(`[quick-import] produto ${creativeProductId}: ${imported}/${sources.length} imagens importadas`)
+    return imported
+  }
+
+  /** Anúncio mínimo (sem IA, sem catálogo): só título = nome do produto. O
+   *  resto o usuário preenche na tela de publicação. */
+  private async createBlankListing(
+    orgId:    string,
+    product:  CreativeProduct,
+    briefing: CreativeBriefing,
+  ): Promise<CreativeListing> {
+    const mlPred = await this.predictMlCategory(product.name, briefing.target_marketplace)
+    const { data, error } = await supabaseAdmin
+      .from('creative_listings')
+      .insert({
+        product_id:               product.id,
+        briefing_id:              briefing.id,
+        organization_id:          orgId,
+        title:                    product.name,
+        subtitle:                 null,
+        description:              '',
+        bullets:                  [],
+        technical_sheet:          {},
+        keywords:                 [],
+        search_tags:              [],
+        suggested_category:       product.category,
+        category_ml_id:           mlPred.category_ml_id,
+        attributes_ml_suggested:  mlPred.attributes_ml_suggested,
+        faq:                      [],
+        commercial_differentials: [],
+        marketplace_variants:     {},
+        version:                  1,
+        parent_listing_id:        null,
+        generation_metadata:      { source: 'quick_blank' },
+        status:                   'review',
+      })
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`createBlankListing: ${error.message}`)
+    return data as CreativeListing
+  }
+
+  /** Anúncio enriquecido com os dados do produto do catálogo vinculado
+   *  (título/descrição/ficha técnica), SEM IA. */
+  private async createCatalogEnrichedListing(
+    orgId:    string,
+    product:  CreativeProduct,
+    briefing: CreativeBriefing,
+  ): Promise<CreativeListing> {
+    // Puxa os campos ricos do catálogo (product.product_id garante vínculo).
+    const { data: cat } = await supabaseAdmin
+      .from('products')
+      .select('name, ml_title, description, attributes')
+      .eq('id', product.product_id as string)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    const c = (cat ?? {}) as { name?: string; ml_title?: string | null; description?: string | null; attributes?: Record<string, unknown> | null }
+
+    const title = (c.ml_title?.trim() || c.name?.trim() || product.name).slice(0, 60)
+    const description = (c.description ?? '').trim()
+
+    // Ficha técnica: atributos do catálogo (valores escalares) + dimensões.
+    const technicalSheet: Record<string, unknown> = {}
+    if (c.attributes && typeof c.attributes === 'object') {
+      for (const [k, v] of Object.entries(c.attributes)) {
+        if (v == null) continue
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') technicalSheet[k] = v
+      }
+    }
+    const dims = (product.dimensions ?? {}) as Record<string, unknown>
+    for (const [k, v] of Object.entries(dims)) {
+      if (typeof v === 'string' || typeof v === 'number') technicalSheet[k] = v
+    }
+
+    const mlPred = await this.predictMlCategory(title, briefing.target_marketplace)
+
+    const { data, error } = await supabaseAdmin
+      .from('creative_listings')
+      .insert({
+        product_id:               product.id,
+        briefing_id:              briefing.id,
+        organization_id:          orgId,
+        title,
+        subtitle:                 null,
+        description,
+        bullets:                  product.differentials ?? [],
+        technical_sheet:          technicalSheet,
+        keywords:                 [],
+        search_tags:              [],
+        suggested_category:       product.category,
+        category_ml_id:           mlPred.category_ml_id,
+        attributes_ml_suggested:  mlPred.attributes_ml_suggested,
+        faq:                      [],
+        commercial_differentials: product.differentials ?? [],
+        marketplace_variants:     {},
+        version:                  1,
+        parent_listing_id:        null,
+        generation_metadata:      { source: 'quick_catalog', catalog_product_id: product.product_id },
+        status:                   'review',
+      })
+      .select('*')
+      .single()
+    if (error) throw new BadRequestException(`createCatalogEnrichedListing: ${error.message}`)
+    return data as CreativeListing
   }
 
   /** Cria creative_product pré-preenchido com dados de um produto do catálogo.
