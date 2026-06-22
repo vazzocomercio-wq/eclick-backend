@@ -848,6 +848,13 @@ export class CreativeService {
 
     const mlPred = await this.predictMlCategory(title, briefing.target_marketplace)
 
+    // Atributos ML preenchíveis direto do produto (universais, sem depender da
+    // categoria): GTIN (do EAN) e BRAND (da marca). A tela de publicação lê
+    // `ml_attributes` — sem isso o GTIN/EAN sai vazio mesmo o produto tendo.
+    const mlAttributes: Array<{ id: string; value_id?: string; value_name?: string }> = []
+    if (product.ean?.trim())   mlAttributes.push({ id: 'GTIN',  value_name: product.ean.trim() })
+    if (product.brand?.trim()) mlAttributes.push({ id: 'BRAND', value_name: product.brand.trim() })
+
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
       .insert({
@@ -859,6 +866,7 @@ export class CreativeService {
         description,
         bullets:                  product.differentials ?? [],
         technical_sheet:          technicalSheet,
+        ml_attributes:            mlAttributes,
         keywords:                 [],
         search_tags:              [],
         suggested_category:       product.category,
