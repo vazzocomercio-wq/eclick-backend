@@ -225,12 +225,12 @@ export class ProductionService {
     const priceByProduct = new Map(prods.map(p => [(p as { id: string }).id, Number((p as { price: number | null }).price) || 0]))
 
     const since = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10)
-    const sales = linkedIds.length ? (await supabaseAdmin.from('product_sales_snapshots').select('product_id, units_sold, gross_profit, snapshot_date').eq('organization_id', orgId).gte('snapshot_date', since).in('product_id', linkedIds)).data ?? [] : []
-    const salesByProduct = new Map<string, { units: number; profit: number }>()
+    const sales = linkedIds.length ? (await supabaseAdmin.from('product_sales_snapshots').select('product_id, units_sold, gross_profit, revenue, snapshot_date').eq('organization_id', orgId).gte('snapshot_date', since).in('product_id', linkedIds)).data ?? [] : []
+    const salesByProduct = new Map<string, { units: number; profit: number; revenue: number }>()
     for (const s of sales) {
-      const row = s as { product_id: string; units_sold: number | null; gross_profit: number | null }
-      const cur = salesByProduct.get(row.product_id) ?? { units: 0, profit: 0 }
-      cur.units += Number(row.units_sold) || 0; cur.profit += Number(row.gross_profit) || 0
+      const row = s as { product_id: string; units_sold: number | null; gross_profit: number | null; revenue: number | null }
+      const cur = salesByProduct.get(row.product_id) ?? { units: 0, profit: 0, revenue: 0 }
+      cur.units += Number(row.units_sold) || 0; cur.profit += Number(row.gross_profit) || 0; cur.revenue += Number(row.revenue) || 0
       salesByProduct.set(row.product_id, cur)
     }
 
@@ -245,6 +245,8 @@ export class ProductionService {
       const profitPerHour = printMin > 0 ? this.round2(contribution / (printMin / 60)) : null
       const sale = d.product_id ? salesByProduct.get(d.product_id) : undefined
       const unitsSold30d = sale?.units ?? 0
+      const revenue30d = this.round2(sale?.revenue ?? 0)
+      const realizedProfit30d = this.round2(sale?.profit ?? 0)
       const unitsProduced = (orders ?? []).filter(o => (o as { product_dev_id: string }).product_dev_id === d.id).reduce((s, o) => s + (Number((o as { quantity: number }).quantity) || 0), 0)
 
       let recommendation: string
@@ -257,7 +259,8 @@ export class ProductionService {
         product_dev_id: d.id, name: d.name, category: d.category,
         print_minutes_unit: printMin, cost_unit: costUnit, price_unit: priceUnit,
         contribution_unit: contribution, profit_per_hour: profitPerHour,
-        units_sold_30d: unitsSold30d, units_produced: unitsProduced, recommendation,
+        units_sold_30d: unitsSold30d, units_produced: unitsProduced,
+        revenue_30d: revenue30d, realized_profit_30d: realizedProfit30d, recommendation,
       }
     })
 
@@ -316,8 +319,53 @@ export class ProductionService {
         total_contribution: totalContribution,
         free_profit: this.round2(Math.max(0, totalContribution - totalPaidBack)),
       },
+      sales: {
+        revenue_30d: this.round2(prof.reduce((s, p) => s + (Number(p.revenue_30d) || 0), 0)),
+        realized_profit_30d: this.round2(prof.reduce((s, p) => s + (Number(p.realized_profit_30d) || 0), 0)),
+        units_sold_30d: prof.reduce((s, p) => s + (Number(p.units_sold_30d) || 0), 0),
+      },
       inputs: { low_stock: lowStock },
       top_products: prof.slice(0, 5),
+    }
+  }
+
+  /** Plano de produção: dado o tempo de máquina disponível, sugere o mix que
+   *  maximiza o lucro por hora do parque (guloso por R$/hora, limitado pela
+   *  demanda real de 30d — não imprime o que não vende). */
+  async productionPlan(orgId: string, hoursParam?: number) {
+    const prof = await this.profitability(orgId)
+    const { data: printers } = await supabaseAdmin.from('production_printer').select('id').eq('organization_id', orgId).eq('status', 'ativa')
+    const activeCount = (printers ?? []).length
+    // capacidade: parâmetro OU 12h/dia × 7 dias × impressoras ativas
+    const capacityHours = Math.max(0, Number(hoursParam) || activeCount * 84)
+
+    const candidates = prof
+      .filter(p => p.profit_per_hour != null && p.profit_per_hour > 0 && p.print_minutes_unit > 0 && p.units_sold_30d > 0)
+      .sort((a, b) => (b.profit_per_hour ?? 0) - (a.profit_per_hour ?? 0))
+
+    let remaining = capacityHours
+    let totalContribution = 0
+    const plan: Array<{ product_dev_id: string; name: string; units: number; hours: number; profit_per_hour: number | null; contribution: number }> = []
+    for (const c of candidates) {
+      if (remaining <= 0) break
+      const hoursPerUnit = c.print_minutes_unit / 60
+      const units = Math.min(c.units_sold_30d, Math.floor(remaining / hoursPerUnit))
+      if (units <= 0) continue
+      const hours = this.round2(units * hoursPerUnit)
+      const contribution = this.round2(units * c.contribution_unit)
+      plan.push({ product_dev_id: c.product_dev_id, name: c.name, units, hours, profit_per_hour: c.profit_per_hour, contribution })
+      remaining = this.round2(remaining - hours)
+      totalContribution += contribution
+    }
+
+    return {
+      capacity_hours: this.round2(capacityHours),
+      active_printers: activeCount,
+      hours_used: this.round2(capacityHours - remaining),
+      hours_idle: this.round2(remaining),
+      utilization_pct: capacityHours > 0 ? this.round2(((capacityHours - remaining) / capacityHours) * 100) : 0,
+      total_contribution: this.round2(totalContribution),
+      plan,
     }
   }
 

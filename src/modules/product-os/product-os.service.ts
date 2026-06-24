@@ -118,6 +118,47 @@ export class ProductOsService {
     return data ?? []
   }
 
+  /** Extrai peso(g), tempo(min) e material do resumo/G-code do slicer
+   *  (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura). Parser tolerante. */
+  parseSlicer(text: string): { weight_g: number | null; print_time_minutes: number | null; material: string | null } {
+    const t = (text ?? '').slice(0, 20000)
+    const num = (s: string) => { const n = Number(s.replace(/\./g, '').replace(',', '.')) ; return Number.isFinite(n) ? n : Number(s.replace(',', '.')) }
+
+    // ── tempo ──
+    let minutes: number | null = null
+    // HH:MM:SS
+    const hms = t.match(/(\d{1,2}):(\d{2}):(\d{2})/)
+    if (hms) minutes = Number(hms[1]) * 60 + Number(hms[2]) + Math.round(Number(hms[3]) / 60)
+    if (minutes == null) {
+      // procura uma linha que fale de "time" e tenha h/m
+      const timeLine = t.split(/\r?\n/).find(l => /time/i.test(l) && /\d+\s*[hm]/i.test(l)) ?? t
+      const h = timeLine.match(/(\d+)\s*h/i); const m = timeLine.match(/(\d+)\s*m(?:in)?/i); const sec = timeLine.match(/(\d+)\s*s\b/i)
+      if (h || m) minutes = (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0) + (sec ? Math.round(Number(sec[1]) / 60) : 0)
+    }
+    if (minutes == null) { const mn = t.match(/([\d.]+)\s*min\b/i); if (mn) minutes = Math.round(Number(mn[1])) }
+
+    // ── peso (g) ──
+    let grams: number | null = null
+    const wPatterns = [
+      /filament[^=:\n]*weight[^=:\n]*[=:]\s*([\d.,]+)/i,
+      /(?:total\s+)?filament\s+used\s*\[g\]\s*[=:]\s*([\d.,]+)/i,
+      /(?:total\s+)?filament[^=:\n]*[=:]\s*([\d.,]+)\s*g\b/i,
+      /total\s+filament\s*[:=]\s*([\d.,]+)\s*g/i,
+      /([\d.,]+)\s*g\b(?=[^\n]*filament)/i,
+    ]
+    for (const re of wPatterns) { const mm = t.match(re); if (mm) { grams = num(mm[1]); break } }
+    if (grams == null) { const g = t.match(/([\d.,]+)\s*g(?:rams?)?\b/i); if (g) grams = num(g[1]) }
+
+    // ── material ──
+    const mat = t.match(/\b(PLA|PETG|ABS|TPU|ASA|PC|Nylon|PA)\b/i)
+
+    return {
+      weight_g: grams != null && grams > 0 ? Math.round(grams * 100) / 100 : null,
+      print_time_minutes: minutes != null && minutes > 0 ? minutes : null,
+      material: mat ? mat[1].toUpperCase() : null,
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // product_dev — CRUD + kanban
   // ─────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import { ProductOsActiveService } from './product-os-active.service'
 import { ProductionService } from './production.service'
 import { ProductionInputService } from './production-input.service'
 import { PrinterService } from './printer.service'
+import { ProductOsCronService } from './product-os-cron.service'
 import { AiModule } from '../ai/ai.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { ProductsModule } from '../products/products.module'
@@ -16,7 +17,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}

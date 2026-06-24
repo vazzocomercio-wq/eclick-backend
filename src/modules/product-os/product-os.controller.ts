@@ -148,6 +148,20 @@ export class ProductOsController {
   @RequirePermission('products.view')
   factoryOverview(@ReqUser() u: ReqUserPayload) { return this.production.factoryOverview(this.org(u)) }
 
+  @Post('parse-slicer')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  parseSlicer(@ReqUser() u: ReqUserPayload, @Body() body: { text: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.parseSlicer(body?.text ?? '')
+  }
+
+  @Get('production-plan')
+  @RequirePermission('products.view')
+  productionPlan(@ReqUser() u: ReqUserPayload, @Query('hours') hours?: string) {
+    return this.production.productionPlan(this.org(u), hours ? Number(hours) : undefined)
+  }
+
   // ══ coleção ═══════════════════════════════════════════════════════
   @Get()
   @RequirePermission('products.view')
