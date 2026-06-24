@@ -324,11 +324,12 @@ export class ProductOsService {
 
     await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' }).eq('id', id).eq('organization_id', orgId)
 
-    // estoque inicial NATIVO — produto vem do nosso sistema, SEM Icarus
+    // estoque inicial NATIVO — produto vem do nosso sistema, SEM sync de canal
     let stockSeeded = 0
     const qty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
     if (qty > 0) {
       await supabaseAdmin.from('products').update({ stock: qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+      await supabaseAdmin.from('product_stock').update({ quantity: qty, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
       stockSeeded = qty
     }
 

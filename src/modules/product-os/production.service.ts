@@ -201,10 +201,13 @@ export class ProductionService {
     }
     const qty = Number(order.quantity) || 0
     const { data: prod } = await supabaseAdmin.from('products').select('stock').eq('id', productId).maybeSingle()
-    const cur = Number((prod as { stock: number | null } | null)?.stock) || 0
-    await supabaseAdmin.from('products').update({ stock: cur + qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+    const novo = (Number((prod as { stock: number | null } | null)?.stock) || 0) + qty
+    await supabaseAdmin.from('products').update({ stock: novo, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+    // espelha no registro mestre criado pela plataforma (consistência) — SEM
+    // sync de canal/marketplace (não chama recalcAndPropagate = sem Icarus)
+    await supabaseAdmin.from('product_stock').update({ quantity: novo, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
     await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
-    this.logger.log(`[producao] +${qty} un nativas em products.stock p/ ${productId.slice(0, 8)} (sem Icarus)`)
+    this.logger.log(`[producao] +${qty} un nativas (products.stock=${novo}) p/ ${productId.slice(0, 8)} — sem sync de canal`)
   }
 
   /** Carimba custo/preço/contribuição na ordem concluída → alimenta o payback
