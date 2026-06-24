@@ -160,6 +160,14 @@ export class ProductOsController {
     return this.svc.parseSlicer(body?.text ?? '')
   }
 
+  @Post('upload-url')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  uploadUrl(@ReqUser() u: ReqUserPayload, @Body() body: { filename: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.createUploadUrl(u.orgId, body?.filename ?? 'arquivo')
+  }
+
   @Get('production-plan')
   @RequirePermission('products.view')
   productionPlan(@ReqUser() u: ReqUserPayload, @Query('hours') hours?: string) {

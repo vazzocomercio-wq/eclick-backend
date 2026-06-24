@@ -169,6 +169,17 @@ export class ProductOsService {
     }
   }
 
+  /** Gera uma URL assinada pro navegador subir o arquivo DIRETO ao storage
+   *  (não passa pela API). Bucket público 'product-os', escopo por org. */
+  async createUploadUrl(orgId: string, filename: string): Promise<{ path: string; token: string; public_url: string }> {
+    const safe = (filename || 'arquivo').normalize('NFD').replace(/[^\w.\-]/g, '_').slice(-80)
+    const path = `${orgId}/${Date.now()}-${safe}`
+    const { data, error } = await supabaseAdmin.storage.from('product-os').createSignedUploadUrl(path)
+    if (error || !data) throw new BadRequestException(`Erro ao gerar upload: ${error?.message ?? 'sem dados'}`)
+    const pub = supabaseAdmin.storage.from('product-os').getPublicUrl(data.path)
+    return { path: data.path, token: data.token, public_url: pub.data.publicUrl }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // product_dev — CRUD + kanban
   // ─────────────────────────────────────────────────────────────────
