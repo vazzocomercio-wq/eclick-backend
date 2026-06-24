@@ -144,6 +144,10 @@ export class ProductOsController {
   @RequirePermission('products.view')
   profitability(@ReqUser() u: ReqUserPayload) { return this.production.profitability(this.org(u)) }
 
+  @Get('factory-overview')
+  @RequirePermission('products.view')
+  factoryOverview(@ReqUser() u: ReqUserPayload) { return this.production.factoryOverview(this.org(u)) }
+
   // ══ coleção ═══════════════════════════════════════════════════════
   @Get()
   @RequirePermission('products.view')

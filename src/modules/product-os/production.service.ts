@@ -264,6 +264,63 @@ export class ProductionService {
     return out.sort((a, b) => (b.profit_per_hour ?? -1) - (a.profit_per_hour ?? -1))
   }
 
+  // ── painel da fábrica (visão executiva consolidada) ───────────────
+  async factoryOverview(orgId: string) {
+    const since30 = new Date(Date.now() - 30 * 86400_000).toISOString()
+    const [printersR, ordersR, inputsR, jobsR, prof] = await Promise.all([
+      supabaseAdmin.from('production_printer').select('id, name, acquisition_cost, status').eq('organization_id', orgId),
+      supabaseAdmin.from('production_order').select('printer_id, status, quantity, contribution_total, completed_at').eq('organization_id', orgId),
+      supabaseAdmin.from('production_input').select('id, name, quantity, reserved_quantity, reorder_threshold, unit').eq('organization_id', orgId).eq('is_active', true),
+      supabaseAdmin.from('print_job').select('print_time_minutes').eq('organization_id', orgId).eq('status', 'concluido'),
+      this.profitability(orgId),
+    ])
+    const printers = (printersR.data ?? []) as Array<{ id: string; acquisition_cost: number | null; status: string }>
+    const orders = (ordersR.data ?? []) as Array<{ printer_id: string | null; status: string; quantity: number; contribution_total: number | null; completed_at: string | null }>
+    const inputs = (inputsR.data ?? []) as Array<{ name: string; quantity: number; reserved_quantity: number; reorder_threshold: number; unit: string }>
+    const jobs = (jobsR.data ?? []) as Array<{ print_time_minutes: number | null }>
+
+    const done = orders.filter(o => o.status === 'disponivel')
+    const totalInvestment = this.round2(printers.reduce((s, p) => s + (Number(p.acquisition_cost) || 0), 0))
+    const contribByPrinter = new Map<string, number>()
+    let totalContribution = 0
+    for (const o of done) {
+      const c = Number(o.contribution_total) || 0; totalContribution += c
+      if (o.printer_id) contribByPrinter.set(o.printer_id, (contribByPrinter.get(o.printer_id) ?? 0) + c)
+    }
+    let totalPaidBack = 0, paidOff = 0
+    for (const p of printers) {
+      const cost = Number(p.acquisition_cost) || 0
+      const c = contribByPrinter.get(p.id) ?? 0
+      if (cost > 0) { totalPaidBack += Math.min(c, cost); if (c >= cost) paidOff++ }
+    }
+    totalContribution = this.round2(totalContribution); totalPaidBack = this.round2(totalPaidBack)
+
+    const lowStock = inputs.filter(i => i.reorder_threshold > 0 && (Number(i.quantity) - Number(i.reserved_quantity)) <= i.reorder_threshold)
+      .map(i => ({ name: i.name, available: this.round2(Number(i.quantity) - Number(i.reserved_quantity)), unit: i.unit }))
+
+    return {
+      printers: {
+        count: printers.length,
+        active: printers.filter(p => p.status === 'ativa').length,
+        total_investment: totalInvestment,
+        total_paid_back: totalPaidBack,
+        payback_pct: totalInvestment > 0 ? this.round2((totalPaidBack / totalInvestment) * 100) : null,
+        paid_off: paidOff,
+        total_print_hours: this.round2(jobs.reduce((s, j) => s + (Number(j.print_time_minutes) || 0), 0) / 60),
+      },
+      production: {
+        orders_done: done.length,
+        orders_active: orders.filter(o => !['disponivel', 'cancelado'].includes(o.status)).length,
+        units_produced: done.reduce((s, o) => s + (Number(o.quantity) || 0), 0),
+        units_30d: done.filter(o => o.completed_at && o.completed_at >= since30).reduce((s, o) => s + (Number(o.quantity) || 0), 0),
+        total_contribution: totalContribution,
+        free_profit: this.round2(Math.max(0, totalContribution - totalPaidBack)),
+      },
+      inputs: { low_stock: lowStock },
+      top_products: prof.slice(0, 5),
+    }
+  }
+
   // ── fila de impressão (print jobs) ────────────────────────────────
   async listJobs(orgId: string, oid: string) {
     const { data, error } = await supabaseAdmin.from('print_job').select('*')
