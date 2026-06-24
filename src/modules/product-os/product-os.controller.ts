@@ -136,6 +136,10 @@ export class ProductOsController {
   @RequirePermission('products.view')
   getPrinter(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.printers.get(this.org(u), pid) }
 
+  @Get('printers/:pid/analytics')
+  @RequirePermission('products.view')
+  printerAnalytics(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.printers.analytics(this.org(u), pid) }
+
   @Patch('printers/:pid')
   @RequirePermission('products.update')
   updatePrinter(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: Partial<Printer>) { return this.printers.update(this.org(u), pid, body) }
