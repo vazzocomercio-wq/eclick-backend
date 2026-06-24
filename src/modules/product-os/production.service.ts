@@ -389,6 +389,59 @@ export class ProductionService {
     }
   }
 
+  // ── custo real × estimado + consumo de insumo por produto ─────────
+  async costReality(orgId: string, devId: string) {
+    const { data: devData } = await supabaseAdmin.from('product_dev').select('estimated_cost').eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    const estUnit = Number((devData as { estimated_cost: number | null } | null)?.estimated_cost) || 0
+    const { data: settings } = await supabaseAdmin.from('production_settings').select('energy_cost_per_hour, labor_cost_per_hour, packaging_cost, default_waste_pct').eq('organization_id', orgId).maybeSingle()
+    const s = (settings ?? {}) as { energy_cost_per_hour?: number; labor_cost_per_hour?: number; packaging_cost?: number; default_waste_pct?: number }
+    const { data: ordersData } = await supabaseAdmin.from('production_order')
+      .select('id, order_number, quantity, actual_time_minutes, estimated_time_minutes, is_prototype')
+      .eq('organization_id', orgId).eq('product_dev_id', devId).eq('status', 'disponivel')
+    const orders = (ordersData ?? []) as Array<{ id: string; order_number: number; quantity: number; actual_time_minutes: number | null; estimated_time_minutes: number | null; is_prototype: boolean }>
+    const orderIds = orders.map(o => o.id)
+
+    let consumes: Array<{ input_id: string; quantity: number; unit_cost: number | null; reference_id: string }> = []
+    if (orderIds.length) {
+      const { data } = await supabaseAdmin.from('production_input_movement').select('input_id, quantity, unit_cost, reference_id')
+        .eq('organization_id', orgId).eq('movement_type', 'consume').eq('reference_type', 'production_order').in('reference_id', orderIds)
+      consumes = (data ?? []) as typeof consumes
+    }
+    const inputIds = [...new Set(consumes.map(c => c.input_id))]
+    const inputs = inputIds.length ? ((await supabaseAdmin.from('production_input').select('id, name, unit').in('id', inputIds)).data ?? []) : []
+    const inputById = new Map(inputs.map(i => [(i as { id: string }).id, i as { id: string; name: string; unit: string }]))
+
+    const matCostByOrder = new Map<string, number>()
+    const consByInput = new Map<string, { qty: number; cost: number }>()
+    for (const c of consumes) {
+      const cost = (Number(c.quantity) || 0) * (Number(c.unit_cost) || 0)
+      matCostByOrder.set(c.reference_id, (matCostByOrder.get(c.reference_id) ?? 0) + cost)
+      const cur = consByInput.get(c.input_id) ?? { qty: 0, cost: 0 }; cur.qty += Number(c.quantity) || 0; cur.cost += cost; consByInput.set(c.input_id, cur)
+    }
+
+    const energyRate = Number(s.energy_cost_per_hour) || 0, laborRate = Number(s.labor_cost_per_hour) || 0, pkg = Number(s.packaging_cost) || 0, wastePct = Number(s.default_waste_pct) || 0
+    let totalUnits = 0, totalReal = 0, totalEst = 0
+    const orderRows = orders.map(o => {
+      const qty = Number(o.quantity) || 0
+      const mins = Number(o.actual_time_minutes ?? o.estimated_time_minutes) || 0
+      const material = this.round2(matCostByOrder.get(o.id) ?? 0)
+      const sub = material + this.round2(mins / 60 * energyRate) + this.round2(mins / 60 * laborRate) + this.round2(pkg * qty)
+      const realTotal = this.round2(sub + this.round2(sub * wastePct / 100))
+      const realUnit = qty > 0 ? this.round2(realTotal / qty) : 0
+      totalUnits += qty; totalReal += realTotal; totalEst += this.round2(estUnit * qty)
+      return { order_number: o.order_number, is_prototype: o.is_prototype, quantity: qty, real_time_min: mins, material_cost: material, real_unit_cost: realUnit, estimated_unit_cost: this.round2(estUnit), real_total: realTotal }
+    })
+    const realUnitAvg = totalUnits > 0 ? this.round2(totalReal / totalUnits) : 0
+    const variancePct = estUnit > 0 ? this.round2(((realUnitAvg - estUnit) / estUnit) * 100) : null
+    const consumption = [...consByInput.entries()].map(([id, v]) => ({ name: inputById.get(id)?.name ?? '—', unit: inputById.get(id)?.unit ?? '', qty: this.round2(v.qty), cost: this.round2(v.cost) })).sort((a, b) => b.cost - a.cost)
+
+    return {
+      estimated_unit_cost: this.round2(estUnit), real_unit_cost_avg: realUnitAvg, variance_pct: variancePct,
+      total_units_produced: totalUnits, total_estimated: this.round2(totalEst), total_real: this.round2(totalReal),
+      orders: orderRows.sort((a, b) => b.order_number - a.order_number), consumption,
+    }
+  }
+
   // ── fila de impressão (print jobs) ────────────────────────────────
   async listJobs(orgId: string, oid: string) {
     const { data, error } = await supabaseAdmin.from('print_job').select('*')

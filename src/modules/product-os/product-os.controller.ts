@@ -256,6 +256,12 @@ export class ProductOsController {
     return this.production.costFromBom(this.org(u), id, body)
   }
 
+  @Get(':id/cost-reality')
+  @RequirePermission('products.view')
+  costReality(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.production.costReality(this.org(u), id)
+  }
+
   // ── qualidade ─────────────────────────────────────────────────────
   @Get(':id/quality')
   @RequirePermission('products.view')

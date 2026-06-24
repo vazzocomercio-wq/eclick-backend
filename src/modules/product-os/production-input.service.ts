@@ -170,7 +170,8 @@ export class ProductionInputService {
     }).eq('id', inputId)
     await supabaseAdmin.from('production_input_movement').insert({
       organization_id: orgId, input_id: inputId, movement_type: 'consume', quantity: physical,
-      balance_after: novaQtd, reference_type: refType, reference_id: refId, notes: 'Consumo na conclusão da produção',
+      balance_after: novaQtd, unit_cost: Number(i.cost_per_unit) || 0,   // custo médio no momento do consumo (custo real)
+      reference_type: refType, reference_id: refId, notes: 'Consumo na conclusão da produção',
     })
   }
 
