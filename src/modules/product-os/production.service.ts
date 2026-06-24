@@ -77,9 +77,19 @@ export class ProductionService {
   }
 
   async costFromBom(orgId: string, devId: string, body: { version_id?: string; target_margin_pct?: number } = {}) {
-    const lines = await this.getBom(orgId, devId, body.version_id) as Array<{ quantity: number; unit_cost: number; waste_pct: number }>
+    const lines = await this.getBom(orgId, devId, body.version_id) as Array<{ quantity: number; unit_cost: number; waste_pct: number; input_id: string | null }>
     if (!lines.length) throw new BadRequestException('Sem BOM cadastrado. Cadastre os insumos ou use o custo estimado.')
-    const total = this.round2(lines.reduce((s, l) => s + Number(l.quantity) * Number(l.unit_cost) * (1 + Number(l.waste_pct) / 100), 0))
+    // puxa o custo médio ponderado VIVO dos insumos vinculados (WAC)
+    const inputIds = lines.map(l => l.input_id).filter(Boolean) as string[]
+    const costByInput = new Map<string, number>()
+    if (inputIds.length) {
+      const { data: inputs } = await supabaseAdmin.from('production_input').select('id, cost_per_unit').in('id', inputIds)
+      for (const i of inputs ?? []) costByInput.set((i as { id: string }).id, Number((i as { cost_per_unit: number }).cost_per_unit) || 0)
+    }
+    const total = this.round2(lines.reduce((s, l) => {
+      const unitCost = l.input_id && costByInput.has(l.input_id) ? (costByInput.get(l.input_id) as number) : Number(l.unit_cost)
+      return s + Number(l.quantity) * unitCost * (1 + Number(l.waste_pct) / 100)
+    }, 0))
     const targetMargin = Math.min(Math.max(Number(body.target_margin_pct ?? 30), 0), 90)
     const suggested = Object.entries(CHANNEL_ALLIN_FEE_PCT).map(([channel, fee]) => {
       const denom = 1 - fee / 100 - targetMargin / 100

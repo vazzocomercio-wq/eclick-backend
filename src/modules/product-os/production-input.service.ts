@@ -11,15 +11,23 @@ export interface ProductionInput {
   id: string
   organization_id: string
   kind: 'filamento' | 'embalagem' | 'etiqueta' | 'outro'
+  sku: string | null
   name: string
-  material: string | null
+  description: string | null
+  material: string | null      // tipo (PLA, PETG, ABS…)
   color: string | null
+  color_hex: string | null
+  brand: string | null
+  supplier: string | null
+  diameter_mm: number | null
+  spool_weight_g: number | null
   unit: 'g' | 'kg' | 'un' | 'm'
   quantity: number
   reserved_quantity: number
   reorder_threshold: number
-  cost_per_unit: number
+  cost_per_unit: number         // CUSTO MÉDIO PONDERADO (recalculado a cada entrada)
   is_active: boolean
+  notes: string | null
   last_movement_at: string | null
   created_at: string
   updated_at: string
@@ -46,28 +54,33 @@ export class ProductionInputService {
     return rows
   }
 
-  async create(orgId: string, dto: {
-    kind?: string; name: string; material?: string; color?: string; unit?: string
-    quantity?: number; reorder_threshold?: number; cost_per_unit?: number
-  }): Promise<ProductionInput> {
+  async create(orgId: string, dto: Partial<ProductionInput> & { name: string }): Promise<ProductionInput> {
     if (!dto.name?.trim()) throw new BadRequestException('Nome do insumo é obrigatório')
     const { data, error } = await supabaseAdmin.from('production_input').insert({
       organization_id: orgId,
       kind: dto.kind ?? 'filamento',
+      sku: dto.sku ?? null,
       name: dto.name.trim(),
+      description: dto.description ?? null,
       material: dto.material ?? null,
       color: dto.color ?? null,
+      color_hex: dto.color_hex ?? null,
+      brand: dto.brand ?? null,
+      supplier: dto.supplier ?? null,
+      diameter_mm: dto.diameter_mm ?? null,
+      spool_weight_g: dto.spool_weight_g ?? null,
       unit: dto.unit ?? 'g',
       quantity: dto.quantity ?? 0,
       reorder_threshold: dto.reorder_threshold ?? 0,
-      cost_per_unit: dto.cost_per_unit ?? 0,
+      cost_per_unit: dto.cost_per_unit ?? 0,   // custo do lote inicial = médio inicial
+      notes: dto.notes ?? null,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar insumo: ${error?.message ?? 'sem dados'}`)
     return data as ProductionInput
   }
 
   async update(orgId: string, id: string, patch: Partial<ProductionInput>): Promise<ProductionInput> {
-    const allowed: (keyof ProductionInput)[] = ['name', 'material', 'color', 'unit', 'reorder_threshold', 'cost_per_unit', 'is_active']
+    const allowed: (keyof ProductionInput)[] = ['kind', 'sku', 'name', 'description', 'material', 'color', 'color_hex', 'brand', 'supplier', 'diameter_mm', 'spool_weight_g', 'unit', 'reorder_threshold', 'cost_per_unit', 'is_active', 'notes']
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
     if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
@@ -77,19 +90,27 @@ export class ProductionInputService {
     return data as ProductionInput
   }
 
-  /** Reposição/ajuste manual do estoque físico. */
-  async movement(orgId: string, id: string, body: { type: 'in' | 'adjust'; quantity: number; notes?: string }, userId: string | null): Promise<ProductionInput> {
+  /** Reposição/ajuste do estoque. Entrada com preço recalcula o CUSTO MÉDIO
+   *  PONDERADO: (qtd_atual×custo_atual + qtd_entrada×custo_entrada) / total. */
+  async movement(orgId: string, id: string, body: { type: 'in' | 'adjust'; quantity: number; unit_cost?: number; notes?: string }, userId: string | null): Promise<ProductionInput> {
     const input = await this.getOne(orgId, id)
     const qty = Math.max(0, Number(body.quantity) || 0)
     const novaQtd = body.type === 'adjust' ? qty : Number(input.quantity) + qty
+    let novoCusto = Number(input.cost_per_unit) || 0
+    if (body.type === 'in' && body.unit_cost != null && qty > 0) {
+      const curQty = Math.max(0, Number(input.quantity) || 0)
+      const inCost = Math.max(0, Number(body.unit_cost) || 0)
+      const total = curQty + qty
+      novoCusto = total > 0 ? Math.round(((curQty * novoCusto + qty * inCost) / total) * 100) / 100 : inCost
+    }
     await supabaseAdmin.from('production_input').update({
-      quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      quantity: novaQtd, cost_per_unit: novoCusto, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     }).eq('id', id).eq('organization_id', orgId)
     await supabaseAdmin.from('production_input_movement').insert({
       organization_id: orgId, input_id: id, movement_type: body.type, quantity: qty,
-      balance_after: novaQtd, notes: body.notes ?? null, created_by: userId,
+      balance_after: novaQtd, unit_cost: body.unit_cost ?? null, notes: body.notes ?? null, created_by: userId,
     })
-    return { ...input, quantity: novaQtd }
+    return { ...input, quantity: novaQtd, cost_per_unit: novoCusto }
   }
 
   async listMovements(orgId: string, id: string) {

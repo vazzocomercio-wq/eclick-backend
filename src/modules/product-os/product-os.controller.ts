@@ -102,7 +102,7 @@ export class ProductOsController {
 
   @Post('production-inputs')
   @RequirePermission('products.update')
-  createInput(@ReqUser() u: ReqUserPayload, @Body() body: { kind?: string; name: string; material?: string; color?: string; unit?: string; quantity?: number; reorder_threshold?: number; cost_per_unit?: number }) {
+  createInput(@ReqUser() u: ReqUserPayload, @Body() body: Partial<ProductionInput> & { name: string }) {
     return this.inputs.create(this.org(u), body)
   }
 
@@ -115,7 +115,7 @@ export class ProductOsController {
   @Post('production-inputs/:iid/movement')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  inputMovement(@ReqUser() u: ReqUserPayload, @Param('iid') iid: string, @Body() body: { type: 'in' | 'adjust'; quantity: number; notes?: string }) {
+  inputMovement(@ReqUser() u: ReqUserPayload, @Param('iid') iid: string, @Body() body: { type: 'in' | 'adjust'; quantity: number; unit_cost?: number; notes?: string }) {
     return this.inputs.movement(this.org(u), iid, body, u.id)
   }
 

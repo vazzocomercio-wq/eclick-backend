@@ -502,7 +502,17 @@ export class ProductOsService {
     const w = Math.max(0, Number(weight) || 0)
     const min = Math.max(0, Number(minutes) || 0)
     const mat = (material || 'PLA').toUpperCase()
-    const costPerKg = Number(settings.filament_cost_per_kg?.[mat] ?? settings.filament_cost_per_kg?.PLA ?? 0)
+    let costPerKg = Number(settings.filament_cost_per_kg?.[mat] ?? settings.filament_cost_per_kg?.PLA ?? 0)
+    // prefere o custo médio ponderado (WAC) do insumo de filamento, se cadastrado
+    const { data: inp } = await supabaseAdmin.from('production_input')
+      .select('cost_per_unit, unit').eq('organization_id', orgId).eq('kind', 'filamento')
+      .eq('material', mat).eq('is_active', true).gt('cost_per_unit', 0)
+      .order('quantity', { ascending: false }).limit(1).maybeSingle()
+    if (inp) {
+      const c = Number((inp as { cost_per_unit: number }).cost_per_unit) || 0
+      const u = (inp as { unit: string }).unit
+      if (c > 0) costPerKg = u === 'g' ? c * 1000 : u === 'kg' ? c : costPerKg
+    }
 
     const filament  = round2((w / 1000) * costPerKg)
     const energy    = round2((min / 60) * Number(settings.energy_cost_per_hour || 0))
