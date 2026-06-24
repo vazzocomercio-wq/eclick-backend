@@ -111,7 +111,7 @@ export class ProductionService {
     return { ...data, jobs: jobs ?? [] }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     // pega métricas da versão (explícita > aprovada > última)
     const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id)
@@ -124,7 +124,7 @@ export class ProductionService {
 
     const { data, error } = await supabaseAdmin.from('production_order').insert({
       organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? null,
-      order_number: nextNumber, quantity: qty, machine: body.machine ?? null,
+      order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null,
       estimated_time_minutes: estTime, estimated_filament_g: estFilament, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
@@ -160,6 +160,7 @@ export class ProductionService {
       // baixa insumos + alimenta estoque de produto acabado
       const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? (order as { estimated_filament_g: number | null }).estimated_filament_g ?? undefined
       await this.inputs.consume(orgId, 'production_order', oid, actual ?? undefined)
+      await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
       await this.feedFinishedGoods(orgId, order as Record<string, unknown>)
       await this.emit(orgId, devId, 'production_completed', { production_order_id: oid }, userId)
     }
@@ -189,6 +190,80 @@ export class ProductionService {
     }
   }
 
+  /** Carimba custo/preço/contribuição na ordem concluída → alimenta o payback
+   *  da impressora. Preço = target_price do produto (ou preço do SKU vinculado). */
+  private async snapshotContribution(orgId: string, devId: string, oid: string, quantity: number) {
+    const { data: dev } = await supabaseAdmin.from('product_dev').select('estimated_cost, target_price, product_id').eq('id', devId).maybeSingle()
+    const d = dev as { estimated_cost: number | null; target_price: number | null; product_id: string | null } | null
+    let priceUnit = Number(d?.target_price) || 0
+    if (!priceUnit && d?.product_id) {
+      const { data: prod } = await supabaseAdmin.from('products').select('price').eq('id', d.product_id).maybeSingle()
+      priceUnit = Number((prod as { price: number | null } | null)?.price) || 0
+    }
+    const costUnit = Number(d?.estimated_cost) || 0
+    const contribution = this.round2(Math.max(0, priceUnit - costUnit) * quantity)
+    await supabaseAdmin.from('production_order').update({
+      unit_cost_snapshot: costUnit, unit_price_snapshot: priceUnit, contribution_total: contribution,
+    }).eq('id', oid).eq('organization_id', orgId)
+  }
+
+  // ── inteligência de rentabilidade (lucro por hora de impressora) ──
+  async profitability(orgId: string) {
+    const { data: devs } = await supabaseAdmin.from('product_dev')
+      .select('id, name, category, estimated_cost, target_price, product_id, production_profile, status')
+      .eq('organization_id', orgId).neq('status', 'arquivado')
+    const devRows = (devs ?? []) as Array<{ id: string; name: string; category: string | null; estimated_cost: number | null; target_price: number | null; product_id: string | null; production_profile: string; status: string }>
+    if (!devRows.length) return []
+
+    const { data: versions } = await supabaseAdmin.from('product_dev_version')
+      .select('product_dev_id, version_number, approved, print_time_minutes').eq('organization_id', orgId)
+    const { data: orders } = await supabaseAdmin.from('production_order')
+      .select('product_dev_id, quantity, status').eq('organization_id', orgId).eq('status', 'disponivel')
+
+    const linkedIds = devRows.map(d => d.product_id).filter(Boolean) as string[]
+    const prods = linkedIds.length ? (await supabaseAdmin.from('products').select('id, price').in('id', linkedIds)).data ?? [] : []
+    const priceByProduct = new Map(prods.map(p => [(p as { id: string }).id, Number((p as { price: number | null }).price) || 0]))
+
+    const since = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10)
+    const sales = linkedIds.length ? (await supabaseAdmin.from('product_sales_snapshots').select('product_id, units_sold, gross_profit, snapshot_date').eq('organization_id', orgId).gte('snapshot_date', since).in('product_id', linkedIds)).data ?? [] : []
+    const salesByProduct = new Map<string, { units: number; profit: number }>()
+    for (const s of sales) {
+      const row = s as { product_id: string; units_sold: number | null; gross_profit: number | null }
+      const cur = salesByProduct.get(row.product_id) ?? { units: 0, profit: 0 }
+      cur.units += Number(row.units_sold) || 0; cur.profit += Number(row.gross_profit) || 0
+      salesByProduct.set(row.product_id, cur)
+    }
+
+    const out = devRows.map(d => {
+      const vs = (versions ?? []).filter(v => (v as { product_dev_id: string }).product_dev_id === d.id)
+        .sort((a, b) => (b as { version_number: number }).version_number - (a as { version_number: number }).version_number)
+      const ref = vs.find(v => (v as { approved: boolean }).approved) ?? vs[0]
+      const printMin = ref ? Number((ref as { print_time_minutes: number | null }).print_time_minutes) || 0 : 0
+      const costUnit = Number(d.estimated_cost) || 0
+      const priceUnit = Number(d.target_price) || (d.product_id ? (priceByProduct.get(d.product_id) ?? 0) : 0)
+      const contribution = this.round2(priceUnit - costUnit)
+      const profitPerHour = printMin > 0 ? this.round2(contribution / (printMin / 60)) : null
+      const sale = d.product_id ? salesByProduct.get(d.product_id) : undefined
+      const unitsSold30d = sale?.units ?? 0
+      const unitsProduced = (orders ?? []).filter(o => (o as { product_dev_id: string }).product_dev_id === d.id).reduce((s, o) => s + (Number((o as { quantity: number }).quantity) || 0), 0)
+
+      let recommendation: string
+      if (profitPerHour == null) recommendation = 'faltam_dados'
+      else if (profitPerHour <= 0) recommendation = 'reavaliar'
+      else if (unitsSold30d > 0) recommendation = 'priorizar'
+      else recommendation = 'validar_demanda'
+
+      return {
+        product_dev_id: d.id, name: d.name, category: d.category,
+        print_minutes_unit: printMin, cost_unit: costUnit, price_unit: priceUnit,
+        contribution_unit: contribution, profit_per_hour: profitPerHour,
+        units_sold_30d: unitsSold30d, units_produced: unitsProduced, recommendation,
+      }
+    })
+
+    return out.sort((a, b) => (b.profit_per_hour ?? -1) - (a.profit_per_hour ?? -1))
+  }
+
   // ── fila de impressão (print jobs) ────────────────────────────────
   async listJobs(orgId: string, oid: string) {
     const { data, error } = await supabaseAdmin.from('print_job').select('*')
@@ -204,6 +279,7 @@ export class ProductionService {
     const rows = Array.from({ length: count }, (_, i) => ({
       organization_id: orgId, production_order_id: oid,
       version_id: (order as { version_id: string | null }).version_id,
+      printer_id: (order as { printer_id: string | null }).printer_id,
       job_number: existing + i + 1, machine: body.machine ?? (order as { machine: string | null }).machine, created_by: userId,
     }))
     const { error } = await supabaseAdmin.from('print_job').insert(rows)

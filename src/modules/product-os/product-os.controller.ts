@@ -8,6 +8,7 @@ import {
 } from './product-os.service'
 import { ProductionService } from './production.service'
 import { ProductionInputService, type ProductionInput } from './production-input.service'
+import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -22,6 +23,7 @@ export class ProductOsController {
     private readonly svc: ProductOsService,
     private readonly production: ProductionService,
     private readonly inputs: ProductionInputService,
+    private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
   ) {}
 
@@ -59,7 +61,7 @@ export class ProductOsController {
 
   @Post('production-orders')
   @RequirePermission('products.update')
-  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string }) {
+  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string }) {
     return this.production.createOrder(this.org(u), u.id, body)
   }
 
@@ -120,6 +122,27 @@ export class ProductOsController {
   @Get('production-inputs/:iid/movements')
   @RequirePermission('products.view')
   inputMovements(@ReqUser() u: ReqUserPayload, @Param('iid') iid: string) { return this.inputs.listMovements(this.org(u), iid) }
+
+  // ── impressoras + rentabilidade ───────────────────────────────────
+  @Get('printers')
+  @RequirePermission('products.view')
+  listPrinters(@ReqUser() u: ReqUserPayload) { return this.printers.list(this.org(u)) }
+
+  @Post('printers')
+  @RequirePermission('products.update')
+  createPrinter(@ReqUser() u: ReqUserPayload, @Body() body: Partial<Printer> & { name: string }) { return this.printers.create(this.org(u), body) }
+
+  @Get('printers/:pid')
+  @RequirePermission('products.view')
+  getPrinter(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.printers.get(this.org(u), pid) }
+
+  @Patch('printers/:pid')
+  @RequirePermission('products.update')
+  updatePrinter(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: Partial<Printer>) { return this.printers.update(this.org(u), pid, body) }
+
+  @Get('profitability')
+  @RequirePermission('products.view')
+  profitability(@ReqUser() u: ReqUserPayload) { return this.production.profitability(this.org(u)) }
 
   // ══ coleção ═══════════════════════════════════════════════════════
   @Get()
