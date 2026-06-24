@@ -6,6 +6,8 @@ import { ProductionService } from './production.service'
 import { ProductionInputService } from './production-input.service'
 import { PrinterService } from './printer.service'
 import { ProductOsCronService } from './product-os-cron.service'
+import { FarmService } from './farm.service'
+import { FarmController, FarmIngestController } from './farm.controller'
 import { AiModule } from '../ai/ai.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { ProductsModule } from '../products/products.module'
@@ -16,8 +18,8 @@ import { StockModule } from '../stock/stock.module'
  *  active-bridge p/ despacho operacional. */
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
-  controllers: [ProductOsController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService],
+  controllers: [ProductOsController, FarmController, FarmIngestController],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}

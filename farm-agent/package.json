@@ -1,0 +1,13 @@
+{
+  "name": "eclick-farm-agent",
+  "version": "1.0.0",
+  "description": "Agente local que lê o MQTT das impressoras e envia status pro e-Click Product OS",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node agent.mjs"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  }
+}

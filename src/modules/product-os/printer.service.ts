@@ -13,6 +13,7 @@ export interface Printer {
   build_volume_mm: string | null; nozzle_mm: number | null; has_ams: boolean; power_watts: number | null
   acquisition_cost: number; acquisition_date: string | null; expected_lifetime_hours: number | null
   status: 'ativa' | 'manutencao' | 'aposentada'; notes: string | null
+  serial_number: string | null; lan_ip: string | null; connection_mode: string | null; agent_id: string | null
   created_at: string; updated_at: string
 }
 
@@ -143,13 +144,14 @@ export class PrinterService {
       power_watts: dto.power_watts ?? null, acquisition_cost: dto.acquisition_cost ?? 0,
       acquisition_date: dto.acquisition_date ?? null, expected_lifetime_hours: dto.expected_lifetime_hours ?? null,
       status: dto.status ?? 'ativa', notes: dto.notes ?? null,
+      serial_number: dto.serial_number ?? null, lan_ip: dto.lan_ip ?? null, connection_mode: dto.connection_mode ?? 'lan',
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar impressora: ${error?.message ?? 'sem dados'}`)
     return data as Printer
   }
 
   async update(orgId: string, id: string, patch: Partial<Printer>): Promise<Printer> {
-    const allowed: (keyof Printer)[] = ['name', 'brand', 'model', 'build_volume_mm', 'nozzle_mm', 'has_ams', 'power_watts', 'acquisition_cost', 'acquisition_date', 'expected_lifetime_hours', 'status', 'notes']
+    const allowed: (keyof Printer)[] = ['name', 'brand', 'model', 'build_volume_mm', 'nozzle_mm', 'has_ams', 'power_watts', 'acquisition_cost', 'acquisition_date', 'expected_lifetime_hours', 'status', 'notes', 'serial_number', 'lan_ip', 'connection_mode']
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
     if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
