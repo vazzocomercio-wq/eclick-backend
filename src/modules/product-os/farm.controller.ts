@@ -53,4 +53,19 @@ export class FarmController {
   @Get('status')
   @RequirePermission('products.view')
   status(@ReqUser() u: ReqUserPayload) { return this.farm.status(this.org(u)) }
+
+  @Post('printers/:pid/command')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  command(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { type: string; payload?: Record<string, unknown> }) {
+    if (!['pause', 'resume', 'stop', 'light_on', 'light_off'].includes(body?.type)) throw new BadRequestException('Comando inválido')
+    return this.farm.enqueueCommand(this.org(u), pid, body.type, body.payload ?? {}, u.id)
+  }
+
+  @Post('orders/:oid/send')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  sendOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string) {
+    return this.farm.sendOrderToPrinter(this.org(u), oid, u.id)
+  }
 }

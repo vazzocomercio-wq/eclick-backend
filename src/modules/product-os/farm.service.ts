@@ -25,6 +25,8 @@ export interface TelemetryPrinter {
   raw?: unknown
 }
 
+export interface FarmCommandOut { id: string; serial: string; command_type: string; payload: Record<string, unknown> }
+
 const STALE_MS = 90_000  // sem telemetria há 90s → considera offline/stale
 
 @Injectable()
@@ -57,7 +59,7 @@ export class FarmService {
   }
 
   // ── ingestão de telemetria (chamada PELO agente, auth por token) ──
-  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[] }): Promise<{ ok: true; matched: number; unmatched: string[] }> {
+  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[]; command_results?: Array<{ id: string; ok: boolean; result?: string }> }): Promise<{ ok: true; matched: number; unmatched: string[]; commands: FarmCommandOut[] }> {
     if (!token) throw new UnauthorizedException('token ausente')
     const { data: agent } = await supabaseAdmin.from('farm_agent')
       .select('id, organization_id, status').eq('token', token).maybeSingle()
@@ -68,37 +70,92 @@ export class FarmService {
       .update({ last_seen_at: new Date().toISOString(), version: body.agent_version ?? null })
       .eq('id', a.id)
 
+    // acks dos comandos que o agente executou
+    for (const cr of body.command_results ?? []) {
+      await supabaseAdmin.from('farm_command')
+        .update({ status: cr.ok ? 'done' : 'failed', result: cr.result ?? null, done_at: new Date().toISOString() })
+        .eq('id', cr.id).eq('organization_id', a.organization_id).eq('status', 'sent')
+    }
+
     const printers = body.printers ?? []
-    if (!printers.length) return { ok: true, matched: 0, unmatched: [] }
-
-    // casa por número de série dentro da org
     const serials = printers.map(p => p.serial).filter(Boolean)
-    const { data: bound } = await supabaseAdmin.from('production_printer')
-      .select('id, serial_number').eq('organization_id', a.organization_id).in('serial_number', serials)
-    const idBySerial = new Map((bound ?? []).map(b => [(b as { serial_number: string }).serial_number, (b as { id: string }).id]))
-
     const unmatched: string[] = []
     let matched = 0
-    const now = new Date().toISOString()
-    for (const p of printers) {
-      const printerId = idBySerial.get(p.serial)
-      if (!printerId) { unmatched.push(p.serial); continue }
-      await supabaseAdmin.from('printer_status').upsert({
-        printer_id: printerId, organization_id: a.organization_id,
-        online: p.online ?? true, state: p.state ?? null, job_name: p.job_name ?? null,
-        progress_pct: p.progress_pct ?? null, layer_current: p.layer_current ?? null, layer_total: p.layer_total ?? null,
-        nozzle_temp: p.nozzle_temp ?? null, bed_temp: p.bed_temp ?? null, remaining_minutes: p.remaining_minutes ?? null,
-        ams: p.ams ?? null, error_code: p.error_code ?? null, error_text: p.error_text ?? null,
-        raw: p.raw ?? null, updated_at: now,
-      }, { onConflict: 'printer_id' })
-      matched++
+    if (printers.length) {
+      const { data: bound } = await supabaseAdmin.from('production_printer')
+        .select('id, serial_number').eq('organization_id', a.organization_id).in('serial_number', serials)
+      const idBySerial = new Map((bound ?? []).map(b => [(b as { serial_number: string }).serial_number, (b as { id: string }).id]))
+      const now = new Date().toISOString()
+      for (const p of printers) {
+        const printerId = idBySerial.get(p.serial)
+        if (!printerId) { unmatched.push(p.serial); continue }
+        await supabaseAdmin.from('printer_status').upsert({
+          printer_id: printerId, organization_id: a.organization_id,
+          online: p.online ?? true, state: p.state ?? null, job_name: p.job_name ?? null,
+          progress_pct: p.progress_pct ?? null, layer_current: p.layer_current ?? null, layer_total: p.layer_total ?? null,
+          nozzle_temp: p.nozzle_temp ?? null, bed_temp: p.bed_temp ?? null, remaining_minutes: p.remaining_minutes ?? null,
+          ams: p.ams ?? null, error_code: p.error_code ?? null, error_text: p.error_text ?? null,
+          raw: p.raw ?? null, updated_at: now,
+        }, { onConflict: 'printer_id' })
+        matched++
+      }
+      if (matched > 0) {
+        await supabaseAdmin.from('production_printer')
+          .update({ agent_id: a.id }).eq('organization_id', a.organization_id).in('serial_number', serials).is('agent_id', null)
+      }
     }
-    // bind o agente às impressoras casadas (1ª vez)
-    if (matched > 0) {
-      await supabaseAdmin.from('production_printer')
-        .update({ agent_id: a.id }).eq('organization_id', a.organization_id).in('serial_number', serials).is('agent_id', null)
+
+    // entrega comandos pendentes das impressoras desse agente
+    const commands = await this.pullCommands(a.id, a.organization_id)
+    return { ok: true, matched, unmatched, commands }
+  }
+
+  /** Comandos pendentes das impressoras ligadas a este agente; marca como enviados. */
+  private async pullCommands(agentId: string, orgId: string): Promise<FarmCommandOut[]> {
+    const { data: mine } = await supabaseAdmin.from('production_printer')
+      .select('id, serial_number').eq('organization_id', orgId).eq('agent_id', agentId)
+    const serialByPid = new Map((mine ?? []).map(p => [(p as { id: string }).id, (p as { serial_number: string }).serial_number]))
+    const pids = [...serialByPid.keys()]
+    if (!pids.length) return []
+    const { data: pend } = await supabaseAdmin.from('farm_command')
+      .select('id, printer_id, command_type, payload').eq('status', 'pending').in('printer_id', pids)
+    const out: FarmCommandOut[] = (pend ?? []).map(c => {
+      const cmd = c as { id: string; printer_id: string; command_type: string; payload: Record<string, unknown> | null }
+      return { id: cmd.id, serial: serialByPid.get(cmd.printer_id) ?? '', command_type: cmd.command_type, payload: cmd.payload ?? {} }
+    })
+    if (out.length) await supabaseAdmin.from('farm_command').update({ status: 'sent', sent_at: new Date().toISOString() }).in('id', out.map(c => c.id))
+    return out
+  }
+
+  // ── enfileirar comandos (chamado pela tela) ───────────────────────
+  async enqueueCommand(orgId: string, printerId: string, type: string, payload: Record<string, unknown>, userId: string | null) {
+    const { data: pr } = await supabaseAdmin.from('production_printer')
+      .select('id, serial_number, agent_id').eq('id', printerId).eq('organization_id', orgId).maybeSingle()
+    if (!pr) throw new BadRequestException('Impressora não encontrada')
+    const p = pr as { serial_number: string | null; agent_id: string | null }
+    if (!p.serial_number || !p.agent_id) throw new BadRequestException('Impressora não está conectada ao agente. Cadastre o nº de série e deixe o agente rodando.')
+    const { data, error } = await supabaseAdmin.from('farm_command')
+      .insert({ organization_id: orgId, printer_id: printerId, command_type: type, payload: payload ?? {}, created_by: userId })
+      .select('id').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao enfileirar: ${error?.message ?? 'sem dados'}`)
+    return { ok: true, command_id: (data as { id: string }).id }
+  }
+
+  /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
+  async sendOrderToPrinter(orgId: string, orderId: string, userId: string | null) {
+    const { data: order } = await supabaseAdmin.from('production_order')
+      .select('id, printer_id, version_id').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+    if (!order) throw new BadRequestException('Ordem não encontrada')
+    const o = order as { printer_id: string | null; version_id: string | null }
+    if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
+    let fileUrl: string | null = null, fileName = 'job.3mf'
+    if (o.version_id) {
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, version_number').eq('id', o.version_id).maybeSingle()
+      fileUrl = (v as { file_url: string | null } | null)?.file_url ?? null
+      fileName = `v${(v as { version_number: number } | null)?.version_number ?? 1}.3mf`
     }
-    return { ok: true, matched, unmatched }
+    if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora.')
+    return this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
   }
 
   // ── estado ao vivo (lido pela tela) ───────────────────────────────
