@@ -437,6 +437,17 @@ export class ProductOsService {
     return v
   }
 
+  async updateVersion(versionId: string, orgId: string, patch: Partial<ProductDevVersion>): Promise<ProductDevVersion> {
+    const allowed: (keyof ProductDevVersion)[] = ['changelog', 'file_url', 'file_type', 'material', 'weight_g', 'print_time_minutes', 'volume_cm3', 'prototype_photo_urls', 'notes']
+    const safe: Record<string, unknown> = {}
+    for (const k of allowed) if (k in patch) safe[k] = patch[k]
+    if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
+    const { data, error } = await supabaseAdmin.from('product_dev_version').update(safe)
+      .eq('id', versionId).eq('organization_id', orgId).select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'não encontrado'}`)
+    return data as ProductDevVersion
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // production_settings — constantes de fabricação por org
   // ─────────────────────────────────────────────────────────────────

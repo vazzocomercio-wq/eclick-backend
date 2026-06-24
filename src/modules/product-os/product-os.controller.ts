@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common'
 import {
   ProductOsService,
-  type ProductDev, type ProductDevStatus, type ProductionProfile, type ReferenceImage,
+  type ProductDev, type ProductDevStatus, type ProductionProfile, type ReferenceImage, type ProductDevVersion,
 } from './product-os.service'
 import { ProductionService } from './production.service'
 import { ProductionInputService, type ProductionInput } from './production-input.service'
@@ -50,6 +50,12 @@ export class ProductOsController {
   @RequirePermission('products.update')
   setVersionApproval(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string, @Body() body: { approved: boolean }) {
     return this.svc.setVersionApproval(vid, this.org(u), body?.approved === true)
+  }
+
+  @Patch('versions/:vid')
+  @RequirePermission('products.update')
+  updateVersion(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string, @Body() body: Partial<ProductDevVersion>) {
+    return this.svc.updateVersion(vid, this.org(u), body)
   }
 
   // ── ordens de produção ────────────────────────────────────────────
