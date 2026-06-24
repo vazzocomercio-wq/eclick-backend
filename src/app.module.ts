@@ -101,6 +101,7 @@ import { ChannelSettingsModule } from './modules/channel-settings/channel-settin
 import { AccessModule } from './modules/access/access.module'
 import { MultiplierModule } from './modules/multiplier/multiplier.module'
 import { CompositionModule } from './modules/composition/composition.module'
+import { ProductOsModule } from './modules/product-os/product-os.module'
 import { RbacModule } from './modules/rbac/rbac.module'
 
 @Module({
@@ -206,6 +207,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     AccessModule,
     MultiplierModule,
     CompositionModule,
+    ProductOsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

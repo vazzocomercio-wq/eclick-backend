@@ -406,6 +406,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Product OS — Briefing técnico de produto físico. Transforma ideia +
+  // referência num briefing DFM estruturado (módulos, paredes, orientação,
+  // originalidade) que alimenta o modelador 3D. Sonnet pra qualidade de
+  // engenharia + jsonMode estruturado.
+  product_os_briefing: {
+    label:       'Briefing técnico de produto (Product OS)',
+    description: 'Transforma ideia + referência num briefing técnico de fabricação (DFM): módulos, dimensões, paredes, orientação de impressão e diferenciação de originalidade',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
