@@ -324,12 +324,12 @@ export class ProductOsService {
 
     await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' }).eq('id', id).eq('organization_id', orgId)
 
-    // semeia estoque das unidades já produzidas
+    // estoque inicial NATIVO — produto vem do nosso sistema, SEM Icarus
     let stockSeeded = 0
     const qty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
     if (qty > 0) {
-      const r = await this.stock.applyProductionRestock({ productId, quantity: qty, refId: `publish:${id}`, note: `Estoque inicial — Product OS ${pd.name}` }).catch(() => 'noop' as const)
-      if (r === 'restocked') stockSeeded = qty
+      await supabaseAdmin.from('products').update({ stock: qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+      stockSeeded = qty
     }
 
     // publica na loja se for um canal-alvo

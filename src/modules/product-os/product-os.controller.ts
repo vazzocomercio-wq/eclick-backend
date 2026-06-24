@@ -61,7 +61,7 @@ export class ProductOsController {
 
   @Post('production-orders')
   @RequirePermission('products.update')
-  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string }) {
+  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {
     return this.production.createOrder(this.org(u), u.id, body)
   }
 

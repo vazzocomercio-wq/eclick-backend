@@ -121,8 +121,13 @@ export class ProductionService {
     return { ...data, jobs: jobs ?? [] }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
+    // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
+    // vendável; produção (produto cadastrado) consome insumo + credita products.stock
+    const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id').eq('id', body.product_dev_id).eq('organization_id', orgId).maybeSingle()
+    const registered = !!(dev as { product_id: string | null } | null)?.product_id
+    const isPrototype = body.is_prototype ?? !registered
     // pega métricas da versão (explícita > aprovada > última)
     const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id)
     const estTime = metrics.print_time_minutes != null ? metrics.print_time_minutes * qty : null
@@ -135,7 +140,7 @@ export class ProductionService {
     const { data, error } = await supabaseAdmin.from('production_order').insert({
       organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? null,
       order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null,
-      estimated_time_minutes: estTime, estimated_filament_g: estFilament, created_by: userId,
+      estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
     const order = data as { id: string }
@@ -171,33 +176,35 @@ export class ProductionService {
       const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? (order as { estimated_filament_g: number | null }).estimated_filament_g ?? undefined
       await this.inputs.consume(orgId, 'production_order', oid, actual ?? undefined)
       await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
-      await this.feedFinishedGoods(orgId, order as Record<string, unknown>)
+      await this.creditNativeStock(orgId, order as Record<string, unknown>)
       await this.emit(orgId, devId, 'production_completed', { production_order_id: oid }, userId)
     }
     return this.getOrder(orgId, oid)
   }
 
-  /** Alimenta o estoque de produto acabado (Icarus) quando o produto já virou
-   *  SKU (product_dev.product_id setado). Idempotente via stock_movement_done. */
-  private async feedFinishedGoods(orgId: string, order: Record<string, unknown>) {
+  /** Credita as unidades produzidas DIRETO em products.stock (NATIVO).
+   *  Produto vem do nosso sistema → NÃO usa Icarus (sem ledger/sync de canal).
+   *  Idempotente via stock_movement_done. */
+  private async creditNativeStock(orgId: string, order: Record<string, unknown>) {
     if (order.stock_movement_done === true) return
+    if (order.is_prototype === true) {
+      this.logger.log(`[producao] ordem ${(order.id as string).slice(0, 8)} é protótipo — consome insumo, sem estoque vendável`)
+      return
+    }
     const devId = order.product_dev_id as string
     const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id')
       .eq('id', devId).eq('organization_id', orgId).maybeSingle()
     const productId = (dev as { product_id: string | null } | null)?.product_id
     if (!productId) {
-      this.logger.log(`[producao] ordem ${(order.id as string).slice(0, 8)} concluída sem SKU vinculado — unidades só no Product OS`)
+      this.logger.log(`[producao] ordem ${(order.id as string).slice(0, 8)} concluída sem produto cadastrado — sem crédito de estoque`)
       return
     }
-    try {
-      await this.stock.applyProductionRestock({
-        productId, quantity: Number(order.quantity) || 0, refId: order.id as string,
-        note: `Produção concluída — Product OS`,
-      })
-      await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
-    } catch (e) {
-      this.logger.warn(`[producao] feedFinishedGoods falhou: ${(e as Error).message}`)
-    }
+    const qty = Number(order.quantity) || 0
+    const { data: prod } = await supabaseAdmin.from('products').select('stock').eq('id', productId).maybeSingle()
+    const cur = Number((prod as { stock: number | null } | null)?.stock) || 0
+    await supabaseAdmin.from('products').update({ stock: cur + qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+    await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
+    this.logger.log(`[producao] +${qty} un nativas em products.stock p/ ${productId.slice(0, 8)} (sem Icarus)`)
   }
 
   /** Carimba custo/preço/contribuição na ordem concluída → alimenta o payback
