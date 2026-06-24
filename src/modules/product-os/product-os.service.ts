@@ -122,7 +122,17 @@ export class ProductOsService {
    *  (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura). Parser tolerante. */
   parseSlicer(text: string): { weight_g: number | null; print_time_minutes: number | null; material: string | null } {
     const t = (text ?? '').slice(0, 20000)
-    const num = (s: string) => { const n = Number(s.replace(/\./g, '').replace(',', '.')) ; return Number.isFinite(n) ? n : Number(s.replace(',', '.')) }
+    // normaliza número aceitando decimal US (145.2) e BR (145,2 / 1.234,56)
+    const num = (raw: string): number => {
+      const s = raw.trim()
+      const hasDot = s.includes('.'), hasComma = s.includes(',')
+      let norm: string
+      if (hasDot && hasComma) norm = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '')
+      else if (hasComma) norm = s.replace(',', '.')
+      else norm = s
+      const n = Number(norm)
+      return Number.isFinite(n) ? n : 0
+    }
 
     // ── tempo ──
     let minutes: number | null = null
