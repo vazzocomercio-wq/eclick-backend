@@ -68,4 +68,15 @@ export class FarmController {
   sendOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string) {
     return this.farm.sendOrderToPrinter(this.org(u), oid, u.id)
   }
+
+  @Get('scheduler')
+  @RequirePermission('products.view')
+  scheduler(@ReqUser() u: ReqUserPayload) { return this.farm.schedulerSuggest(this.org(u)) }
+
+  @Post('scheduler/apply')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  schedulerApply(@ReqUser() u: ReqUserPayload, @Body() body: { assignments: Array<{ order_id: string; printer_id: string }> }) {
+    return this.farm.schedulerApply(this.org(u), body?.assignments ?? [])
+  }
 }

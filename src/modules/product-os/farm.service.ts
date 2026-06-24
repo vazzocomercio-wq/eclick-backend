@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, UnauthorizedException } from '@nestjs/common'
 import { randomBytes } from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
+import { ProductionService } from './production.service'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -32,6 +33,8 @@ const STALE_MS = 90_000  // sem telemetria há 90s → considera offline/stale
 @Injectable()
 export class FarmService {
   private readonly logger = new Logger(FarmService.name)
+
+  constructor(private readonly production: ProductionService) {}
 
   // ── agentes ───────────────────────────────────────────────────────
   async createAgent(orgId: string, name: string): Promise<{ id: string; name: string; token: string }> {
@@ -81,14 +84,19 @@ export class FarmService {
     const serials = printers.map(p => p.serial).filter(Boolean)
     const unmatched: string[] = []
     let matched = 0
+    const finished: string[] = []
     if (printers.length) {
       const { data: bound } = await supabaseAdmin.from('production_printer')
         .select('id, serial_number').eq('organization_id', a.organization_id).in('serial_number', serials)
       const idBySerial = new Map((bound ?? []).map(b => [(b as { serial_number: string }).serial_number, (b as { id: string }).id]))
+      const pids = [...idBySerial.values()]
+      const { data: prev } = pids.length ? await supabaseAdmin.from('printer_status').select('printer_id, state').in('printer_id', pids) : { data: [] }
+      const prevState = new Map((prev ?? []).map(s => [(s as { printer_id: string }).printer_id, (s as { state: string }).state]))
       const now = new Date().toISOString()
       for (const p of printers) {
         const printerId = idBySerial.get(p.serial)
         if (!printerId) { unmatched.push(p.serial); continue }
+        const before = prevState.get(printerId)
         await supabaseAdmin.from('printer_status').upsert({
           printer_id: printerId, organization_id: a.organization_id,
           online: p.online ?? true, state: p.state ?? null, job_name: p.job_name ?? null,
@@ -98,12 +106,15 @@ export class FarmService {
           raw: p.raw ?? null, updated_at: now,
         }, { onConflict: 'printer_id' })
         matched++
+        // transição imprimindo → ocioso = impressão terminou → auto-fecha
+        if (before === 'printing' && p.state === 'idle') finished.push(printerId)
       }
       if (matched > 0) {
         await supabaseAdmin.from('production_printer')
           .update({ agent_id: a.id }).eq('organization_id', a.organization_id).in('serial_number', serials).is('agent_id', null)
       }
     }
+    for (const pid of finished) await this.autoCloseFinished(a.organization_id, pid).catch(e => this.logger.warn(`[farm.autoclose] ${(e as Error).message}`))
 
     // entrega comandos pendentes das impressoras desse agente
     const commands = await this.pullCommands(a.id, a.organization_id)
@@ -156,6 +167,66 @@ export class FarmService {
     }
     if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora.')
     return this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
+  }
+
+  // ── Fase C: auto-fechamento da produção pela telemetria ───────────
+  /** A impressora terminou (imprimindo→ocioso): fecha os jobs da ordem ativa
+   *  com o tempo REAL decorrido e avança a ordem p/ acabamento. */
+  private async autoCloseFinished(orgId: string, printerId: string) {
+    const { data: order } = await supabaseAdmin.from('production_order')
+      .select('id, started_at, estimated_time_minutes, product_dev_id')
+      .eq('organization_id', orgId).eq('printer_id', printerId).eq('status', 'imprimindo')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle()
+    if (!order) return
+    const o = order as { id: string; started_at: string | null; estimated_time_minutes: number | null; product_dev_id: string }
+    const elapsed = o.started_at ? Math.max(1, Math.round((Date.now() - new Date(o.started_at).getTime()) / 60000)) : (o.estimated_time_minutes ?? null)
+    await supabaseAdmin.from('print_job')
+      .update({ status: 'concluido', finished_at: new Date().toISOString(), print_time_minutes: elapsed })
+      .eq('production_order_id', o.id).in('status', ['imprimindo', 'fila'])
+    await supabaseAdmin.from('production_order')
+      .update({ status: 'acabamento', actual_time_minutes: elapsed })
+      .eq('id', o.id).eq('status', 'imprimindo')
+    await supabaseAdmin.from('product_dev_event').insert({
+      organization_id: orgId, product_dev_id: o.product_dev_id, event_type: 'production_completed',
+      payload: { production_order_id: o.id, auto: true, print_minutes: elapsed }, is_auto: true,
+    }).then(() => {}, () => {})
+    this.logger.log(`[farm] auto-fechou produção da impressora ${printerId.slice(0, 8)} (${elapsed}min reais)`)
+  }
+
+  // ── Fase C: scheduler (qual produto em qual impressora ociosa) ────
+  async schedulerSuggest(orgId: string) {
+    const [statuses, prof, ordersR] = await Promise.all([
+      this.status(orgId),
+      this.production.profitability(orgId),
+      supabaseAdmin.from('production_order').select('id, order_number, product_dev_id, quantity, printer_id').eq('organization_id', orgId).eq('status', 'fila'),
+    ])
+    const idle = statuses.filter(s => s.online && s.state === 'idle')
+    const profById = new Map(prof.map(p => [p.product_dev_id, p]))
+    const orders = ((ordersR.data ?? []) as Array<{ id: string; order_number: number; product_dev_id: string; quantity: number; printer_id: string | null }>)
+      .map(o => ({ ...o, pph: profById.get(o.product_dev_id)?.profit_per_hour ?? 0, name: profById.get(o.product_dev_id)?.name ?? '—' }))
+      .sort((a, b) => b.pph - a.pph)
+
+    const used = new Set<string>()
+    const assignments = []
+    for (const o of orders) {
+      // se a ordem já tem impressora, respeita; senão pega a ociosa de maior valor livre
+      let printer = o.printer_id ? idle.find(p => p.id === o.printer_id && !used.has(p.id)) : undefined
+      if (!printer) printer = idle.find(p => !used.has(p.id))
+      if (!printer) break
+      used.add(printer.id)
+      assignments.push({ order_id: o.id, order_number: o.order_number, product_dev_id: o.product_dev_id, name: o.name, quantity: o.quantity, printer_id: printer.id, printer_name: printer.name, profit_per_hour: o.pph })
+    }
+    return { idle_printers: idle.length, queued_orders: orders.length, assignments }
+  }
+
+  async schedulerApply(orgId: string, assignments: Array<{ order_id: string; printer_id: string }>) {
+    let assigned = 0
+    for (const a of assignments ?? []) {
+      const { error } = await supabaseAdmin.from('production_order')
+        .update({ printer_id: a.printer_id }).eq('id', a.order_id).eq('organization_id', orgId).eq('status', 'fila')
+      if (!error) assigned++
+    }
+    return { ok: true, assigned }
   }
 
   // ── estado ao vivo (lido pela tela) ───────────────────────────────
