@@ -1,6 +1,10 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { LlmService } from '../ai/llm.service'
 import { supabaseAdmin } from '../../common/supabase'
+import { ProductsService } from '../products/products.service'
+import { StockService } from '../stock/stock.service'
+import { ProductionService } from './production.service'
+import { ProductOsActiveService } from './product-os-active.service'
 
 /**
  * Product OS — Fase 1.
@@ -91,7 +95,28 @@ const CHANNEL_ALLIN_FEE_PCT: Record<string, number> = {
 export class ProductOsService {
   private readonly logger = new Logger(ProductOsService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly products: ProductsService,
+    private readonly stock: StockService,
+    private readonly production: ProductionService,
+    private readonly active: ProductOsActiveService,
+  ) {}
+
+  /** Insere um evento na timeline do produto (best-effort, nunca lança). */
+  private async emitEvent(orgId: string, devId: string, type: string, payload: Record<string, unknown> = {}, userId?: string | null, isAuto = false): Promise<void> {
+    await supabaseAdmin.from('product_dev_event').insert({
+      organization_id: orgId, product_dev_id: devId, event_type: type, payload, actor_id: userId ?? null, is_auto: isAuto,
+    }).then(() => {}, () => {})
+  }
+
+  async listEvents(devId: string, orgId: string) {
+    const { data, error } = await supabaseAdmin.from('product_dev_event').select('*')
+      .eq('organization_id', orgId).eq('product_dev_id', devId)
+      .order('created_at', { ascending: false }).limit(100)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return data ?? []
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // product_dev — CRUD + kanban
@@ -148,7 +173,9 @@ export class ProductOsService {
       })
       .select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar: ${error?.message ?? 'sem dados'}`)
-    return data as ProductDev
+    const created = data as ProductDev
+    await this.emitEvent(orgId, created.id, 'created', { name: created.name, production_profile: created.production_profile }, userId)
+    return created
   }
 
   async update(id: string, orgId: string, patch: Partial<ProductDev>): Promise<ProductDev> {
@@ -177,7 +204,13 @@ export class ProductOsService {
       .from('product_dev').update(safe)
       .eq('id', id).eq('organization_id', orgId).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'não encontrado'}`)
-    return data as ProductDev
+    const moved = data as ProductDev
+    if (body.status) {
+      await this.emitEvent(orgId, id, 'status_changed', { to: body.status })
+      // reflete no card do Active (best-effort, não bloqueia)
+      void this.active.reflectStatus(orgId, id).catch(() => {})
+    }
+    return moved
   }
 
   async archive(id: string, orgId: string): Promise<ProductDev> {
@@ -185,7 +218,78 @@ export class ProductOsService {
       .from('product_dev').update({ status: 'arquivado' })
       .eq('id', id).eq('organization_id', orgId).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'não encontrado'}`)
+    await this.emitEvent(orgId, id, 'archived')
     return data as ProductDev
+  }
+
+  /**
+   * Fase 3 — "aprovado → virar anúncio". Cria um SKU real em `products` a
+   * partir do product_dev, vincula, semeia estoque das unidades produzidas e
+   * (opcional) publica na loja. Reusa ProductsService p/ taxa+vitrine e
+   * StockService p/ o estoque. Idempotente (se já tem product_id, no-op).
+   */
+  async publishToCatalog(id: string, orgId: string, userId: string | null, body: { produced_quantity?: number; target_margin_pct?: number } = {}): Promise<{
+    product_id: string; price: number | null; cost_price: number | null; photos: number; stock_seeded: number; storefront: boolean; already?: boolean
+  }> {
+    const pd = await this.get(id, orgId)
+    if (pd.product_id) return { product_id: pd.product_id, price: null, cost_price: pd.estimated_cost, photos: 0, stock_seeded: 0, storefront: false, already: true }
+    if (pd.status !== 'aprovado') throw new BadRequestException('Só produtos aprovados podem virar anúncio. Aprove uma versão primeiro.')
+
+    // gate de qualidade
+    const qualityOk = await this.production.isQualityPassed(orgId, id, pd.production_profile)
+    if (!qualityOk) throw new BadRequestException('Conclua o checklist de qualidade (aprovado) antes de publicar.')
+
+    // fotos: protótipo aprovado > referências
+    const approvedV = pd.versions.find(v => v.approved)
+    const photos = (approvedV?.prototype_photo_urls?.length ? approvedV.prototype_photo_urls : (pd.reference_images ?? []).map(r => r.url)).filter(Boolean)
+
+    // preço: target_price > sugerido do canal primário
+    let price = pd.target_price ?? null
+    if (price == null) {
+      const primary = (pd.target_marketplaces ?? [])[0] ?? 'mercado_livre'
+      try {
+        const c = await this.computeCost(id, orgId, { target_margin_pct: body.target_margin_pct })
+        price = c.suggested_prices.find(s => s.channel === primary)?.price ?? c.suggested_prices[0]?.price ?? null
+      } catch { /* segue sem preço */ }
+    }
+
+    const tax = await this.products.getTaxConfig(orgId).catch(() => ({ default_tax_percentage: null, default_tax_on_freight: false }))
+
+    const { data: created, error } = await supabaseAdmin.from('products').insert({
+      organization_id: orgId,
+      name: pd.name,
+      category: pd.category,
+      description: pd.description,
+      photo_urls: photos,
+      cost_price: pd.estimated_cost,
+      price,
+      tax_percentage: tax.default_tax_percentage,
+      tax_on_freight: tax.default_tax_on_freight,
+      status: 'draft',
+      condition: 'new',
+    }).select('id').maybeSingle()
+    if (error || !created) throw new BadRequestException(`Erro ao criar produto no catálogo: ${error?.message ?? 'sem dados'}`)
+    const productId = (created as { id: string }).id
+
+    await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' }).eq('id', id).eq('organization_id', orgId)
+
+    // semeia estoque das unidades já produzidas
+    let stockSeeded = 0
+    const qty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
+    if (qty > 0) {
+      const r = await this.stock.applyProductionRestock({ productId, quantity: qty, refId: `publish:${id}`, note: `Estoque inicial — Product OS ${pd.name}` }).catch(() => 'noop' as const)
+      if (r === 'restocked') stockSeeded = qty
+    }
+
+    // publica na loja se for um canal-alvo
+    let storefront = false
+    if ((pd.target_marketplaces ?? []).includes('loja')) {
+      const res = await this.products.setStorefrontVisibility(orgId, [productId], true).catch(() => ({ updated: 0, skipped: 0 }))
+      storefront = res.updated > 0
+    }
+
+    await this.emitEvent(orgId, id, 'published', { product_id: productId }, userId)
+    return { product_id: productId, price, cost_price: pd.estimated_cost, photos: photos.length, stock_seeded: stockSeeded, storefront }
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -245,7 +349,10 @@ export class ProductOsService {
       .eq('id', productDevId).eq('organization_id', orgId)
       .in('status', ['ideia', 'briefing'])
 
-    return data as ProductDevVersion
+    const v = data as ProductDevVersion
+    await this.emitEvent(orgId, productDevId, 'version_added', { version_id: v.id, version_number: v.version_number }, userId)
+    void this.active.reflectStatus(orgId, productDevId).catch(() => {})
+    return v
   }
 
   /** Aprova ou reprova uma versão. Aprovar move o produto p/ 'aprovado'. */
@@ -262,6 +369,8 @@ export class ProductOsService {
         .eq('id', v.product_dev_id).eq('organization_id', orgId)
         .in('status', ['modelagem', 'prototipo'])
     }
+    await this.emitEvent(orgId, v.product_dev_id, approved ? 'version_approved' : 'version_rejected', { version_id: v.id, version_number: v.version_number })
+    void this.active.reflectStatus(orgId, v.product_dev_id).catch(() => {})
     return v
   }
 
@@ -449,6 +558,7 @@ Observações: ${body.notes ?? '—'}
       })
       .eq('id', productDevId).eq('organization_id', orgId)
 
+    await this.emitEvent(orgId, productDevId, 'briefing_generated', { cost_usd: out.costUsd })
     return { briefing: parsed, briefing_text: briefingText, cost_usd: out.costUsd }
   }
 }

@@ -589,6 +589,55 @@ export class StockService {
     return 'restocked'
   }
 
+  /** Product OS — alimenta o estoque de PRODUTO ACABADO com unidades
+   *  produzidas. Cria o registro de estoque se não existir (produto novo).
+   *  Idempotente por reference_id. Espelha applyReturnRestockSingle. */
+  async applyProductionRestock(params: {
+    productId: string
+    quantity: number
+    refId: string
+    note?: string
+  }): Promise<'restocked' | 'noop'> {
+    const productId = params.productId
+    const qty = Math.max(0, Math.round(Number(params.quantity) || 0))
+    if (!productId || qty <= 0) return 'noop'
+    const refId = params.refId
+
+    let { data: stock } = await supabaseAdmin
+      .from('product_stock').select('id, quantity')
+      .eq('product_id', productId).is('platform', null).maybeSingle()
+    if (!stock) {
+      const { data: created } = await supabaseAdmin
+        .from('product_stock').insert({ product_id: productId, platform: null, quantity: 0 })
+        .select('id, quantity').maybeSingle()
+      stock = created ?? null
+    }
+    if (!stock) {
+      this.logger.warn(`[stock.production] produto ${productId} sem registro de estoque`)
+      return 'noop'
+    }
+
+    const { data: movs } = await supabaseAdmin
+      .from('stock_movements').select('id')
+      .eq('reference_type', 'product_os_production').eq('reference_id', refId)
+    if ((movs ?? []).length > 0) return 'noop' // já lançado
+
+    const novaQtd = Number(stock.quantity || 0) + qty
+    await supabaseAdmin
+      .from('product_stock')
+      .update({ quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', stock.id)
+    await supabaseAdmin.from('stock_movements').insert({
+      product_id: productId, stock_id: stock.id,
+      movement_type: 'production_in', quantity: qty, balance_after: novaQtd,
+      reference_type: 'product_os_production', reference_id: refId,
+      notes: params.note ?? 'Produção concluída — Product OS',
+    })
+    await this.recalcAndPropagate(productId, 'production_in')
+      .catch(e => this.logger.warn(`[stock.production] recalc ${productId}: ${e?.message}`))
+    return 'restocked'
+  }
+
   // ── Channel distribution ──────────────────────────────────────────────────
 
   async calculateChannelQuantities(productId: string): Promise<Array<{
