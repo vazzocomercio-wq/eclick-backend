@@ -271,12 +271,18 @@ export class NfeImportService {
     supplier: NfeSupplier & { use_existing_id?: string | null }
     nf: { access_key: string | null; number: string | null; total?: number }
     items: Array<{ include?: boolean; link_input_id?: string | null; name: string; sku?: string | null; unit?: string; quantity: number; unit_cost: number; kind?: string; material?: string | null; description?: string | null; color?: string | null; diameter_mm?: number | null; spool_weight_g?: number | null }>
+    force?: boolean // reimportar uma NF já carimbada (ex.: insumos foram excluídos e o user quer recriar)
   }): Promise<{ supplier_id: string; created: number; restocked: number }> {
-    // trava anti-duplicação
-    if (body.nf.access_key) {
+    // trava anti-duplicação — só barra quando NÃO é reimportação explícita
+    if (body.nf.access_key && !body.force) {
       const { data } = await supabaseAdmin.from('nfe_import_log').select('id')
         .eq('organization_id', orgId).eq('access_key', body.nf.access_key).limit(1).maybeSingle()
       if (data) throw new ConflictException('Esta NF já foi importada antes.')
+    }
+    // reimportação: remove o carimbo antigo p/ o índice único não barrar o novo log
+    if (body.nf.access_key && body.force) {
+      await supabaseAdmin.from('nfe_import_log')
+        .delete().eq('organization_id', orgId).eq('access_key', body.nf.access_key)
     }
 
     // 1. fornecedor — NUNCA duplica: usa o existente (por id ou CNPJ); só cria se não houver
