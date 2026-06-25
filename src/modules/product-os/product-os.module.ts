@@ -9,6 +9,7 @@ import { ProductOsCronService } from './product-os-cron.service'
 import { FarmService } from './farm.service'
 import { FarmController, FarmIngestController } from './farm.controller'
 import { MakerworldService } from './makerworld.service'
+import { ThingiverseService } from './thingiverse.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { AiModule } from '../ai/ai.module'
@@ -22,7 +23,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, ModelSourceRegistry, MakerworldRadarService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, ThingiverseService, ModelSourceRegistry, MakerworldRadarService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}

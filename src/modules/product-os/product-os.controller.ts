@@ -11,6 +11,7 @@ import { ProductionInputService, type ProductionInput } from './production-input
 import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
+import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -27,6 +28,7 @@ export class ProductOsController {
     private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
     private readonly radar: MakerworldRadarService,
+    private readonly sources: ModelSourceRegistry,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -189,7 +191,14 @@ export class ProductOsController {
     return this.production.productionPlan(this.org(u), hours ? Number(hours) : undefined)
   }
 
-  // ── Radar de campeões do MakerWorld (Peça 3) ──────────────────────
+  // ── Fontes de modelos 3D (multi-plataforma) ───────────────────────
+  @Get('sources')
+  @RequirePermission('products.view')
+  listSources() {
+    return this.sources.all().map(p => ({ platform: p.platform, label: p.label, configured: p.isConfigured() }))
+  }
+
+  // ── Radar de campeões (Peça 3) ────────────────────────────────────
   @Get('radar')
   @RequirePermission('products.view')
   radarList(@ReqUser() u: ReqUserPayload) { return this.radar.list(this.org(u)) }

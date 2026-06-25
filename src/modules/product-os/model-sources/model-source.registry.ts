@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common'
 import { type ModelSourceProvider, type SourceModel } from './source.types'
 import { MakerworldService } from '../makerworld.service'
+import { ThingiverseService } from '../thingiverse.service'
 
 /**
  * Registry dos bancos de modelos 3D. Importar/Radar/Porteiro falam só com ele;
@@ -13,8 +14,9 @@ export class ModelSourceRegistry {
 
   constructor(
     private readonly makerworld: MakerworldService,
+    private readonly thingiverse: ThingiverseService,
   ) {
-    this.providers = [this.makerworld]
+    this.providers = [this.makerworld, this.thingiverse]
   }
 
   /** Plataformas conhecidas (independente de estarem configuradas). */
