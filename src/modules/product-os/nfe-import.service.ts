@@ -68,7 +68,7 @@ export class NfeImportService {
     const emit = inf.emit ?? {}
     const ender = emit.enderEmit ?? {}
     const supplier: NfeSupplier = {
-      tax_id: (emit.CNPJ ?? emit.CPF ?? null) || null,
+      tax_id: String(emit.CNPJ ?? emit.CPF ?? '').replace(/\D/g, '') || null, // só dígitos p/ dedupe robusto
       name: String(emit.xFant || emit.xNome || 'Fornecedor').trim(),
       legal_name: String(emit.xNome || emit.xFant || '').trim(),
       ie: emit.IE ? String(emit.IE) : null,
@@ -172,22 +172,28 @@ export class NfeImportService {
       if (data) throw new ConflictException('Esta NF já foi importada antes.')
     }
 
-    // 1. fornecedor
-    let supplierId = body.supplier.use_existing_id ?? null
-    if (!supplierId && body.supplier.tax_id) {
+    // 1. fornecedor — NUNCA duplica: usa o existente (por id ou CNPJ); só cria se não houver
+    const taxId = String(body.supplier.tax_id ?? '').replace(/\D/g, '') || null
+    const findByTaxId = async (): Promise<string | null> => {
+      if (!taxId) return null
       const { data } = await supabaseAdmin.from('suppliers').select('id')
-        .eq('organization_id', orgId).eq('tax_id', body.supplier.tax_id).limit(1).maybeSingle()
-      supplierId = (data as { id: string } | null)?.id ?? null
+        .eq('organization_id', orgId).eq('tax_id', taxId).limit(1).maybeSingle()
+      return (data as { id: string } | null)?.id ?? null
     }
+    let supplierId = body.supplier.use_existing_id ?? (await findByTaxId())
     if (!supplierId) {
       const { data, error } = await supabaseAdmin.from('suppliers').insert({
         organization_id: orgId, name: body.supplier.name, legal_name: body.supplier.legal_name || null,
-        tax_id: body.supplier.tax_id, country: 'BR', supplier_type: 'nacional',
+        tax_id: taxId, country: 'BR', supplier_type: 'nacional',
         contact_phone: body.supplier.phone, address: body.supplier.address ?? {}, is_active: true, created_by: userId,
         notes: body.supplier.ie ? `IE: ${body.supplier.ie}` : null,
       }).select('id').maybeSingle()
-      if (error || !data) throw new BadRequestException(`Erro ao criar fornecedor: ${error?.message ?? 'sem dados'}`)
-      supplierId = (data as { id: string }).id
+      if (data) supplierId = (data as { id: string }).id
+      else {
+        // corrida/duplicata barrada pelo índice único → reusa o que já existe
+        supplierId = await findByTaxId()
+        if (!supplierId) throw new BadRequestException(`Erro ao criar fornecedor: ${error?.message ?? 'sem dados'}`)
+      }
     }
     const supplierName = body.supplier.name
 
