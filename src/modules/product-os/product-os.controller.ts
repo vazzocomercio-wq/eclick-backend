@@ -65,6 +65,13 @@ export class ProductOsController {
     return this.production.listOrders(this.org(u), { status })
   }
 
+  @Post('production-orders/preview')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  previewOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number }) {
+    return this.production.previewOrderConsumption(this.org(u), body)
+  }
+
   @Post('production-orders')
   @RequirePermission('products.update')
   createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {

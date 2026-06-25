@@ -121,6 +121,50 @@ export class ProductionService {
     return { ...data, jobs: jobs ?? [] }
   }
 
+  /** Prévia do que uma OP vai CONSUMIR do estoque (BOM × qtd × (1+perda)), por insumo,
+   *  com disponibilidade. NÃO grava nada. Fallback = filamento por peso se não há BOM. */
+  async previewOrderConsumption(orgId: string, body: { product_dev_id: string; version_id?: string; quantity: number }) {
+    const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
+    const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id)
+    const bom = await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
+    const needByInput = new Map<string, number>()
+    for (const l of bom) {
+      if (!l.input_id || Number(l.quantity) <= 0) continue
+      const need = Number(l.quantity) * qty * (1 + Number(l.waste_pct) / 100)
+      needByInput.set(l.input_id, (needByInput.get(l.input_id) ?? 0) + need)
+    }
+    type PrevInput = { id: string; name: string; unit: string; quantity: number; reserved_quantity: number; cost_per_unit: number }
+    const buildLine = (id: string | null, name: string, unit: string, needed: number, i?: PrevInput) => {
+      const available = i ? this.round2(Number(i.quantity) - Number(i.reserved_quantity)) : 0
+      const unitCost = i ? Number(i.cost_per_unit) || 0 : 0
+      return { input_id: id, name, unit, needed: this.round2(needed), available, sufficient: !!i && available >= needed, unit_cost: unitCost, line_cost: this.round2(needed * unitCost) }
+    }
+
+    if (needByInput.size > 0) {
+      const ids = [...needByInput.keys()]
+      const { data } = await supabaseAdmin.from('production_input').select('id, name, unit, quantity, reserved_quantity, cost_per_unit').in('id', ids)
+      const map = new Map((data ?? []).map(r => [(r as PrevInput).id, r as PrevInput]))
+      const lines = [...needByInput.entries()].map(([id, need]) => {
+        const i = map.get(id)
+        return buildLine(id, i?.name ?? '(insumo removido)', i?.unit ?? 'un', need, i)
+      })
+      return { source: 'bom', quantity: qty, lines, total_cost: this.round2(lines.reduce((s, l) => s + l.line_cost, 0)), all_sufficient: lines.every(l => l.sufficient) }
+    }
+
+    // sem BOM → fallback do filamento principal por peso
+    const estFilament = metrics.weight_g != null ? this.round2(metrics.weight_g * qty) : 0
+    if (estFilament > 0) {
+      let q = supabaseAdmin.from('production_input').select('id, name, unit, quantity, reserved_quantity, cost_per_unit')
+        .eq('organization_id', orgId).eq('kind', 'filamento').eq('is_active', true).order('quantity', { ascending: false }).limit(1)
+      if (metrics.material) q = q.eq('material', metrics.material.toUpperCase())
+      const { data } = await q
+      const i = (data ?? [])[0] as PrevInput | undefined
+      const line = buildLine(i?.id ?? null, i?.name ?? `Filamento ${metrics.material ?? ''}`.trim(), i?.unit ?? 'g', estFilament, i)
+      return { source: 'filament', quantity: qty, material: metrics.material, lines: [line], total_cost: line.line_cost, all_sufficient: line.sufficient }
+    }
+    return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
+  }
+
   async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
