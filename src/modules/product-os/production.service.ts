@@ -26,7 +26,7 @@ const ORDER_TRANSITIONS: Record<string, string[]> = {
   cancelado:   [],
 }
 
-interface VersionMetrics { weight_g: number | null; print_time_minutes: number | null; material: string | null }
+interface VersionMetrics { versionId: string | null; weight_g: number | null; print_time_minutes: number | null; material: string | null }
 
 @Injectable()
 export class ProductionService {
@@ -145,8 +145,24 @@ export class ProductionService {
     if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
     const order = data as { id: string }
 
-    // reserva filamento (best-effort)
-    if (estFilament && estFilament > 0) {
+    // reserva de insumos: se há COMPOSIÇÃO (BOM) com insumos vinculados, reserva a
+    // composição inteira (qtd_linha × qtd_OP × (1+perda), agregando por insumo);
+    // senão, mantém o fallback do filamento principal por peso.
+    const bom = await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
+    const needByInput = new Map<string, number>()
+    for (const l of bom) {
+      if (!l.input_id || Number(l.quantity) <= 0) continue
+      const need = Number(l.quantity) * qty * (1 + Number(l.waste_pct) / 100)
+      needByInput.set(l.input_id, (needByInput.get(l.input_id) ?? 0) + need)
+    }
+    if (needByInput.size > 0) {
+      let firstFilament: string | null = null
+      for (const [inputId, need] of needByInput) {
+        const ok = await this.inputs.reserveInput(orgId, inputId, this.round2(need), 'production_order', order.id)
+        if (ok && !firstFilament) firstFilament = inputId   // p/ referência informativa
+      }
+      if (firstFilament) await supabaseAdmin.from('production_order').update({ reservation_id: firstFilament }).eq('id', order.id)
+    } else if (estFilament && estFilament > 0) {
       const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
       if (r) await supabaseAdmin.from('production_order').update({ reservation_id: r.inputId }).eq('id', order.id)
     }
@@ -553,8 +569,8 @@ export class ProductionService {
     const { data } = await supabaseAdmin.from('product_dev_version')
       .select('id, weight_g, print_time_minutes, material, approved, version_number')
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('version_number', { ascending: false })
-    const versions = (data ?? []) as Array<VersionMetrics & { id: string; approved: boolean }>
+    const versions = (data ?? []) as Array<{ id: string; weight_g: number | null; print_time_minutes: number | null; material: string | null; approved: boolean }>
     const ref = versionId ? versions.find(v => v.id === versionId) : (versions.find(v => v.approved) ?? versions[0])
-    return { weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null }
+    return { versionId: ref?.id ?? null, weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null }
   }
 }

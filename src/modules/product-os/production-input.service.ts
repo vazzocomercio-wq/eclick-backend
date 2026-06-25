@@ -149,50 +149,82 @@ export class ProductionInputService {
     return { inputId: input.id }
   }
 
-  /** Consome (baixa física) o que foi reservado p/ a ref. Idempotente. */
-  async consume(orgId: string, refType: string, refId: string, actualQty?: number): Promise<void> {
-    const { data: reserveMov } = await supabaseAdmin.from('production_input_movement').select('input_id, quantity')
-      .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
-    if (!reserveMov) return
-    const inputId = (reserveMov as { input_id: string }).input_id
-    const reserved = Number((reserveMov as { quantity: number }).quantity)
-    const { data: consumed } = await supabaseAdmin.from('production_input_movement').select('id')
-      .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'consume').maybeSingle()
-    if (consumed) return
-    const physical = Math.max(0, Number(actualQty ?? reserved))
-    const { data: input } = await supabaseAdmin.from('production_input').select('*').eq('id', inputId).maybeSingle()
-    if (!input) return
-    const i = input as ProductionInput
-    const novaQtd = Math.max(0, Number(i.quantity) - physical)
-    const novaRes = Math.max(0, Number(i.reserved_quantity) - reserved)
+  /** Reserva `quantity` de um insumo ESPECÍFICO (linha de BOM/composição).
+   *  Idempotente por (refType, refId, inputId). Retorna true se a reserva existe. */
+  async reserveInput(orgId: string, inputId: string, quantity: number, refType: string, refId: string): Promise<boolean> {
+    const qty = Math.max(0, Number(quantity) || 0)
+    if (qty <= 0) return false
+    const { data: existing } = await supabaseAdmin.from('production_input_movement').select('id')
+      .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
+    if (existing) return true
+    const { data: input } = await supabaseAdmin.from('production_input').select('reserved_quantity')
+      .eq('id', inputId).eq('organization_id', orgId).maybeSingle()
+    if (!input) { this.logger.warn(`[insumo] insumo ${inputId.slice(0, 8)} não encontrado p/ reservar (org ${orgId.slice(0, 8)})`); return false }
     await supabaseAdmin.from('production_input').update({
-      quantity: novaQtd, reserved_quantity: novaRes, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      reserved_quantity: Number((input as { reserved_quantity: number }).reserved_quantity) + qty, updated_at: new Date().toISOString(),
     }).eq('id', inputId)
     await supabaseAdmin.from('production_input_movement').insert({
-      organization_id: orgId, input_id: inputId, movement_type: 'consume', quantity: physical,
-      balance_after: novaQtd, unit_cost: Number(i.cost_per_unit) || 0,   // custo médio no momento do consumo (custo real)
-      reference_type: refType, reference_id: refId, notes: 'Consumo na conclusão da produção',
+      organization_id: orgId, input_id: inputId, movement_type: 'reserve', quantity: qty,
+      reference_type: refType, reference_id: refId, notes: 'Reserva de composição (BOM) p/ ordem de produção',
     })
+    return true
   }
 
-  /** Libera a reserva sem baixa física (cancelamento de ordem). Idempotente. */
+  /** Consome (baixa física) TODOS os insumos reservados p/ a ref. Idempotente por insumo.
+   *  `filamentActualG` (peso real) só sobrepõe quando há UM único filamento reservado. */
+  async consume(orgId: string, refType: string, refId: string, filamentActualG?: number): Promise<void> {
+    const { data: reserves } = await supabaseAdmin.from('production_input_movement').select('input_id, quantity')
+      .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve')
+    const list = (reserves ?? []) as Array<{ input_id: string; quantity: number }>
+    if (!list.length) return
+    const inputIds = [...new Set(list.map(r => r.input_id))]
+    const { data: inputsData } = await supabaseAdmin.from('production_input').select('*').in('id', inputIds)
+    const inputMap = new Map((inputsData ?? []).map(r => [(r as ProductionInput).id, r as ProductionInput]))
+    const filamentCount = list.filter(r => inputMap.get(r.input_id)?.kind === 'filamento').length
+    for (const rm of list) {
+      const inputId = rm.input_id
+      const reserved = Number(rm.quantity)
+      const { data: consumed } = await supabaseAdmin.from('production_input_movement').select('id')
+        .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'consume').maybeSingle()
+      if (consumed) continue
+      const i = inputMap.get(inputId)
+      if (!i) continue
+      const physical = (i.kind === 'filamento' && filamentCount === 1 && filamentActualG != null)
+        ? Math.max(0, Number(filamentActualG)) : Math.max(0, reserved)
+      const novaQtd = Math.max(0, Number(i.quantity) - physical)
+      const novaRes = Math.max(0, Number(i.reserved_quantity) - reserved)
+      await supabaseAdmin.from('production_input').update({
+        quantity: novaQtd, reserved_quantity: novaRes, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }).eq('id', inputId)
+      await supabaseAdmin.from('production_input_movement').insert({
+        organization_id: orgId, input_id: inputId, movement_type: 'consume', quantity: physical,
+        balance_after: novaQtd, unit_cost: Number(i.cost_per_unit) || 0,   // custo médio no momento do consumo (custo real)
+        reference_type: refType, reference_id: refId, notes: 'Consumo na conclusão da produção',
+      })
+    }
+  }
+
+  /** Libera TODAS as reservas sem baixa física (cancelamento de ordem). Idempotente por insumo. */
   async release(orgId: string, refType: string, refId: string): Promise<void> {
-    const { data: reserveMov } = await supabaseAdmin.from('production_input_movement').select('input_id, quantity')
-      .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
-    if (!reserveMov) return
-    const inputId = (reserveMov as { input_id: string }).input_id
-    const reserved = Number((reserveMov as { quantity: number }).quantity)
-    const { data: released } = await supabaseAdmin.from('production_input_movement').select('id')
-      .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'release').maybeSingle()
-    if (released) return
-    const { data: input } = await supabaseAdmin.from('production_input').select('reserved_quantity').eq('id', inputId).maybeSingle()
-    if (!input) return
-    const novaRes = Math.max(0, Number((input as { reserved_quantity: number }).reserved_quantity) - reserved)
-    await supabaseAdmin.from('production_input').update({ reserved_quantity: novaRes, updated_at: new Date().toISOString() }).eq('id', inputId)
-    await supabaseAdmin.from('production_input_movement').insert({
-      organization_id: orgId, input_id: inputId, movement_type: 'release', quantity: reserved,
-      reference_type: refType, reference_id: refId, notes: 'Liberação de reserva (cancelamento)',
-    })
+    const { data: reserves } = await supabaseAdmin.from('production_input_movement').select('input_id, quantity')
+      .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve')
+    const list = (reserves ?? []) as Array<{ input_id: string; quantity: number }>
+    if (!list.length) return
+    for (const rm of list) {
+      const inputId = rm.input_id
+      const reserved = Number(rm.quantity)
+      const { data: released } = await supabaseAdmin.from('production_input_movement').select('id')
+        .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'release').maybeSingle()
+      if (released) continue
+      const { data: input } = await supabaseAdmin.from('production_input').select('reserved_quantity').eq('id', inputId).maybeSingle()
+      if (!input) continue
+      const novaRes = Math.max(0, Number((input as { reserved_quantity: number }).reserved_quantity) - reserved)
+      await supabaseAdmin.from('production_input').update({ reserved_quantity: novaRes, updated_at: new Date().toISOString() }).eq('id', inputId)
+      await supabaseAdmin.from('production_input_movement').insert({
+        organization_id: orgId, input_id: inputId, movement_type: 'release', quantity: reserved,
+        reference_type: refType, reference_id: refId, notes: 'Liberação de reserva (cancelamento)',
+      })
+    }
   }
 
   private async getOne(orgId: string, id: string): Promise<ProductionInput> {
