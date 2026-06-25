@@ -492,6 +492,64 @@ export class LlmService {
     }
   }
 
+  /** Lê um documento PDF nativo via Anthropic (vê o layout — DANFE, contrato).
+   *  Mesma estrutura do analyzeImage, mas envia um content block 'document'. */
+  async analyzeDocument(input: {
+    orgId:        string
+    feature:      FeatureKey
+    pdfBase64:    string
+    systemPrompt?: string
+    userPrompt:   string
+    maxTokens?:   number
+    jsonMode?:    boolean
+  }): Promise<GenerateTextOutput> {
+    const t0 = Date.now()
+    if (!input.userPrompt?.trim()) throw new BadRequestException('userPrompt obrigatório')
+    if (!input.pdfBase64) throw new BadRequestException('pdfBase64 obrigatório')
+
+    const config = await this.resolveConfig({ orgId: input.orgId, feature: input.feature, userPrompt: input.userPrompt })
+    if (config.primary.provider !== 'anthropic') {
+      throw new BadRequestException(`Leitura de PDF suportada apenas via anthropic — feature ${input.feature} configurada com ${config.primary.provider}`)
+    }
+
+    let out: GenerateTextOutput | null = null
+    let errorMessage: string | null = null
+    try {
+      const result = await this.callAnthropicDocument({
+        orgId: input.orgId, model: config.primary.model, systemPrompt: input.systemPrompt,
+        userPrompt: input.jsonMode ? `${input.userPrompt}\n\nResponda APENAS com JSON válido, sem markdown.` : input.userPrompt,
+        pdfBase64: input.pdfBase64, maxTokens: input.maxTokens ?? 2000,
+      })
+      out = this.finalize(config.primary, result, t0, false)
+      return out
+    } catch (e) {
+      errorMessage = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
+      throw e
+    } finally {
+      if (out) await this.logUsage(out, input.feature, input.orgId, null)
+      else await this.logUsage({ text: '', provider: config.primary.provider, model: config.primary.model, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: Date.now() - t0, fallbackUsed: false }, input.feature, input.orgId, errorMessage)
+    }
+  }
+
+  private async callAnthropicDocument(args: {
+    orgId: string; model: string; systemPrompt?: string; userPrompt: string; pdfBase64: string; maxTokens: number
+  }): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+    const apiKey = await this.credentials.resolveAiKey(args.orgId, 'anthropic', 'ANTHROPIC_API_KEY')
+    const docBlock = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: args.pdfBase64 } }
+    const body: Record<string, unknown> = {
+      model: args.model, max_tokens: args.maxTokens,
+      messages: [{ role: 'user', content: [docBlock, { type: 'text', text: args.userPrompt }] }],
+    }
+    if (args.systemPrompt) body.system = args.systemPrompt
+    const res = await axios.post<{ content: Array<{ type: string; text?: string }>; usage: { input_tokens: number; output_tokens: number } }>(
+      ANTHROPIC_URL, body, {
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'pdfs-2024-09-25', 'Content-Type': 'application/json' },
+        timeout: 120_000,
+      })
+    const text = (res.data.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join('').trim()
+    return { text, inputTokens: res.data.usage?.input_tokens ?? 0, outputTokens: res.data.usage?.output_tokens ?? 0 }
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   // F5-2 — Image generation (gpt-image-1 + Flux stub)
   // ════════════════════════════════════════════════════════════════════════

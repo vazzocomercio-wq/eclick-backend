@@ -425,6 +425,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Product OS — Lê o DANFE (PDF) da NF de insumo e extrai fornecedor + itens
+  // estruturados. PDF nativo via Anthropic (vê a tabela) → Sonnet. Sem fallback
+  // OpenAI (precisa de leitura de documento).
+  nfe_pdf_extract: {
+    label:       'Leitura de NF em PDF (Product OS)',
+    description: 'Extrai do DANFE (PDF) os dados do fornecedor (CNPJ, nome, endereço) e dos itens (descrição, quantidade, unidade, valor unitário) para cadastrar insumos',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

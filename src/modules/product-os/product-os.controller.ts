@@ -141,6 +141,14 @@ export class ProductOsController {
     return this.nfe.importPreview(this.org(u), body.xml)
   }
 
+  @Post('production-inputs/import-nfe/preview-pdf')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view', 'ai.view_usage')
+  importNfePreviewPdf(@ReqUser() u: ReqUserPayload, @Body() body: { pdf_base64: string }) {
+    if (!body?.pdf_base64?.trim()) throw new BadRequestException('Envie o PDF da NF.')
+    return this.nfe.importPreviewFromPdf(this.org(u), body.pdf_base64)
+  }
+
   @Post('production-inputs/import-nfe')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

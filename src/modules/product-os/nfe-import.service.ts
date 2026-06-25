@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, ConflictException } from '@nes
 import { XMLParser } from 'fast-xml-parser'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductionInputService } from './production-input.service'
+import { LlmService } from '../ai/llm.service'
 
 /**
  * Importação de NF-e de insumo (XML).
@@ -32,7 +33,51 @@ export class NfeImportService {
   private readonly logger = new Logger(NfeImportService.name)
   private readonly parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false, trimValues: true })
 
-  constructor(private readonly inputs: ProductionInputService) {}
+  constructor(
+    private readonly inputs: ProductionInputService,
+    private readonly llm: LlmService,
+  ) {}
+
+  /** Lê o DANFE (PDF) via IA (documento nativo) e normaliza no mesmo shape. */
+  async parsePdf(orgId: string, pdfBase64: string): Promise<NfeParsed> {
+    if (!pdfBase64?.trim()) throw new BadRequestException('PDF ausente.')
+    const out = await this.llm.analyzeDocument({
+      orgId, feature: 'nfe_pdf_extract', pdfBase64, jsonMode: true, maxTokens: 3000,
+      systemPrompt: 'Você extrai dados de uma NF-e brasileira (DANFE em PDF). Leia a tabela de produtos com cuidado. Devolva SOMENTE JSON.',
+      userPrompt: NFE_PDF_PROMPT,
+    })
+    const parsed = parseJsonLoose(out.text) as any
+    if (!parsed || typeof parsed !== 'object') throw new BadRequestException('Não consegui ler a NF do PDF. Tente o XML (mais confiável).')
+
+    const e = parsed.supplier ?? {}
+    const supplier: NfeSupplier = {
+      tax_id: String(e.tax_id ?? e.cnpj ?? '').replace(/\D/g, '') || null,
+      name: String(e.name ?? 'Fornecedor').trim(),
+      legal_name: String(e.legal_name ?? e.name ?? '').trim(),
+      ie: e.ie ? String(e.ie) : null,
+      phone: e.phone ? String(e.phone) : null,
+      address: (e.address && typeof e.address === 'object') ? e.address : {},
+    }
+    const n = parsed.nf ?? {}
+    const nf = {
+      number: n.number != null ? String(n.number) : null, serie: n.serie != null ? String(n.serie) : null,
+      date: (n.date ?? null) as string | null, access_key: String(n.access_key ?? '').replace(/\D/g, '') || null,
+      total: Number(n.total ?? 0) || 0,
+    }
+    const items: NfeItem[] = (Array.isArray(parsed.items) ? parsed.items : []).map((p: any) => {
+      const desc = String(p.description ?? '').trim()
+      return {
+        code: p.code != null ? String(p.code) : null, ean: null, description: desc,
+        ncm: p.ncm != null ? String(p.ncm) : null, cfop: p.cfop != null ? String(p.cfop) : null,
+        unit: String(p.unit ?? 'UN').trim().toUpperCase(), quantity: Number(p.quantity ?? 0) || 0,
+        unit_cost: Math.round((Number(p.unit_cost ?? 0) || 0) * 100) / 100,
+        total: Math.round((Number(p.total ?? 0) || 0) * 100) / 100,
+        kind: this.inferKind(desc), material: this.inferMaterial(desc),
+      }
+    }).filter((i: NfeItem) => i.description)
+    if (!items.length) throw new BadRequestException('Não encontrei itens na NF do PDF.')
+    return { supplier, nf, items }
+  }
 
   private inferKind(desc: string): 'filamento' | 'embalagem' | 'etiqueta' | 'outro' {
     const d = (desc || '').toLowerCase()
@@ -114,14 +159,22 @@ export class NfeImportService {
     return { supplier, nf, items }
   }
 
-  /** Preview: parseia, casa o fornecedor (por CNPJ) e cada item (por sku/nome). */
-  async importPreview(orgId: string, xml: string): Promise<NfeParsed & {
+  /** Preview a partir do XML. */
+  async importPreview(orgId: string, xml: string) {
+    return this.buildPreview(orgId, this.parse(xml))
+  }
+
+  /** Preview a partir do PDF (DANFE) — IA lê o documento. */
+  async importPreviewFromPdf(orgId: string, pdfBase64: string) {
+    return this.buildPreview(orgId, await this.parsePdf(orgId, pdfBase64))
+  }
+
+  /** Casa o fornecedor (por CNPJ) e cada item (por sku/nome) + avisa NF duplicada. */
+  private async buildPreview(orgId: string, parsed: NfeParsed): Promise<NfeParsed & {
     supplier_existing_id: string | null
     already_imported: boolean
     items_matched: Array<{ index: number; input_id: string | null; input_name: string | null }>
   }> {
-    const parsed = this.parse(xml)
-
     // fornecedor já cadastrado? (por CNPJ)
     let supplierExistingId: string | null = null
     if (parsed.supplier.tax_id) {
@@ -229,4 +282,22 @@ export class NfeImportService {
 
     return { supplier_id: supplierId, created, restocked }
   }
+}
+
+const NFE_PDF_PROMPT = `Extraia os dados desta NF-e (DANFE) e responda em JSON com EXATAMENTE este formato:
+{
+  "supplier": { "tax_id": "CNPJ do EMITENTE só dígitos", "name": "nome fantasia ou razão social", "legal_name": "razão social", "ie": "inscrição estadual ou null", "phone": "telefone ou null", "address": { "city": "município", "uf": "UF" } },
+  "nf": { "number": "número da nota", "serie": "série", "access_key": "chave de acesso de 44 dígitos só números", "total": valor_total_da_nota },
+  "items": [ { "code": "código do produto do fornecedor", "description": "descrição do produto", "ncm": "NCM", "unit": "unidade (UN, KG, PC, MT...)", "quantity": quantidade_numérica, "unit_cost": valor_unitário_numérico, "total": valor_total_do_item } ]
+}
+Regras: o EMITENTE é o fornecedor (quem vendeu), NÃO o destinatário. Números com ponto decimal. Liste TODOS os itens da tabela de produtos. Se um campo não existir, use null.`
+
+function parseJsonLoose(text: string): unknown {
+  const t = (text ?? '').trim()
+  try { return JSON.parse(t) } catch { /* continua */ }
+  const m = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (m) { try { return JSON.parse(m[1]) } catch { /* continua */ } }
+  const o = t.indexOf('{'), c = t.lastIndexOf('}')
+  if (o >= 0 && c > o) { try { return JSON.parse(t.slice(o, c + 1)) } catch { /* continua */ } }
+  return null
 }
