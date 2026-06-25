@@ -188,8 +188,11 @@ export class ProductionService {
       await this.inputs.release(orgId, 'production_order', oid)
     }
     if (to === 'disponivel') {
-      // baixa insumos + alimenta estoque de produto acabado
-      const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? (order as { estimated_filament_g: number | null }).estimated_filament_g ?? undefined
+      // baixa insumos + alimenta estoque de produto acabado.
+      // Só o peso REAL medido do filamento sobrepõe a reserva; sem medição,
+      // consome o reservado (que já inclui a perda do BOM). O estimado NÃO
+      // sobrepõe — senão zeraria a perda da composição.
+      const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? undefined
       await this.inputs.consume(orgId, 'production_order', oid, actual ?? undefined)
       await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
       await this.creditNativeStock(orgId, order as Record<string, unknown>)
