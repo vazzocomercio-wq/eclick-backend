@@ -11,14 +11,10 @@ import { type ModelSourceProvider, type SourceModel, buildVerdict } from './mode
  * Credencial em `CULTS_API_USERNAME` + `CULTS_API_KEY` (gerar em
  * cults3d.com/en/api/keys). DORMENTE até as envs.
  *
- * ⚠️ VALIDAR COM INTROSPECTION quando a chave existir (não testei ao vivo):
- *   1. a query `creation` aceita `id` (ID global base64 "Creation/123") — a URL
- *      do Cults traz só o SLUG, não o id. Resolvemos o slug via `creations`
- *      (busca) como best-effort; confirmar o nome do argumento/filtro.
- *   2. a semântica de licença comercial: paid model ≠ direito comercial
- *      automático. Default conservador aqui = amarelo (remodela, comercial
- *      exige a licença comercial do criador → liberar no porteiro). Refinar
- *      quando o campo de licença/uso comercial for confirmado na introspection.
+ * Schema validado por introspection ao vivo (2026-06-25): `creation(slug: String!)`,
+ * `License.allowsCommercialUse` é o sinal comercial autoritativo → veredito real
+ * (verde quando comercial, amarelo quando uso privado). Modelo pago de "Private
+ * Use" = amarelo; o lojista compra a licença comercial e libera no porteiro.
  */
 
 const ENDPOINT = 'https://cults3d.com/graphql'
@@ -66,23 +62,21 @@ export class CultsService implements ModelSourceProvider {
   async fetchModel(input: string): Promise<SourceModel> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada (defina CULTS_API_USERNAME e CULTS_API_KEY).')
     const slug = this.parseSlug(input)
-    // ⚠️ VALIDAR: assume `creation(slug:)`. Se a introspection mostrar que só
-    // existe `creation(id:)`, resolver o slug via `creations(filter:{...})` antes.
-    const CREATION_FIELDS = `
-      name(locale: EN)
-      url(locale: EN)
-      shortUrl
-      description(locale: EN)
-      illustrationImageUrl
-      illustrations { imageUrl }
-      price(currency: USD) { cents currency }
-      tags(locale: EN)
-      downloadsCount
-      likesCount
-      viewsCount(cached: true)
-      publishedAt
-      user { nick }`
-    const query = `query($slug: String!) { creation(slug: $slug) { ${CREATION_FIELDS} } }`
+    // schema validado por introspection ao vivo 2026-06-25: creation(slug: String!),
+    // campos planos (sem locale), creator{nick}, license{allowsCommercialUse}.
+    const query = `query($slug: String!) {
+      creation(slug: $slug) {
+        name slug url shortUrl description
+        illustrationImageUrl
+        illustrations { imageUrl }
+        price { cents currency }
+        license { code name allowsCommercialUse availableOnFreeDesigns availableOnPricedDesigns spdxId }
+        tags
+        downloadsCount likesCount viewsCount
+        publishedAt
+        creator { nick }
+      }
+    }`
     let creation: Record<string, any> | null = null
     try {
       const out = await this.gql<{ creation: Record<string, any> }>(query, { slug })
@@ -101,30 +95,30 @@ export class CultsService implements ModelSourceProvider {
     const cover = j.illustrationImageUrl || j.illustrations?.[0]?.imageUrl || null
     const tags: string[] = Array.isArray(j.tags) ? j.tags.filter((t: unknown) => typeof t === 'string') : []
     const url = j.url || `https://cults3d.com/en/3d-model/${slug}`
+    const lic = j.license ?? {}
+    const licenseName: string | null = lic.name || lic.code || (isPaid ? 'Cults3D — pago' : 'Cults3D — grátis')
 
-    // ⚠️ VALIDAR: licença comercial do Cults precisa de campo confirmado. Default
-    // conservador: pode remodelar; comercial exige a licença comercial do criador
-    // (o lojista libera no porteiro depois de adquiri-la). Modelo grátis tende a
-    // ser uso pessoal/atribuição → também não-comercial por padrão.
+    // sinal comercial REAL do Cults (license.allowsCommercialUse). Derivado não
+    // tem flag de proibição → assume permitido (o comprador imprime/modifica).
+    const allowsCommercial = lic.allowsCommercialUse === true
     const allowsDerivative = true
-    const allowsCommercial = false
 
     return {
       platform:           'cults3d',
       source_url:         url,
       external_id:        slug,
       title:              String(j.name ?? '').trim(),
-      license:            isPaid ? 'Cults3D — pago' : 'Cults3D — grátis',
-      license_title:      'Cults3D (licença comercial vendida pelo criador)',
+      license:            licenseName,
+      license_title:      lic.code ? `Cults3D · ${lic.code}` : 'Cults3D',
       allow_recreation:   allowsDerivative,
       is_printable:       true,
       cover_url:          cover,
-      creator:            j.user?.nick || null,
-      creator_handle:     j.user?.nick || null,
+      creator:            j.creator?.nick || null,
+      creator_handle:     j.creator?.nick || null,
       download_count:     Number(j.downloadsCount ?? 0),
       print_count:        0,
       like_count:         Number(j.likesCount ?? 0),
-      collection_count:   0,
+      collection_count:   Number(j.viewsCount ?? 0),
       tags,
       categories:         [],
       weight_g:           null,
@@ -134,15 +128,17 @@ export class CultsService implements ModelSourceProvider {
       is_remix:           false,
       price:              isPaid ? priceCents / 100 : null,
       verdict: buildVerdict({
-        license: isPaid ? 'modelo pago Cults3D' : 'modelo grátis Cults3D',
+        license: licenseName,
         allowsDerivative,
         allowsCommercial,
-        commercialReason: 'Cults3D vende licença comercial por modelo: você pode remodelar, mas para VENDER precisa adquirir a licença comercial do criador. Depois de comprá-la, libere no porteiro ("Licença & origem").',
+        commercialReason: `Licença "${licenseName}" do Cults3D não permite uso comercial — você pode imprimir/remodelar para uso próprio, mas para VENDER precisa adquirir a licença comercial do criador (depois libere no porteiro "Licença & origem").`,
+        greenReason: `Licença "${licenseName}" do Cults3D permite uso comercial: pode imprimir, remodelar e vender.`,
       }),
       raw: {
         slug, name: j.name, url, shortUrl: j.shortUrl, price_cents: priceCents, currency: j.price?.currency,
+        license: { code: lic.code, name: lic.name, allowsCommercialUse: lic.allowsCommercialUse, spdxId: lic.spdxId },
         downloadsCount: j.downloadsCount, likesCount: j.likesCount, viewsCount: j.viewsCount,
-        user: j.user?.nick, publishedAt: j.publishedAt, tags, fetched_from: 'cults3d_graphql',
+        creator: j.creator?.nick, publishedAt: j.publishedAt, tags, fetched_from: 'cults3d_graphql',
       },
     }
   }
