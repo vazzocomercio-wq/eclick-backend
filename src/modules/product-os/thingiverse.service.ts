@@ -87,6 +87,33 @@ export class ThingiverseService implements ModelSourceProvider {
     return models.filter((m): m is SourceModel => m != null)
   }
 
+  /** Categorias do Thingiverse (amplas: Household, Art, Gadgets…). */
+  async listCategories(): Promise<{ slug: string; name: string }[]> {
+    const token = this.token()
+    if (!token) throw new BadRequestException('Integração Thingiverse não configurada.')
+    const { data } = await axios.get(`${BASE}/categories`, { headers: { Authorization: `Bearer ${token}` }, timeout: 12000, validateStatus: s => s === 200 })
+    const arr = Array.isArray(data) ? data : (data?.categories ?? [])
+    return arr.map((c: any) => ({ slug: c.slug || (c.url ?? '').split('/').filter(Boolean).pop(), name: c.name })).filter((c: any) => c.slug && c.name)
+  }
+
+  /** Feed por categoria (ou populares). Resumo sem licença → busca detalhe top-N. */
+  async discover(opts: { categorySlug?: string; commercialOnly?: boolean; limit?: number } = {}): Promise<SourceModel[]> {
+    const token = this.token()
+    if (!token) throw new BadRequestException('Integração Thingiverse não configurada.')
+    const n = Math.min(20, Math.max(1, opts.limit ?? 12))
+    const url = opts.categorySlug
+      ? `${BASE}/categories/${encodeURIComponent(opts.categorySlug)}/things?per_page=30`
+      : `${BASE}/popular?per_page=30`
+    let summaries: Array<Record<string, any>> = []
+    try {
+      const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${token}` }, timeout: 12000, validateStatus: s => s === 200 })
+      summaries = Array.isArray(data) ? data : (data?.hits ?? [])
+    } catch { throw new BadRequestException('Não consegui carregar os modelos do Thingiverse.') }
+    const top = summaries.filter(t => t?.id && t.is_published !== 0).slice(0, n)
+    const models = (await Promise.all(top.map(t => this.fetchModel(String(t.id)).catch(() => null)))).filter((m): m is SourceModel => m != null)
+    return opts.commercialOnly ? models.filter(m => m.verdict.can_commercial) : models
+  }
+
   private normalize(id: string, j: Record<string, any>): SourceModel {
     const license: string | null = j.license || null
     const s = (license ?? '').toLowerCase()

@@ -89,18 +89,31 @@ export class CultsService implements ModelSourceProvider {
     return (out?.creationsSearchBatch?.results ?? []).map(c => this.normalize(c.slug, c))
   }
 
-  /** Feed "em alta" — mais baixados; opção de só comerciais (vendáveis). */
-  async discover(opts: { commercialOnly?: boolean; limit?: number; offset?: number } = {}): Promise<SourceModel[]> {
+  /** Feed "em alta" — mais baixados; filtros opcionais por comercial e categoria. */
+  async discover(opts: { commercialOnly?: boolean; categorySlug?: string; limit?: number; offset?: number } = {}): Promise<SourceModel[]> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
     const limit = Math.min(50, Math.max(1, opts.limit ?? 24))
     const offset = Math.max(0, opts.offset ?? 0)
-    const query = `query($limit: Int!, $offset: Int!, $onlyCommercial: Boolean) {
-      creationsBatch(sort: BY_DOWNLOADS, direction: DESC, limit: $limit, offset: $offset, onlyCommercial: $onlyCommercial) {
+    const query = `query($limit: Int!, $offset: Int!, $onlyCommercial: Boolean, $cat: String) {
+      creationsBatch(sort: BY_DOWNLOADS, direction: DESC, limit: $limit, offset: $offset, onlyCommercial: $onlyCommercial, categorySlugEn: $cat) {
         results { ${CREATION_FIELDS} }
       }
     }`
-    const out = await this.gql<{ creationsBatch: { results: Record<string, any>[] } }>(query, { limit, offset, onlyCommercial: opts.commercialOnly ?? false })
+    const out = await this.gql<{ creationsBatch: { results: Record<string, any>[] } }>(query, { limit, offset, onlyCommercial: opts.commercialOnly ?? false, cat: opts.categorySlug || null })
     return (out?.creationsBatch?.results ?? []).map(c => this.normalize(c.slug, c))
+  }
+
+  /** Árvore de categorias do Cults (9 raízes + subcategorias). */
+  async listCategories(): Promise<{ slug: string; name: string }[]> {
+    if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
+    const out = await this.gql<{ categories: Array<{ name: string; slug: string; children: Array<{ name: string; slug: string }> }> }>(
+      `{ categories { name slug children { name slug } } }`, {})
+    const flat: { slug: string; name: string }[] = []
+    for (const c of out?.categories ?? []) {
+      flat.push({ slug: c.slug, name: c.name })
+      for (const ch of c.children ?? []) flat.push({ slug: ch.slug, name: `${c.name} › ${ch.name}` })
+    }
+    return flat
   }
 
   private normalize(slug: string, j: Record<string, any>): SourceModel {

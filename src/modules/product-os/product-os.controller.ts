@@ -209,7 +209,7 @@ export class ProductOsController {
   @Get('sources')
   @RequirePermission('products.view')
   listSources() {
-    return this.sources.all().map(p => ({ platform: p.platform, label: p.label, configured: p.isConfigured(), can_creator: !!p.listByCreator, can_discover: !!p.discover }))
+    return this.sources.all().map(p => ({ platform: p.platform, label: p.label, configured: p.isConfigured(), can_creator: !!p.listByCreator, can_discover: !!p.discover, can_categories: !!p.listCategories }))
   }
 
   // ── Watchlist de criadores (Fase E) ───────────────────────────────
@@ -236,10 +236,18 @@ export class ProductOsController {
   // ── Feed "em alta" / descoberta (Fase D) ──────────────────────────
   @Get('discover')
   @RequirePermission('products.view')
-  discover(@ReqUser() u: ReqUserPayload, @Query('platform') platform: string, @Query('commercial') commercial?: string) {
+  discover(@ReqUser() u: ReqUserPayload, @Query('platform') platform: string, @Query('commercial') commercial?: string, @Query('category') category?: string) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     if (!platform) throw new BadRequestException('Informe a plataforma.')
-    return this.radar.discover(platform, { commercialOnly: commercial === '1' || commercial === 'true' })
+    return this.radar.discover(platform, { commercialOnly: commercial === '1' || commercial === 'true', categorySlug: category || undefined })
+  }
+
+  @Get('categories')
+  @RequirePermission('products.view')
+  listCategories(@ReqUser() u: ReqUserPayload, @Query('platform') platform: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!platform) throw new BadRequestException('Informe a plataforma.')
+    return this.radar.listCategories(platform)
   }
 
   // ── Radar de campeões (Peça 3) ────────────────────────────────────

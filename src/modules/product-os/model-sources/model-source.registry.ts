@@ -63,11 +63,19 @@ export class ModelSourceRegistry {
   }
 
   /** Feed de descoberta / "em alta" de uma plataforma (se suportar). */
-  discover(platform: string, opts?: { commercialOnly?: boolean; limit?: number; offset?: number }): Promise<SourceModel[]> {
+  discover(platform: string, opts?: { commercialOnly?: boolean; categorySlug?: string; limit?: number; offset?: number }): Promise<SourceModel[]> {
     const provider = this.byPlatform(platform)
     if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
     if (!provider.discover) throw new BadRequestException(`${provider.label} não tem feed de descoberta.`)
     return provider.discover(opts)
+  }
+
+  /** Categorias de uma plataforma (se suportar). */
+  listCategories(platform: string): Promise<{ slug: string; name: string }[]> {
+    const provider = this.byPlatform(platform)
+    if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
+    if (!provider.listCategories) throw new BadRequestException(`${provider.label} não expõe categorias.`)
+    return provider.listCategories()
   }
 
   /** Plataformas configuradas que suportam cada capacidade (pra UI). */

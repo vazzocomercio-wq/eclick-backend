@@ -282,8 +282,12 @@ export class MakerworldRadarService {
   }
 
   // ══ Feed "em alta" / descoberta (Fase D) ═══════════════════════════
-  async discover(platform: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<import('./model-sources/source.types').SourceModel[]> {
-    return this.sources.discover(platform, { commercialOnly: opts.commercialOnly, limit: opts.limit ?? 24 })
+  async discover(platform: string, opts: { commercialOnly?: boolean; categorySlug?: string; limit?: number } = {}): Promise<import('./model-sources/source.types').SourceModel[]> {
+    return this.sources.discover(platform, { commercialOnly: opts.commercialOnly, categorySlug: opts.categorySlug, limit: opts.limit ?? 24 })
+  }
+
+  listCategories(platform: string): Promise<{ slug: string; name: string }[]> {
+    return this.sources.listCategories(platform)
   }
 }
 

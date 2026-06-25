@@ -66,12 +66,21 @@ export interface ModelSourceProvider {
   listByCreator?(handle: string, limit?: number): Promise<SourceModel[]>
   /** feed de descoberta / "em alta" (se suportado) */
   discover?(opts?: DiscoverOpts): Promise<SourceModel[]>
+  /** árvore de categorias da plataforma (se suportado) */
+  listCategories?(): Promise<SourceCategory[]>
 }
 
 export interface DiscoverOpts {
   commercialOnly?: boolean   // só modelos com licença comercial (vendáveis)
+  categorySlug?:   string    // filtra por categoria (ex 'home-decor', 'vases')
   limit?:          number
   offset?:         number
+}
+
+export interface SourceCategory {
+  slug:      string
+  name:      string          // já vem com prefixo do pai quando é subcategoria (ex "Home › Vases")
+  children?: SourceCategory[]
 }
 
 /** Monta o veredito verde/amarelo/vermelho a partir dos flags normalizados.
