@@ -10,6 +10,7 @@ import { ProductionService } from './production.service'
 import { ProductionInputService, type ProductionInput } from './production-input.service'
 import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
+import { MakerworldRadarService } from './makerworld-radar.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -25,6 +26,7 @@ export class ProductOsController {
     private readonly inputs: ProductionInputService,
     private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
+    private readonly radar: MakerworldRadarService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -186,6 +188,45 @@ export class ProductOsController {
   productionPlan(@ReqUser() u: ReqUserPayload, @Query('hours') hours?: string) {
     return this.production.productionPlan(this.org(u), hours ? Number(hours) : undefined)
   }
+
+  // ── Radar de campeões do MakerWorld (Peça 3) ──────────────────────
+  @Get('radar')
+  @RequirePermission('products.view')
+  radarList(@ReqUser() u: ReqUserPayload) { return this.radar.list(this.org(u)) }
+
+  @Post('radar')
+  @RequirePermission('products.update')
+  radarAdd(@ReqUser() u: ReqUserPayload, @Body() body: { url: string }) {
+    if (!body?.url?.trim()) throw new BadRequestException('Informe o link ou o ID do modelo MakerWorld.')
+    return this.radar.addToWatch(this.org(u), u.id, body.url)
+  }
+
+  @Post('radar/refresh')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  radarRefreshAll(@ReqUser() u: ReqUserPayload) { return this.radar.refresh(this.org(u)) }
+
+  @Post('radar/:rid/refresh')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  radarRefresh(@ReqUser() u: ReqUserPayload, @Param('rid') rid: string) { return this.radar.refresh(this.org(u), rid) }
+
+  @Post('radar/:rid/decision')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  radarDecision(@ReqUser() u: ReqUserPayload, @Param('rid') rid: string, @Body() body: { decision: 'observar' | 'comprar' | 'ignorar'; notes?: string }) {
+    return this.radar.setDecision(this.org(u), rid, body.decision, body.notes)
+  }
+
+  @Post('radar/:rid/ai-suggest')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update', 'ai.view_usage')
+  radarAiSuggest(@ReqUser() u: ReqUserPayload, @Param('rid') rid: string) { return this.radar.aiSuggest(this.org(u), rid) }
+
+  @Post('radar/:rid/remove')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  radarRemove(@ReqUser() u: ReqUserPayload, @Param('rid') rid: string) { return this.radar.remove(this.org(u), rid) }
 
   // ── Importar do MakerWorld (Peça 1) ───────────────────────────────
   @Post('import/makerworld/preview')

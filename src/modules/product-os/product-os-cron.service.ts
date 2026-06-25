@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { MakerworldRadarService } from './makerworld-radar.service'
 
 /**
  * Product OS — Fase 7: alerta automático de insumo.
@@ -13,7 +14,30 @@ import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 export class ProductOsCronService {
   private readonly logger = new Logger(ProductOsCronService.name)
 
-  constructor(private readonly bridge: ActiveBridgeClient) {}
+  constructor(
+    private readonly bridge: ActiveBridgeClient,
+    private readonly radar: MakerworldRadarService,
+  ) {}
+
+  /**
+   * Radar de campeões (Peça 3): re-fotografa diariamente (08:00) os modelos
+   * observados de cada org, gravando um snapshot por item. É o que alimenta a
+   * velocidade semanal. Best-effort, gentil com a API não-oficial (1×/dia).
+   */
+  @Cron('0 8 * * *', { name: 'product-os-radar-refresh' })
+  async refreshRadar(): Promise<{ orgs: number; refreshed: number; failed: number }> {
+    const { data, error } = await supabaseAdmin.from('mw_watch_item')
+      .select('organization_id').eq('is_active', true)
+    if (error) { this.logger.warn(`[product-os.cron] radar: ${error.message}`); return { orgs: 0, refreshed: 0, failed: 0 } }
+    const orgs = [...new Set((data ?? []).map(r => (r as { organization_id: string }).organization_id))]
+    let refreshed = 0, failed = 0
+    for (const orgId of orgs) {
+      try { const r = await this.radar.refresh(orgId); refreshed += r.refreshed; failed += r.failed }
+      catch (e) { this.logger.warn(`[product-os.cron] radar ${orgId.slice(0, 8)}: ${(e as Error).message}`) }
+    }
+    if (refreshed || failed) this.logger.log(`[product-os.cron] radar: ${orgs.length} org(s), ${refreshed} ok, ${failed} falhas`)
+    return { orgs: orgs.length, refreshed, failed }
+  }
 
   @Cron('0 12 * * *', { name: 'product-os-input-alerts' })
   async checkInputAlerts(): Promise<{ orgs_alerted: number }> {

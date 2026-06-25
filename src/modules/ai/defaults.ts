@@ -416,6 +416,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Product OS — Radar de campeões do MakerWorld. Cruza velocidade (downloads/
+  // prints por semana) com a licença e recomenda comprar/observar/ignorar.
+  // Decisão curta e barata → Haiku.
+  makerworld_radar_decision: {
+    label:       'Decisão do Radar MakerWorld (Product OS)',
+    description: 'Lê velocidade (downloads/prints por semana), licença e popularidade de um modelo do MakerWorld e recomenda comprar/observar/ignorar para a fábrica de impressão 3D',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
