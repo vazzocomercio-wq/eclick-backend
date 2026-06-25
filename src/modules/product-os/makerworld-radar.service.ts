@@ -239,6 +239,58 @@ export class MakerworldRadarService {
       .eq('id', itemId).eq('organization_id', orgId)
     return result
   }
+
+  // ══ Watchlist de criadores (Fase E) ════════════════════════════════
+  /** Segue um criador (valida listando os modelos dele) + devolve a prévia. */
+  async addCreator(orgId: string, userId: string | null, platform: string, handle: string): Promise<{ creator: TrackedCreator; models: import('./model-sources/source.types').SourceModel[] }> {
+    const nick = (handle ?? '').replace(/^@/, '').trim()
+    if (!nick) throw new BadRequestException('Informe o nick do criador.')
+    const models = await this.sources.listByCreator(platform, nick, 24)
+    const displayName = models.find(m => m.creator)?.creator ?? nick
+    const { data, error } = await supabaseAdmin.from('mw_tracked_creator').upsert({
+      organization_id: orgId, platform, handle: nick, display_name: displayName,
+      last_model_count: models.length, is_active: true, created_by: userId, updated_at: this.nowIso(),
+    }, { onConflict: 'organization_id,platform,handle' }).select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao seguir criador: ${error?.message ?? 'sem dados'}`)
+    return { creator: data as TrackedCreator, models }
+  }
+
+  async listCreators(orgId: string): Promise<TrackedCreator[]> {
+    const { data, error } = await supabaseAdmin.from('mw_tracked_creator')
+      .select('*').eq('organization_id', orgId).eq('is_active', true).order('created_at', { ascending: false })
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return (data ?? []) as TrackedCreator[]
+  }
+
+  /** Modelos do criador AO VIVO (ranqueados por popularidade, com veredito). */
+  async creatorModels(orgId: string, creatorId: string): Promise<import('./model-sources/source.types').SourceModel[]> {
+    const { data } = await supabaseAdmin.from('mw_tracked_creator').select('platform, handle')
+      .eq('id', creatorId).eq('organization_id', orgId).eq('is_active', true).maybeSingle()
+    if (!data) throw new NotFoundException('Criador não encontrado')
+    const c = data as { platform: string; handle: string }
+    const models = await this.sources.listByCreator(c.platform, c.handle, 24)
+    await supabaseAdmin.from('mw_tracked_creator').update({ last_model_count: models.length, updated_at: this.nowIso() })
+      .eq('id', creatorId).eq('organization_id', orgId)
+    return models
+  }
+
+  async removeCreator(orgId: string, creatorId: string): Promise<{ removed: boolean }> {
+    const { error } = await supabaseAdmin.from('mw_tracked_creator').update({ is_active: false, updated_at: this.nowIso() })
+      .eq('id', creatorId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { removed: true }
+  }
+
+  // ══ Feed "em alta" / descoberta (Fase D) ═══════════════════════════
+  async discover(platform: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<import('./model-sources/source.types').SourceModel[]> {
+    return this.sources.discover(platform, { commercialOnly: opts.commercialOnly, limit: opts.limit ?? 24 })
+  }
+}
+
+export interface TrackedCreator {
+  id: string; organization_id: string; platform: string; handle: string
+  display_name: string | null; is_active: boolean; last_model_count: number | null
+  notes: string | null; created_at: string; updated_at: string
 }
 
 const RADAR_SYSTEM_PROMPT = `Você é um analista de produtos para uma fábrica de impressão 3D que revende modelos.

@@ -195,7 +195,37 @@ export class ProductOsController {
   @Get('sources')
   @RequirePermission('products.view')
   listSources() {
-    return this.sources.all().map(p => ({ platform: p.platform, label: p.label, configured: p.isConfigured() }))
+    return this.sources.all().map(p => ({ platform: p.platform, label: p.label, configured: p.isConfigured(), can_creator: !!p.listByCreator, can_discover: !!p.discover }))
+  }
+
+  // ── Watchlist de criadores (Fase E) ───────────────────────────────
+  @Get('creators')
+  @RequirePermission('products.view')
+  listCreators(@ReqUser() u: ReqUserPayload) { return this.radar.listCreators(this.org(u)) }
+
+  @Post('creators')
+  @RequirePermission('products.update')
+  addCreator(@ReqUser() u: ReqUserPayload, @Body() body: { platform: string; handle: string }) {
+    if (!body?.platform || !body?.handle?.trim()) throw new BadRequestException('Informe a plataforma e o nick do criador.')
+    return this.radar.addCreator(this.org(u), u.id, body.platform, body.handle)
+  }
+
+  @Get('creators/:cid/models')
+  @RequirePermission('products.view')
+  creatorModels(@ReqUser() u: ReqUserPayload, @Param('cid') cid: string) { return this.radar.creatorModels(this.org(u), cid) }
+
+  @Post('creators/:cid/remove')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  removeCreator(@ReqUser() u: ReqUserPayload, @Param('cid') cid: string) { return this.radar.removeCreator(this.org(u), cid) }
+
+  // ── Feed "em alta" / descoberta (Fase D) ──────────────────────────
+  @Get('discover')
+  @RequirePermission('products.view')
+  discover(@ReqUser() u: ReqUserPayload, @Query('platform') platform: string, @Query('commercial') commercial?: string) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    if (!platform) throw new BadRequestException('Informe a plataforma.')
+    return this.radar.discover(platform, { commercialOnly: commercial === '1' || commercial === 'true' })
   }
 
   // ── Radar de campeões (Peça 3) ────────────────────────────────────

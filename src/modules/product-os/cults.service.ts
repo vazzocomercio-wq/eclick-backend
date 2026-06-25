@@ -62,21 +62,7 @@ export class CultsService implements ModelSourceProvider {
   async fetchModel(input: string): Promise<SourceModel> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada (defina CULTS_API_USERNAME e CULTS_API_KEY).')
     const slug = this.parseSlug(input)
-    // schema validado por introspection ao vivo 2026-06-25: creation(slug: String!),
-    // campos planos (sem locale), creator{nick}, license{allowsCommercialUse}.
-    const query = `query($slug: String!) {
-      creation(slug: $slug) {
-        name slug url shortUrl description
-        illustrationImageUrl
-        illustrations { imageUrl }
-        price { cents currency }
-        license { code name allowsCommercialUse availableOnFreeDesigns availableOnPricedDesigns spdxId }
-        tags
-        downloadsCount likesCount viewsCount
-        publishedAt
-        creator { nick }
-      }
-    }`
+    const query = `query($slug: String!) { creation(slug: $slug) { ${CREATION_FIELDS} } }`
     let creation: Record<string, any> | null = null
     try {
       const out = await this.gql<{ creation: Record<string, any> }>(query, { slug })
@@ -87,6 +73,34 @@ export class CultsService implements ModelSourceProvider {
     }
     if (!creation) throw new NotFoundException('Modelo não encontrado no Cults3D.')
     return this.normalize(slug, creation)
+  }
+
+  /** Modelos de um criador, mais baixados primeiro (`creationsSearchBatch`). */
+  async listByCreator(handle: string, limit = 24): Promise<SourceModel[]> {
+    if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
+    const nick = (handle ?? '').replace(/^@/, '').trim()
+    if (!nick) throw new BadRequestException('Informe o nick do criador no Cults3D.')
+    const query = `query($nick: String!, $limit: Int!) {
+      creationsSearchBatch(query: "", creatorNick: $nick, sort: BY_DOWNLOADS, limit: $limit) {
+        results { ${CREATION_FIELDS} }
+      }
+    }`
+    const out = await this.gql<{ creationsSearchBatch: { results: Record<string, any>[] } }>(query, { nick, limit: Math.min(50, Math.max(1, limit)) })
+    return (out?.creationsSearchBatch?.results ?? []).map(c => this.normalize(c.slug, c))
+  }
+
+  /** Feed "em alta" — mais baixados; opção de só comerciais (vendáveis). */
+  async discover(opts: { commercialOnly?: boolean; limit?: number; offset?: number } = {}): Promise<SourceModel[]> {
+    if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
+    const limit = Math.min(50, Math.max(1, opts.limit ?? 24))
+    const offset = Math.max(0, opts.offset ?? 0)
+    const query = `query($limit: Int!, $offset: Int!, $onlyCommercial: Boolean) {
+      creationsBatch(sort: BY_DOWNLOADS, direction: DESC, limit: $limit, offset: $offset, onlyCommercial: $onlyCommercial) {
+        results { ${CREATION_FIELDS} }
+      }
+    }`
+    const out = await this.gql<{ creationsBatch: { results: Record<string, any>[] } }>(query, { limit, offset, onlyCommercial: opts.commercialOnly ?? false })
+    return (out?.creationsBatch?.results ?? []).map(c => this.normalize(c.slug, c))
   }
 
   private normalize(slug: string, j: Record<string, any>): SourceModel {
@@ -146,3 +160,16 @@ export class CultsService implements ModelSourceProvider {
     }
   }
 }
+
+// campos da Creation validados por introspection ao vivo (2026-06-25): planos,
+// sem locale; creator{nick}; license{allowsCommercialUse}. Reusado por fetch/list/discover.
+const CREATION_FIELDS = `
+  name slug url shortUrl description
+  illustrationImageUrl
+  illustrations { imageUrl }
+  price { cents currency }
+  license { code name allowsCommercialUse availableOnFreeDesigns availableOnPricedDesigns spdxId }
+  tags
+  downloadsCount likesCount viewsCount
+  publishedAt
+  creator { nick }`

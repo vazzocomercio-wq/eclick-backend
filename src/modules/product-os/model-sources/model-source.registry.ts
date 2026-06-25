@@ -53,4 +53,24 @@ export class ModelSourceRegistry {
     if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
     return provider.fetchModel(input)
   }
+
+  /** Lista os modelos de um criador numa plataforma (se suportar). */
+  listByCreator(platform: string, handle: string, limit?: number): Promise<SourceModel[]> {
+    const provider = this.byPlatform(platform)
+    if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
+    if (!provider.listByCreator) throw new BadRequestException(`${provider.label} não suporta busca por criador.`)
+    return provider.listByCreator(handle, limit)
+  }
+
+  /** Feed de descoberta / "em alta" de uma plataforma (se suportar). */
+  discover(platform: string, opts?: { commercialOnly?: boolean; limit?: number; offset?: number }): Promise<SourceModel[]> {
+    const provider = this.byPlatform(platform)
+    if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
+    if (!provider.discover) throw new BadRequestException(`${provider.label} não tem feed de descoberta.`)
+    return provider.discover(opts)
+  }
+
+  /** Plataformas configuradas que suportam cada capacidade (pra UI). */
+  creatorPlatforms() { return this.configured().filter(p => !!p.listByCreator).map(p => ({ platform: p.platform, label: p.label })) }
+  discoverPlatforms() { return this.configured().filter(p => !!p.discover).map(p => ({ platform: p.platform, label: p.label })) }
 }

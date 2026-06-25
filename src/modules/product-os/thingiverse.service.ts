@@ -60,6 +60,33 @@ export class ThingiverseService implements ModelSourceProvider {
     }
   }
 
+  /** Modelos de um criador, mais curtidos primeiro. O resumo de /users/{nick}/
+   *  things NÃO traz licença/downloads → busca o detalhe dos top-N (paralelo). */
+  async listByCreator(handle: string, limit = 12): Promise<SourceModel[]> {
+    const token = this.token()
+    if (!token) throw new BadRequestException('Integração Thingiverse não configurada (defina THINGIVERSE_TOKEN).')
+    const nick = (handle ?? '').replace(/^@/, '').trim()
+    if (!nick) throw new BadRequestException('Informe o nick do criador no Thingiverse.')
+    const n = Math.min(20, Math.max(1, limit))
+    let summaries: Array<Record<string, any>> = []
+    try {
+      const { data } = await axios.get(`${BASE}/users/${encodeURIComponent(nick)}/things?per_page=30`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 12000, validateStatus: s => s === 200,
+      })
+      summaries = Array.isArray(data) ? data : (data?.hits ?? [])
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status
+      if (status === 404) throw new NotFoundException('Criador não encontrado no Thingiverse.')
+      throw new BadRequestException('Não consegui listar os modelos desse criador no Thingiverse.')
+    }
+    const top = summaries
+      .filter(t => t?.id && t.is_published !== 0)
+      .sort((a, b) => Number(b.like_count ?? 0) - Number(a.like_count ?? 0))
+      .slice(0, n)
+    const models = await Promise.all(top.map(t => this.fetchModel(String(t.id)).catch(() => null)))
+    return models.filter((m): m is SourceModel => m != null)
+  }
+
   private normalize(id: string, j: Record<string, any>): SourceModel {
     const license: string | null = j.license || null
     const s = (license ?? '').toLowerCase()

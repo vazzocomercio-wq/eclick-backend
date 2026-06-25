@@ -62,6 +62,16 @@ export interface ModelSourceProvider {
   isConfigured(): boolean
   /** lê um modelo por URL ou ID e normaliza */
   fetchModel(input: string): Promise<SourceModel>
+  /** lista os modelos de um criador, ordenados por popularidade (se suportado) */
+  listByCreator?(handle: string, limit?: number): Promise<SourceModel[]>
+  /** feed de descoberta / "em alta" (se suportado) */
+  discover?(opts?: DiscoverOpts): Promise<SourceModel[]>
+}
+
+export interface DiscoverOpts {
+  commercialOnly?: boolean   // só modelos com licença comercial (vendáveis)
+  limit?:          number
+  offset?:         number
 }
 
 /** Monta o veredito verde/amarelo/vermelho a partir dos flags normalizados.
