@@ -10,6 +10,7 @@ import { FarmService } from './farm.service'
 import { FarmController, FarmIngestController } from './farm.controller'
 import { MakerworldService } from './makerworld.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
+import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { AiModule } from '../ai/ai.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { ProductsModule } from '../products/products.module'
@@ -21,7 +22,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, MakerworldRadarService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, ModelSourceRegistry, MakerworldRadarService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}

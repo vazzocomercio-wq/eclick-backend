@@ -5,7 +5,9 @@ import { ProductsService } from '../products/products.service'
 import { StockService } from '../stock/stock.service'
 import { ProductionService } from './production.service'
 import { ProductOsActiveService } from './product-os-active.service'
-import { MakerworldService, type MakerworldDesign } from './makerworld.service'
+import { MakerworldService } from './makerworld.service'
+import { ModelSourceRegistry } from './model-sources/model-source.registry'
+import { type SourceModel, type LicenseVerdict } from './model-sources/source.types'
 
 /**
  * Product OS — Fase 1.
@@ -66,7 +68,7 @@ export interface LicenseStatus {
   platform:     string | null
   source_url:   string | null
   license:      string | null
-  verdict:      import('./makerworld.service').LicenseVerdict | null
+  verdict:      LicenseVerdict | null
   cleared:      boolean
   cleared_note: string | null
   cleared_at:   string | null
@@ -127,6 +129,7 @@ export class ProductOsService {
     private readonly production: ProductionService,
     private readonly active: ProductOsActiveService,
     private readonly makerworld: MakerworldService,
+    private readonly sources: ModelSourceRegistry,
   ) {}
 
   /** Insere um evento na timeline do produto (best-effort, nunca lança). */
@@ -270,12 +273,12 @@ export class ProductOsService {
   // ══ Importar do MakerWorld (Peça 1) ════════════════════════════════
   /** Lê o design no MakerWorld SEM gravar. Mostra o selo de licença e avisa
    *  se já foi importado nesta org. */
-  async importPreview(orgId: string, url: string): Promise<MakerworldDesign & { already_imported_id: string | null }> {
-    const d = await this.makerworld.fetchDesign(url)
+  async importPreview(orgId: string, url: string): Promise<SourceModel & { already_imported_id: string | null }> {
+    const d = await this.sources.fetchByUrl(url)
     const { data: existing } = await supabaseAdmin
       .from('product_dev').select('id')
       .eq('organization_id', orgId)
-      .eq('source_platform', d.source_platform)
+      .eq('source_platform', d.platform)
       .eq('source_external_id', d.external_id)
       .limit(1).maybeSingle()
     return { ...d, already_imported_id: existing?.id ?? null }
@@ -285,12 +288,13 @@ export class ProductOsService {
    *  peso/tempo/material, guardando proveniência e licença. Não bloqueia por
    *  licença (isso é a Peça 2); só registra o veredito na timeline. */
   async importFromMakerworld(orgId: string, userId: string | null, url: string, opts: { create_version?: boolean } = {}): Promise<{
-    product_dev: ProductDev; version_id: string | null; verdict: MakerworldDesign['verdict']; design: MakerworldDesign
+    product_dev: ProductDev; version_id: string | null; verdict: LicenseVerdict; design: SourceModel
   }> {
-    const d = await this.makerworld.fetchDesign(url)
+    const d = await this.sources.fetchByUrl(url)
+    const platformLabel = this.sources.byPlatform(d.platform).label
 
     const refImg: ReferenceImage[] = d.cover_url
-      ? [{ url: d.cover_url, source_url: d.source_url, notes: `Capa MakerWorld — ${d.creator ?? 'criador desconhecido'}` }]
+      ? [{ url: d.cover_url, source_url: d.source_url, notes: `Capa ${platformLabel} — ${d.creator ?? 'criador desconhecido'}` }]
       : []
     const descParts = [
       d.creator ? `Criador: ${d.creator}` : null,
@@ -304,7 +308,7 @@ export class ProductOsService {
       .from('product_dev')
       .insert({
         organization_id:         orgId,
-        name:                    d.title || `MakerWorld ${d.external_id}`,
+        name:                    d.title || `${platformLabel} ${d.external_id}`,
         category:                d.categories[0] ?? null,
         description:             descParts.join('\n'),
         production_profile:      'impressao_3d',
@@ -312,11 +316,11 @@ export class ProductOsService {
         reference_images:        refImg,
         target_marketplaces:     [],
         status:                  'ideia',
-        source_platform:         d.source_platform,
+        source_platform:         d.platform,
         source_external_id:      d.external_id,
         source_license:          d.license,
         source_allow_recreation: d.allow_recreation,
-        source_metadata:         { ...d.raw, verdict: d.verdict, tags: d.tags, source_url: d.source_url },
+        source_metadata:         { ...d.raw, verdict: d.verdict, tags: d.tags, source_url: d.source_url, price: d.price },
         created_by:              userId,
       })
       .select('*').maybeSingle()
@@ -324,7 +328,7 @@ export class ProductOsService {
     const created = data as ProductDev
 
     await this.emitEvent(orgId, created.id, 'imported', {
-      platform: d.source_platform, external_id: d.external_id, license: d.license,
+      platform: d.platform, external_id: d.external_id, license: d.license,
       allow_recreation: d.allow_recreation, verdict: d.verdict.level, source_url: d.source_url,
     }, userId)
 
@@ -333,7 +337,7 @@ export class ProductOsService {
     if (opts.create_version !== false && (d.weight_g != null || d.print_time_minutes != null)) {
       try {
         const v = await this.addVersion(created.id, orgId, userId, {
-          changelog:          'Importado do MakerWorld (perfil de impressão da origem)',
+          changelog:          `Importado do ${platformLabel} (perfil de impressão da origem)`,
           material:           d.material_count && d.material_count > 1 ? 'multicor' : null,
           weight_g:           d.weight_g ?? undefined,
           print_time_minutes: d.print_time_minutes ?? undefined,
@@ -352,12 +356,15 @@ export class ProductOsService {
   /** Calcula o status do porteiro a partir das colunas de proveniência +
    *  liberação. Produto próprio (sem origem) nunca é bloqueado. */
   licenseStatus(pd: Pick<ProductDev,
-    'source_platform' | 'source_license' | 'source_allow_recreation' | 'inspiration_url' |
+    'source_platform' | 'source_license' | 'source_allow_recreation' | 'inspiration_url' | 'source_metadata' |
     'license_cleared' | 'license_clearance_note' | 'license_cleared_at'>): LicenseStatus {
     if (!pd.source_platform) {
       return { imported: false, platform: null, source_url: null, license: null, verdict: null, cleared: false, cleared_note: null, cleared_at: null, blocked: false, can_publish: true }
     }
-    const verdict = this.makerworld.licenseVerdict(pd.source_license, pd.source_allow_recreation === true)
+    // confia no veredito gravado no import (platform-agnostic). Fallback p/ linhas
+    // legadas sem veredito = recomputa pela regra do MakerWorld (origem histórica).
+    const stored = (pd.source_metadata as { verdict?: LicenseVerdict } | null)?.verdict
+    const verdict: LicenseVerdict = stored ?? this.makerworld.licenseVerdict(pd.source_license, pd.source_allow_recreation === true)
     const cleared = pd.license_cleared === true
     // pra vender uma peça remodelada preciso de direito comercial E de derivados = verde
     const blocked = verdict.level !== 'green' && !cleared

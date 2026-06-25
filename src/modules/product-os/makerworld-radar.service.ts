@@ -1,10 +1,11 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
-import { MakerworldService, type LicenseVerdict } from './makerworld.service'
+import { ModelSourceRegistry } from './model-sources/model-source.registry'
+import { type LicenseVerdict } from './model-sources/source.types'
 
 /**
- * Radar de campeões do MakerWorld (Peça 3).
+ * Radar de campeões (Peça 3) — multi-fonte via ModelSourceRegistry.
  *
  * O feed "em alta" oficial é travado por login → v1 = WATCHLIST: o lojista
  * semeia modelos, o sistema fotografa as métricas ao longo do tempo (via API
@@ -21,6 +22,7 @@ interface Snapshot { download_count: number; print_count: number; like_count: nu
 
 export interface RadarItemView {
   id:                   string
+  platform:             string
   external_id:          string
   title:                string | null
   cover_url:            string | null
@@ -46,8 +48,9 @@ export interface RadarItemView {
 }
 
 interface WatchItemRow {
-  id: string; organization_id: string; external_id: string; title: string | null; cover_url: string | null
+  id: string; organization_id: string; platform: string; external_id: string; title: string | null; cover_url: string | null
   creator: string | null; license: string | null; allow_recreation: boolean | null; source_url: string | null
+  verdict: LicenseVerdict | null
   last_download_count: number; last_print_count: number; last_like_count: number; last_collection_count: number
   decision: RadarDecision; ai_suggestion: Record<string, unknown> | null; notes: string | null
   is_active: boolean; first_seen_at: string; last_checked_at: string | null
@@ -58,7 +61,7 @@ export class MakerworldRadarService {
   private readonly logger = new Logger(MakerworldRadarService.name)
 
   constructor(
-    private readonly makerworld: MakerworldService,
+    private readonly sources: ModelSourceRegistry,
     private readonly llm: LlmService,
   ) {}
 
@@ -74,15 +77,15 @@ export class MakerworldRadarService {
 
   /** Adiciona um modelo ao radar (ou reativa se já existia) + 1º snapshot. */
   async addToWatch(orgId: string, userId: string | null, url: string): Promise<RadarItemView> {
-    const d = await this.makerworld.fetchDesign(url)
+    const d = await this.sources.fetchByUrl(url)
     const { data, error } = await supabaseAdmin.from('mw_watch_item').upsert({
-      organization_id: orgId, kind: 'design', external_id: d.external_id,
+      organization_id: orgId, kind: 'design', platform: d.platform, external_id: d.external_id,
       title: d.title, cover_url: d.cover_url, creator: d.creator, license: d.license,
-      allow_recreation: d.allow_recreation, source_url: d.source_url,
+      allow_recreation: d.allow_recreation, source_url: d.source_url, verdict: d.verdict,
       last_download_count: d.download_count, last_print_count: d.print_count,
       last_like_count: d.like_count, last_collection_count: d.collection_count,
       is_active: true, last_checked_at: this.nowIso(), created_by: userId, updated_at: this.nowIso(),
-    }, { onConflict: 'organization_id,kind,external_id' }).select('*').maybeSingle()
+    }, { onConflict: 'organization_id,platform,kind,external_id' }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao adicionar ao radar: ${error?.message ?? 'sem dados'}`)
     const item = data as WatchItemRow
     await this.snapshot(orgId, item.id, d)
@@ -125,12 +128,13 @@ export class MakerworldRadarService {
   }
 
   private viewOf(item: WatchItemRow, snaps: Snapshot[]): RadarItemView {
-    const verdict = this.makerworld.licenseVerdict(item.license, item.allow_recreation === true)
+    // veredito gravado no add/refresh (platform-agnostic); fallback p/ linhas legadas
+    const verdict: LicenseVerdict = item.verdict ?? { level: 'red', can_remodel: false, can_commercial: false, label: 'Licença não avaliada', reason: 'Atualize o item para reavaliar a licença.' }
     const v = this.velocity(snaps)
     // Champion Score: prints (uso real) pesam 2×; downloads 1×. null enquanto coleta.
     const champion = v.status === 'ok' && v.dpw != null && v.ppw != null ? v.dpw + v.ppw * 2 : null
     return {
-      id: item.id, external_id: item.external_id, title: item.title, cover_url: item.cover_url,
+      id: item.id, platform: item.platform ?? 'makerworld', external_id: item.external_id, title: item.title, cover_url: item.cover_url,
       creator: item.creator, source_url: item.source_url, license: item.license, verdict,
       last_download_count: item.last_download_count, last_print_count: item.last_print_count,
       last_like_count: item.last_like_count, last_collection_count: item.last_collection_count,
@@ -154,20 +158,20 @@ export class MakerworldRadarService {
 
   /** Re-fotografa 1 item (ou todos os ativos da org) lendo a API by-id. */
   async refresh(orgId: string, itemId?: string): Promise<{ refreshed: number; failed: number }> {
-    let q = supabaseAdmin.from('mw_watch_item').select('id, external_id, source_url').eq('organization_id', orgId).eq('is_active', true)
+    let q = supabaseAdmin.from('mw_watch_item').select('id, platform, external_id, source_url').eq('organization_id', orgId).eq('is_active', true)
     if (itemId) q = q.eq('id', itemId)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
-    const items = (data ?? []) as Array<{ id: string; external_id: string; source_url: string | null }>
+    const items = (data ?? []) as Array<{ id: string; platform: string; external_id: string; source_url: string | null }>
     if (itemId && !items.length) throw new NotFoundException('Item do radar não encontrado')
 
     let refreshed = 0, failed = 0
     for (const it of items) {
       try {
-        const d = await this.makerworld.fetchDesign(it.source_url || it.external_id)
+        const d = await this.sources.fetchByPlatform(it.platform ?? 'makerworld', it.source_url || it.external_id)
         await this.snapshot(orgId, it.id, d)
         await supabaseAdmin.from('mw_watch_item').update({
-          title: d.title, cover_url: d.cover_url, creator: d.creator, license: d.license, allow_recreation: d.allow_recreation,
+          title: d.title, cover_url: d.cover_url, creator: d.creator, license: d.license, allow_recreation: d.allow_recreation, verdict: d.verdict,
           last_download_count: d.download_count, last_print_count: d.print_count,
           last_like_count: d.like_count, last_collection_count: d.collection_count,
           last_checked_at: this.nowIso(), updated_at: this.nowIso(),
@@ -175,7 +179,7 @@ export class MakerworldRadarService {
         refreshed++
       } catch (e) {
         failed++
-        this.logger.warn(`[mw-radar] refresh ${it.external_id} falhou: ${(e as Error).message}`)
+        this.logger.warn(`[radar] refresh ${it.platform}/${it.external_id} falhou: ${(e as Error).message}`)
       }
     }
     return { refreshed, failed }
