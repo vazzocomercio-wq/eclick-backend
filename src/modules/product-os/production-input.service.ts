@@ -90,6 +90,22 @@ export class ProductionInputService {
     return data as ProductionInput
   }
 
+  /** Exclui o insumo de vez (+ histórico de movimentações). Bloqueia se estiver
+   *  reservado por uma ordem ou em uso numa composição (BOM) — nesses casos o
+   *  certo é desativar, não apagar. */
+  async deleteInput(orgId: string, id: string): Promise<{ deleted: boolean }> {
+    const input = await this.getOne(orgId, id)
+    if (Number(input.reserved_quantity) > 0) {
+      throw new BadRequestException('Insumo reservado por uma ordem de produção — conclua/cancele a ordem antes de excluir (ou desative).')
+    }
+    const { data: bom } = await supabaseAdmin.from('product_dev_bom').select('id').eq('input_id', id).limit(1).maybeSingle()
+    if (bom) throw new BadRequestException('Insumo em uso numa composição (BOM) de produto — remova de lá ou desative em vez de excluir.')
+    await supabaseAdmin.from('production_input_movement').delete().eq('organization_id', orgId).eq('input_id', id)
+    const { error } = await supabaseAdmin.from('production_input').delete().eq('id', id).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro ao excluir: ${error.message}`)
+    return { deleted: true }
+  }
+
   /** Reposição/ajuste do estoque. Entrada com preço recalcula o CUSTO MÉDIO
    *  PONDERADO: (qtd_atual×custo_atual + qtd_entrada×custo_entrada) / total. */
   async movement(orgId: string, id: string, body: { type: 'in' | 'adjust'; quantity: number; unit_cost?: number; notes?: string }, userId: string | null): Promise<ProductionInput> {

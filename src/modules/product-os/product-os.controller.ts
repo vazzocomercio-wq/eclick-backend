@@ -162,6 +162,13 @@ export class ProductOsController {
     return this.inputs.update(this.org(u), iid, body)
   }
 
+  @Post('production-inputs/:iid/delete')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  deleteInput(@ReqUser() u: ReqUserPayload, @Param('iid') iid: string) {
+    return this.inputs.deleteInput(this.org(u), iid)
+  }
+
   @Post('production-inputs/:iid/movement')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
