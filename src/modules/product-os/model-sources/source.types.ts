@@ -68,6 +68,8 @@ export interface ModelSourceProvider {
   discover?(opts?: DiscoverOpts): Promise<SourceModel[]>
   /** árvore de categorias da plataforma (se suportado) */
   listCategories?(): Promise<SourceCategory[]>
+  /** busca por palavra-chave, ordenada por popularidade (se suportado) */
+  search?(query: string, opts?: { commercialOnly?: boolean; limit?: number }): Promise<SourceModel[]>
 }
 
 export interface DiscoverOpts {

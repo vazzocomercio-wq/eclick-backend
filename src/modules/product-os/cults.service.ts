@@ -103,6 +103,21 @@ export class CultsService implements ModelSourceProvider {
     return (out?.creationsBatch?.results ?? []).map(c => this.normalize(c.slug, c))
   }
 
+  /** Busca por palavra-chave nos 3,4M modelos, mais baixados primeiro. */
+  async search(query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<SourceModel[]> {
+    if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
+    const q = (query ?? '').trim()
+    if (!q) throw new BadRequestException('Informe o termo de busca.')
+    const limit = Math.min(50, Math.max(1, opts.limit ?? 24))
+    const gqlQuery = `query($q: String!, $limit: Int!, $onlyCommercial: Boolean) {
+      creationsSearchBatch(query: $q, onlyCommercial: $onlyCommercial, sort: BY_DOWNLOADS, limit: $limit) {
+        results { ${CREATION_FIELDS} }
+      }
+    }`
+    const out = await this.gql<{ creationsSearchBatch: { results: Record<string, any>[] } }>(gqlQuery, { q, limit, onlyCommercial: opts.commercialOnly ?? false })
+    return (out?.creationsSearchBatch?.results ?? []).map(c => this.normalize(c.slug, c))
+  }
+
   /** Árvore de categorias do Cults (9 raízes + subcategorias). */
   async listCategories(): Promise<{ slug: string; name: string }[]> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')

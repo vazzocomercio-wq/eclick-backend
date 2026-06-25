@@ -78,6 +78,14 @@ export class ModelSourceRegistry {
     return provider.listCategories()
   }
 
+  /** Busca por palavra-chave numa plataforma (se suportar). */
+  search(platform: string, query: string, opts?: { commercialOnly?: boolean; limit?: number }): Promise<SourceModel[]> {
+    const provider = this.byPlatform(platform)
+    if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
+    if (!provider.search) throw new BadRequestException(`${provider.label} não suporta busca por palavra.`)
+    return provider.search(query, opts)
+  }
+
   /** Plataformas configuradas que suportam cada capacidade (pra UI). */
   creatorPlatforms() { return this.configured().filter(p => !!p.listByCreator).map(p => ({ platform: p.platform, label: p.label })) }
   discoverPlatforms() { return this.configured().filter(p => !!p.discover).map(p => ({ platform: p.platform, label: p.label })) }

@@ -289,6 +289,10 @@ export class MakerworldRadarService {
   listCategories(platform: string): Promise<{ slug: string; name: string }[]> {
     return this.sources.listCategories(platform)
   }
+
+  search(platform: string, query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<import('./model-sources/source.types').SourceModel[]> {
+    return this.sources.search(platform, query, { commercialOnly: opts.commercialOnly, limit: opts.limit ?? 24 })
+  }
 }
 
 export interface TrackedCreator {

@@ -87,6 +87,23 @@ export class ThingiverseService implements ModelSourceProvider {
     return models.filter((m): m is SourceModel => m != null)
   }
 
+  /** Busca por palavra-chave. Resumo sem licença → busca detalhe dos top-N. */
+  async search(query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<SourceModel[]> {
+    const token = this.token()
+    if (!token) throw new BadRequestException('Integração Thingiverse não configurada.')
+    const q = (query ?? '').trim()
+    if (!q) throw new BadRequestException('Informe o termo de busca.')
+    const n = Math.min(20, Math.max(1, opts.limit ?? 12))
+    let hits: Array<Record<string, any>> = []
+    try {
+      const { data } = await axios.get(`${BASE}/search/${encodeURIComponent(q)}?per_page=30`, { headers: { Authorization: `Bearer ${token}` }, timeout: 12000, validateStatus: s => s === 200 })
+      hits = Array.isArray(data) ? data : (data?.hits ?? [])
+    } catch { throw new BadRequestException('Não consegui buscar no Thingiverse.') }
+    const top = hits.filter(t => t?.id && t.is_published !== 0).slice(0, n)
+    const models = (await Promise.all(top.map(t => this.fetchModel(String(t.id)).catch(() => null)))).filter((m): m is SourceModel => m != null)
+    return opts.commercialOnly ? models.filter(m => m.verdict.can_commercial) : models
+  }
+
   /** Categorias do Thingiverse (amplas: Household, Art, Gadgets…). */
   async listCategories(): Promise<{ slug: string; name: string }[]> {
     const token = this.token()
