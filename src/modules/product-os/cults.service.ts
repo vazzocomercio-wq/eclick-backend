@@ -89,13 +89,14 @@ export class CultsService implements ModelSourceProvider {
     return (out?.creationsSearchBatch?.results ?? []).map(c => this.normalize(c.slug, c))
   }
 
-  /** Feed "em alta" — mais baixados; filtros opcionais por comercial e categoria. */
-  async discover(opts: { commercialOnly?: boolean; categorySlug?: string; limit?: number; offset?: number } = {}): Promise<SourceModel[]> {
+  /** Feed "em alta" — mais baixados (ou recentes); filtros por comercial e categoria. */
+  async discover(opts: { commercialOnly?: boolean; categorySlug?: string; sort?: 'downloads' | 'recent'; limit?: number; offset?: number } = {}): Promise<SourceModel[]> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
     const limit = Math.min(50, Math.max(1, opts.limit ?? 24))
     const offset = Math.max(0, opts.offset ?? 0)
+    const sortEnum = opts.sort === 'recent' ? 'BY_PUBLICATION' : 'BY_DOWNLOADS'
     const query = `query($limit: Int!, $offset: Int!, $onlyCommercial: Boolean, $cat: String) {
-      creationsBatch(sort: BY_DOWNLOADS, direction: DESC, limit: $limit, offset: $offset, onlyCommercial: $onlyCommercial, categorySlugEn: $cat) {
+      creationsBatch(sort: ${sortEnum}, direction: DESC, limit: $limit, offset: $offset, onlyCommercial: $onlyCommercial, categorySlugEn: $cat) {
         results { ${CREATION_FIELDS} }
       }
     }`

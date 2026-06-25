@@ -63,7 +63,7 @@ export class ModelSourceRegistry {
   }
 
   /** Feed de descoberta / "em alta" de uma plataforma (se suportar). */
-  discover(platform: string, opts?: { commercialOnly?: boolean; categorySlug?: string; limit?: number; offset?: number }): Promise<SourceModel[]> {
+  discover(platform: string, opts?: { commercialOnly?: boolean; categorySlug?: string; sort?: 'downloads' | 'recent'; limit?: number; offset?: number }): Promise<SourceModel[]> {
     const provider = this.byPlatform(platform)
     if (!provider.isConfigured()) throw new BadRequestException(`A integração com ${provider.label} ainda não está configurada.`)
     if (!provider.discover) throw new BadRequestException(`${provider.label} não tem feed de descoberta.`)

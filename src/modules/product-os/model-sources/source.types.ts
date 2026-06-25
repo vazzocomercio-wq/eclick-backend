@@ -78,8 +78,9 @@ export interface ModelSourceProvider {
 export interface CreatorRef { external_id: string; title: string; source_url: string }
 
 export interface DiscoverOpts {
-  commercialOnly?: boolean   // só modelos com licença comercial (vendáveis)
-  categorySlug?:   string    // filtra por categoria (ex 'home-decor', 'vases')
+  commercialOnly?: boolean              // só modelos com licença comercial (vendáveis)
+  categorySlug?:   string               // filtra por categoria (ex 'home-decor', 'vases')
+  sort?:           'downloads' | 'recent' // mais baixados (default) vs recém-lançados
   limit?:          number
   offset?:         number
 }
