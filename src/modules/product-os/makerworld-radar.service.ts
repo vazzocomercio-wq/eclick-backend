@@ -293,6 +293,33 @@ export class MakerworldRadarService {
   search(platform: string, query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<import('./model-sources/source.types').SourceModel[]> {
     return this.sources.search(platform, query, { commercialOnly: opts.commercialOnly, limit: opts.limit ?? 24 })
   }
+
+  /** Detecta lançamentos novos dos criadores seguidos pela org. 1ª passada só
+   *  semeia (sem avisar). Atualiza o conjunto visto. Devolve as novidades. */
+  async scanCreatorNovelties(orgId: string): Promise<Array<{ creator: string; platform: string; items: { title: string; url: string }[] }>> {
+    const { data } = await supabaseAdmin.from('mw_tracked_creator')
+      .select('id, platform, handle, display_name, seen_external_ids')
+      .eq('organization_id', orgId).eq('is_active', true)
+    const out: Array<{ creator: string; platform: string; items: { title: string; url: string }[] }> = []
+    for (const row of (data ?? []) as Array<{ id: string; platform: string; handle: string; display_name: string | null; seen_external_ids: string[] | null }>) {
+      let refs: { external_id: string; title: string; source_url: string }[]
+      try { refs = await this.sources.listCreatorRefs(row.platform, row.handle, 50) } catch { continue }
+      if (!refs.length) continue
+      const ids = refs.map(r => r.external_id)
+      const seen = new Set(row.seen_external_ids ?? [])
+      if (!seen.size) {
+        // 1ª passada — semeia o baseline, não avisa nada
+        await supabaseAdmin.from('mw_tracked_creator').update({ seen_external_ids: ids, updated_at: this.nowIso() }).eq('id', row.id).eq('organization_id', orgId)
+        continue
+      }
+      const fresh = refs.filter(r => !seen.has(r.external_id))
+      if (!fresh.length) continue
+      out.push({ creator: row.display_name || row.handle, platform: row.platform, items: fresh.slice(0, 8).map(r => ({ title: r.title, url: r.source_url })) })
+      const merged = [...ids, ...(row.seen_external_ids ?? [])].slice(0, 150) // recentes + antigos, capado
+      await supabaseAdmin.from('mw_tracked_creator').update({ seen_external_ids: merged, last_notified_at: this.nowIso(), updated_at: this.nowIso() }).eq('id', row.id).eq('organization_id', orgId)
+    }
+    return out
+  }
 }
 
 export interface TrackedCreator {

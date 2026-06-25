@@ -103,6 +103,20 @@ export class CultsService implements ModelSourceProvider {
     return (out?.creationsBatch?.results ?? []).map(c => this.normalize(c.slug, c))
   }
 
+  /** Lista LEVE dos modelos mais RECENTES do criador (p/ detectar novidades). */
+  async listCreatorRefs(handle: string, limit = 50): Promise<{ external_id: string; title: string; source_url: string }[]> {
+    if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')
+    const nick = (handle ?? '').replace(/^@/, '').trim()
+    if (!nick) throw new BadRequestException('Informe o nick do criador.')
+    const query = `query($nick: String!, $limit: Int!) {
+      creationsSearchBatch(query: "", creatorNick: $nick, sort: BY_PUBLICATION, limit: $limit) {
+        results { slug name url }
+      }
+    }`
+    const out = await this.gql<{ creationsSearchBatch: { results: Array<{ slug: string; name: string; url: string }> } }>(query, { nick, limit: Math.min(50, Math.max(1, limit)) })
+    return (out?.creationsSearchBatch?.results ?? []).map(c => ({ external_id: c.slug, title: c.name, source_url: c.url || `https://cults3d.com/en/3d-model/${c.slug}` }))
+  }
+
   /** Busca por palavra-chave nos 3,4M modelos, mais baixados primeiro. */
   async search(query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<SourceModel[]> {
     if (!this.isConfigured()) throw new BadRequestException('Integração Cults3D não configurada.')

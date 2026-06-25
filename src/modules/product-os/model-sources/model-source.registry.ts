@@ -86,6 +86,13 @@ export class ModelSourceRegistry {
     return provider.search(query, opts)
   }
 
+  /** Refs leves dos modelos recentes de um criador (p/ cron de novidades). */
+  listCreatorRefs(platform: string, handle: string, limit?: number): Promise<{ external_id: string; title: string; source_url: string }[]> {
+    const provider = this.byPlatform(platform)
+    if (!provider.isConfigured() || !provider.listCreatorRefs) return Promise.resolve([])
+    return provider.listCreatorRefs(handle, limit)
+  }
+
   /** Plataformas configuradas que suportam cada capacidade (pra UI). */
   creatorPlatforms() { return this.configured().filter(p => !!p.listByCreator).map(p => ({ platform: p.platform, label: p.label })) }
   discoverPlatforms() { return this.configured().filter(p => !!p.discover).map(p => ({ platform: p.platform, label: p.label })) }

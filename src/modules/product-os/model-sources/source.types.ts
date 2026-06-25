@@ -70,7 +70,12 @@ export interface ModelSourceProvider {
   listCategories?(): Promise<SourceCategory[]>
   /** busca por palavra-chave, ordenada por popularidade (se suportado) */
   search?(query: string, opts?: { commercialOnly?: boolean; limit?: number }): Promise<SourceModel[]>
+  /** lista LEVE (id+título+url) dos modelos recentes de um criador — sem buscar
+   *  detalhe, p/ o cron de novidades ser barato (se suportado) */
+  listCreatorRefs?(handle: string, limit?: number): Promise<CreatorRef[]>
 }
+
+export interface CreatorRef { external_id: string; title: string; source_url: string }
 
 export interface DiscoverOpts {
   commercialOnly?: boolean   // só modelos com licença comercial (vendáveis)

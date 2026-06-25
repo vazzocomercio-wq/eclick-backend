@@ -87,6 +87,23 @@ export class ThingiverseService implements ModelSourceProvider {
     return models.filter((m): m is SourceModel => m != null)
   }
 
+  /** Lista LEVE dos modelos mais RECENTES do criador (p/ detectar novidades). */
+  async listCreatorRefs(handle: string, limit = 50): Promise<{ external_id: string; title: string; source_url: string }[]> {
+    const token = this.token()
+    if (!token) throw new BadRequestException('Integração Thingiverse não configurada.')
+    const nick = (handle ?? '').replace(/^@/, '').trim()
+    if (!nick) throw new BadRequestException('Informe o nick do criador.')
+    const { data } = await axios.get(`${BASE}/users/${encodeURIComponent(nick)}/things?per_page=${Math.min(50, Math.max(1, limit))}`, {
+      headers: { Authorization: `Bearer ${token}` }, timeout: 12000, validateStatus: s => s === 200,
+    })
+    const list: Array<Record<string, any>> = Array.isArray(data) ? data : (data?.hits ?? [])
+    return list
+      .filter(t => t?.id && t.is_published !== 0)
+      .sort((a, b) => new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime())
+      .slice(0, limit)
+      .map(t => ({ external_id: String(t.id), title: t.name, source_url: t.public_url || `https://www.thingiverse.com/thing:${t.id}` }))
+  }
+
   /** Busca por palavra-chave. Resumo sem licença → busca detalhe dos top-N. */
   async search(query: string, opts: { commercialOnly?: boolean; limit?: number } = {}): Promise<SourceModel[]> {
     const token = this.token()

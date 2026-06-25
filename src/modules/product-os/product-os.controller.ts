@@ -233,6 +233,11 @@ export class ProductOsController {
   @RequirePermission('products.update')
   removeCreator(@ReqUser() u: ReqUserPayload, @Param('cid') cid: string) { return this.radar.removeCreator(this.org(u), cid) }
 
+  @Post('creators/scan-novelties')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  scanNovelties(@ReqUser() u: ReqUserPayload) { return this.radar.scanCreatorNovelties(this.org(u)) }
+
   // ── Feed "em alta" / descoberta (Fase D) ──────────────────────────
   @Get('discover')
   @RequirePermission('products.view')

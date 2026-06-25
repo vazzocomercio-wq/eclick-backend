@@ -39,6 +39,32 @@ export class ProductOsCronService {
     return { orgs: orgs.length, refreshed, failed }
   }
 
+  /**
+   * Alerta de novidades de criador: cron diário (09:00) varre os criadores
+   * seguidos de cada org, detecta lançamentos novos e manda um digest por
+   * WhatsApp. Best-effort, 1ª passada de cada criador só semeia (não avisa).
+   */
+  @Cron('0 9 * * *', { name: 'product-os-creator-novelties' })
+  async checkCreatorNovelties(): Promise<{ orgs_alerted: number }> {
+    if (!this.bridge.isConfigured()) { this.logger.log('[product-os.cron] bridge off — sem alerta de criador'); return { orgs_alerted: 0 } }
+    const { data, error } = await supabaseAdmin.from('mw_tracked_creator').select('organization_id').eq('is_active', true)
+    if (error) { this.logger.warn(`[product-os.cron] criadores: ${error.message}`); return { orgs_alerted: 0 } }
+    const orgs = [...new Set((data ?? []).map(r => (r as { organization_id: string }).organization_id))]
+    let alerted = 0
+    for (const orgId of orgs) {
+      try {
+        const news = await this.radar.scanCreatorNovelties(orgId)
+        if (!news.length) continue
+        const blocks = news.map(n => `*${n.creator}* (${n.platform}) lançou ${n.items.length}:\n${n.items.map(i => `• ${i.title}`).join('\n')}`)
+        const msg = `🔔 *Novidades de criadores que você segue* (Product OS)\n\n${blocks.join('\n\n')}\n\nVeja no Radar › Criadores.`
+        const r = await this.bridge.notifyLojista({ organization_id: orgId, message: msg, severity: 'low', deeplink: 'producao/product-os' })
+        if (!r.skipped) alerted++
+      } catch (e) { this.logger.warn(`[product-os.cron] criadores ${orgId.slice(0, 8)}: ${(e as Error).message}`) }
+    }
+    if (alerted) this.logger.log(`[product-os.cron] novidades de criador → ${alerted} org(s)`)
+    return { orgs_alerted: alerted }
+  }
+
   @Cron('0 12 * * *', { name: 'product-os-input-alerts' })
   async checkInputAlerts(): Promise<{ orgs_alerted: number }> {
     if (!this.bridge.isConfigured()) { this.logger.log('[product-os.cron] bridge off — sem alerta de insumo'); return { orgs_alerted: 0 } }
