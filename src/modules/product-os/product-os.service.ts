@@ -209,6 +209,29 @@ export class ProductOsService {
     return { path: data.path, token: data.token, public_url: pub.data.publicUrl }
   }
 
+  /** Exclui um arquivo do storage (libera espaço). Só apaga arquivo desta org
+   *  (o path começa com `${orgId}/`) — trava de segurança multi-tenant. */
+  async deleteFile(orgId: string, url: string): Promise<{ removed: boolean; path: string }> {
+    if (!url?.trim()) throw new BadRequestException('Informe o arquivo a excluir.')
+    const m = url.match(/\/product-os\/(.+)$/)
+    const path = m ? decodeURIComponent(m[1].split('?')[0]) : null
+    if (!path) throw new BadRequestException('URL de arquivo inválida.')
+    if (!path.startsWith(`${orgId}/`)) throw new BadRequestException('Este arquivo não pertence à sua organização.')
+    const { error } = await supabaseAdmin.storage.from('product-os').remove([path])
+    if (error) throw new BadRequestException(`Erro ao excluir o arquivo: ${error.message}`)
+    return { removed: true, path }
+  }
+
+  /** Remove o arquivo CAD de uma versão: apaga do storage + limpa file_url. */
+  async removeVersionFile(versionId: string, orgId: string): Promise<ProductDevVersion> {
+    const { data, error } = await supabaseAdmin.from('product_dev_version')
+      .select('id, file_url').eq('id', versionId).eq('organization_id', orgId).maybeSingle()
+    if (error || !data) throw new NotFoundException('Versão não encontrada')
+    const v = data as { id: string; file_url: string | null }
+    if (v.file_url) await this.deleteFile(orgId, v.file_url).catch(() => { /* arquivo já sumiu — segue limpando o vínculo */ })
+    return this.updateVersion(versionId, orgId, { file_url: null, file_type: null })
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // product_dev — CRUD + kanban
   // ─────────────────────────────────────────────────────────────────

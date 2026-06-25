@@ -62,6 +62,13 @@ export class ProductOsController {
     return this.svc.updateVersion(vid, this.org(u), body)
   }
 
+  @Post('versions/:vid/remove-file')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  removeVersionFile(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string) {
+    return this.svc.removeVersionFile(vid, this.org(u))
+  }
+
   // ── ordens de produção ────────────────────────────────────────────
   @Get('production-orders')
   @RequirePermission('products.view')
@@ -183,6 +190,13 @@ export class ProductOsController {
   uploadUrl(@ReqUser() u: ReqUserPayload, @Body() body: { filename: string }) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.createUploadUrl(u.orgId, body?.filename ?? 'arquivo')
+  }
+
+  @Post('delete-file')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  deleteFile(@ReqUser() u: ReqUserPayload, @Body() body: { url: string }) {
+    return this.svc.deleteFile(this.org(u), body?.url ?? '')
   }
 
   @Get('production-plan')
