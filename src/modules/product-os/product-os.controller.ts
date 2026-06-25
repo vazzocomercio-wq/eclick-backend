@@ -12,6 +12,7 @@ import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
+import { NfeImportService } from './nfe-import.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -29,6 +30,7 @@ export class ProductOsController {
     private readonly active: ProductOsActiveService,
     private readonly radar: MakerworldRadarService,
     private readonly sources: ModelSourceRegistry,
+    private readonly nfe: NfeImportService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -128,6 +130,22 @@ export class ProductOsController {
   @RequirePermission('products.update')
   createInput(@ReqUser() u: ReqUserPayload, @Body() body: Partial<ProductionInput> & { name: string }) {
     return this.inputs.create(this.org(u), body)
+  }
+
+  // ── Importar NF de insumo (XML → fornecedor + insumos) ────────────
+  @Post('production-inputs/import-nfe/preview')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  importNfePreview(@ReqUser() u: ReqUserPayload, @Body() body: { xml: string }) {
+    if (!body?.xml?.trim()) throw new BadRequestException('Envie o XML da NF.')
+    return this.nfe.importPreview(this.org(u), body.xml)
+  }
+
+  @Post('production-inputs/import-nfe')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  importNfe(@ReqUser() u: ReqUserPayload, @Body() body: Parameters<NfeImportService['importCommit']>[2]) {
+    return this.nfe.importCommit(this.org(u), u.id, body)
   }
 
   @Patch('production-inputs/:iid')

@@ -13,6 +13,7 @@ import { ThingiverseService } from './thingiverse.service'
 import { CultsService } from './cults.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
+import { NfeImportService } from './nfe-import.service'
 import { AiModule } from '../ai/ai.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { ProductsModule } from '../products/products.module'
@@ -24,7 +25,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, ThingiverseService, CultsService, ModelSourceRegistry, MakerworldRadarService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService, ThingiverseService, CultsService, ModelSourceRegistry, MakerworldRadarService, NfeImportService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}
