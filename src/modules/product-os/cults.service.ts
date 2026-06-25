@@ -98,10 +98,13 @@ export class CultsService implements ModelSourceProvider {
     const lic = j.license ?? {}
     const licenseName: string | null = lic.name || lic.code || (isPaid ? 'Cults3D — pago' : 'Cults3D — grátis')
 
-    // sinal comercial REAL do Cults (license.allowsCommercialUse). Derivado não
-    // tem flag de proibição → assume permitido (o comprador imprime/modifica).
+    // sinal comercial REAL do Cults (license.allowsCommercialUse). Derivado: não
+    // há flag booleana, mas as licenças CC trazem "No derivatives" no nome/código
+    // (ex BY-ND) → detecta pra não liberar remodelar o que é sem-derivados.
+    const licText = `${lic.name ?? ''} ${lic.code ?? ''}`.toLowerCase()
+    const noDeriv = /no[\s-]*derivativ|\bnd\b/.test(licText)
     const allowsCommercial = lic.allowsCommercialUse === true
-    const allowsDerivative = true
+    const allowsDerivative = !noDeriv
 
     return {
       platform:           'cults3d',
