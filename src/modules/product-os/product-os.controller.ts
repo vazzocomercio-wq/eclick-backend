@@ -187,6 +187,22 @@ export class ProductOsController {
     return this.production.productionPlan(this.org(u), hours ? Number(hours) : undefined)
   }
 
+  // ── Importar do MakerWorld (Peça 1) ───────────────────────────────
+  @Post('import/makerworld/preview')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  importMakerworldPreview(@ReqUser() u: ReqUserPayload, @Body() body: { url: string }) {
+    if (!body?.url?.trim()) throw new BadRequestException('Informe o link ou o ID do modelo MakerWorld.')
+    return this.svc.importPreview(this.org(u), body.url)
+  }
+
+  @Post('import/makerworld')
+  @RequirePermission('products.update')
+  importMakerworld(@ReqUser() u: ReqUserPayload, @Body() body: { url: string; create_version?: boolean }) {
+    if (!body?.url?.trim()) throw new BadRequestException('Informe o link ou o ID do modelo MakerWorld.')
+    return this.svc.importFromMakerworld(this.org(u), u.id, body.url, { create_version: body.create_version })
+  }
+
   // ══ coleção ═══════════════════════════════════════════════════════
   @Get()
   @RequirePermission('products.view')

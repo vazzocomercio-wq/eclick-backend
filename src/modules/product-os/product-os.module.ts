@@ -8,6 +8,7 @@ import { PrinterService } from './printer.service'
 import { ProductOsCronService } from './product-os-cron.service'
 import { FarmService } from './farm.service'
 import { FarmController, FarmIngestController } from './farm.controller'
+import { MakerworldService } from './makerworld.service'
 import { AiModule } from '../ai/ai.module'
 import { ActiveBridgeModule } from '../active-bridge/active-bridge.module'
 import { ProductsModule } from '../products/products.module'
@@ -19,7 +20,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, PrinterService, ProductOsCronService, FarmService, MakerworldService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}

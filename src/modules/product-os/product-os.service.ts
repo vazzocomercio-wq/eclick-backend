@@ -5,6 +5,7 @@ import { ProductsService } from '../products/products.service'
 import { StockService } from '../stock/stock.service'
 import { ProductionService } from './production.service'
 import { ProductOsActiveService } from './product-os-active.service'
+import { MakerworldService, type MakerworldDesign } from './makerworld.service'
 
 /**
  * Product OS — Fase 1.
@@ -101,6 +102,7 @@ export class ProductOsService {
     private readonly stock: StockService,
     private readonly production: ProductionService,
     private readonly active: ProductOsActiveService,
+    private readonly makerworld: MakerworldService,
   ) {}
 
   /** Insere um evento na timeline do produto (best-effort, nunca lança). */
@@ -238,6 +240,87 @@ export class ProductOsService {
     const created = data as ProductDev
     await this.emitEvent(orgId, created.id, 'created', { name: created.name, production_profile: created.production_profile }, userId)
     return created
+  }
+
+  // ══ Importar do MakerWorld (Peça 1) ════════════════════════════════
+  /** Lê o design no MakerWorld SEM gravar. Mostra o selo de licença e avisa
+   *  se já foi importado nesta org. */
+  async importPreview(orgId: string, url: string): Promise<MakerworldDesign & { already_imported_id: string | null }> {
+    const d = await this.makerworld.fetchDesign(url)
+    const { data: existing } = await supabaseAdmin
+      .from('product_dev').select('id')
+      .eq('organization_id', orgId)
+      .eq('source_platform', d.source_platform)
+      .eq('source_external_id', d.external_id)
+      .limit(1).maybeSingle()
+    return { ...d, already_imported_id: existing?.id ?? null }
+  }
+
+  /** Importa o design → cria product_dev (status 'ideia') + 1ª versão com
+   *  peso/tempo/material, guardando proveniência e licença. Não bloqueia por
+   *  licença (isso é a Peça 2); só registra o veredito na timeline. */
+  async importFromMakerworld(orgId: string, userId: string | null, url: string, opts: { create_version?: boolean } = {}): Promise<{
+    product_dev: ProductDev; version_id: string | null; verdict: MakerworldDesign['verdict']; design: MakerworldDesign
+  }> {
+    const d = await this.makerworld.fetchDesign(url)
+
+    const refImg: ReferenceImage[] = d.cover_url
+      ? [{ url: d.cover_url, source_url: d.source_url, notes: `Capa MakerWorld — ${d.creator ?? 'criador desconhecido'}` }]
+      : []
+    const descParts = [
+      d.creator ? `Criador: ${d.creator}` : null,
+      d.license ? `Licença: ${d.license}${d.license_title ? ` (${d.license_title})` : ''}` : null,
+      d.is_remix ? 'Remix (tem linhagem de origem).' : null,
+      `Origem: ${d.source_url}`,
+      `Veredito: ${d.verdict.label} — ${d.verdict.reason}`,
+    ].filter(Boolean)
+
+    const { data, error } = await supabaseAdmin
+      .from('product_dev')
+      .insert({
+        organization_id:         orgId,
+        name:                    d.title || `MakerWorld ${d.external_id}`,
+        category:                d.categories[0] ?? null,
+        description:             descParts.join('\n'),
+        production_profile:      'impressao_3d',
+        inspiration_url:         d.source_url,
+        reference_images:        refImg,
+        target_marketplaces:     [],
+        status:                  'ideia',
+        source_platform:         d.source_platform,
+        source_external_id:      d.external_id,
+        source_license:          d.license,
+        source_allow_recreation: d.allow_recreation,
+        source_metadata:         { ...d.raw, verdict: d.verdict, tags: d.tags, source_url: d.source_url },
+        created_by:              userId,
+      })
+      .select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao importar: ${error?.message ?? 'sem dados'}`)
+    const created = data as ProductDev
+
+    await this.emitEvent(orgId, created.id, 'imported', {
+      platform: d.source_platform, external_id: d.external_id, license: d.license,
+      allow_recreation: d.allow_recreation, verdict: d.verdict.level, source_url: d.source_url,
+    }, userId)
+
+    // 1ª versão com as métricas de fabricação, se a API trouxe perfil de impressão
+    let versionId: string | null = null
+    if (opts.create_version !== false && (d.weight_g != null || d.print_time_minutes != null)) {
+      try {
+        const v = await this.addVersion(created.id, orgId, userId, {
+          changelog:          'Importado do MakerWorld (perfil de impressão da origem)',
+          material:           d.material_count && d.material_count > 1 ? 'multicor' : null,
+          weight_g:           d.weight_g ?? undefined,
+          print_time_minutes: d.print_time_minutes ?? undefined,
+          notes:              d.need_ams ? 'Requer AMS (multicor).' : null,
+        })
+        versionId = v.id
+      } catch (e) {
+        this.logger.warn(`[makerworld] produto ${created.id} criado mas falhou a 1ª versão: ${(e as Error).message}`)
+      }
+    }
+
+    return { product_dev: created, version_id: versionId, verdict: d.verdict, design: d }
   }
 
   async update(id: string, orgId: string, patch: Partial<ProductDev>): Promise<ProductDev> {
