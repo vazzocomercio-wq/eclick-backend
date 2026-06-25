@@ -317,6 +317,13 @@ export class ProductOsController {
     return this.active.dispatch(id, this.org(u), u.id, body)
   }
 
+  @Post(':id/license-clearance')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  licenseClearance(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { cleared: boolean; note?: string }) {
+    return this.svc.setLicenseClearance(id, this.org(u), u.id, body)
+  }
+
   @Post(':id/publish-to-catalog')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

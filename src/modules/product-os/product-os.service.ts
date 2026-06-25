@@ -45,9 +45,33 @@ export interface ProductDev {
   product_id:          string | null
   active_deal_id:      string | null
   position:            number
+  // proveniência de importação (Peça 1) + liberação de licença (Peça 2)
+  source_platform:         string | null
+  source_external_id:      string | null
+  source_license:          string | null
+  source_allow_recreation: boolean | null
+  source_metadata:         Record<string, unknown>
+  license_cleared:         boolean
+  license_clearance_note:  string | null
+  license_cleared_by:      string | null
+  license_cleared_at:      string | null
   created_by:          string | null
   created_at:          string
   updated_at:          string
+}
+
+/** Status do porteiro de licença (Peça 2) — devolvido junto do produto. */
+export interface LicenseStatus {
+  imported:     boolean                              // veio de uma plataforma externa?
+  platform:     string | null
+  source_url:   string | null
+  license:      string | null
+  verdict:      import('./makerworld.service').LicenseVerdict | null
+  cleared:      boolean
+  cleared_note: string | null
+  cleared_at:   string | null
+  blocked:      boolean                              // trava a publicação?
+  can_publish:  boolean
 }
 
 export interface ProductDevVersion {
@@ -186,7 +210,7 @@ export class ProductOsService {
   // product_dev — CRUD + kanban
   // ─────────────────────────────────────────────────────────────────
 
-  async list(orgId: string, opts: { status?: ProductDevStatus } = {}): Promise<ProductDev[]> {
+  async list(orgId: string, opts: { status?: ProductDevStatus } = {}): Promise<(ProductDev & { license_status: LicenseStatus })[]> {
     let q = supabaseAdmin
       .from('product_dev')
       .select('*')
@@ -196,17 +220,18 @@ export class ProductOsService {
     if (opts.status) q = q.eq('status', opts.status)
     const { data, error } = await q
     if (error) throw new BadRequestException(`Erro ao listar: ${error.message}`)
-    return (data ?? []) as ProductDev[]
+    return (data ?? []).map(d => ({ ...(d as ProductDev), license_status: this.licenseStatus(d as ProductDev) }))
   }
 
-  async get(id: string, orgId: string): Promise<ProductDev & { versions: ProductDevVersion[] }> {
+  async get(id: string, orgId: string): Promise<ProductDev & { versions: ProductDevVersion[]; license_status: LicenseStatus }> {
     const { data, error } = await supabaseAdmin
       .from('product_dev').select('*')
       .eq('id', id).eq('organization_id', orgId).maybeSingle()
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     if (!data) throw new NotFoundException('Produto não encontrado')
+    const pd = data as ProductDev
     const versions = await this.listVersions(id, orgId)
-    return { ...(data as ProductDev), versions }
+    return { ...pd, versions, license_status: this.licenseStatus(pd) }
   }
 
   async create(orgId: string, userId: string | null, body: {
@@ -323,6 +348,44 @@ export class ProductOsService {
     return { product_dev: created, version_id: versionId, verdict: d.verdict, design: d }
   }
 
+  // ══ Porteiro de licença (Peça 2) ═══════════════════════════════════
+  /** Calcula o status do porteiro a partir das colunas de proveniência +
+   *  liberação. Produto próprio (sem origem) nunca é bloqueado. */
+  licenseStatus(pd: Pick<ProductDev,
+    'source_platform' | 'source_license' | 'source_allow_recreation' | 'inspiration_url' |
+    'license_cleared' | 'license_clearance_note' | 'license_cleared_at'>): LicenseStatus {
+    if (!pd.source_platform) {
+      return { imported: false, platform: null, source_url: null, license: null, verdict: null, cleared: false, cleared_note: null, cleared_at: null, blocked: false, can_publish: true }
+    }
+    const verdict = this.makerworld.licenseVerdict(pd.source_license, pd.source_allow_recreation === true)
+    const cleared = pd.license_cleared === true
+    // pra vender uma peça remodelada preciso de direito comercial E de derivados = verde
+    const blocked = verdict.level !== 'green' && !cleared
+    return {
+      imported: true, platform: pd.source_platform, source_url: pd.inspiration_url,
+      license: pd.source_license, verdict, cleared,
+      cleared_note: pd.license_clearance_note, cleared_at: pd.license_cleared_at,
+      blocked, can_publish: !blocked,
+    }
+  }
+
+  /** Override do porteiro: lojista declara que adquiriu licença comercial ou foi
+   *  autorizado pelo criador. Liberar destrava a publicação; remover re-bloqueia. */
+  async setLicenseClearance(id: string, orgId: string, userId: string | null, body: { cleared: boolean; note?: string }): Promise<ProductDev & { versions: ProductDevVersion[]; license_status: LicenseStatus }> {
+    const pd = await this.get(id, orgId)
+    if (!pd.source_platform) throw new BadRequestException('Este produto não veio de uma importação — não há licença externa para liberar.')
+    const cleared = body.cleared === true
+    const { error } = await supabaseAdmin.from('product_dev').update({
+      license_cleared:        cleared,
+      license_clearance_note: cleared ? (body.note?.trim() || null) : null,
+      license_cleared_by:     cleared ? userId : null,
+      license_cleared_at:     cleared ? new Date().toISOString() : null,
+    }).eq('id', id).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    await this.emitEvent(orgId, id, cleared ? 'license_cleared' : 'license_clearance_removed', { note: body.note?.trim() || null }, userId)
+    return this.get(id, orgId)
+  }
+
   async update(id: string, orgId: string, patch: Partial<ProductDev>): Promise<ProductDev> {
     const allowed: (keyof ProductDev)[] = [
       'name', 'category', 'description', 'production_profile',
@@ -379,6 +442,15 @@ export class ProductOsService {
     const pd = await this.get(id, orgId)
     if (pd.product_id) return { product_id: pd.product_id, price: null, cost_price: pd.estimated_cost, photos: 0, stock_seeded: 0, storefront: false, already: true }
     if (pd.status !== 'aprovado') throw new BadRequestException('Só produtos aprovados podem virar anúncio. Aprove uma versão primeiro.')
+
+    // porteiro de licença (Peça 2): importados não-verdes só publicam com liberação
+    const lic = pd.license_status
+    if (lic.blocked) {
+      throw new BadRequestException(
+        `Licença bloqueia a publicação: ${lic.verdict?.reason ?? 'modelo importado sem direito comercial/derivado.'} ` +
+        `Se você adquiriu licença comercial ou foi autorizado pelo criador, registre a liberação em "Licença & origem".`,
+      )
+    }
 
     // gate de qualidade
     const qualityOk = await this.production.isQualityPassed(orgId, id, pd.production_profile)
