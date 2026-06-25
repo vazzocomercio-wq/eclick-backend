@@ -101,7 +101,7 @@ export class ProductionInputService {
       const curQty = Math.max(0, Number(input.quantity) || 0)
       const inCost = Math.max(0, Number(body.unit_cost) || 0)
       const total = curQty + qty
-      novoCusto = total > 0 ? Math.round(((curQty * novoCusto + qty * inCost) / total) * 100) / 100 : inCost
+      novoCusto = total > 0 ? Math.round(((curQty * novoCusto + qty * inCost) / total) * 1e6) / 1e6 : inCost // 6 casas: custo/g é pequeno
     }
     await supabaseAdmin.from('production_input').update({
       quantity: novaQtd, cost_per_unit: novoCusto, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
