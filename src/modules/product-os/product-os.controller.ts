@@ -8,6 +8,7 @@ import {
 } from './product-os.service'
 import { ProductionService } from './production.service'
 import { ProductionInputService, type ProductionInput } from './production-input.service'
+import { ProductPartService } from './product-part.service'
 import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
@@ -26,6 +27,7 @@ export class ProductOsController {
     private readonly svc: ProductOsService,
     private readonly production: ProductionService,
     private readonly inputs: ProductionInputService,
+    private readonly parts: ProductPartService,
     private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
     private readonly radar: MakerworldRadarService,
@@ -81,13 +83,13 @@ export class ProductOsController {
   @Post('production-orders/preview')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.view')
-  previewOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number }) {
+  previewOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null }) {
     return this.production.previewOrderConsumption(this.org(u), body)
   }
 
   @Post('production-orders')
   @RequirePermission('products.update')
-  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {
+  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null }) {
     return this.production.createOrder(this.org(u), u.id, body)
   }
 
@@ -117,6 +119,95 @@ export class ProductOsController {
   @RequirePermission('products.update')
   transitionJob(@ReqUser() u: ReqUserPayload, @Param('jid') jid: string, @Body() body: { status: string; filament_used_g?: number; print_time_minutes?: number; failure_reason?: string }) {
     return this.production.transitionJob(this.org(u), jid, body)
+  }
+
+  // ── peças (partes do produto) ─────────────────────────────────────
+  @Get('parts')
+  @RequirePermission('products.view')
+  listParts(@ReqUser() u: ReqUserPayload, @Query('product_dev_id') devId: string) {
+    if (!devId) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.listParts(this.org(u), devId)
+  }
+
+  @Post('parts')
+  @RequirePermission('products.update')
+  createPart(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.createPart(this.org(u), body.product_dev_id, u.id, body)
+  }
+
+  @Post('cost-from-parts')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  costFromParts(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; target_margin_pct?: number }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.costFromParts(this.org(u), body.product_dev_id, body)
+  }
+
+  @Patch('parts/:pid')
+  @RequirePermission('products.update')
+  updatePart(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+    return this.parts.updatePart(this.org(u), pid, body)
+  }
+
+  @Post('parts/:pid/delete')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  deletePart(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.parts.deletePart(this.org(u), pid) }
+
+  @Post('parts/:pid/adjust-stock')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  adjustPartStock(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { quantity: number }) {
+    return this.parts.adjustStock(this.org(u), pid, Number(body?.quantity), u.id)
+  }
+
+  @Get('parts/:pid/versions')
+  @RequirePermission('products.view')
+  listPartVersions(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.parts.listPartVersions(this.org(u), pid) }
+
+  @Post('parts/:pid/versions')
+  @RequirePermission('products.update')
+  addPartVersion(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: {
+    changelog?: string; file_url?: string; file_type?: string; material?: string
+    weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
+  }) { return this.parts.addPartVersion(this.org(u), pid, u.id, body) }
+
+  @Get('parts/:pid/movements')
+  @RequirePermission('products.view')
+  partMovements(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.parts.listPartMovements(this.org(u), pid) }
+
+  // ── montagem (assembly) ───────────────────────────────────────────
+  @Post('assemblies/preview')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  previewAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.previewAssembly(this.org(u), body.product_dev_id, body.quantity)
+  }
+
+  @Get('assemblies')
+  @RequirePermission('products.view')
+  listAssemblies(@ReqUser() u: ReqUserPayload, @Query('product_dev_id') devId?: string, @Query('status') status?: string) {
+    return this.parts.listAssemblies(this.org(u), { product_dev_id: devId, status })
+  }
+
+  @Post('assemblies')
+  @RequirePermission('products.update')
+  createAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.createAssembly(this.org(u), body.product_dev_id, u.id, body.quantity)
+  }
+
+  @Get('assemblies/:aid')
+  @RequirePermission('products.view')
+  getAssembly(@ReqUser() u: ReqUserPayload, @Param('aid') aid: string) { return this.parts.getAssembly(this.org(u), aid) }
+
+  @Post('assemblies/:aid/transition')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  transitionAssembly(@ReqUser() u: ReqUserPayload, @Param('aid') aid: string, @Body() body: { status: string }) {
+    return this.parts.transitionAssembly(this.org(u), aid, body.status, u.id)
   }
 
   // ── insumos ───────────────────────────────────────────────────────

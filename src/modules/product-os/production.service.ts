@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { supabaseAdmin } from '../../common/supabase'
 import { StockService } from '../stock/stock.service'
 import { ProductionInputService } from './production-input.service'
+import { ProductPartService } from './product-part.service'
 
 /**
  * Product OS — Fase 2: BOM detalhado, ordem de produção, fila de impressão e
@@ -35,6 +36,7 @@ export class ProductionService {
   constructor(
     private readonly stock: StockService,
     private readonly inputs: ProductionInputService,
+    private readonly parts: ProductPartService,
   ) {}
 
   private round2(n: number): number { return Math.round((Number(n) || 0) * 100) / 100 }
@@ -123,10 +125,12 @@ export class ProductionService {
 
   /** Prévia do que uma OP vai CONSUMIR do estoque (BOM × qtd × (1+perda)), por insumo,
    *  com disponibilidade. NÃO grava nada. Fallback = filamento por peso se não há BOM. */
-  async previewOrderConsumption(orgId: string, body: { product_dev_id: string; version_id?: string; quantity: number }) {
+  async previewOrderConsumption(orgId: string, body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
-    const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id)
-    const bom = await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
+    const partId = body.part_id ?? null
+    const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id, partId)
+    // OP de peça reserva só filamento (sem BOM de produto montado)
+    const bom = partId ? [] : await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
     const needByInput = new Map<string, number>()
     for (const l of bom) {
       if (!l.input_id || Number(l.quantity) <= 0) continue
@@ -165,15 +169,17 @@ export class ProductionService {
     return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
+    const partId = body.part_id ?? null
     // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
-    // vendável; produção (produto cadastrado) consome insumo + credita products.stock
+    // vendável; produção (produto cadastrado) consome insumo + credita products.stock.
+    // OP de PEÇA nunca é protótipo: ela alimenta o estoque de peças prontas.
     const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id').eq('id', body.product_dev_id).eq('organization_id', orgId).maybeSingle()
     const registered = !!(dev as { product_id: string | null } | null)?.product_id
-    const isPrototype = body.is_prototype ?? !registered
-    // pega métricas da versão (explícita > aprovada > última)
-    const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id)
+    const isPrototype = partId ? false : (body.is_prototype ?? !registered)
+    // pega métricas da versão — da PEÇA se for OP de peça, senão do produto inteiro
+    const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id, partId)
     const estTime = metrics.print_time_minutes != null ? metrics.print_time_minutes * qty : null
     const estFilament = metrics.weight_g != null ? this.round2(metrics.weight_g * qty) : null
 
@@ -182,17 +188,17 @@ export class ProductionService {
     const nextNumber = seq ? Number((seq as { order_number: number }).order_number) + 1 : 1
 
     const { data, error } = await supabaseAdmin.from('production_order').insert({
-      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? null,
+      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? null, part_id: partId,
       order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null,
       estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
     const order = data as { id: string }
 
-    // reserva de insumos: se há COMPOSIÇÃO (BOM) com insumos vinculados, reserva a
-    // composição inteira (qtd_linha × qtd_OP × (1+perda), agregando por insumo);
-    // senão, mantém o fallback do filamento principal por peso.
-    const bom = await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
+    // reserva de insumos:
+    //  - OP de PEÇA → só filamento pelo material/peso da peça (BOM é do produto montado, não da peça)
+    //  - OP do produto inteiro → COMPOSIÇÃO (BOM) com insumos vinculados, se houver; senão filamento por peso
+    const bom = partId ? [] : await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
     const needByInput = new Map<string, number>()
     for (const l of bom) {
       if (!l.input_id || Number(l.quantity) <= 0) continue
@@ -228,6 +234,7 @@ export class ProductionService {
     await supabaseAdmin.from('production_order').update(patch).eq('id', oid).eq('organization_id', orgId)
 
     const devId = (order as { product_dev_id: string }).product_dev_id
+    const partId = (order as { part_id: string | null }).part_id ?? null
     if (to === 'cancelado') {
       await this.inputs.release(orgId, 'production_order', oid)
     }
@@ -238,9 +245,14 @@ export class ProductionService {
       // sobrepõe — senão zeraria a perda da composição.
       const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? undefined
       await this.inputs.consume(orgId, 'production_order', oid, actual ?? undefined)
-      await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
-      await this.creditNativeStock(orgId, order as Record<string, unknown>)
-      await this.emit(orgId, devId, 'production_completed', { production_order_id: oid }, userId)
+      if (partId) {
+        // OP de PEÇA → credita o estoque de peças prontas (não o produto acabado)
+        await this.parts.creditFromOrder(orgId, partId, Number((order as { quantity: number }).quantity) || 0, oid, userId)
+      } else {
+        await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
+        await this.creditNativeStock(orgId, order as Record<string, unknown>)
+      }
+      await this.emit(orgId, devId, 'production_completed', { production_order_id: oid, part_id: partId }, userId)
     }
     return this.getOrder(orgId, oid)
   }
@@ -299,7 +311,7 @@ export class ProductionService {
     if (!devRows.length) return []
 
     const { data: versions } = await supabaseAdmin.from('product_dev_version')
-      .select('product_dev_id, version_number, approved, print_time_minutes').eq('organization_id', orgId)
+      .select('product_dev_id, version_number, approved, print_time_minutes').eq('organization_id', orgId).is('part_id', null)
     const { data: orders } = await supabaseAdmin.from('production_order')
       .select('product_dev_id, quantity, status').eq('organization_id', orgId).eq('status', 'disponivel')
 
@@ -612,10 +624,13 @@ export class ProductionService {
   }
 
   // ── helpers ───────────────────────────────────────────────────────
-  private async resolveVersionMetrics(orgId: string, devId: string, versionId?: string): Promise<VersionMetrics> {
-    const { data } = await supabaseAdmin.from('product_dev_version')
+  private async resolveVersionMetrics(orgId: string, devId: string, versionId?: string, partId?: string | null): Promise<VersionMetrics> {
+    let q = supabaseAdmin.from('product_dev_version')
       .select('id, weight_g, print_time_minutes, material, approved, version_number')
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('version_number', { ascending: false })
+    // OP de peça → versões da peça; OP de produto inteiro → versões sem peça
+    q = partId ? q.eq('part_id', partId) : q.is('part_id', null)
+    const { data } = await q
     const versions = (data ?? []) as Array<{ id: string; weight_g: number | null; print_time_minutes: number | null; material: string | null; approved: boolean }>
     const ref = versionId ? versions.find(v => v.id === versionId) : (versions.find(v => v.approved) ?? versions[0])
     return { versionId: ref?.id ?? null, weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null }

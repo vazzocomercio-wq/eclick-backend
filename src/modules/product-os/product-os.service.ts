@@ -548,6 +548,7 @@ export class ProductOsService {
     const { data, error } = await supabaseAdmin
       .from('product_dev_version').select('*')
       .eq('product_dev_id', productDevId).eq('organization_id', orgId)
+      .is('part_id', null)   // só versões do PRODUTO INTEIRO; versões de peça vivem no módulo de peças
       .order('version_number', { ascending: false })
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     return (data ?? []) as ProductDevVersion[]
