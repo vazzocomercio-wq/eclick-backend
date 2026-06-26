@@ -131,9 +131,32 @@ export class ProductOsController {
 
   @Post('parts')
   @RequirePermission('products.update')
-  createPart(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+  createPart(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }) {
     if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
     return this.parts.createPart(this.org(u), body.product_dev_id, u.id, body)
+  }
+
+  @Post('parts/bulk')
+  @RequirePermission('products.update')
+  createPartsBulk(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; parts: Array<{ name: string; qty_per_product?: number; is_optional?: boolean; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }> }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.createPartsBulk(this.org(u), body.product_dev_id, u.id, body.parts ?? [])
+  }
+
+  @Post('suggest-parts')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view', 'ai.view_usage')
+  suggestParts(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.suggestParts(this.org(u), body.product_dev_id)
+  }
+
+  @Post('plate-plan')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  platePlan(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number }) {
+    if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.platePlan(this.org(u), body.product_dev_id, body.quantity)
   }
 
   @Post('cost-from-parts')

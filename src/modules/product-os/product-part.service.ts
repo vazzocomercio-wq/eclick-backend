@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductionInputService } from './production-input.service'
+import { LlmService } from '../ai/llm.service'
 
 /**
  * Product OS — PEÇAS & MONTAGEM.
@@ -31,7 +32,10 @@ interface PartVersionMetrics { weight_g: number | null; print_time_minutes: numb
 export class ProductPartService {
   private readonly logger = new Logger(ProductPartService.name)
 
-  constructor(private readonly inputs: ProductionInputService) {}
+  constructor(
+    private readonly inputs: ProductionInputService,
+    private readonly llm: LlmService,
+  ) {}
 
   private round2(n: number): number { return Math.round((Number(n) || 0) * 100) / 100 }
 
@@ -47,12 +51,12 @@ export class ProductPartService {
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('sort_order', { ascending: true })
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     return (data ?? []).map(p => {
-      const r = p as PartRef & { is_optional: boolean }
+      const r = p as PartRef & { is_optional: boolean; width_mm: number | null; depth_mm: number | null; height_mm: number | null }
       return { ...r, available: this.round2(Number(r.stock_qty) - Number(r.reserved_qty)) }
     })
   }
 
-  async createPart(orgId: string, devId: string, userId: string | null, dto: { name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+  async createPart(orgId: string, devId: string, userId: string | null, dto: { name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }) {
     if (!dto.name?.trim()) throw new BadRequestException('Nome da peça é obrigatório')
     const { data: dev } = await supabaseAdmin.from('product_dev').select('id').eq('id', devId).eq('organization_id', orgId).maybeSingle()
     if (!dev) throw new NotFoundException('Produto não encontrado')
@@ -62,6 +66,7 @@ export class ProductPartService {
     const { data, error } = await supabaseAdmin.from('product_dev_part').insert({
       organization_id: orgId, product_dev_id: devId, name: dto.name.trim(),
       qty_per_product: Math.max(1, Number(dto.qty_per_product) || 1), is_optional: dto.is_optional === true,
+      width_mm: dto.width_mm ?? null, depth_mm: dto.depth_mm ?? null, height_mm: dto.height_mm ?? null,
       sort_order: nextSort, notes: dto.notes ?? null, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar peça: ${error?.message ?? 'sem dados'}`)
@@ -69,13 +74,23 @@ export class ProductPartService {
     return data
   }
 
-  async updatePart(orgId: string, partId: string, patch: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+  /** Cria várias peças de uma vez (usado pela sugestão de IA). */
+  async createPartsBulk(orgId: string, devId: string, userId: string | null, parts: Array<{ name: string; qty_per_product?: number; is_optional?: boolean; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }>) {
+    const created = []
+    for (const p of parts) { if (p?.name?.trim()) created.push(await this.createPart(orgId, devId, userId, p)) }
+    return created
+  }
+
+  async updatePart(orgId: string, partId: string, patch: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }) {
     const safe: Record<string, unknown> = {}
     if (patch.name != null) safe.name = String(patch.name).trim()
     if (patch.qty_per_product != null) safe.qty_per_product = Math.max(1, Number(patch.qty_per_product) || 1)
     if (patch.is_optional != null) safe.is_optional = patch.is_optional === true
     if (patch.sort_order != null) safe.sort_order = Number(patch.sort_order) || 0
     if (patch.notes != null) safe.notes = patch.notes
+    if ('width_mm' in patch) safe.width_mm = patch.width_mm ?? null
+    if ('depth_mm' in patch) safe.depth_mm = patch.depth_mm ?? null
+    if ('height_mm' in patch) safe.height_mm = patch.height_mm ?? null
     if (!Object.keys(safe).length) throw new BadRequestException('Nada para atualizar')
     const { data, error } = await supabaseAdmin.from('product_dev_part').update(safe)
       .eq('id', partId).eq('organization_id', orgId).select('*').maybeSingle()
@@ -400,4 +415,102 @@ export class ProductPartService {
       target_margin_pct: targetMargin, suggested_prices: suggested,
     }
   }
+
+  // ══ #1 — IA sugere as peças (a partir do briefing, ou gera do zero) ═
+  async suggestParts(orgId: string, devId: string): Promise<{ source: 'briefing' | 'ia'; suggestions: Array<{ name: string; qty_per_product: number; is_optional: boolean; width_mm: number | null; depth_mm: number | null; height_mm: number | null; rationale: string }> }> {
+    const { data: dev } = await supabaseAdmin.from('product_dev').select('name, category, description, briefing')
+      .eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    if (!dev) throw new NotFoundException('Produto não encontrado')
+    const d = dev as { name: string; category: string | null; description: string | null; briefing: Record<string, unknown> | null }
+
+    // 1. o briefing já costuma trazer os MÓDULOS prontos (nome/qtd/dimensões) → reusa sem gastar IA
+    const modulos = Array.isArray((d.briefing as { modulos?: unknown[] } | null)?.modulos) ? ((d.briefing as { modulos: Array<Record<string, unknown>> }).modulos) : []
+    if (modulos.length) {
+      const suggestions = modulos.map(m => {
+        const p = (m.params ?? {}) as Record<string, unknown>
+        const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : null }
+        return {
+          name: String(m.nome ?? 'Peça').trim(), qty_per_product: Math.max(1, Number(m.quantidade) || 1), is_optional: false,
+          width_mm: num(p.largura_mm), depth_mm: num(p.profundidade_mm), height_mm: num(p.altura_mm),
+          rationale: [m.tipo, m.cor].filter(Boolean).join(' · ') || 'do briefing',
+        }
+      }).filter(s => s.name)
+      if (suggestions.length) return { source: 'briefing', suggestions }
+    }
+
+    // 2. sem briefing → IA propõe a divisão
+    const out = await this.llm.generateText({
+      orgId, feature: 'product_os_parts_suggest', jsonMode: true, maxTokens: 1200, temperature: 0.3,
+      systemPrompt: 'Você é engenheiro de produto p/ impressão 3D FDM (mesa ~256×256mm). Divida o produto em PEÇAS imprimíveis separadas (que encaixam/montam). Peças grandes (>250mm) viram módulos. Responda SOMENTE JSON.',
+      userPrompt: `Produto: ${d.name}\nCategoria: ${d.category ?? '—'}\nDescrição: ${d.description ?? '—'}\n\nResponda JSON:\n{ "parts": [ { "name": "ex: Base", "qty_per_product": número, "width_mm": número_ou_null, "depth_mm": número_ou_null, "height_mm": número_ou_null, "rationale": "por que é uma peça separada" } ] }\nSe o produto é naturalmente 1 peça só, devolva 1 item.`,
+    })
+    const parsed = parseJsonLoosePart(out.text) as { parts?: Array<Record<string, unknown>> } | null
+    const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n) : null }
+    const suggestions = (parsed?.parts ?? []).map(p => ({
+      name: String(p.name ?? '').trim(), qty_per_product: Math.max(1, Number(p.qty_per_product) || 1), is_optional: false,
+      width_mm: num(p.width_mm), depth_mm: num(p.depth_mm), height_mm: num(p.height_mm), rationale: String(p.rationale ?? '').trim(),
+    })).filter(s => s.name)
+    return { source: 'ia', suggestions }
+  }
+
+  // ══ #2 — Plano de pratos (quantas peças cabem por bandeja) ══════════
+  async platePlan(orgId: string, devId: string, quantity: number) {
+    const qty = Math.max(1, Math.floor(Number(quantity) || 1))
+    const parts = await this.listParts(orgId, devId) as Array<PartRef & { width_mm: number | null; depth_mm: number | null; height_mm: number | null }>
+    if (!parts.length) throw new BadRequestException('Sem peças cadastradas.')
+    // mesa: maior impressora ativa, senão A1 (256×256×256)
+    const { data: printers } = await supabaseAdmin.from('production_printer').select('name, build_volume_mm, status').eq('organization_id', orgId).eq('status', 'ativa')
+    const beds = (printers ?? []).map(p => ({ name: (p as { name: string }).name, ...parseBed((p as { build_volume_mm: string | null }).build_volume_mm) }))
+    const bed = beds.sort((a, b) => b.x * b.y - a.x * a.y)[0] ?? { name: 'Padrão A1', x: 256, y: 256, z: 256 }
+    const GAP = 5 // folga entre peças (mm)
+
+    const lines = []
+    for (const p of parts) {
+      const m = await this.resolvePartMetrics(orgId, p.id)
+      const needed = Math.ceil(Number(p.qty_per_product) * qty)
+      const w = Number(p.width_mm) || 0, dep = Number(p.depth_mm) || 0, h = Number(p.height_mm) || 0
+      let perPlate: number | null = null, fitNote = ''
+      if (w > 0 && dep > 0) {
+        if (h > 0 && h > bed.z) { perPlate = 0; fitNote = `peça (${h}mm) mais alta que a mesa (${bed.z}mm)` }
+        else {
+          // grade simples nas 2 orientações (gira 90°), pega a melhor
+          const grid = (a: number, b: number) => Math.max(0, Math.floor((bed.x + GAP) / (a + GAP))) * Math.max(0, Math.floor((bed.y + GAP) / (b + GAP)))
+          perPlate = Math.max(grid(w, dep), grid(dep, w))
+          if (perPlate === 0) fitNote = `peça (${w}×${dep}mm) maior que a mesa (${bed.x}×${bed.y}mm)`
+        }
+      }
+      const plates = perPlate && perPlate > 0 ? Math.ceil(needed / perPlate) : null
+      const minutesPerUnit = Number(m.print_time_minutes) || 0
+      lines.push({
+        part_id: p.id, name: p.name, qty_per_product: Number(p.qty_per_product), needed,
+        width_mm: p.width_mm, depth_mm: p.depth_mm, height_mm: p.height_mm,
+        per_plate: perPlate, plates, fit_note: fitNote || null,
+        plate_minutes: perPlate && perPlate > 0 && minutesPerUnit > 0 ? Math.round(minutesPerUnit * Math.min(perPlate, needed)) : null,
+        has_dims: w > 0 && dep > 0,
+      })
+    }
+    const totalPlates = lines.reduce((s, l) => s + (l.plates ?? 0), 0)
+    return {
+      quantity: qty, bed, gap_mm: GAP, lines,
+      total_plates: totalPlates, missing_dims: lines.filter(l => !l.has_dims).map(l => l.name),
+      note: 'Estimativa por grade (peças iguais no mesmo prato). O encaixe fino de peças diferentes juntas é feito no Bambu Studio. Agrupar reduz trocas de prato, não o tempo total de impressão.',
+    }
+  }
+}
+
+/** Parse "256x256x256" / "256 × 256 × 256" / "180x180" → {x,y,z}. Default A1. */
+function parseBed(s: string | null): { x: number; y: number; z: number } {
+  const nums = String(s ?? '').match(/\d+(?:[.,]\d+)?/g)?.map(n => Number(n.replace(',', '.'))) ?? []
+  return { x: nums[0] || 256, y: nums[1] || nums[0] || 256, z: nums[2] || 256 }
+}
+
+/** Parse tolerante de JSON de LLM (igual aos outros serviços do módulo). */
+function parseJsonLoosePart(text: string): unknown {
+  const t = (text ?? '').trim()
+  try { return JSON.parse(t) } catch { /* */ }
+  const m = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (m) { try { return JSON.parse(m[1]) } catch { /* */ } }
+  const o = t.indexOf('{'), c = t.lastIndexOf('}')
+  if (o >= 0 && c > o) { try { return JSON.parse(t.slice(o, c + 1)) } catch { /* */ } }
+  return null
 }

@@ -434,6 +434,15 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Product OS — Sugere a divisão de um produto em PEÇAS imprimíveis a partir
+  // do briefing/ideia (nome, qtd por produto, dimensões aproximadas). Decisão
+  // estruturada e barata → Haiku.
+  product_os_parts_suggest: {
+    label:       'Sugestão de peças do produto (Product OS)',
+    description: 'Divide um produto de impressão 3D em peças imprimíveis (base, cúpula, conector…) com quantidade por produto e dimensões aproximadas, a partir do briefing/ideia',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
