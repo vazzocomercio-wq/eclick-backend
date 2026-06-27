@@ -280,7 +280,7 @@ export class FarmService {
     if (!token) throw new UnauthorizedException('token ausente')
     const { data: agent } = await supabaseAdmin.from('farm_agent').select('id, organization_id, status').eq('token', token).maybeSingle()
     const a = agent as { id: string; organization_id: string; status: string } | null
-    if (!a || a.status !== 'active') throw new UnauthorizedException('agente inválido')
+    if (!a || a.status !== 'ativo') throw new UnauthorizedException('agente inválido ou revogado')
     if (!serial || !imageBase64) return { ok: false, reason: 'sem imagem' }
     const { data: pr } = await supabaseAdmin.from('production_printer')
       .select('id').eq('organization_id', a.organization_id).eq('serial_number', serial).maybeSingle()
