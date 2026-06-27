@@ -106,8 +106,11 @@ export class FarmService {
           raw: p.raw ?? null, updated_at: now,
         }, { onConflict: 'printer_id' })
         matched++
-        // transição imprimindo → ocioso = impressão terminou → auto-fecha
-        if (before === 'printing' && p.state === 'idle') finished.push(printerId)
+        // sincroniza a OP com o estado da impressora (só quando muda)
+        if (before !== p.state) {
+          if (before === 'printing' && p.state === 'idle') finished.push(printerId) // terminou → auto-fecha
+          else await this.syncOrderState(a.organization_id, printerId, p.state ?? '').catch(() => {})
+        }
       }
       if (matched > 0) {
         await supabaseAdmin.from('production_printer')
@@ -175,7 +178,12 @@ export class FarmService {
     if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o .3mf fatiado na peça.')
     // só .3mf imprime via FTP — STL não serve pra impressora
     if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão não é .3mf fatiado — a impressora só aceita .3mf. Suba o arquivo fatiado do Bambu.')
-    return this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
+    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
+    // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento)
+    await supabaseAdmin.from('production_order')
+      .update({ status: 'imprimindo', started_at: new Date().toISOString() })
+      .eq('id', orderId).eq('organization_id', orgId).in('status', ['fila', 'reimpressao'])
+    return cmd
   }
 
   // ── Fase C: auto-fechamento da produção pela telemetria ───────────
@@ -200,6 +208,33 @@ export class FarmService {
       payload: { production_order_id: o.id, auto: true, print_minutes: elapsed }, is_auto: true,
     }).then(() => {}, () => {})
     this.logger.log(`[farm] auto-fechou produção da impressora ${printerId.slice(0, 8)} (${elapsed}min reais)`)
+  }
+
+  /** Sincroniza a OP ativa da impressora com o estado da telemetria:
+   *  pausou→pausado, retomou→imprimindo, erro→falhou. (Terminar é o autoClose.) */
+  private async syncOrderState(orgId: string, printerId: string, state: string) {
+    const MAP: Record<string, { to: string; from: string[] }> = {
+      printing: { to: 'imprimindo', from: ['pausado'] },          // retomou
+      paused:   { to: 'pausado',    from: ['imprimindo'] },        // pausou
+      error:    { to: 'falhou',     from: ['imprimindo', 'pausado'] },
+      failed:   { to: 'falhou',     from: ['imprimindo', 'pausado'] },
+    }
+    const m = MAP[state]
+    if (!m) return
+    const { data } = await supabaseAdmin.from('production_order')
+      .select('id, status, product_dev_id').eq('organization_id', orgId).eq('printer_id', printerId)
+      .in('status', ['imprimindo', 'pausado']).order('updated_at', { ascending: false }).limit(1).maybeSingle()
+    if (!data) return
+    const o = data as { id: string; status: string; product_dev_id: string }
+    if (!m.from.includes(o.status)) return
+    const patch: Record<string, unknown> = { status: m.to }
+    if (m.to === 'falhou') patch.notes = `Falha reportada pela impressora (${state})`
+    await supabaseAdmin.from('production_order').update(patch).eq('id', o.id).eq('status', o.status)
+    await supabaseAdmin.from('product_dev_event').insert({
+      organization_id: orgId, product_dev_id: o.product_dev_id, event_type: 'status_changed',
+      payload: { production_order_id: o.id, to: m.to, from_printer: state, auto: true }, is_auto: true,
+    }).then(() => {}, () => {})
+    this.logger.log(`[farm] OP ${o.id.slice(0, 8)} ${o.status}→${m.to} (impressora ${state})`)
   }
 
   // ── Fase C: scheduler (qual produto em qual impressora ociosa) ────
