@@ -205,6 +205,9 @@ export class FarmService {
     await supabaseAdmin.from('production_order')
       .update({ status: 'acabamento', actual_time_minutes: elapsed })
       .eq('id', o.id).eq('status', 'imprimindo')
+    // peças físicas existem → marca as unidades planejadas como produzidas
+    await supabaseAdmin.from('production_unit').update({ status: 'produzida' })
+      .eq('organization_id', orgId).eq('production_order_id', o.id).eq('status', 'planejada').then(() => {}, () => {})
     await supabaseAdmin.from('product_dev_event').insert({
       organization_id: orgId, product_dev_id: o.product_dev_id, event_type: 'production_completed',
       payload: { production_order_id: o.id, auto: true, print_minutes: elapsed }, is_auto: true,

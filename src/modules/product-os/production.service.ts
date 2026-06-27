@@ -224,8 +224,38 @@ export class ProductionService {
         if (r) await supabaseAdmin.from('production_order').update({ reservation_id: r.inputId }).eq('id', order.id)
       }
     }
+    // gera as unidades físicas (serial único por unidade; lote = esta OP)
+    await this.generateUnits(orgId, order.id, nextNumber, qty, body.product_dev_id, partId).catch(() => {})
     await this.emit(orgId, body.product_dev_id, 'production_order_created', { production_order_id: order.id, qty }, userId)
     return this.getOrder(orgId, order.id)
+  }
+
+  /** Código de exibição da OP a partir do número sequencial. */
+  private opCode(orderNumber: number): string { return `OP${String(orderNumber).padStart(4, '0')}` }
+
+  /** Cria 1 linha por unidade da OP: serial = OP0005-{cod}-001. lote=OP, identidade=serial. */
+  private async generateUnits(orgId: string, orderId: string, orderNumber: number, qty: number, devId: string, partId: string | null) {
+    const op = this.opCode(orderNumber)
+    const base = partId ? await this.parts.ensurePartCode(orgId, partId) : await this.parts.ensureDevCode(orgId, devId)
+    const rows = Array.from({ length: qty }, (_, i) => ({
+      organization_id: orgId, production_order_id: orderId, product_dev_id: devId, part_id: partId,
+      serial: `${op}-${base}-${String(i + 1).padStart(3, '0')}`, seq: i + 1, status: 'planejada',
+    }))
+    if (rows.length) await supabaseAdmin.from('production_unit').insert(rows)
+  }
+
+  /** Marca as unidades planejadas da OP como produzidas (peças físicas existem). */
+  private async markUnitsProduced(orgId: string, orderId: string) {
+    await supabaseAdmin.from('production_unit').update({ status: 'produzida' })
+      .eq('organization_id', orgId).eq('production_order_id', orderId).eq('status', 'planejada').then(() => {}, () => {})
+  }
+
+  /** Lista as unidades (seriais) de uma OP. */
+  async listUnits(orgId: string, oid: string) {
+    const { data, error } = await supabaseAdmin.from('production_unit').select('*')
+      .eq('organization_id', orgId).eq('production_order_id', oid).order('seq', { ascending: true })
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return data ?? []
   }
 
   /** Atualiza campos editáveis da ordem (ex: peso REAL pesado na balança).
@@ -256,6 +286,7 @@ export class ProductionService {
 
     const devId = (order as { product_dev_id: string }).product_dev_id
     const partId = (order as { part_id: string | null }).part_id ?? null
+    if (to === 'acabamento') await this.markUnitsProduced(orgId, oid)   // peças físicas existem
     if (to === 'cancelado') {
       await this.inputs.release(orgId, 'production_order', oid)
     }

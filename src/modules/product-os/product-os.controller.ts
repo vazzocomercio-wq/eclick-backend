@@ -110,6 +110,10 @@ export class ProductOsController {
     return this.production.updateOrder(this.org(u), oid, body)
   }
 
+  @Get('production-orders/:oid/units')
+  @RequirePermission('products.view')
+  listUnits(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string) { return this.production.listUnits(this.org(u), oid) }
+
   @Get('production-orders/:oid/jobs')
   @RequirePermission('products.view')
   listJobs(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string) { return this.production.listJobs(this.org(u), oid) }
@@ -175,7 +179,7 @@ export class ProductOsController {
 
   @Patch('parts/:pid')
   @RequirePermission('products.update')
-  updatePart(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string }) {
+  updatePart(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null; code?: string | null }) {
     return this.parts.updatePart(this.org(u), pid, body)
   }
 

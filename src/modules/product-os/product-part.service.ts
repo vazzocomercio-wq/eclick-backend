@@ -45,6 +45,60 @@ export class ProductPartService {
     }).then(() => {}, () => {})
   }
 
+  // ══ Códigos / sub-SKUs (rastreio) ══════════════════════════════════
+  /** Normaliza um texto em código: MAIÚSCULAS, sem acento, só A-Z0-9 e hífen. */
+  private toCode(s: string): string {
+    return String(s || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'PROD'
+  }
+
+  /** Garante o código interno do produto (base dos sub-SKUs). Prefere o SKU de
+   *  venda se já publicado; senão deriva do nome. Estável depois de gerado. */
+  async ensureDevCode(orgId: string, devId: string): Promise<string> {
+    const { data } = await supabaseAdmin.from('product_dev').select('code, name, product_id').eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    const d = data as { code: string | null; name: string; product_id: string | null } | null
+    if (!d) throw new NotFoundException('Produto não encontrado')
+    if (d.code) return d.code
+    let base = ''
+    if (d.product_id) {
+      const { data: prod } = await supabaseAdmin.from('products').select('sku').eq('id', d.product_id).maybeSingle()
+      const sku = ((prod as { sku: string | null } | null)?.sku || '').trim()
+      if (sku) base = this.toCode(sku)   // só usa o SKU se existir (toCode('') vira 'PROD')
+    }
+    if (!base) base = this.toCode(d.name)
+    let code = base, n = 1
+    for (;;) {
+      const { data: clash } = await supabaseAdmin.from('product_dev').select('id').eq('organization_id', orgId).eq('code', code).neq('id', devId).maybeSingle()
+      if (!clash) break
+      n++; code = `${base}-${n}`
+    }
+    await supabaseAdmin.from('product_dev').update({ code }).eq('id', devId).eq('organization_id', orgId)
+    return code
+  }
+
+  /** Próximo sub-SKU sequencial (-01, -02…) pro produto. */
+  private async nextPartCode(orgId: string, devId: string): Promise<string> {
+    const base = await this.ensureDevCode(orgId, devId)
+    const { data } = await supabaseAdmin.from('product_dev_part').select('code').eq('organization_id', orgId).eq('product_dev_id', devId)
+    let max = 0
+    for (const r of (data ?? [])) {
+      const m = (r as { code: string | null }).code?.match(/-(\d+)$/)
+      if (m) max = Math.max(max, parseInt(m[1], 10))
+    }
+    return `${base}-${String(max + 1).padStart(2, '0')}`
+  }
+
+  /** Garante o sub-SKU da peça (gera se faltar). Usado por OPs antigas/backfill. */
+  async ensurePartCode(orgId: string, partId: string): Promise<string> {
+    const { data } = await supabaseAdmin.from('product_dev_part').select('code, product_dev_id').eq('id', partId).eq('organization_id', orgId).maybeSingle()
+    const p = data as { code: string | null; product_dev_id: string } | null
+    if (!p) throw new NotFoundException('Peça não encontrada')
+    if (p.code) return p.code
+    const code = await this.nextPartCode(orgId, p.product_dev_id)
+    await supabaseAdmin.from('product_dev_part').update({ code }).eq('id', partId).eq('organization_id', orgId)
+    return code
+  }
+
   // ══ Peças (CRUD) ═══════════════════════════════════════════════════
   async listParts(orgId: string, devId: string) {
     const { data, error } = await supabaseAdmin.from('product_dev_part').select('*')
@@ -63,8 +117,9 @@ export class ProductPartService {
     const { data: seq } = await supabaseAdmin.from('product_dev_part').select('sort_order')
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('sort_order', { ascending: false }).limit(1).maybeSingle()
     const nextSort = dto.sort_order ?? (seq ? Number((seq as { sort_order: number }).sort_order) + 1 : 0)
+    const code = await this.nextPartCode(orgId, devId)   // sub-SKU sequencial {produto}-NN
     const { data, error } = await supabaseAdmin.from('product_dev_part').insert({
-      organization_id: orgId, product_dev_id: devId, name: dto.name.trim(),
+      organization_id: orgId, product_dev_id: devId, name: dto.name.trim(), code,
       qty_per_product: Math.max(1, Number(dto.qty_per_product) || 1), is_optional: dto.is_optional === true,
       width_mm: dto.width_mm ?? null, depth_mm: dto.depth_mm ?? null, height_mm: dto.height_mm ?? null,
       sort_order: nextSort, notes: dto.notes ?? null, created_by: userId,
@@ -81,13 +136,14 @@ export class ProductPartService {
     return created
   }
 
-  async updatePart(orgId: string, partId: string, patch: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }) {
+  async updatePart(orgId: string, partId: string, patch: { name?: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null; code?: string | null }) {
     const safe: Record<string, unknown> = {}
     if (patch.name != null) safe.name = String(patch.name).trim()
     if (patch.qty_per_product != null) safe.qty_per_product = Math.max(1, Number(patch.qty_per_product) || 1)
     if (patch.is_optional != null) safe.is_optional = patch.is_optional === true
     if (patch.sort_order != null) safe.sort_order = Number(patch.sort_order) || 0
     if (patch.notes != null) safe.notes = patch.notes
+    if ('code' in patch) safe.code = patch.code ? this.toCode(String(patch.code)) : null
     if ('width_mm' in patch) safe.width_mm = patch.width_mm ?? null
     if ('depth_mm' in patch) safe.depth_mm = patch.depth_mm ?? null
     if ('height_mm' in patch) safe.height_mm = patch.height_mm ?? null

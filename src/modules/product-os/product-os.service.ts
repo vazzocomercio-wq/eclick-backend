@@ -35,6 +35,7 @@ export interface ProductDev {
   id:                  string
   organization_id:     string
   name:                string
+  code:                string | null
   category:            string | null
   description:         string | null
   status:              ProductDevStatus
