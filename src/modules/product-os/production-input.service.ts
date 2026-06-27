@@ -12,6 +12,7 @@ export interface ProductionInput {
   organization_id: string
   kind: 'filamento' | 'embalagem' | 'etiqueta' | 'outro'
   sku: string | null
+  barcode: string | null       // código de barras (leitura/escaneamento)
   name: string
   description: string | null
   material: string | null      // tipo (PLA, PETG, ABS…)
@@ -60,6 +61,7 @@ export class ProductionInputService {
       organization_id: orgId,
       kind: dto.kind ?? 'filamento',
       sku: dto.sku ?? null,
+      barcode: dto.barcode ?? null,
       name: dto.name.trim(),
       description: dto.description ?? null,
       material: dto.material ?? null,
@@ -80,7 +82,7 @@ export class ProductionInputService {
   }
 
   async update(orgId: string, id: string, patch: Partial<ProductionInput>): Promise<ProductionInput> {
-    const allowed: (keyof ProductionInput)[] = ['kind', 'sku', 'name', 'description', 'material', 'color', 'color_hex', 'brand', 'supplier', 'diameter_mm', 'spool_weight_g', 'unit', 'reorder_threshold', 'cost_per_unit', 'is_active', 'notes']
+    const allowed: (keyof ProductionInput)[] = ['kind', 'sku', 'barcode', 'name', 'description', 'material', 'color', 'color_hex', 'brand', 'supplier', 'diameter_mm', 'spool_weight_g', 'unit', 'reorder_threshold', 'cost_per_unit', 'is_active', 'notes']
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
     if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
@@ -284,7 +286,7 @@ export class ProductionInputService {
   /** Filamento(s) montado(s) agora na impressora, com dados do insumo. */
   async getLoaded(orgId: string, printerId: string) {
     const { data, error } = await supabaseAdmin.from('printer_loaded_filament')
-      .select('id, slot, loaded_at, loaded_g, consumed_g, input:input_id(id, name, material, color, color_hex, unit, quantity, reserved_quantity, cost_per_unit, spool_weight_g)')
+      .select('id, slot, loaded_at, loaded_g, consumed_g, input:input_id(id, name, sku, barcode, material, color, color_hex, unit, quantity, reserved_quantity, cost_per_unit, spool_weight_g)')
       .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true })
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     return (data ?? []).map(r => {
@@ -303,11 +305,13 @@ export class ProductionInputService {
     return data ?? []
   }
 
-  /** input_id do rolo montado (bandeja 0 por padrão). Opcionalmente exige o material. */
-  async loadedInputId(orgId: string, printerId: string, material?: string | null): Promise<string | null> {
-    const { data } = await supabaseAdmin.from('printer_loaded_filament')
+  /** input_id do rolo montado. Sem slot = 1ª bandeja; com slot = aquela. Opcional: exige material. */
+  async loadedInputId(orgId: string, printerId: string, material?: string | null, slot?: number | null): Promise<string | null> {
+    let q = supabaseAdmin.from('printer_loaded_filament')
       .select('input_id, input:input_id(material)')
-      .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true }).limit(1).maybeSingle()
+      .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null)
+    if (slot != null) q = q.eq('slot', slot)
+    const { data } = await q.order('slot', { ascending: true }).limit(1).maybeSingle()
     if (!data) return null
     const row = data as { input_id: string; input: unknown }
     if (material) {
@@ -319,11 +323,13 @@ export class ProductionInputService {
 
   /** Soma gramas na conta da sessão aberta (só relatório — NÃO mexe no estoque,
    *  que já foi baixado pela consume da ordem). Idempotência: chamada 1×/ordem. */
-  async bumpLoadedSession(orgId: string, printerId: string, grams: number) {
+  async bumpLoadedSession(orgId: string, printerId: string, grams: number, slot?: number | null) {
     const g = Math.max(0, Number(grams) || 0)
     if (g <= 0) return
-    const { data } = await supabaseAdmin.from('printer_loaded_filament')
-      .select('id, consumed_g').eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true }).limit(1).maybeSingle()
+    let q = supabaseAdmin.from('printer_loaded_filament')
+      .select('id, consumed_g').eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null)
+    if (slot != null) q = q.eq('slot', slot)
+    const { data } = await q.order('slot', { ascending: true }).limit(1).maybeSingle()
     if (!data) return
     const cur = data as { id: string; consumed_g: number }
     await supabaseAdmin.from('printer_loaded_filament')
@@ -331,11 +337,11 @@ export class ProductionInputService {
   }
 
   /** Uso AVULSO (impressão fora de ordem): baixa o rolo montado + soma na sessão. */
-  async logManualUsage(orgId: string, printerId: string, grams: number, notes: string | null, userId: string | null) {
+  async logManualUsage(orgId: string, printerId: string, grams: number, notes: string | null, userId: string | null, slot?: number | null) {
     const g = Math.max(0, Number(grams) || 0)
     if (g <= 0) throw new BadRequestException('Informe as gramas usadas.')
-    const inputId = await this.loadedInputId(orgId, printerId)
-    if (!inputId) throw new BadRequestException('Nenhum filamento montado nesta impressora — carregue um antes de registrar uso.')
+    const inputId = await this.loadedInputId(orgId, printerId, null, slot ?? null)
+    if (!inputId) throw new BadRequestException('Nenhum filamento montado nessa bandeja — carregue um antes de registrar uso.')
     const input = await this.getOne(orgId, inputId)
     const novaQtd = Math.max(0, Math.round((Number(input.quantity) - g) * 1e6) / 1e6)
     await supabaseAdmin.from('production_input').update({
@@ -346,7 +352,7 @@ export class ProductionInputService {
       unit_cost: Number(input.cost_per_unit) || 0, reference_type: 'printer_usage', reference_id: printerId,
       notes: notes ?? 'Uso avulso na impressora', created_by: userId,
     })
-    await this.bumpLoadedSession(orgId, printerId, g)
+    await this.bumpLoadedSession(orgId, printerId, g, slot ?? null)
     return this.getLoaded(orgId, printerId)
   }
 }

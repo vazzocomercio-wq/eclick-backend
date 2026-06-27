@@ -342,8 +342,8 @@ export class ProductOsController {
   @Post('printers/:pid/filament-usage')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  filamentUsage(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { grams: number; notes?: string }) {
-    return this.inputs.logManualUsage(this.org(u), pid, Number(body?.grams), body?.notes ?? null, u.id)
+  filamentUsage(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { grams: number; notes?: string; slot?: number }) {
+    return this.inputs.logManualUsage(this.org(u), pid, Number(body?.grams), body?.notes ?? null, u.id, body?.slot ?? null)
   }
 
   @Get('profitability')
