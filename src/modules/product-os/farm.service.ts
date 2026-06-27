@@ -274,6 +274,27 @@ export class FarmService {
   }
 
   // ── estado ao vivo (lido pela tela) ───────────────────────────────
+  /** Recebe um frame JPEG da câmera (agente) e guarda como o snapshot atual da
+   *  impressora no storage (cam/{printerId}.jpg, sobrescreve). Auth por token. */
+  async ingestCamera(token: string, serial: string, imageBase64: string): Promise<{ ok: boolean; reason?: string }> {
+    if (!token) throw new UnauthorizedException('token ausente')
+    const { data: agent } = await supabaseAdmin.from('farm_agent').select('id, organization_id, status').eq('token', token).maybeSingle()
+    const a = agent as { id: string; organization_id: string; status: string } | null
+    if (!a || a.status !== 'active') throw new UnauthorizedException('agente inválido')
+    if (!serial || !imageBase64) return { ok: false, reason: 'sem imagem' }
+    const { data: pr } = await supabaseAdmin.from('production_printer')
+      .select('id').eq('organization_id', a.organization_id).eq('serial_number', serial).maybeSingle()
+    const printerId = (pr as { id: string } | null)?.id
+    if (!printerId) return { ok: false, reason: 'impressora não casada' }
+    const buf = Buffer.from(imageBase64, 'base64')
+    if (buf.length < 100) return { ok: false, reason: 'imagem vazia' }
+    const { error } = await supabaseAdmin.storage.from('product-os')
+      .upload(`cam/${printerId}.jpg`, buf, { contentType: 'image/jpeg', upsert: true })
+    if (error) { this.logger.warn(`[farm.camera] upload falhou: ${error.message}`); return { ok: false, reason: error.message } }
+    await supabaseAdmin.from('printer_status').update({ camera_at: new Date().toISOString() }).eq('printer_id', printerId)
+    return { ok: true }
+  }
+
   async status(orgId: string) {
     const { data: printers } = await supabaseAdmin.from('production_printer')
       .select('id, name, brand, model, status, serial_number').eq('organization_id', orgId).order('name')
@@ -297,6 +318,8 @@ export class FarmService {
         remaining_minutes: st?.remaining_minutes ?? null,
         ams: st?.ams ?? null, error_code: st?.error_code ?? null, error_text: st?.error_text ?? null,
         last_update: st?.updated_at ?? null,
+        camera_at: (st?.camera_at as string) ?? null,
+        camera_url: st?.camera_at ? `${(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/storage/v1/object/public/product-os/cam/${pr.id}.jpg` : null,
       }
     })
   }

@@ -22,6 +22,13 @@ export class FarmIngestController {
   ingest(@Headers('x-farm-agent-token') token: string, @Body() body: { agent_version?: string; printers?: TelemetryPrinter[] }) {
     return this.farm.ingest(token, body ?? {})
   }
+
+  @Public()
+  @Post('camera')
+  @HttpCode(HttpStatus.OK)
+  ingestCamera(@Headers('x-farm-agent-token') token: string, @Body() body: { serial: string; image_base64: string }) {
+    return this.farm.ingestCamera(token, body?.serial ?? '', body?.image_base64 ?? '')
+  }
 }
 
 /** Gerenciamento do agente + leitura do estado ao vivo (login de usuário). */
