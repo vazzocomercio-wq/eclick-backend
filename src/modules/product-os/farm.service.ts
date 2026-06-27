@@ -23,6 +23,7 @@ export interface TelemetryPrinter {
   ams?: unknown
   error_code?: string
   error_text?: string
+  light_on?: boolean
   raw?: unknown
 }
 
@@ -103,6 +104,7 @@ export class FarmService {
           progress_pct: p.progress_pct ?? null, layer_current: p.layer_current ?? null, layer_total: p.layer_total ?? null,
           nozzle_temp: p.nozzle_temp ?? null, bed_temp: p.bed_temp ?? null, remaining_minutes: p.remaining_minutes ?? null,
           ams: p.ams ?? null, error_code: p.error_code ?? null, error_text: p.error_text ?? null,
+          light_on: p.light_on ?? null,
           raw: p.raw ?? null, updated_at: now,
         }, { onConflict: 'printer_id' })
         matched++
@@ -317,6 +319,7 @@ export class FarmService {
         nozzle_temp: st?.nozzle_temp ?? null, bed_temp: st?.bed_temp ?? null,
         remaining_minutes: st?.remaining_minutes ?? null,
         ams: st?.ams ?? null, error_code: st?.error_code ?? null, error_text: st?.error_text ?? null,
+        light_on: (st?.light_on as boolean | null) ?? null,
         last_update: st?.updated_at ?? null,
         camera_at: (st?.camera_at as string) ?? null,
         camera_url: st?.camera_at ? `${(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/storage/v1/object/public/product-os/cam/${pr.id}.jpg` : null,
