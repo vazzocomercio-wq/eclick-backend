@@ -195,6 +195,13 @@ export class ProductOsController {
     return this.parts.adjustStock(this.org(u), pid, Number(body?.quantity), u.id)
   }
 
+  @Post('parts/:pid/stock-out')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  partStockOut(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { quantity: number; reason?: string }) {
+    return this.parts.partStockOut(this.org(u), pid, Number(body?.quantity), body?.reason ?? '', u.id)
+  }
+
   @Get('parts/:pid/versions')
   @RequirePermission('products.view')
   listPartVersions(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.parts.listPartVersions(this.org(u), pid) }

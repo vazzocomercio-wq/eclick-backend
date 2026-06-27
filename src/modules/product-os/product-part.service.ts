@@ -19,10 +19,12 @@ const CHANNEL_ALLIN_FEE_PCT: Record<string, number> = {
 }
 
 const ASSEMBLY_TRANSITIONS: Record<string, string[]> = {
-  fila:      ['montando', 'cancelado'],
-  montando:  ['concluido', 'cancelado'],
-  concluido: [],
-  cancelado: [],
+  fila:       ['montando', 'cancelado'],
+  montando:   ['embalado', 'cancelado'],   // montou → embala
+  embalado:   ['disponivel'],               // embalado → disponível p/ venda
+  disponivel: [],
+  concluido:  [],                           // legado (montagens antigas)
+  cancelado:  [],
 }
 
 interface PartRef { id: string; name: string; qty_per_product: number; stock_qty: number; reserved_qty: number }
@@ -233,6 +235,23 @@ export class ProductPartService {
     this.logger.log(`[peca] +${q} prontas em ${partId.slice(0, 8)} (estoque=${novo})`)
   }
 
+  /** Saída de peças prontas pra SAC/reposição/uso avulso (baixa N do estoque com motivo). */
+  async partStockOut(orgId: string, partId: string, qty: number, reason: string, userId: string | null) {
+    const q = Math.max(0, Number(qty) || 0)
+    if (q <= 0) throw new BadRequestException('Quantidade inválida')
+    const part = await this.getPart(orgId, partId)
+    const disponivel = this.round2(Number(part.stock_qty) - Number(part.reserved_qty))
+    if (q > disponivel) throw new BadRequestException(`Só há ${disponivel} peça(s) disponível(is) (fora as reservadas).`)
+    const novo = this.round2(Number(part.stock_qty) - q)
+    await supabaseAdmin.from('product_dev_part').update({ stock_qty: novo, updated_at: new Date().toISOString() }).eq('id', partId).eq('organization_id', orgId)
+    await supabaseAdmin.from('product_dev_part_movement').insert({
+      organization_id: orgId, part_id: partId, movement_type: 'consume', quantity: q, balance_after: novo,
+      reference_type: 'sac', reference_id: null, notes: reason?.trim() || 'Saída p/ reposição/SAC', created_by: userId,
+    })
+    this.logger.log(`[peca] -${q} saída SAC/reposição em ${partId.slice(0, 8)} (estoque=${novo})`)
+    return { ...part, stock_qty: novo }
+  }
+
   /** Ajuste manual do estoque de peças (define o valor absoluto). */
   async adjustStock(orgId: string, partId: string, newQty: number, userId: string | null) {
     const part = await this.getPart(orgId, partId)
@@ -385,13 +404,25 @@ export class ProductPartService {
     if (!allowed.includes(to)) throw new BadRequestException(`Transição inválida: '${from}' → '${to}'`)
     const patch: Record<string, unknown> = { status: to }
     if (to === 'montando' && !(asm as { started_at?: string }).started_at) patch.started_at = new Date().toISOString()
-    if (to === 'concluido') patch.completed_at = new Date().toISOString()
+    if (to === 'disponivel' || to === 'concluido') patch.completed_at = new Date().toISOString()
     await supabaseAdmin.from('assembly_order').update(patch).eq('id', aid).eq('organization_id', orgId)
 
     if (to === 'cancelado') {
       await this.releaseParts(orgId, 'assembly_order', aid)
       await this.inputs.release(orgId, 'assembly_order', aid)
     }
+    // embalado: o produto foi montado → consome as peças prontas + insumos de montagem
+    if (to === 'embalado') {
+      await this.consumeParts(orgId, 'assembly_order', aid)
+      await this.inputs.consume(orgId, 'assembly_order', aid)
+      await this.emit(orgId, asm.product_dev_id, 'assembly_packed' as string, { assembly_order_id: aid, qty: asm.quantity }, userId)
+    }
+    // disponível: produto pronto p/ venda → credita estoque vendável
+    if (to === 'disponivel') {
+      await this.creditProductStock(orgId, asm)
+      await this.emit(orgId, asm.product_dev_id, 'assembly_completed' as string, { assembly_order_id: aid, qty: asm.quantity }, userId)
+    }
+    // legado: montagens antigas que iam direto p/ 'concluido' (consome + credita)
     if (to === 'concluido') {
       await this.consumeParts(orgId, 'assembly_order', aid)
       await this.inputs.consume(orgId, 'assembly_order', aid)

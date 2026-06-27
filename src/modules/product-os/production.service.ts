@@ -26,6 +26,19 @@ const ORDER_TRANSITIONS: Record<string, string[]> = {
   disponivel:  [],
   cancelado:   [],
 }
+// OP de PEÇA termina em 'pronta' (vira estoque de peça → montagem/SAC/reposição),
+// não passa por Embalado/Disponível (peça não se embala; o PRODUTO é que embala).
+const PART_ORDER_TRANSITIONS: Record<string, string[]> = {
+  fila:        ['imprimindo', 'cancelado'],
+  imprimindo:  ['pausado', 'falhou', 'acabamento', 'cancelado'],
+  pausado:     ['imprimindo', 'cancelado'],
+  falhou:      ['reimpressao', 'cancelado'],
+  reimpressao: ['imprimindo', 'cancelado'],
+  acabamento:  ['qualidade', 'cancelado'],
+  qualidade:   ['pronta', 'falhou'],
+  pronta:      [],
+  cancelado:   [],
+}
 
 interface VersionMetrics { versionId: string | null; weight_g: number | null; print_time_minutes: number | null; material: string | null }
 
@@ -275,23 +288,26 @@ export class ProductionService {
     const order = await this.getOrder(orgId, oid)
     const from = (order as { status: string }).status
     if (from === to) return order
-    const allowed = ORDER_TRANSITIONS[from] ?? []
+    const partId = (order as { part_id: string | null }).part_id ?? null
+    const transitions = partId ? PART_ORDER_TRANSITIONS : ORDER_TRANSITIONS
+    const allowed = transitions[from] ?? []
     if (!allowed.includes(to)) throw new BadRequestException(`Transição inválida: '${from}' → '${to}'`)
 
+    // OP de peça conclui em 'pronta' (vira estoque de peça); produto inteiro em 'disponivel'.
+    const completionState = partId ? 'pronta' : 'disponivel'
     const patch: Record<string, unknown> = { status: to }
     if (to === 'imprimindo' && !(order as { started_at: string | null }).started_at) patch.started_at = new Date().toISOString()
-    if (to === 'disponivel') patch.completed_at = new Date().toISOString()
+    if (to === completionState) patch.completed_at = new Date().toISOString()
 
     await supabaseAdmin.from('production_order').update(patch).eq('id', oid).eq('organization_id', orgId)
 
     const devId = (order as { product_dev_id: string }).product_dev_id
-    const partId = (order as { part_id: string | null }).part_id ?? null
     if (to === 'acabamento') await this.markUnitsProduced(orgId, oid)   // peças físicas existem
     if (to === 'cancelado') {
       await this.inputs.release(orgId, 'production_order', oid)
     }
-    if (to === 'disponivel') {
-      // baixa insumos + alimenta estoque de produto acabado.
+    if (to === completionState) {
+      // baixa insumos + alimenta estoque (de peça OU de produto acabado).
       // Só o peso REAL medido do filamento sobrepõe a reserva; sem medição,
       // consome o reservado (que já inclui a perda do BOM). O estimado NÃO
       // sobrepõe — senão zeraria a perda da composição.
