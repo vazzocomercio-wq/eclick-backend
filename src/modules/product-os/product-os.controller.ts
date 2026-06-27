@@ -315,6 +315,37 @@ export class ProductOsController {
   @RequirePermission('products.update')
   updatePrinter(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: Partial<Printer>) { return this.printers.update(this.org(u), pid, body) }
 
+  // ── filamento carregado na impressora (rastreio por rolo) ─────────
+  @Get('printers/:pid/loaded-filament')
+  @RequirePermission('products.view')
+  getLoaded(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.inputs.getLoaded(this.org(u), pid) }
+
+  @Get('printers/:pid/filament-history')
+  @RequirePermission('products.view')
+  filamentHistory(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.inputs.loadHistory(this.org(u), pid) }
+
+  @Post('printers/:pid/load-filament')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  loadFilament(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { input_id: string; slot?: number; loaded_g?: number | null }) {
+    if (!body?.input_id) throw new BadRequestException('Escolha o filamento (insumo).')
+    return this.inputs.loadFilament(this.org(u), pid, body.input_id, body.slot ?? 0, body.loaded_g ?? null, u.id)
+  }
+
+  @Post('printers/:pid/unload-filament')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  unloadFilament(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { slot?: number }) {
+    return this.inputs.unloadFilament(this.org(u), pid, body?.slot ?? 0, u.id)
+  }
+
+  @Post('printers/:pid/filament-usage')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  filamentUsage(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { grams: number; notes?: string }) {
+    return this.inputs.logManualUsage(this.org(u), pid, Number(body?.grams), body?.notes ?? null, u.id)
+  }
+
   @Get('profitability')
   @RequirePermission('products.view')
   profitability(@ReqUser() u: ReqUserPayload) { return this.production.profitability(this.org(u)) }

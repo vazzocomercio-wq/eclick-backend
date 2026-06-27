@@ -213,8 +213,16 @@ export class ProductionService {
       }
       if (firstFilament) await supabaseAdmin.from('production_order').update({ reservation_id: firstFilament }).eq('id', order.id)
     } else if (estFilament && estFilament > 0) {
-      const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
-      if (r) await supabaseAdmin.from('production_order').update({ reservation_id: r.inputId }).eq('id', order.id)
+      // se a impressora tem um rolo MONTADO, reserva DELE (consumo vai pro rolo real,
+      // não num chute pelo material); senão, fallback do filamento por material/peso.
+      const loadedId = body.printer_id ? await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material) : null
+      if (loadedId) {
+        const ok = await this.inputs.reserveInput(orgId, loadedId, estFilament, 'production_order', order.id)
+        if (ok) await supabaseAdmin.from('production_order').update({ reservation_id: loadedId }).eq('id', order.id)
+      } else {
+        const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
+        if (r) await supabaseAdmin.from('production_order').update({ reservation_id: r.inputId }).eq('id', order.id)
+      }
     }
     await this.emit(orgId, body.product_dev_id, 'production_order_created', { production_order_id: order.id, qty }, userId)
     return this.getOrder(orgId, order.id)
@@ -245,6 +253,10 @@ export class ProductionService {
       // sobrepõe — senão zeraria a perda da composição.
       const actual = (order as { actual_filament_g: number | null }).actual_filament_g ?? undefined
       await this.inputs.consume(orgId, 'production_order', oid, actual ?? undefined)
+      // soma o filamento usado na conta do rolo montado na impressora (relatório por rolo)
+      const printerId = (order as { printer_id: string | null }).printer_id
+      const gUsed = (order as { actual_filament_g: number | null }).actual_filament_g ?? (order as { estimated_filament_g: number | null }).estimated_filament_g
+      if (printerId && gUsed) await this.inputs.bumpLoadedSession(orgId, printerId, Number(gUsed))
       if (partId) {
         // OP de PEÇA → credita o estoque de peças prontas (não o produto acabado)
         await this.parts.creditFromOrder(orgId, partId, Number((order as { quantity: number }).quantity) || 0, oid, userId)

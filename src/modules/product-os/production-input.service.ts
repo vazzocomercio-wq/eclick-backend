@@ -250,4 +250,103 @@ export class ProductionInputService {
     if (!data) throw new NotFoundException('Insumo não encontrado')
     return data as ProductionInput
   }
+
+  // ══ Filamento carregado na impressora (rastreio por rolo) ══════════
+
+  /** Monta um filamento na impressora: fecha a sessão anterior (se houver) e
+   *  abre uma nova. A partir daí, o consumo daquela máquina debita ESTE rolo. */
+  async loadFilament(orgId: string, printerId: string, inputId: string, slot: number, loadedG: number | null, userId: string | null) {
+    const input = await this.getOne(orgId, inputId)
+    if (input.kind !== 'filamento') throw new BadRequestException('Só filamento pode ser carregado na impressora.')
+    if (!input.is_active) throw new BadRequestException('Esse insumo está inativo.')
+    const s = Math.max(0, Math.floor(Number(slot) || 0))
+    // fecha a sessão aberta dessa bandeja
+    await supabaseAdmin.from('printer_loaded_filament')
+      .update({ unloaded_at: new Date().toISOString() })
+      .eq('organization_id', orgId).eq('printer_id', printerId).eq('slot', s).is('unloaded_at', null)
+    const { data, error } = await supabaseAdmin.from('printer_loaded_filament').insert({
+      organization_id: orgId, printer_id: printerId, input_id: inputId, slot: s,
+      loaded_g: loadedG ?? (Number(input.spool_weight_g) || null), loaded_by: userId,
+    }).select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao carregar filamento: ${error?.message ?? 'sem dados'}`)
+    return this.getLoaded(orgId, printerId)
+  }
+
+  /** Tira o filamento da bandeja (fecha a sessão, sem montar outro). */
+  async unloadFilament(orgId: string, printerId: string, slot: number, _userId: string | null) {
+    const s = Math.max(0, Math.floor(Number(slot) || 0))
+    await supabaseAdmin.from('printer_loaded_filament')
+      .update({ unloaded_at: new Date().toISOString() })
+      .eq('organization_id', orgId).eq('printer_id', printerId).eq('slot', s).is('unloaded_at', null)
+    return this.getLoaded(orgId, printerId)
+  }
+
+  /** Filamento(s) montado(s) agora na impressora, com dados do insumo. */
+  async getLoaded(orgId: string, printerId: string) {
+    const { data, error } = await supabaseAdmin.from('printer_loaded_filament')
+      .select('id, slot, loaded_at, loaded_g, consumed_g, input:input_id(id, name, material, color, color_hex, unit, quantity, reserved_quantity, cost_per_unit, spool_weight_g)')
+      .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true })
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return (data ?? []).map(r => {
+      const x = r as { input: unknown }
+      const inp = (Array.isArray(x.input) ? x.input[0] : x.input) as { quantity: number; reserved_quantity: number } | null
+      return { ...r, input: inp, available: inp ? Math.round((Number(inp.quantity) - Number(inp.reserved_quantity)) * 1e6) / 1e6 : 0 }
+    })
+  }
+
+  /** Histórico de rolos montados nesta impressora (rendimento por rolo). */
+  async loadHistory(orgId: string, printerId: string) {
+    const { data, error } = await supabaseAdmin.from('printer_loaded_filament')
+      .select('id, slot, loaded_at, unloaded_at, loaded_g, consumed_g, input:input_id(name, color, cost_per_unit)')
+      .eq('organization_id', orgId).eq('printer_id', printerId).order('loaded_at', { ascending: false }).limit(50)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return data ?? []
+  }
+
+  /** input_id do rolo montado (bandeja 0 por padrão). Opcionalmente exige o material. */
+  async loadedInputId(orgId: string, printerId: string, material?: string | null): Promise<string | null> {
+    const { data } = await supabaseAdmin.from('printer_loaded_filament')
+      .select('input_id, input:input_id(material)')
+      .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true }).limit(1).maybeSingle()
+    if (!data) return null
+    const row = data as { input_id: string; input: unknown }
+    if (material) {
+      const inp = (Array.isArray(row.input) ? row.input[0] : row.input) as { material: string | null } | null
+      if (inp?.material && inp.material.toUpperCase() !== material.toUpperCase()) return null
+    }
+    return row.input_id
+  }
+
+  /** Soma gramas na conta da sessão aberta (só relatório — NÃO mexe no estoque,
+   *  que já foi baixado pela consume da ordem). Idempotência: chamada 1×/ordem. */
+  async bumpLoadedSession(orgId: string, printerId: string, grams: number) {
+    const g = Math.max(0, Number(grams) || 0)
+    if (g <= 0) return
+    const { data } = await supabaseAdmin.from('printer_loaded_filament')
+      .select('id, consumed_g').eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null).order('slot', { ascending: true }).limit(1).maybeSingle()
+    if (!data) return
+    const cur = data as { id: string; consumed_g: number }
+    await supabaseAdmin.from('printer_loaded_filament')
+      .update({ consumed_g: Math.round((Number(cur.consumed_g) + g) * 1e6) / 1e6 }).eq('id', cur.id)
+  }
+
+  /** Uso AVULSO (impressão fora de ordem): baixa o rolo montado + soma na sessão. */
+  async logManualUsage(orgId: string, printerId: string, grams: number, notes: string | null, userId: string | null) {
+    const g = Math.max(0, Number(grams) || 0)
+    if (g <= 0) throw new BadRequestException('Informe as gramas usadas.')
+    const inputId = await this.loadedInputId(orgId, printerId)
+    if (!inputId) throw new BadRequestException('Nenhum filamento montado nesta impressora — carregue um antes de registrar uso.')
+    const input = await this.getOne(orgId, inputId)
+    const novaQtd = Math.max(0, Math.round((Number(input.quantity) - g) * 1e6) / 1e6)
+    await supabaseAdmin.from('production_input').update({
+      quantity: novaQtd, last_movement_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }).eq('id', inputId).eq('organization_id', orgId)
+    await supabaseAdmin.from('production_input_movement').insert({
+      organization_id: orgId, input_id: inputId, movement_type: 'consume', quantity: g, balance_after: novaQtd,
+      unit_cost: Number(input.cost_per_unit) || 0, reference_type: 'printer_usage', reference_id: printerId,
+      notes: notes ?? 'Uso avulso na impressora', created_by: userId,
+    })
+    await this.bumpLoadedSession(orgId, printerId, g)
+    return this.getLoaded(orgId, printerId)
+  }
 }
