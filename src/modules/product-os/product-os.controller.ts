@@ -362,6 +362,14 @@ export class ProductOsController {
     return this.svc.parseSlicer(body?.text ?? '')
   }
 
+  @Post('parse-3mf')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  parse3mf(@ReqUser() u: ReqUserPayload, @Body() body: { url: string }) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.parse3mf(body?.url ?? '')
+  }
+
   @Post('upload-url')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

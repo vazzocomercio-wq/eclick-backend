@@ -42,6 +42,7 @@
     "axios": "^1.15.2",
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^17.4.2",
+    "fflate": "^0.8.3",
     "multer": "^2.1.1",
     "node-forge": "^1.4.0",
     "node-sped-nfe": "^1.2.52",
