@@ -228,6 +228,19 @@ export class ProductionService {
     return this.getOrder(orgId, order.id)
   }
 
+  /** Atualiza campos editáveis da ordem (ex: peso REAL pesado na balança).
+   *  O peso real sobrepõe o estimado no custo quando a OP chega em 'disponível'. */
+  async updateOrder(orgId: string, oid: string, patch: { actual_filament_g?: number | null; actual_time_minutes?: number | null; notes?: string | null }) {
+    const safe: Record<string, unknown> = {}
+    if ('actual_filament_g' in patch) safe.actual_filament_g = patch.actual_filament_g != null && Number(patch.actual_filament_g) > 0 ? this.round2(Number(patch.actual_filament_g)) : null
+    if ('actual_time_minutes' in patch) safe.actual_time_minutes = patch.actual_time_minutes != null && Number(patch.actual_time_minutes) > 0 ? Math.round(Number(patch.actual_time_minutes)) : null
+    if ('notes' in patch) safe.notes = patch.notes ?? null
+    if (!Object.keys(safe).length) return this.getOrder(orgId, oid)
+    const { error } = await supabaseAdmin.from('production_order').update(safe).eq('id', oid).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro ao atualizar ordem: ${error.message}`)
+    return this.getOrder(orgId, oid)
+  }
+
   async transitionOrder(orgId: string, oid: string, to: string, userId: string | null) {
     const order = await this.getOrder(orgId, oid)
     const from = (order as { status: string }).status

@@ -104,6 +104,12 @@ export class ProductOsController {
     return this.production.transitionOrder(this.org(u), oid, body.status, u.id)
   }
 
+  @Patch('production-orders/:oid')
+  @RequirePermission('products.update')
+  updateOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string, @Body() body: { actual_filament_g?: number | null; actual_time_minutes?: number | null; notes?: string | null }) {
+    return this.production.updateOrder(this.org(u), oid, body)
+  }
+
   @Get('production-orders/:oid/jobs')
   @RequirePermission('products.view')
   listJobs(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string) { return this.production.listJobs(this.org(u), oid) }

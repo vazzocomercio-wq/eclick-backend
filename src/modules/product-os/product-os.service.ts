@@ -204,8 +204,8 @@ export class ProductOsService {
    *  `Metadata/slice_info.config` traz peso/tempo/filamento (SÓ se foi fatiado),
    *  e `Metadata/plate_*.json` traz o bounding box (largura/profundidade) mesmo
    *  SEM fatiar. STL não tem nada disso (só geometria). */
-  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; width_mm: number | null; depth_mm: number | null; found: boolean }> {
-    const none = { weight_g: null, print_time_minutes: null, material: null, width_mm: null, depth_mm: null, found: false }
+  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; width_mm: number | null; depth_mm: number | null; height_mm: number | null; found: boolean }> {
+    const none = { weight_g: null, print_time_minutes: null, material: null, width_mm: null, depth_mm: null, height_mm: null, found: false }
     if (!url?.trim()) throw new BadRequestException('URL do arquivo ausente.')
     if (!/\.3mf($|\?)/i.test(url)) return none   // STL/STEP/etc não têm metadados
     let buf: Uint8Array
@@ -259,12 +259,23 @@ export class ProductOsService {
       } catch { /* ignora plate json corrompido */ }
     }
 
+    // ── altura (Z) — header do gcode fatiado: "; max_z_height: NN" ──
+    let height: number | null = null
+    const gcodeKey = Object.keys(files).find(k => /plate_\d+\.gcode$/i.test(k))
+    if (gcodeKey) {
+      try {
+        const head = strFromU8(files[gcodeKey].slice(0, 20000))   // só o cabeçalho
+        const m = head.match(/;\s*max_z_height:\s*([\d.]+)/i)
+        if (m) { const h = Math.round(parseFloat(m[1]) * 10) / 10; if (h > 0) height = h }
+      } catch { /* ignora gcode corrompido */ }
+    }
+
     return {
       weight_g: grams > 0 ? Math.round(grams * 100) / 100 : null,
       print_time_minutes: seconds > 0 ? Math.round(seconds / 60) : null,
       material: mats[0] ?? null,
-      width_mm: width, depth_mm: depth,
-      found: !!(grams > 0 || seconds > 0 || width || depth),
+      width_mm: width, depth_mm: depth, height_mm: height,
+      found: !!(grams > 0 || seconds > 0 || width || depth || height),
     }
   }
 
