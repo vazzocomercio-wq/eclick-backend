@@ -188,7 +188,7 @@ export class ProductionService {
     const nextNumber = seq ? Number((seq as { order_number: number }).order_number) + 1 : 1
 
     const { data, error } = await supabaseAdmin.from('production_order').insert({
-      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? null, part_id: partId,
+      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? metrics.versionId ?? null, part_id: partId,
       order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null,
       estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
     }).select('*').maybeSingle()

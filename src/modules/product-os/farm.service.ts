@@ -155,9 +155,9 @@ export class FarmService {
   /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
   async sendOrderToPrinter(orgId: string, orderId: string, userId: string | null) {
     const { data: order } = await supabaseAdmin.from('production_order')
-      .select('id, printer_id, version_id').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      .select('id, printer_id, version_id, part_id').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
     if (!order) throw new BadRequestException('Ordem não encontrada')
-    const o = order as { printer_id: string | null; version_id: string | null }
+    const o = order as { printer_id: string | null; version_id: string | null; part_id: string | null }
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
     let fileUrl: string | null = null, fileName = 'job.3mf'
     if (o.version_id) {
@@ -165,7 +165,16 @@ export class FarmService {
       fileUrl = (v as { file_url: string | null } | null)?.file_url ?? null
       fileName = `v${(v as { version_number: number } | null)?.version_number ?? 1}.3mf`
     }
-    if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora.')
+    // fallback: OP de peça sem version_id → pega a versão mais recente da peça que tenha arquivo
+    if (!fileUrl && o.part_id) {
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, version_number')
+        .eq('part_id', o.part_id).not('file_url', 'is', null).order('created_at', { ascending: false }).limit(1).maybeSingle()
+      fileUrl = (v as { file_url: string | null } | null)?.file_url ?? null
+      fileName = `peca-v${(v as { version_number: number } | null)?.version_number ?? 1}.3mf`
+    }
+    if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o .3mf fatiado na peça.')
+    // só .3mf imprime via FTP — STL não serve pra impressora
+    if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão não é .3mf fatiado — a impressora só aceita .3mf. Suba o arquivo fatiado do Bambu.')
     return this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
   }
 
