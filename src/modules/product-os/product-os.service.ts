@@ -200,13 +200,14 @@ export class ProductOsService {
     }
   }
 
-  /** Lê peso/tempo/material de dentro de um .3mf FATIADO (projeto do Bambu
-   *  Studio). O 3mf é um ZIP; `Metadata/slice_info.config` traz peso, tempo
-   *  (prediction em s) e o filamento por prato. STL não tem isso (só geometria). */
-  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; found: boolean }> {
-    const none = { weight_g: null, print_time_minutes: null, material: null, found: false }
+  /** Lê dados de dentro de um .3mf (projeto do Bambu Studio). O 3mf é um ZIP:
+   *  `Metadata/slice_info.config` traz peso/tempo/filamento (SÓ se foi fatiado),
+   *  e `Metadata/plate_*.json` traz o bounding box (largura/profundidade) mesmo
+   *  SEM fatiar. STL não tem nada disso (só geometria). */
+  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; width_mm: number | null; depth_mm: number | null; found: boolean }> {
+    const none = { weight_g: null, print_time_minutes: null, material: null, width_mm: null, depth_mm: null, found: false }
     if (!url?.trim()) throw new BadRequestException('URL do arquivo ausente.')
-    if (!/\.3mf($|\?)/i.test(url)) return none   // STL/STEP/etc não têm dados de fatiamento
+    if (!/\.3mf($|\?)/i.test(url)) return none   // STL/STEP/etc não têm metadados
     let buf: Uint8Array
     try {
       const res = await fetch(url)
@@ -216,36 +217,54 @@ export class ProductOsService {
 
     let files: Record<string, Uint8Array>
     try { files = unzipSync(buf) } catch { return none }   // não é um zip/3mf válido
-    const key = Object.keys(files).find(k => /slice_info\.config$/i.test(k))
-    if (!key) return none   // 3mf sem fatiamento (exporte o projeto fatiado do Bambu)
 
-    let j: { config?: { plate?: unknown } }
-    try { j = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false }).parse(strFromU8(files[key])) }
-    catch { return none }
-    const pRaw = j?.config?.plate
-    const plates: Array<Record<string, unknown>> = Array.isArray(pRaw) ? pRaw as Array<Record<string, unknown>> : (pRaw ? [pRaw as Record<string, unknown>] : [])
-
+    // ── peso/tempo/material (só se fatiado) — Metadata/slice_info.config ──
     let grams = 0, seconds = 0; const mats: string[] = []
-    for (const pl of plates) {
-      const mdRaw = pl.metadata
-      const md: Array<Record<string, string>> = Array.isArray(mdRaw) ? mdRaw as Array<Record<string, string>> : (mdRaw ? [mdRaw as Record<string, string>] : [])
-      const getMd = (k: string): string | undefined => md.find(m => m['@_key'] === k)?.['@_value']
-      const plateW = Number(getMd('weight'))
-      if (Number.isFinite(plateW) && plateW > 0) grams += plateW
-      const pr = Number(getMd('prediction'))
-      if (Number.isFinite(pr) && pr > 0) seconds += pr
-      const fRaw = pl.filament
-      const fils: Array<Record<string, string>> = Array.isArray(fRaw) ? fRaw as Array<Record<string, string>> : (fRaw ? [fRaw as Record<string, string>] : [])
-      for (const f of fils) {
-        if (f['@_type']) mats.push(String(f['@_type']).toUpperCase())
-        if (!(Number.isFinite(plateW) && plateW > 0)) { const ug = Number(f['@_used_g']); if (Number.isFinite(ug) && ug > 0) grams += ug }
-      }
+    const sliceKey = Object.keys(files).find(k => /slice_info\.config$/i.test(k))
+    if (sliceKey) {
+      try {
+        const j = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false }).parse(strFromU8(files[sliceKey])) as { config?: { plate?: unknown } }
+        const pRaw = j?.config?.plate
+        const plates: Array<Record<string, unknown>> = Array.isArray(pRaw) ? pRaw as Array<Record<string, unknown>> : (pRaw ? [pRaw as Record<string, unknown>] : [])
+        for (const pl of plates) {
+          const mdRaw = pl.metadata
+          const md: Array<Record<string, string>> = Array.isArray(mdRaw) ? mdRaw as Array<Record<string, string>> : (mdRaw ? [mdRaw as Record<string, string>] : [])
+          const getMd = (k: string): string | undefined => md.find(m => m['@_key'] === k)?.['@_value']
+          const plateW = Number(getMd('weight'))
+          if (Number.isFinite(plateW) && plateW > 0) grams += plateW
+          const pr = Number(getMd('prediction'))
+          if (Number.isFinite(pr) && pr > 0) seconds += pr
+          const fRaw = pl.filament
+          const fils: Array<Record<string, string>> = Array.isArray(fRaw) ? fRaw as Array<Record<string, string>> : (fRaw ? [fRaw as Record<string, string>] : [])
+          for (const f of fils) {
+            if (f['@_type']) mats.push(String(f['@_type']).toUpperCase())
+            if (!(Number.isFinite(plateW) && plateW > 0)) { const ug = Number(f['@_used_g']); if (Number.isFinite(ug) && ug > 0) grams += ug }
+          }
+        }
+      } catch { /* ignora slice info corrompida */ }
     }
+
+    // ── footprint (largura/profundidade) — Metadata/plate_*.json bbox_all ──
+    let width: number | null = null, depth: number | null = null
+    const plateJsonKey = Object.keys(files).find(k => /plate_\d+\.json$/i.test(k))
+    if (plateJsonKey) {
+      try {
+        const pj = JSON.parse(strFromU8(files[plateJsonKey])) as { bbox_all?: number[]; bbox_objects?: Array<{ bbox?: number[] }> }
+        const bb = pj.bbox_all ?? pj.bbox_objects?.[0]?.bbox   // [minX, minY, maxX, maxY]
+        if (Array.isArray(bb) && bb.length >= 4) {
+          const w = Math.round((bb[2] - bb[0]) * 10) / 10, d = Math.round((bb[3] - bb[1]) * 10) / 10
+          if (w > 0) width = w
+          if (d > 0) depth = d
+        }
+      } catch { /* ignora plate json corrompido */ }
+    }
+
     return {
       weight_g: grams > 0 ? Math.round(grams * 100) / 100 : null,
       print_time_minutes: seconds > 0 ? Math.round(seconds / 60) : null,
       material: mats[0] ?? null,
-      found: true,
+      width_mm: width, depth_mm: depth,
+      found: !!(grams > 0 || seconds > 0 || width || depth),
     }
   }
 
