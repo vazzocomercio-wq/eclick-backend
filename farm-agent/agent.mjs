@@ -13,7 +13,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.3.0'
+const AGENT_VERSION = '1.3.1'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -122,9 +122,16 @@ async function dispatchPrint(serial, payload) {
   const { Client } = await import('basic-ftp')
   const name = (payload.file_name || 'job.3mf').replace(/[^\w.\-]/g, '_')
   const tmp = path.join(os.tmpdir(), `eclick-${Date.now()}-${name}`)
-  const res = await fetch(payload.file_url)
-  if (!res.ok) throw new Error(`download do arquivo falhou (HTTP ${res.status})`)
-  const fileBuf = Buffer.from(await res.arrayBuffer())
+  // download com timeout (arquivo .3mf pode ser grande e a conexão lenta) —
+  // sem isso um download travado penduraria o comando pra sempre (status 'sent')
+  const ac = new AbortController()
+  const dlTimer = setTimeout(() => ac.abort(), 180000)
+  let fileBuf
+  try {
+    const res = await fetch(payload.file_url, { signal: ac.signal })
+    if (!res.ok) throw new Error(`download do arquivo falhou (HTTP ${res.status})`)
+    fileBuf = Buffer.from(await res.arrayBuffer())
+  } catch (e) { throw new Error(`download do .3mf falhou/expirou: ${e.message}`) } finally { clearTimeout(dlTimer) }
   const md5 = crypto.createHash('md5').update(fileBuf).digest('hex')   // firmware exige o md5 do arquivo
   fs.writeFileSync(tmp, fileBuf)
   const ftp = new Client(15000)
