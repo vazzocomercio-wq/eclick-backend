@@ -308,17 +308,29 @@ export class ProductionInputService {
   /** input_id do rolo montado. Sem slot = 1ª bandeja; com slot = aquela. Opcional: exige material. */
   async loadedInputId(orgId: string, printerId: string, material?: string | null, slot?: number | null): Promise<string | null> {
     let q = supabaseAdmin.from('printer_loaded_filament')
-      .select('input_id, input:input_id(material)')
+      .select('input_id, slot, input:input_id(material)')
       .eq('organization_id', orgId).eq('printer_id', printerId).is('unloaded_at', null)
     if (slot != null) q = q.eq('slot', slot)
-    const { data } = await q.order('slot', { ascending: true }).limit(1).maybeSingle()
-    if (!data) return null
-    const row = data as { input_id: string; input: unknown }
-    if (material) {
-      const inp = (Array.isArray(row.input) ? row.input[0] : row.input) as { material: string | null } | null
-      if (inp?.material && inp.material.toUpperCase() !== material.toUpperCase()) return null
+    const { data } = await q.order('slot', { ascending: true })
+    const rows = (data ?? []) as Array<{ input_id: string; slot: number; input: unknown }>
+    if (!rows.length) return null
+    const matOf = (r: { input: unknown }) => {
+      const inp = (Array.isArray(r.input) ? r.input[0] : r.input) as { material: string | null } | null
+      return inp?.material ? inp.material.toUpperCase() : null
     }
-    return row.input_id
+    if (material) {
+      // procura o rolo montado que BATE o material (em qualquer slot), não só o 1º
+      const match = rows.find(r => matOf(r) === material.toUpperCase())
+      return match ? match.input_id : null
+    }
+    return rows[0].input_id
+  }
+
+  /** Valida que um insumo está realmente montado na impressora (no slot, se dado). */
+  async isLoadedOnPrinter(orgId: string, printerId: string, inputId: string): Promise<boolean> {
+    const { data } = await supabaseAdmin.from('printer_loaded_filament')
+      .select('id').eq('organization_id', orgId).eq('printer_id', printerId).eq('input_id', inputId).is('unloaded_at', null).limit(1).maybeSingle()
+    return !!data
   }
 
   /** Soma gramas na conta da sessão aberta (só relatório — NÃO mexe no estoque,

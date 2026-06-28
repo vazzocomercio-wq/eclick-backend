@@ -182,7 +182,7 @@ export class ProductionService {
     return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     const partId = body.part_id ?? null
     // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
@@ -226,16 +226,21 @@ export class ProductionService {
       }
       if (firstFilament) await supabaseAdmin.from('production_order').update({ reservation_id: firstFilament }).eq('id', order.id)
     } else if (estFilament && estFilament > 0) {
-      // se a impressora tem um rolo MONTADO, reserva DELE (consumo vai pro rolo real,
-      // não num chute pelo material); senão, fallback do filamento por material/peso.
-      const loadedId = body.printer_id ? await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material) : null
-      if (loadedId) {
-        const ok = await this.inputs.reserveInput(orgId, loadedId, estFilament, 'production_order', order.id)
-        if (ok) await supabaseAdmin.from('production_order').update({ reservation_id: loadedId }).eq('id', order.id)
-      } else {
-        const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
-        if (r) await supabaseAdmin.from('production_order').update({ reservation_id: r.inputId }).eq('id', order.id)
+      // 1) rolo ESCOLHIDO pelo usuário (cor/slot exato) — só se estiver montado na impressora;
+      // 2) senão, rolo MONTADO que casa o material; 3) senão, fallback por material/peso.
+      let reservedFrom: string | null = null
+      if (body.loaded_input_id && body.printer_id && await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, body.loaded_input_id)) {
+        if (await this.inputs.reserveInput(orgId, body.loaded_input_id, estFilament, 'production_order', order.id)) reservedFrom = body.loaded_input_id
       }
+      if (!reservedFrom && body.printer_id) {
+        const loadedId = await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material)
+        if (loadedId && await this.inputs.reserveInput(orgId, loadedId, estFilament, 'production_order', order.id)) reservedFrom = loadedId
+      }
+      if (!reservedFrom) {
+        const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
+        if (r) reservedFrom = r.inputId
+      }
+      if (reservedFrom) await supabaseAdmin.from('production_order').update({ reservation_id: reservedFrom }).eq('id', order.id)
     }
     // gera as unidades físicas (serial único por unidade; lote = esta OP)
     await this.generateUnits(orgId, order.id, nextNumber, qty, body.product_dev_id, partId).catch(() => {})
