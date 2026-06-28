@@ -160,9 +160,9 @@ export class FarmService {
   /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
   async sendOrderToPrinter(orgId: string, orderId: string, userId: string | null) {
     const { data: order } = await supabaseAdmin.from('production_order')
-      .select('id, printer_id, version_id, part_id').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      .select('id, printer_id, version_id, part_id, reservation_id').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
     if (!order) throw new BadRequestException('Ordem não encontrada')
-    const o = order as { printer_id: string | null; version_id: string | null; part_id: string | null }
+    const o = order as { printer_id: string | null; version_id: string | null; part_id: string | null; reservation_id: string | null }
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
     let fileUrl: string | null = null, fileName = 'job.3mf'
     if (o.version_id) {
@@ -180,7 +180,15 @@ export class FarmService {
     if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o .3mf fatiado na peça.')
     // só .3mf imprime via FTP — STL não serve pra impressora
     if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão não é .3mf fatiado — a impressora só aceita .3mf. Suba o arquivo fatiado do Bambu.')
-    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId }, userId)
+    // descobre o slot do AMS do filamento reservado → manda imprimir no rolo/cor certo
+    let amsMapping: number[] | undefined
+    if (o.reservation_id) {
+      const { data: lf } = await supabaseAdmin.from('printer_loaded_filament')
+        .select('slot').eq('printer_id', o.printer_id).eq('input_id', o.reservation_id).is('unloaded_at', null).limit(1).maybeSingle()
+      const slot = (lf as { slot: number } | null)?.slot
+      if (slot != null) amsMapping = [slot]
+    }
+    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ...(amsMapping ? { ams_mapping: amsMapping } : {}) }, userId)
     // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento)
     await supabaseAdmin.from('production_order')
       .update({ status: 'imprimindo', started_at: new Date().toISOString() })
