@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, UnauthorizedException } from '
 import { randomBytes } from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductionService } from './production.service'
+import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -24,6 +25,8 @@ export interface TelemetryPrinter {
   error_code?: string
   error_text?: string
   light_on?: boolean
+  /** sinal de detecção de falha vindo do agente (xcam/halt da Bambu) */
+  detection?: { failure?: boolean; reason?: string; sensitivity?: string }
   raw?: unknown
 }
 
@@ -35,7 +38,10 @@ const STALE_MS = 90_000  // sem telemetria há 90s → considera offline/stale
 export class FarmService {
   private readonly logger = new Logger(FarmService.name)
 
-  constructor(private readonly production: ProductionService) {}
+  constructor(
+    private readonly production: ProductionService,
+    private readonly bridge: ActiveBridgeClient,
+  ) {}
 
   // ── agentes ───────────────────────────────────────────────────────
   async createAgent(orgId: string, name: string): Promise<{ id: string; name: string; token: string }> {
@@ -63,7 +69,7 @@ export class FarmService {
   }
 
   // ── ingestão de telemetria (chamada PELO agente, auth por token) ──
-  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[]; command_results?: Array<{ id: string; ok: boolean; result?: string }> }): Promise<{ ok: true; matched: number; unmatched: string[]; commands: FarmCommandOut[] }> {
+  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[]; command_results?: Array<{ id: string; ok: boolean; result?: string }> }): Promise<{ ok: true; matched: number; unmatched: string[]; commands: FarmCommandOut[]; detection_config: Record<string, { enabled: boolean; sensitivity: string }> }> {
     if (!token) throw new UnauthorizedException('token ausente')
     const { data: agent } = await supabaseAdmin.from('farm_agent')
       .select('id, organization_id, status').eq('token', token).maybeSingle()
@@ -86,10 +92,17 @@ export class FarmService {
     const unmatched: string[] = []
     let matched = 0
     const finished: string[] = []
+    const failures: Array<{ printerId: string; p: TelemetryPrinter }> = []
+    const detection_config: Record<string, { enabled: boolean; sensitivity: string }> = {}
     if (printers.length) {
       const { data: bound } = await supabaseAdmin.from('production_printer')
-        .select('id, serial_number').eq('organization_id', a.organization_id).in('serial_number', serials)
+        .select('id, serial_number, ai_detection_enabled, ai_sensitivity').eq('organization_id', a.organization_id).in('serial_number', serials)
       const idBySerial = new Map((bound ?? []).map(b => [(b as { serial_number: string }).serial_number, (b as { id: string }).id]))
+      const cfgByPid = new Map((bound ?? []).map(b => {
+        const r = b as { id: string; serial_number: string; ai_detection_enabled: boolean | null; ai_sensitivity: string | null }
+        detection_config[r.serial_number] = { enabled: r.ai_detection_enabled !== false, sensitivity: r.ai_sensitivity || 'medium' }
+        return [r.id, detection_config[r.serial_number]]
+      }))
       const pids = [...idBySerial.values()]
       const { data: prev } = pids.length ? await supabaseAdmin.from('printer_status').select('printer_id, state').in('printer_id', pids) : { data: [] }
       const prevState = new Map((prev ?? []).map(s => [(s as { printer_id: string }).printer_id, (s as { state: string }).state]))
@@ -113,6 +126,8 @@ export class FarmService {
           if (before === 'printing' && p.state === 'idle') finished.push(printerId) // terminou → auto-fecha
           else await this.syncOrderState(a.organization_id, printerId, p.state ?? '').catch(() => {})
         }
+        // T1-A: vigilância de falha (só se ligada pra esta impressora)
+        if (cfgByPid.get(printerId)?.enabled !== false && this.isFailureSignal(p)) failures.push({ printerId, p })
       }
       if (matched > 0) {
         await supabaseAdmin.from('production_printer')
@@ -120,10 +135,73 @@ export class FarmService {
       }
     }
     for (const pid of finished) await this.autoCloseFinished(a.organization_id, pid).catch(e => this.logger.warn(`[farm.autoclose] ${(e as Error).message}`))
+    for (const f of failures) await this.handleFailure(a.organization_id, f.printerId, f.p).catch(e => this.logger.warn(`[farm.failure] ${(e as Error).message}`))
 
     // entrega comandos pendentes das impressoras desse agente
     const commands = await this.pullCommands(a.id, a.organization_id)
-    return { ok: true, matched, unmatched, commands }
+    return { ok: true, matched, unmatched, commands, detection_config }
+  }
+
+  /** Sinal de que a impressão foi interrompida por falha:
+   *  detecção on-board da Bambu disparou (agente), OU a impressora reportou
+   *  erro/pausa com código de erro (spaghetti/first-layer/HMS pausam a A1). */
+  private isFailureSignal(p: TelemetryPrinter): boolean {
+    if (p.detection?.failure === true) return true
+    if (p.state === 'error' || p.state === 'failed') return true
+    if (p.state === 'paused' && !!p.error_code) return true   // pausa com erro = halt automático, não pausa do usuário
+    return false
+  }
+
+  /** Registra a falha (KPI), garante a pausa e avisa o lojista (WhatsApp + câmera).
+   *  Dedupe: 1 alerta aberto por (impressora, job) — não repete a cada ciclo de 5s. */
+  private async handleFailure(orgId: string, printerId: string, p: TelemetryPrinter) {
+    const jobName = p.job_name ?? null
+    // já existe alerta aberto pra este job? → não duplica
+    const { data: open } = await supabaseAdmin.from('printer_failure_event')
+      .select('id, job_name').eq('printer_id', printerId).is('acknowledged_at', null).limit(5)
+    if ((open ?? []).some(o => (o as { job_name: string | null }).job_name === jobName)) return
+
+    // OP ativa desta impressora (pra linkar + saber o produto)
+    const { data: order } = await supabaseAdmin.from('production_order')
+      .select('id, product_dev_id').eq('organization_id', orgId).eq('printer_id', printerId)
+      .in('status', ['imprimindo', 'pausado']).order('updated_at', { ascending: false }).limit(1).maybeSingle()
+    const o = order as { id: string; product_dev_id: string } | null
+
+    const reason = p.detection?.reason || p.error_text || (p.error_code ? `erro ${p.error_code}` : 'interrupção inesperada')
+    const cameraUrl = this.camUrl(printerId)
+
+    // garante pausa: se a impressora ainda não está pausada, manda pausar
+    let autoPaused = false
+    if (p.state !== 'paused') {
+      await this.enqueueCommand(orgId, printerId, 'pause', {}, null).then(() => { autoPaused = true }).catch(() => {})
+    }
+
+    const { error: insErr } = await supabaseAdmin.from('printer_failure_event').insert({
+      organization_id: orgId, printer_id: printerId, production_order_id: o?.id ?? null,
+      job_name: jobName, source: 'bambu_native', reason, error_code: p.error_code ?? null, state: p.state ?? null,
+      camera_url: cameraUrl, auto_paused: autoPaused,
+    })
+    if (insErr) { this.logger.warn(`[farm.failure] insert: ${insErr.message}`); return }  // corrida → outro ciclo já gravou
+
+    if (o) await supabaseAdmin.from('product_dev_event').insert({
+      organization_id: orgId, product_dev_id: o.product_dev_id, event_type: 'failure_detected',
+      payload: { production_order_id: o.id, printer_id: printerId, reason, error_code: p.error_code ?? null, auto_paused: autoPaused }, is_auto: true,
+    }).then(() => {}, () => {})
+
+    // nome da impressora pro alerta
+    const { data: pr } = await supabaseAdmin.from('production_printer').select('name').eq('id', printerId).maybeSingle()
+    const pname = (pr as { name: string } | null)?.name ?? 'impressora'
+    const msg = `🛑 *Falha na impressão detectada* (Product OS)\n\n` +
+      `*${pname}* interrompeu ${jobName ? `*${jobName}*` : 'a impressão'} — ${reason}.\n` +
+      `${autoPaused ? 'A produção foi *pausada automaticamente*.' : 'A impressora *parou*.'}\n\n` +
+      `Confira a câmera ao vivo e *retome* ou *cancele* no painel da Fábrica.`
+    await this.bridge.notifyLojista({ organization_id: orgId, message: msg, severity: 'high', deeplink: 'producao/product-os' }).catch(() => {})
+    this.logger.warn(`[farm] FALHA detectada na impressora ${printerId.slice(0, 8)} (${reason}) — alerta enviado`)
+  }
+
+  private camUrl(printerId: string): string | null {
+    const base = (process.env.SUPABASE_URL || '').replace(/\/+$/, '')
+    return base ? `${base}/storage/v1/object/public/product-os/cam/${printerId}.jpg` : null
   }
 
   /** Comandos pendentes das impressoras ligadas a este agente; marca como enviados. */
@@ -301,6 +379,41 @@ export class FarmService {
     return { ok: true, assigned }
   }
 
+  // ── T1-A: vigilância de falha por IA ──────────────────────────────
+  /** Liga/desliga a detecção de falha da impressora e ajusta a sensibilidade.
+   *  O agente lê isso na resposta da telemetria e aplica via MQTT (xcam). */
+  async setAiDetection(orgId: string, printerId: string, enabled: boolean, sensitivity?: string) {
+    const sens = ['low', 'medium', 'high'].includes(String(sensitivity)) ? sensitivity : undefined
+    const patch: Record<string, unknown> = { ai_detection_enabled: !!enabled }
+    if (sens) patch.ai_sensitivity = sens
+    const { error } = await supabaseAdmin.from('production_printer')
+      .update(patch).eq('id', printerId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true, ai_detection_enabled: !!enabled, ...(sens ? { ai_sensitivity: sens } : {}) }
+  }
+
+  /** Falhas recentes (abertas primeiro) — alimenta o card de alerta e o histórico. */
+  async listFailures(orgId: string, limit = 30) {
+    const { data, error } = await supabaseAdmin.from('printer_failure_event')
+      .select('id, printer_id, production_order_id, job_name, source, reason, error_code, state, camera_url, auto_paused, acknowledged_at, false_positive, detected_at')
+      .eq('organization_id', orgId).order('detected_at', { ascending: false }).limit(Math.min(limit, 100))
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    const rows = (data ?? []) as Array<Record<string, unknown>>
+    const pids = [...new Set(rows.map(r => r.printer_id as string))]
+    const { data: prs } = pids.length ? await supabaseAdmin.from('production_printer').select('id, name').in('id', pids) : { data: [] }
+    const nameById = new Map((prs ?? []).map(p => [(p as { id: string }).id, (p as { name: string }).name]))
+    return rows.map(r => ({ ...r, printer_name: nameById.get(r.printer_id as string) ?? '—', open: !r.acknowledged_at }))
+  }
+
+  /** Reconhece (fecha) um alerta de falha; marca falso-positivo se for o caso. */
+  async ackFailure(orgId: string, id: string, falsePositive: boolean, userId: string | null) {
+    const { error } = await supabaseAdmin.from('printer_failure_event')
+      .update({ acknowledged_at: new Date().toISOString(), acknowledged_by: userId, false_positive: !!falsePositive })
+      .eq('id', id).eq('organization_id', orgId).is('acknowledged_at', null)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true }
+  }
+
   // ── estado ao vivo (lido pela tela) ───────────────────────────────
   /** Recebe um frame JPEG da câmera (agente) e guarda como o snapshot atual da
    *  impressora no storage (cam/{printerId}.jpg, sobrescreve). Auth por token. */
@@ -325,18 +438,26 @@ export class FarmService {
 
   async status(orgId: string) {
     const { data: printers } = await supabaseAdmin.from('production_printer')
-      .select('id, name, brand, model, status, serial_number').eq('organization_id', orgId).order('name')
+      .select('id, name, brand, model, status, serial_number, ai_detection_enabled, ai_sensitivity').eq('organization_id', orgId).order('name')
     const { data: statuses } = await supabaseAdmin.from('printer_status')
       .select('*').eq('organization_id', orgId)
     const byId = new Map((statuses ?? []).map(s => [(s as { printer_id: string }).printer_id, s as Record<string, unknown>]))
+    // falhas abertas (não reconhecidas) por impressora
+    const { data: openFails } = await supabaseAdmin.from('printer_failure_event')
+      .select('id, printer_id, reason, detected_at').eq('organization_id', orgId).is('acknowledged_at', null)
+    const failByPid = new Map((openFails ?? []).map(f => [(f as { printer_id: string }).printer_id, f as Record<string, unknown>]))
 
     return (printers ?? []).map(p => {
-      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null }
+      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null; ai_detection_enabled: boolean | null; ai_sensitivity: string | null }
       const st = byId.get(pr.id)
       const fresh = st ? this.isFresh(st.updated_at as string) : false
+      const fail = failByPid.get(pr.id)
       return {
         id: pr.id, name: pr.name, brand: pr.brand, model: pr.model, config_status: pr.status,
         bound: !!pr.serial_number,
+        ai_detection_enabled: pr.ai_detection_enabled !== false,
+        ai_sensitivity: pr.ai_sensitivity || 'medium',
+        open_failure: fail ? { id: fail.id, reason: fail.reason, detected_at: fail.detected_at } : null,
         online: fresh && (st?.online === true),
         state: !st ? 'sem_dados' : !fresh ? 'offline' : (st.state as string) ?? 'idle',
         job_name: st?.job_name ?? null,

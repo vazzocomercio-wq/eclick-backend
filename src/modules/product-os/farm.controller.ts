@@ -76,6 +76,24 @@ export class FarmController {
     return this.farm.sendOrderToPrinter(this.org(u), oid, u.id)
   }
 
+  @Post('printers/:pid/ai-detection')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  aiDetection(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { enabled: boolean; sensitivity?: string }) {
+    return this.farm.setAiDetection(this.org(u), pid, !!body?.enabled, body?.sensitivity)
+  }
+
+  @Get('failures')
+  @RequirePermission('products.view')
+  failures(@ReqUser() u: ReqUserPayload) { return this.farm.listFailures(this.org(u)) }
+
+  @Post('failures/:id/ack')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  ackFailure(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { false_positive?: boolean }) {
+    return this.farm.ackFailure(this.org(u), id, !!body?.false_positive, u.id)
+  }
+
   @Get('scheduler')
   @RequirePermission('products.view')
   scheduler(@ReqUser() u: ReqUserPayload) { return this.farm.schedulerSuggest(this.org(u)) }
