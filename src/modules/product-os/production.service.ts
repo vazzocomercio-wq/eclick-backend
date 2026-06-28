@@ -40,7 +40,8 @@ const PART_ORDER_TRANSITIONS: Record<string, string[]> = {
   cancelado:   [],
 }
 
-interface VersionMetrics { versionId: string | null; weight_g: number | null; print_time_minutes: number | null; material: string | null }
+interface Filament { index: number; material: string | null; color: string | null; weight_g: number }
+interface VersionMetrics { versionId: string | null; weight_g: number | null; print_time_minutes: number | null; material: string | null; filaments: Filament[] }
 
 @Injectable()
 export class ProductionService {
@@ -182,7 +183,7 @@ export class ProductionService {
     return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     const partId = body.part_id ?? null
     // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
@@ -225,6 +226,26 @@ export class ProductionService {
         if (ok && !firstFilament) firstFilament = inputId   // p/ referência informativa
       }
       if (firstFilament) await supabaseAdmin.from('production_order').update({ reservation_id: firstFilament }).eq('id', order.id)
+    } else if (metrics.filaments.length > 1) {
+      // MULTICOR: cada cor do .3mf reserva do rolo escolhido (filament_map index→rolo);
+      // sem escolha, cai no rolo montado que casa o material. Agrega por insumo (mesma cor 2×).
+      const chosen = new Map((body.filament_map ?? []).map(m => [Number(m.index), m.input_id]))
+      const need = new Map<string, number>()
+      const stored: Array<{ index: number; input_id: string; weight_g: number }> = []
+      for (const fil of metrics.filaments) {
+        const g = this.round2(Number(fil.weight_g) * qty)
+        if (g <= 0) continue
+        let inputId = chosen.get(fil.index) ?? null
+        if (inputId && body.printer_id && !(await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, inputId))) inputId = null
+        if (!inputId && body.printer_id) inputId = await this.inputs.loadedInputId(orgId, body.printer_id, fil.material)
+        if (!inputId) continue
+        need.set(inputId, this.round2((need.get(inputId) ?? 0) + g))
+        stored.push({ index: fil.index, input_id: inputId, weight_g: g })
+      }
+      for (const [inputId, g] of need) await this.inputs.reserveInput(orgId, inputId, g, 'production_order', order.id)
+      const patch: Record<string, unknown> = { filament_map: stored }
+      if (stored[0]) patch.reservation_id = stored[0].input_id
+      await supabaseAdmin.from('production_order').update(patch).eq('id', order.id)
     } else if (estFilament && estFilament > 0) {
       // 1) rolo ESCOLHIDO pelo usuário (cor/slot exato) — só se estiver montado na impressora;
       // 2) senão, rolo MONTADO que casa o material; 3) senão, fallback por material/peso.
@@ -703,13 +724,13 @@ export class ProductionService {
   // ── helpers ───────────────────────────────────────────────────────
   private async resolveVersionMetrics(orgId: string, devId: string, versionId?: string, partId?: string | null): Promise<VersionMetrics> {
     let q = supabaseAdmin.from('product_dev_version')
-      .select('id, weight_g, print_time_minutes, material, approved, version_number')
+      .select('id, weight_g, print_time_minutes, material, approved, version_number, filaments')
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('version_number', { ascending: false })
     // OP de peça → versões da peça; OP de produto inteiro → versões sem peça
     q = partId ? q.eq('part_id', partId) : q.is('part_id', null)
     const { data } = await q
-    const versions = (data ?? []) as Array<{ id: string; weight_g: number | null; print_time_minutes: number | null; material: string | null; approved: boolean }>
+    const versions = (data ?? []) as Array<{ id: string; weight_g: number | null; print_time_minutes: number | null; material: string | null; approved: boolean; filaments: Filament[] | null }>
     const ref = versionId ? versions.find(v => v.id === versionId) : (versions.find(v => v.approved) ?? versions[0])
-    return { versionId: ref?.id ?? null, weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null }
+    return { versionId: ref?.id ?? null, weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null, filaments: (ref?.filaments ?? []) as Filament[] }
   }
 }

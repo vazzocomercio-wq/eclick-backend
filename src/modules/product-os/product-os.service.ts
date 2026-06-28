@@ -205,8 +205,8 @@ export class ProductOsService {
    *  `Metadata/slice_info.config` traz peso/tempo/filamento (SÓ se foi fatiado),
    *  e `Metadata/plate_*.json` traz o bounding box (largura/profundidade) mesmo
    *  SEM fatiar. STL não tem nada disso (só geometria). */
-  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; width_mm: number | null; depth_mm: number | null; height_mm: number | null; found: boolean }> {
-    const none = { weight_g: null, print_time_minutes: null, material: null, width_mm: null, depth_mm: null, height_mm: null, found: false }
+  async parse3mf(url: string): Promise<{ weight_g: number | null; print_time_minutes: number | null; material: string | null; width_mm: number | null; depth_mm: number | null; height_mm: number | null; filaments: Array<{ index: number; material: string | null; color: string | null; weight_g: number }>; found: boolean }> {
+    const none = { weight_g: null, print_time_minutes: null, material: null, width_mm: null, depth_mm: null, height_mm: null, filaments: [], found: false }
     if (!url?.trim()) throw new BadRequestException('URL do arquivo ausente.')
     if (!/\.3mf($|\?)/i.test(url)) return none   // STL/STEP/etc não têm metadados
     let buf: Uint8Array
@@ -219,8 +219,10 @@ export class ProductOsService {
     let files: Record<string, Uint8Array>
     try { files = unzipSync(buf) } catch { return none }   // não é um zip/3mf válido
 
-    // ── peso/tempo/material (só se fatiado) — Metadata/slice_info.config ──
+    // ── peso/tempo/material + cores (só se fatiado) — Metadata/slice_info.config ──
     let grams = 0, seconds = 0; const mats: string[] = []
+    // por filamento (cor): índice → {material, cor, gramas} — soma entre placas
+    const filByIdx = new Map<number, { index: number; material: string | null; color: string | null; weight_g: number }>()
     const sliceKey = Object.keys(files).find(k => /slice_info\.config$/i.test(k))
     if (sliceKey) {
       try {
@@ -237,13 +239,26 @@ export class ProductOsService {
           if (Number.isFinite(pr) && pr > 0) seconds += pr
           const fRaw = pl.filament
           const fils: Array<Record<string, string>> = Array.isArray(fRaw) ? fRaw as Array<Record<string, string>> : (fRaw ? [fRaw as Record<string, string>] : [])
-          for (const f of fils) {
-            if (f['@_type']) mats.push(String(f['@_type']).toUpperCase())
-            if (!(Number.isFinite(plateW) && plateW > 0)) { const ug = Number(f['@_used_g']); if (Number.isFinite(ug) && ug > 0) grams += ug }
-          }
+          fils.forEach((f, i) => {
+            const mat = f['@_type'] ? String(f['@_type']).toUpperCase() : null
+            if (mat) mats.push(mat)
+            const idx = Number(f['@_id']) || (i + 1)
+            const ug = Number(f['@_used_g'])
+            const cur = filByIdx.get(idx) ?? { index: idx, material: mat, color: f['@_color'] ? String(f['@_color']) : null, weight_g: 0 }
+            if (Number.isFinite(ug) && ug > 0) cur.weight_g += ug
+            if (!cur.material && mat) cur.material = mat
+            filByIdx.set(idx, cur)
+            // sem peso por placa? soma do filamento vira o total
+            if (!(Number.isFinite(plateW) && plateW > 0)) { if (Number.isFinite(ug) && ug > 0) grams += ug }
+          })
         }
       } catch { /* ignora slice info corrompida */ }
     }
+    // só conta como "cor" o filamento que realmente foi usado (used_g > 0)
+    const filaments = [...filByIdx.values()]
+      .filter(f => f.weight_g > 0)
+      .map(f => ({ ...f, weight_g: Math.round(f.weight_g * 100) / 100 }))
+      .sort((a, b) => a.index - b.index)
 
     // ── footprint (largura/profundidade) — Metadata/plate_*.json bbox_all ──
     let width: number | null = null, depth: number | null = null
@@ -276,6 +291,7 @@ export class ProductOsService {
       print_time_minutes: seconds > 0 ? Math.round(seconds / 60) : null,
       material: mats[0] ?? null,
       width_mm: width, depth_mm: depth, height_mm: height,
+      filaments,
       found: !!(grams > 0 || seconds > 0 || width || depth || height),
     }
   }

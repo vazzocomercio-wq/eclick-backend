@@ -89,7 +89,7 @@ export class ProductOsController {
 
   @Post('production-orders')
   @RequirePermission('products.update')
-  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null }) {
+  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null }) {
     return this.production.createOrder(this.org(u), u.id, body)
   }
 
@@ -211,6 +211,7 @@ export class ProductOsController {
   addPartVersion(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
+    filaments?: Array<{ index: number; material: string | null; color: string | null; weight_g: number }> | null
   }) { return this.parts.addPartVersion(this.org(u), pid, u.id, body) }
 
   @Get('parts/:pid/movements')

@@ -188,6 +188,7 @@ export class ProductPartService {
   async addPartVersion(orgId: string, partId: string, userId: string | null, body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
+    filaments?: Array<{ index: number; material: string | null; color: string | null; weight_g: number }> | null
   }) {
     const part = await this.getPart(orgId, partId)
     const existing = await this.listPartVersions(orgId, partId) as Array<{ version_number: number }>
@@ -197,6 +198,7 @@ export class ProductPartService {
       changelog: body.changelog ?? null, file_url: body.file_url ?? null, file_type: body.file_type ?? null,
       material: body.material ?? null, weight_g: body.weight_g ?? null, print_time_minutes: body.print_time_minutes ?? null,
       volume_cm3: body.volume_cm3 ?? null, prototype_photo_urls: body.prototype_photo_urls ?? [], status: 'rascunho',
+      filaments: body.filaments && body.filaments.length ? body.filaments : null,
       notes: body.notes ?? null, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar versão da peça: ${error?.message ?? 'sem dados'}`)
