@@ -87,6 +87,10 @@ export class FarmController {
   @RequirePermission('products.view')
   failures(@ReqUser() u: ReqUserPayload) { return this.farm.listFailures(this.org(u)) }
 
+  @Get('failure-stats')
+  @RequirePermission('products.view')
+  failureStats(@ReqUser() u: ReqUserPayload) { return this.farm.failureStats(this.org(u)) }
+
   @Post('failures/:id/ack')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

@@ -414,6 +414,45 @@ export class FarmService {
     return { ok: true }
   }
 
+  /** KPI de confiabilidade: taxa de falha por impressora nos últimos N dias.
+   *  Denominador = impressões iniciadas (production_order com started_at na janela);
+   *  falsos-positivos NÃO contam como falha real, mas são reportados à parte. */
+  async failureStats(orgId: string, days = 30) {
+    const since = new Date(Date.now() - days * 86_400_000).toISOString()
+    const [printersR, failsR, ordersR] = await Promise.all([
+      supabaseAdmin.from('production_printer').select('id, name').eq('organization_id', orgId).order('name'),
+      supabaseAdmin.from('printer_failure_event').select('printer_id, false_positive, reason, detected_at').eq('organization_id', orgId).gte('detected_at', since),
+      supabaseAdmin.from('production_order').select('printer_id, started_at').eq('organization_id', orgId).gte('started_at', since),
+    ])
+    const fails = (failsR.data ?? []) as Array<{ printer_id: string; false_positive: boolean; reason: string | null; detected_at: string }>
+    const orders = (ordersR.data ?? []) as Array<{ printer_id: string | null; started_at: string | null }>
+    const attemptsBy = new Map<string, number>()
+    for (const o of orders) if (o.printer_id) attemptsBy.set(o.printer_id, (attemptsBy.get(o.printer_id) ?? 0) + 1)
+    const realBy = new Map<string, number>(), fpBy = new Map<string, number>(), lastBy = new Map<string, { reason: string | null; detected_at: string }>()
+    for (const f of fails) {
+      if (f.false_positive) fpBy.set(f.printer_id, (fpBy.get(f.printer_id) ?? 0) + 1)
+      else realBy.set(f.printer_id, (realBy.get(f.printer_id) ?? 0) + 1)
+      const prev = lastBy.get(f.printer_id)
+      if (!prev || f.detected_at > prev.detected_at) lastBy.set(f.printer_id, { reason: f.reason, detected_at: f.detected_at })
+    }
+    const printers = ((printersR.data ?? []) as Array<{ id: string; name: string }>).map(p => {
+      const attempts = attemptsBy.get(p.id) ?? 0
+      const failures = realBy.get(p.id) ?? 0
+      return {
+        printer_id: p.id, name: p.name, attempts, failures,
+        false_positives: fpBy.get(p.id) ?? 0,
+        rate: attempts > 0 ? Math.round((failures / attempts) * 1000) / 10 : null,  // %
+        last_failure: lastBy.get(p.id) ?? null,
+      }
+    })
+    const totAttempts = printers.reduce((s, p) => s + p.attempts, 0)
+    const totFailures = printers.reduce((s, p) => s + p.failures, 0)
+    return {
+      window_days: days, printers,
+      total: { attempts: totAttempts, failures: totFailures, rate: totAttempts > 0 ? Math.round((totFailures / totAttempts) * 1000) / 10 : null },
+    }
+  }
+
   // ── estado ao vivo (lido pela tela) ───────────────────────────────
   /** Recebe um frame JPEG da câmera (agente) e guarda como o snapshot atual da
    *  impressora no storage (cam/{printerId}.jpg, sobrescreve). Auth por token. */
