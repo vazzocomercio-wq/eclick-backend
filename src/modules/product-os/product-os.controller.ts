@@ -208,11 +208,26 @@ export class ProductOsController {
 
   @Post('parts/:pid/versions')
   @RequirePermission('products.update')
-  addPartVersion(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: {
+  async addPartVersion(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
     filaments?: Array<{ index: number; material: string | null; color: string | null; weight_g: number }> | null
-  }) { return this.parts.addPartVersion(this.org(u), pid, u.id, body) }
+  }) {
+    // blindagem: se veio .3mf mas sem peso/cores (corrida no upload), lê do arquivo no servidor
+    if (body.file_url && /\.3mf($|\?)/i.test(body.file_url) && (body.weight_g == null || !body.filaments?.length)) {
+      try {
+        const m = await this.svc.parse3mf(body.file_url)
+        if (m.found) body = {
+          ...body,
+          weight_g: body.weight_g ?? m.weight_g ?? undefined,
+          material: body.material ?? m.material ?? undefined,
+          print_time_minutes: body.print_time_minutes ?? m.print_time_minutes ?? undefined,
+          filaments: (body.filaments?.length ? body.filaments : (m.filaments.length ? m.filaments : undefined)),
+        }
+      } catch { /* best-effort */ }
+    }
+    return this.parts.addPartVersion(this.org(u), pid, u.id, body)
+  }
 
   @Get('parts/:pid/movements')
   @RequirePermission('products.view')
