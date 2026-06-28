@@ -188,7 +188,14 @@ export class FarmService {
       const slot = (lf as { slot: number } | null)?.slot
       if (slot != null) amsMapping = [slot]
     }
-    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ...(amsMapping ? { ams_mapping: amsMapping } : {}) }, userId)
+    // AVISO no ato da impressão: sem filamento resolvido não imprime (evita consumo não rastreado / cor errada)
+    if (!amsMapping) {
+      const temRolo = await supabaseAdmin.from('printer_loaded_filament').select('id').eq('printer_id', o.printer_id).is('unloaded_at', null).limit(1).maybeSingle()
+      if (!o.reservation_id) throw new BadRequestException('Nenhum filamento escolhido para esta ordem. Abra a OP, escolha o rolo (cor) e tente de novo — sem isso a impressora não sabe qual filamento usar e o consumo não fica rastreado.')
+      if (!temRolo.data) throw new BadRequestException('Nenhum rolo montado nesta impressora. Carregue o filamento no AMS (aba Impressoras → Filamento na impressora) antes de imprimir.')
+      throw new BadRequestException('O filamento reservado para esta OP não está montado nesta impressora. Monte o rolo certo no AMS ou troque o rolo da OP antes de imprimir.')
+    }
+    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ams_mapping: amsMapping }, userId)
     // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento)
     await supabaseAdmin.from('production_order')
       .update({ status: 'imprimindo', started_at: new Date().toISOString() })
