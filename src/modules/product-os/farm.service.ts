@@ -186,10 +186,13 @@ export class FarmService {
       .select('slot, input_id').eq('printer_id', o.printer_id).is('unloaded_at', null)
     const slotOf = new Map((loaded ?? []).map(r => [(r as { input_id: string }).input_id, (r as { slot: number }).slot]))
     if (Array.isArray(o.filament_map) && o.filament_map.length > 1) {
-      // MULTICOR: um slot por cor, na ordem do índice do filamento
-      const sorted = [...o.filament_map].sort((a, b) => a.index - b.index)
-      const slots = sorted.map(f => slotOf.get(f.input_id))
-      if (slots.every(s => s != null)) amsMapping = slots as number[]
+      // MULTICOR: ams_mapping é POSICIONAL pelo índice do filamento do .3mf
+      // (modelo pode usar filamentos 1 e 3 → [slot1, -1, slot3]). Lacunas = -1.
+      const maxIdx = Math.max(...o.filament_map.map(f => Number(f.index) || 0))
+      const arr = new Array(maxIdx).fill(-1) as number[]
+      let ok = maxIdx > 0
+      for (const f of o.filament_map) { const s = slotOf.get(f.input_id); if (s == null) { ok = false; break } arr[Number(f.index) - 1] = s }
+      if (ok) amsMapping = arr
     } else if (o.reservation_id && slotOf.has(o.reservation_id)) {
       amsMapping = [slotOf.get(o.reservation_id) as number]
     }
