@@ -3,6 +3,8 @@
 // executa comandos (pausar/retomar/parar/luz; enviar impressão = experimental).
 // Node 18+ (fetch nativo). Dependências: mqtt, basic-ftp.
 import mqtt from 'mqtt'
+import tls from 'node:tls'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,14 +13,16 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.1.0'
+const AGENT_VERSION = '1.3.0'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
-const state = {}      // serial -> objeto "print" mesclado
-const connected = {}  // serial -> bool
-const clients = {}    // serial -> cliente mqtt
-const acks = []       // [{ id, ok, result }] pendentes de envio
+const state = {}        // serial -> objeto "print" mesclado
+const connected = {}    // serial -> bool
+const clients = {}      // serial -> cliente mqtt
+const acks = []         // [{ id, ok, result }] pendentes de envio
+const detectionCfg = {}     // serial -> { enabled, sensitivity } (vem do backend)
+const detectionApplied = {} // serial -> assinatura já aplicada (evita reenviar)
 
 const STATE_MAP = { RUNNING: 'printing', PAUSE: 'paused', FAILED: 'error', FINISH: 'idle', IDLE: 'idle', PREPARE: 'printing', SLICING: 'printing' }
 
@@ -33,12 +37,39 @@ function connectPrinter(p) {
   const request = `device/${p.serial}/request`
   const pushall = () => client.publish(request, JSON.stringify({ pushing: { sequence_id: '0', command: 'pushall' } }))
 
-  client.on('connect', () => { connected[p.serial] = true; console.log(`[${p.name || p.serial}] conectado`); client.subscribe(report); pushall() })
+  client.on('connect', () => {
+    connected[p.serial] = true; console.log(`[${p.name || p.serial}] conectado`); client.subscribe(report); pushall()
+    // liga a vigilância de falha o quanto antes (default; o backend refina no 1º push)
+    if (!detectionCfg[p.serial]) detectionCfg[p.serial] = { enabled: true, sensitivity: 'medium' }
+    applyDetection(p.serial)
+  })
   client.on('message', (_t, buf) => { try { const m = JSON.parse(buf.toString()); if (m.print) state[p.serial] = { ...(state[p.serial] || {}), ...m.print } } catch { /* ignora */ } })
   client.on('error', e => console.log(`[${p.name || p.serial}] erro: ${e.message}`))
   client.on('close', () => { connected[p.serial] = false })
   client.on('offline', () => { connected[p.serial] = false })
-  setInterval(() => { if (connected[p.serial]) pushall() }, 30000)
+  // a cada 30s: pushall + re-afirma a detecção (a A1 pode resetar o xcam ao iniciar um job)
+  setInterval(() => { if (connected[p.serial]) { pushall(); detectionApplied[p.serial] = null; applyDetection(p.serial) } }, 30000)
+}
+
+// T1-A: liga/desliga a detecção de falha ON-BOARD da Bambu (spaghetti + first-layer)
+// via MQTT. print_halt=true faz a A1 PAUSAR sozinha ao detectar. EXPERIMENTAL:
+// o formato/sensibilidade varia por firmware — validar em máquina real.
+function applyDetection(serial) {
+  const c = clients[serial]; if (!c) return
+  const cfg = detectionCfg[serial]; if (!cfg) return
+  const control = cfg.enabled !== false
+  const sens = ['low', 'medium', 'high'].includes(cfg.sensitivity) ? cfg.sensitivity : 'medium'
+  const sig = `${control}:${sens}`
+  if (detectionApplied[serial] === sig) return
+  for (const module_name of ['spaghetti_detector', 'first_layer_inspector']) {
+    try {
+      c.publish(`device/${serial}/request`, JSON.stringify({
+        xcam: { sequence_id: '0', command: 'xcam_control_set', module_name, control, print_halt: control, halt_print_sensitivity: sens },
+      }))
+    } catch { /* reenvia no próximo ciclo */ }
+  }
+  detectionApplied[serial] = sig
+  console.log(`[${serial}] vigilância de falha ${control ? `ON (sens ${sens})` : 'OFF'}`)
 }
 
 function snapshot(p) {
@@ -46,6 +77,8 @@ function snapshot(p) {
   const ams = []
   try { for (const u of (s.ams?.ams || [])) for (const t of (u.tray || [])) if (t.tray_type) ams.push({ slot: `${u.id}-${t.id}`, material: t.tray_type, color: t.tray_color, remain_pct: t.remain }) } catch { /* */ }
   const hms = Array.isArray(s.hms) && s.hms.length ? s.hms[0] : null
+  const lr = Array.isArray(s.lights_report) ? s.lights_report : null
+  const light_on = lr ? lr.some(l => l && l.mode === 'on') : undefined
   return {
     serial: p.serial, online: !!connected[p.serial],
     state: connected[p.serial] ? (STATE_MAP[s.gcode_state] || 'idle') : 'offline',
@@ -55,6 +88,7 @@ function snapshot(p) {
     nozzle_temp: s.nozzle_temper ?? null, bed_temp: s.bed_temper ?? null, ams,
     error_code: hms ? String(hms.code) : (s.print_error ? String(s.print_error) : null),
     error_text: hms ? `HMS ${hms.attr ?? ''}`.trim() : null,
+    light_on,
   }
 }
 
@@ -90,18 +124,22 @@ async function dispatchPrint(serial, payload) {
   const tmp = path.join(os.tmpdir(), `eclick-${Date.now()}-${name}`)
   const res = await fetch(payload.file_url)
   if (!res.ok) throw new Error(`download do arquivo falhou (HTTP ${res.status})`)
-  fs.writeFileSync(tmp, Buffer.from(await res.arrayBuffer()))
+  const fileBuf = Buffer.from(await res.arrayBuffer())
+  const md5 = crypto.createHash('md5').update(fileBuf).digest('hex')   // firmware exige o md5 do arquivo
+  fs.writeFileSync(tmp, fileBuf)
   const ftp = new Client(15000)
   try {
     await ftp.access({ host: p.ip, port: 990, user: 'bblp', password: p.access_code, secure: 'implicit', secureOptions: { rejectUnauthorized: false } })
     await ftp.uploadFrom(tmp, name)
   } finally { ftp.close(); try { fs.unlinkSync(tmp) } catch { /* */ } }
+  const amsMap = Array.isArray(payload.ams_mapping) && payload.ams_mapping.length > 0 ? payload.ams_mapping : null
   publishCmd(serial, {
     print: {
       sequence_id: '0', command: 'project_file', param: 'Metadata/plate_1.gcode',
-      subtask_name: name, url: `file:///sdcard/${name}`,
+      subtask_name: name.replace(/\.(gcode\.)?3mf$/i, ''), url: `file:///mnt/sdcard/${name}`, md5,
       bed_type: 'auto', timelapse: false, bed_leveling: true, flow_cali: false,
       vibration_cali: false, layer_inspect: false, use_ams: true,
+      ...(amsMap ? { ams_mapping: amsMap } : {}),   // imprime no slot/cor escolhido
       profile_id: '0', project_id: '0', subtask_id: '0', task_id: '0',
     },
   })
@@ -118,10 +156,54 @@ async function push() {
     })
     if (!r.ok) { console.log(`[push] HTTP ${r.status}`); return }
     const data = await r.json().catch(() => ({}))
+    // backend manda a config de vigilância por impressora → aplica se mudou
+    for (const [serial, dc] of Object.entries(data.detection_config || {})) { detectionCfg[serial] = dc; applyDetection(serial) }
     for (const cmd of (data.commands || [])) await runCommand(cmd)
   } catch (e) { console.log(`[push] ${e.message}`) }
+}
+
+// ── câmera: captura 1 frame JPEG da impressora (TLS porta 6000 + access code) ──
+function grabFrame(p) {
+  return new Promise(resolve => {
+    let done = false
+    const fin = v => { if (done) return; done = true; try { sock.destroy() } catch { /* */ } resolve(v) }
+    const sock = tls.connect({ host: p.ip, port: 6000, rejectUnauthorized: false, timeout: 6000 }, () => {
+      const b = Buffer.alloc(80)
+      b.writeUInt32LE(0x40, 0); b.writeUInt32LE(0x3000, 4)
+      Buffer.from('bblp').copy(b, 16); Buffer.from(String(p.access_code)).copy(b, 48)
+      sock.write(b)
+    })
+    let buf = Buffer.alloc(0)
+    sock.on('data', d => {
+      buf = Buffer.concat([buf, d])
+      const s = buf.indexOf(Buffer.from([0xff, 0xd8])); const e = s >= 0 ? buf.indexOf(Buffer.from([0xff, 0xd9]), s + 2) : -1
+      if (s >= 0 && e > s) fin(buf.slice(s, e + 2))
+    })
+    sock.on('timeout', () => fin(null)); sock.on('error', () => fin(null))
+    setTimeout(() => fin(null), 7000)
+  })
+}
+
+let camTick = 0
+async function pushCamera() {
+  camTick++
+  for (const p of (cfg.printers || [])) {
+    if (!connected[p.serial]) continue
+    const st = STATE_MAP[(state[p.serial] || {}).gcode_state] || 'idle'
+    const every = st === 'printing' ? 1 : 10   // imprimindo: ~3s; senão: ~30s
+    if (camTick % every !== 0) continue
+    const frame = await grabFrame(p)
+    if (!frame || frame.length < 1000) continue
+    try {
+      await fetch(`${BACKEND}/product-os/farm/camera`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-farm-agent-token': TOKEN },
+        body: JSON.stringify({ serial: p.serial, image_base64: frame.toString('base64') }),
+      })
+    } catch { /* rede instável, tenta no próximo ciclo */ }
+  }
 }
 
 console.log(`e-Click Farm Agent v${AGENT_VERSION} — ${(cfg.printers || []).length} impressora(s) → ${BACKEND}`)
 ;(cfg.printers || []).forEach(connectPrinter)
 setInterval(push, PUSH_MS)
+setInterval(pushCamera, 3000)
