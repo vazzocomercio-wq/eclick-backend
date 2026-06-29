@@ -463,17 +463,17 @@ export class ProductionService {
   // ── painel da fábrica (visão executiva consolidada) ───────────────
   async factoryOverview(orgId: string) {
     const since30 = new Date(Date.now() - 30 * 86400_000).toISOString()
-    const [printersR, ordersR, inputsR, jobsR, prof] = await Promise.all([
+    const [printersR, ordersR, inputsR, consumesR, prof] = await Promise.all([
       supabaseAdmin.from('production_printer').select('id, name, acquisition_cost, status').eq('organization_id', orgId),
-      supabaseAdmin.from('production_order').select('printer_id, status, quantity, contribution_total, completed_at').eq('organization_id', orgId),
-      supabaseAdmin.from('production_input').select('id, name, quantity, reserved_quantity, reorder_threshold, unit').eq('organization_id', orgId).eq('is_active', true),
-      supabaseAdmin.from('print_job').select('print_time_minutes').eq('organization_id', orgId).eq('status', 'concluido'),
+      supabaseAdmin.from('production_order').select('printer_id, status, quantity, contribution_total, completed_at, actual_time_minutes').eq('organization_id', orgId),
+      supabaseAdmin.from('production_input').select('id, name, kind, quantity, reserved_quantity, reorder_threshold, unit').eq('organization_id', orgId).eq('is_active', true),
+      supabaseAdmin.from('production_input_movement').select('input_id, quantity, unit_cost, created_at').eq('organization_id', orgId).eq('movement_type', 'consume'),
       this.profitability(orgId),
     ])
     const printers = (printersR.data ?? []) as Array<{ id: string; acquisition_cost: number | null; status: string }>
-    const orders = (ordersR.data ?? []) as Array<{ printer_id: string | null; status: string; quantity: number; contribution_total: number | null; completed_at: string | null }>
-    const inputs = (inputsR.data ?? []) as Array<{ name: string; quantity: number; reserved_quantity: number; reorder_threshold: number; unit: string }>
-    const jobs = (jobsR.data ?? []) as Array<{ print_time_minutes: number | null }>
+    const orders = (ordersR.data ?? []) as Array<{ printer_id: string | null; status: string; quantity: number; contribution_total: number | null; completed_at: string | null; actual_time_minutes: number | null }>
+    const inputs = (inputsR.data ?? []) as Array<{ id: string; name: string; kind: string | null; quantity: number; reserved_quantity: number; reorder_threshold: number; unit: string }>
+    const consumes = (consumesR.data ?? []) as Array<{ input_id: string; quantity: number | null; unit_cost: number | null; created_at: string }>
 
     const done = orders.filter(o => o.status === 'disponivel')
     const totalInvestment = this.round2(printers.reduce((s, p) => s + (Number(p.acquisition_cost) || 0), 0))
@@ -494,6 +494,21 @@ export class ProductionService {
     const lowStock = inputs.filter(i => i.reorder_threshold > 0 && (Number(i.quantity) - Number(i.reserved_quantity)) <= i.reorder_threshold)
       .map(i => ({ name: i.name, available: this.round2(Number(i.quantity) - Number(i.reserved_quantity)), unit: i.unit }))
 
+    // material consumido (real, independe de preço de venda): custo (todos os insumos) + gramas (só filamento)
+    const filamentIds = new Set(inputs.filter(i => i.kind === 'filamento').map(i => i.id))
+    let materialCostTotal = 0, materialCost30d = 0, filamentGTotal = 0, filamentG30d = 0
+    for (const m of consumes) {
+      const qty = Number(m.quantity) || 0
+      const cost = qty * (Number(m.unit_cost) || 0)
+      materialCostTotal += cost
+      if (m.created_at >= since30) materialCost30d += cost
+      if (filamentIds.has(m.input_id)) { filamentGTotal += qty; if (m.created_at >= since30) filamentG30d += qty }
+    }
+
+    // horas impressas: tempo REAL da própria ordem (actual_time_minutes) — o print_job é
+    // fila opcional e fica vazio no fluxo "manda .3mf direto"; o tempo real mora na OP.
+    const totalPrintHours = this.round2(orders.reduce((s, o) => s + (Number(o.actual_time_minutes) || 0), 0) / 60)
+
     return {
       printers: {
         count: printers.length,
@@ -502,7 +517,7 @@ export class ProductionService {
         total_paid_back: totalPaidBack,
         payback_pct: totalInvestment > 0 ? this.round2((totalPaidBack / totalInvestment) * 100) : null,
         paid_off: paidOff,
-        total_print_hours: this.round2(jobs.reduce((s, j) => s + (Number(j.print_time_minutes) || 0), 0) / 60),
+        total_print_hours: totalPrintHours,
       },
       production: {
         orders_done: done.length,
@@ -516,6 +531,12 @@ export class ProductionService {
         revenue_30d: this.round2(prof.reduce((s, p) => s + (Number(p.revenue_30d) || 0), 0)),
         realized_profit_30d: this.round2(prof.reduce((s, p) => s + (Number(p.realized_profit_30d) || 0), 0)),
         units_sold_30d: prof.reduce((s, p) => s + (Number(p.units_sold_30d) || 0), 0),
+      },
+      material: {
+        filament_g_total: this.round2(filamentGTotal),
+        filament_g_30d: this.round2(filamentG30d),
+        cost_total: this.round2(materialCostTotal),
+        cost_30d: this.round2(materialCost30d),
       },
       inputs: { low_stock: lowStock },
       top_products: prof.slice(0, 5),
