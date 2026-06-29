@@ -379,6 +379,151 @@ export class FarmService {
     return { ok: true, assigned }
   }
 
+  // ── T1-C: scheduler de capacidade finita (Gantt + prazo + matching) ──
+  /** Distância RGB entre dois hex (#rrggbb); null se algum não for hex. */
+  private hexDist(a: string | null | undefined, b: string | null | undefined): number | null {
+    const rgb = (s?: string | null) => { const m = /^#?([0-9a-f]{6})$/i.exec((s ?? '').trim()); if (!m) return null; const n = parseInt(m[1], 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255] }
+    const x = rgb(a), y = rgb(b)
+    if (!x || !y) return null
+    return Math.sqrt((x[0] - y[0]) ** 2 + (x[1] - y[1]) ** 2 + (x[2] - y[2]) ** 2)
+  }
+  /** A cor requerida (hex ou nome) casa com um rolo montado (cor/hex)? */
+  private colorMatches(req: string | null | undefined, rollColor: string | null | undefined, rollHex: string | null | undefined): boolean {
+    if (!req) return true                                  // cor não especificada → material basta
+    const d = this.hexDist(req, rollHex) ?? this.hexDist(req, rollColor)
+    if (d != null) return d < 80                           // perto o bastante no RGB
+    const norm = (s?: string | null) => (s ?? '').trim().toLowerCase()
+    return !!norm(req) && (norm(req) === norm(rollColor) || norm(req) === norm(rollHex))
+  }
+
+  /**
+   * Plano de capacidade finita: trata cada impressora como recurso que roda 1
+   * job por vez, encaixa a fila respeitando o filamento montado (material+cor) e
+   * devolve o ETA (início→fim) de cada ordem, o "tudo pronto até", as atrasadas
+   * (vs prazo) e as que NÃO têm impressora capaz (com o motivo).
+   */
+  async schedulePlan(orgId: string) {
+    const now = Date.now()
+    const [statuses, prof, ordersR] = await Promise.all([
+      this.status(orgId),
+      this.production.profitability(orgId),
+      supabaseAdmin.from('production_order')
+        .select('id, order_number, product_dev_id, part_id, version_id, quantity, estimated_time_minutes, printer_id, due_at')
+        .eq('organization_id', orgId).eq('status', 'fila'),
+    ])
+    const profById = new Map(prof.map(p => [p.product_dev_id, p]))
+    const orders = (ordersR.data ?? []) as Array<{ id: string; order_number: number; product_dev_id: string; part_id: string | null; version_id: string | null; quantity: number; estimated_time_minutes: number | null; printer_id: string | null; due_at: string | null }>
+
+    // versões → material + cores requeridas por ordem
+    const vIds = [...new Set(orders.map(o => o.version_id).filter(Boolean))] as string[]
+    const { data: vData } = vIds.length
+      ? await supabaseAdmin.from('product_dev_version').select('id, material, filaments').in('id', vIds)
+      : { data: [] as Array<{ id: string; material: string | null; filaments: Array<{ material: string | null; color: string | null; weight_g: number }> | null }> }
+    const verById = new Map((vData ?? []).map(v => [(v as { id: string }).id, v as { id: string; material: string | null; filaments: Array<{ material: string | null; color: string | null; weight_g: number }> | null }]))
+    const requiredFor = (o: typeof orders[number]): Array<{ material: string | null; color: string | null }> => {
+      const v = o.version_id ? verById.get(o.version_id) : null
+      const fils = (v?.filaments ?? []).filter(f => Number(f.weight_g) > 0)
+      if (fils.length) return fils.map(f => ({ material: f.material ?? v?.material ?? null, color: f.color ?? null }))
+      if (v?.material) return [{ material: v.material, color: null }]
+      return []   // material desconhecido
+    }
+
+    // impressoras online (idle ou imprimindo) com relógio de disponibilidade
+    type Slot = { available_at: number; name: string }
+    const printerIds = statuses.map(s => s.id)
+    const { data: loadedRows } = printerIds.length
+      ? await supabaseAdmin.from('printer_loaded_filament')
+          .select('printer_id, input:input_id(material, color, color_hex)').in('printer_id', printerIds).is('unloaded_at', null)
+      : { data: [] as Array<{ printer_id: string; input: { material: string | null; color: string | null; color_hex: string | null } | Array<{ material: string | null; color: string | null; color_hex: string | null }> }> }
+    const rollsBy = new Map<string, Array<{ material: string | null; color: string | null; color_hex: string | null }>>()
+    for (const r of (loadedRows ?? []) as Array<{ printer_id: string; input: unknown }>) {
+      const inp = Array.isArray(r.input) ? r.input[0] : r.input as { material: string | null; color: string | null; color_hex: string | null } | null
+      if (!inp) continue
+      const list = rollsBy.get(r.printer_id) ?? []; list.push(inp); rollsBy.set(r.printer_id, list)
+    }
+    const eligible = statuses.filter(s => s.online && (s.state === 'idle' || s.state === 'printing'))
+    const offline = statuses.length - eligible.length
+    const clock = new Map<string, Slot>()
+    for (const s of eligible) {
+      const busyMs = s.state === 'printing' && s.remaining_minutes != null ? Number(s.remaining_minutes) * 60000 : 0
+      clock.set(s.id, { available_at: now + busyMs, name: s.name })
+    }
+
+    /** A impressora consegue rodar a ordem? fit: exact (cor bate) | material (só material) | none. */
+    const capability = (printerId: string, req: Array<{ material: string | null; color: string | null }>): { fit: 'exact' | 'material' | 'unknown' | 'none'; missing?: string } => {
+      const rolls = rollsBy.get(printerId) ?? []
+      if (!req.length) return rolls.length ? { fit: 'unknown' } : { fit: 'none', missing: 'sem rolo montado' }
+      let allColors = true
+      for (const need of req) {
+        const mat = (need.material ?? '').toUpperCase()
+        const sameMat = rolls.filter(r => (r.material ?? '').toUpperCase() === mat || !mat)
+        if (!sameMat.length) return { fit: 'none', missing: `${need.material ?? 'material'}${need.color ? ' ' + need.color : ''}` }
+        if (!sameMat.some(r => this.colorMatches(need.color, r.color, r.color_hex))) allColors = false
+      }
+      return { fit: allColors ? 'exact' : 'material' }
+    }
+
+    // prioridade: prazo mais cedo primeiro (sem prazo por último), depois R$/hora
+    const enriched = orders.map(o => {
+      const p = profById.get(o.product_dev_id)
+      const dur = o.estimated_time_minutes ?? (p?.print_minutes_unit ? Math.round(p.print_minutes_unit * o.quantity) : null)
+      return { ...o, dur, pph: p?.profit_per_hour ?? 0, name: p?.name ?? '—', required: requiredFor(o) }
+    }).sort((a, b) => {
+      const da = a.due_at ? new Date(a.due_at).getTime() : Infinity
+      const db = b.due_at ? new Date(b.due_at).getTime() : Infinity
+      if (da !== db) return da - db
+      return b.pph - a.pph
+    })
+
+    const assignments: Array<Record<string, unknown>> = []
+    const unscheduled: Array<Record<string, unknown>> = []
+    for (const o of enriched) {
+      // impressora pinada pelo usuário tem prioridade, se estiver elegível
+      let chosen: string | null = o.printer_id && clock.has(o.printer_id) ? o.printer_id : null
+      let cap = chosen ? capability(chosen, o.required) : { fit: 'none' as const }
+      if (!chosen) {
+        // escolhe a capaz com relógio mais cedo (prefere fit exato a parcial)
+        let best: { id: string; at: number; rank: number } | null = null
+        for (const [id, slot] of clock) {
+          const c = capability(id, o.required)
+          if (c.fit === 'none') continue
+          const rank = c.fit === 'exact' ? 0 : c.fit === 'unknown' ? 1 : 2
+          if (!best || rank < best.rank || (rank === best.rank && slot.available_at < best.at)) best = { id, at: slot.available_at, rank }
+        }
+        if (best) { chosen = best.id; cap = capability(best.id, o.required) }
+      }
+      if (!chosen) {
+        // motivo: nenhuma capaz (material não montado em lugar nenhum) ou parque offline
+        let missing = ''
+        for (const id of clock.keys()) { const c = capability(id, o.required); if (c.missing) { missing = c.missing; break } }
+        unscheduled.push({ order_id: o.id, order_number: o.order_number, name: o.name, quantity: o.quantity, reason: eligible.length ? `filamento não montado (${missing || 'incompatível'})` : 'nenhuma impressora online', required: o.required })
+        continue
+      }
+      const slot = clock.get(chosen)!
+      const startMs = slot.available_at
+      const durMin = o.dur ?? 0
+      const finishMs = startMs + durMin * 60000
+      slot.available_at = finishMs
+      const late = !!(o.due_at && finishMs > new Date(o.due_at).getTime())
+      assignments.push({
+        order_id: o.id, order_number: o.order_number, product_dev_id: o.product_dev_id, name: o.name, quantity: o.quantity,
+        printer_id: chosen, printer_name: slot.name, profit_per_hour: o.pph,
+        fit: cap.fit, duration_minutes: o.dur, needs_time: o.dur == null,
+        start_at: new Date(startMs).toISOString(), finish_at: o.dur != null ? new Date(finishMs).toISOString() : null,
+        due_at: o.due_at, late,
+      })
+    }
+    const allDone = assignments.filter(a => a.finish_at).map(a => new Date(a.finish_at as string).getTime())
+    return {
+      now: new Date(now).toISOString(),
+      eligible_printers: eligible.length, offline_printers: offline, queued_orders: orders.length,
+      scheduled: assignments.length, unscheduled_count: unscheduled.length,
+      late_count: assignments.filter(a => a.late).length,
+      all_done_at: allDone.length ? new Date(Math.max(...allDone)).toISOString() : null,
+      assignments, unscheduled,
+    }
+  }
+
   // ── T1-A: vigilância de falha por IA ──────────────────────────────
   /** Liga/desliga a detecção de falha da impressora e ajusta a sensibilidade.
    *  O agente lê isso na resposta da telemetria e aplica via MQTT (xcam). */

@@ -102,6 +102,10 @@ export class FarmController {
   @RequirePermission('products.view')
   scheduler(@ReqUser() u: ReqUserPayload) { return this.farm.schedulerSuggest(this.org(u)) }
 
+  @Get('schedule-plan')
+  @RequirePermission('products.view')
+  schedulePlan(@ReqUser() u: ReqUserPayload) { return this.farm.schedulePlan(this.org(u)) }
+
   @Post('scheduler/apply')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

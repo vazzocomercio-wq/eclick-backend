@@ -136,7 +136,7 @@ export class ProductOsController {
 
   @Patch('production-orders/:oid')
   @RequirePermission('products.update')
-  updateOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string, @Body() body: { actual_filament_g?: number | null; actual_time_minutes?: number | null; notes?: string | null }) {
+  updateOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string, @Body() body: { actual_filament_g?: number | null; actual_time_minutes?: number | null; notes?: string | null; due_at?: string | null }) {
     return this.production.updateOrder(this.org(u), oid, body)
   }
 
