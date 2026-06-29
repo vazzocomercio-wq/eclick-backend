@@ -11,6 +11,7 @@ import { ProductionInputService, type ProductionInput } from './production-input
 import { ProductPartService } from './product-part.service'
 import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
+import { MakeToOrderService, type MtoConfig } from './make-to-order.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { NfeImportService } from './nfe-import.service'
@@ -30,6 +31,7 @@ export class ProductOsController {
     private readonly parts: ProductPartService,
     private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
+    private readonly mto: MakeToOrderService,
     private readonly radar: MakerworldRadarService,
     private readonly sources: ModelSourceRegistry,
     private readonly nfe: NfeImportService,
@@ -52,6 +54,34 @@ export class ProductOsController {
     labor_cost_per_hour?: number; packaging_cost?: number; default_waste_pct?: number
     machines?: Array<{ name: string; model?: string; bed_mm?: number[] }>
   }) { return this.svc.updateSettings(this.org(u), body) }
+
+  // ── Make-to-order (T1-B): reposição da produção a partir do estoque ──
+  @Get('make-to-order/suggestions')
+  @RequirePermission('products.view')
+  mtoSuggestions(@ReqUser() u: ReqUserPayload, @Query('status') status?: string) {
+    return this.mto.listSuggestions(this.org(u), status || 'pending')
+  }
+
+  @Post('make-to-order/reconcile')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  mtoReconcile(@ReqUser() u: ReqUserPayload) {
+    return this.mto.reconcile(this.org(u), 'manual')
+  }
+
+  @Post('make-to-order/suggestions/:sid/accept')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  mtoAccept(@ReqUser() u: ReqUserPayload, @Param('sid') sid: string, @Body() body: { quantity?: number; printer_id?: string }) {
+    return this.mto.acceptSuggestion(this.org(u), sid, u.id, body)
+  }
+
+  @Post('make-to-order/suggestions/:sid/dismiss')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  mtoDismiss(@ReqUser() u: ReqUserPayload, @Param('sid') sid: string) {
+    return this.mto.dismissSuggestion(this.org(u), sid, u.id)
+  }
 
   @Post('versions/:vid/approval')
   @HttpCode(HttpStatus.OK)
@@ -562,6 +592,12 @@ export class ProductOsController {
   @RequirePermission('products.update')
   move(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { status?: ProductDevStatus; position?: number }) {
     return this.svc.move(id, this.org(u), body)
+  }
+
+  @Patch(':id/make-to-order')
+  @RequirePermission('products.update')
+  setMtoConfig(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<MtoConfig>) {
+    return this.mto.setConfig(this.org(u), id, body)
   }
 
   @Post(':id/archive')

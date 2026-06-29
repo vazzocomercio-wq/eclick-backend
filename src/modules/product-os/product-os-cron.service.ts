@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule'
 import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { MakerworldRadarService } from './makerworld-radar.service'
+import { MakeToOrderService } from './make-to-order.service'
 
 /**
  * Product OS — Fase 7: alerta automático de insumo.
@@ -17,7 +18,41 @@ export class ProductOsCronService {
   constructor(
     private readonly bridge: ActiveBridgeClient,
     private readonly radar: MakerworldRadarService,
+    private readonly mto: MakeToOrderService,
   ) {}
+
+  /**
+   * Make-to-order (T1-B): reconcilia o estoque dos produtos 3D com reposição
+   * ligada e sugere/cria ordens de produção quando caem abaixo do ponto. Roda a
+   * cada 15 min (varre o NOSSO estoque, não é polling de marketplace — mesmo
+   * espírito do reconcile do Icarus). Manda um digest pelo Active só quando há
+   * novidade (sugestões pendentes ou OPs criadas no automático).
+   */
+  @Cron('*/15 * * * *', { name: 'product-os-make-to-order' })
+  async reconcileMakeToOrder(): Promise<{ orgs_alerted: number }> {
+    const orgs = await this.mto.orgsWithMto().catch(() => [])
+    let alerted = 0
+    for (const orgId of orgs) {
+      try {
+        const r = await this.mto.reconcile(orgId, 'reconcile')
+        if (!r.suggested.length && !r.auto_created.length) continue
+        if (!this.bridge.isConfigured()) continue
+        const blocks: string[] = []
+        if (r.auto_created.length) {
+          blocks.push(`*Produção criada automaticamente:*\n${r.auto_created.map(s => `• ${s.name}: ${s.qty} un. (estoque ${s.available})`).join('\n')}`)
+        }
+        if (r.suggested.length) {
+          blocks.push(`*Sugestões de reposição:*\n${r.suggested.map(s => `• ${s.name}: produzir ${s.qty} un. (estoque ${s.available})`).join('\n')}`)
+        }
+        const msg = `🔁 *Reposição da produção* (Product OS)\n\n${blocks.join('\n\n')}\n\nRevise na aba Fábrica.`
+        const sev = r.auto_created.length ? 'medium' : 'low'
+        const res = await this.bridge.notifyLojista({ organization_id: orgId, message: msg, severity: sev, deeplink: 'producao/product-os' })
+        if (!res.skipped) alerted++
+      } catch (e) { this.logger.warn(`[product-os.cron] make-to-order ${orgId.slice(0, 8)}: ${(e as Error).message}`) }
+    }
+    if (alerted) this.logger.log(`[product-os.cron] make-to-order → ${alerted} org(s)`)
+    return { orgs_alerted: alerted }
+  }
 
   /**
    * Radar de campeões (Peça 3): re-fotografa diariamente (08:00) os modelos
