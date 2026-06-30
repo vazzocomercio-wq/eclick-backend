@@ -646,6 +646,19 @@ export class ProductOsController {
     return this.sku.setColors(this.org(u), id, body?.cor_ids ?? [])
   }
 
+  @Post(':id/sku/generate-ean')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  generateEan(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { force?: boolean }) {
+    return this.sku.generateEans(this.org(u), id, body?.force === true)
+  }
+
+  @Put('sku/variant/:vid/ean')
+  @RequirePermission('products.update')
+  setVariantEan(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string, @Body() body: { ean: string | null }) {
+    return this.sku.setVariantEan(this.org(u), vid, body?.ean ?? null)
+  }
+
   @Post(':id/archive')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

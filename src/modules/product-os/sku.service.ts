@@ -128,7 +128,7 @@ export class SkuService {
 
   async getSku(orgId: string, devId: string) {
     const { data: dev } = await supabaseAdmin.from('product_dev')
-      .select('sku_marca_id, sku_categoria_id, sku_sub_id, sku_linha_id, sku_caracteristica_id, sku_base')
+      .select('sku_marca_id, sku_categoria_id, sku_sub_id, sku_linha_id, sku_caracteristica_id, sku_base, ean')
       .eq('id', devId).eq('organization_id', orgId).maybeSingle()
     if (!dev) throw new BadRequestException('Produto não encontrado')
     const d = dev as Record<string, string | null>
@@ -137,9 +137,83 @@ export class SkuService {
       this.loadRow(orgId, d.sku_linha_id), this.loadRow(orgId, d.sku_caracteristica_id),
     ])
     const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant')
-      .select('id, cor_id, sku, product_id, cor:cor_id(id, code, label)').eq('product_dev_id', devId).order('sku')
-    const variants = (vars ?? []).map(v => { const r = v as Record<string, unknown> & { cor?: unknown }; const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor; return { id: r.id, sku: r.sku, product_id: r.product_id, cor } })
-    return { classification: { marca, categoria, sub, linha, caracteristica }, base: d.sku_base, variants }
+      .select('id, cor_id, sku, ean, product_id, cor:cor_id(id, code, label)').eq('product_dev_id', devId).order('sku')
+    const variants = (vars ?? []).map(v => { const r = v as Record<string, unknown> & { cor?: unknown }; const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor; return { id: r.id, sku: r.sku, ean: r.ean, product_id: r.product_id, cor } })
+    return { classification: { marca, categoria, sub, linha, caracteristica }, base: d.sku_base, ean: d.ean, variants }
+  }
+
+  // ── EAN-13 interno (1 clique) ─────────────────────────────────────
+  /** Dígito verificador EAN-13 do payload de 12 dígitos (mod-10, pesos 1/3). */
+  private ean13Check(payload12: string): string {
+    let sum = 0
+    for (let i = 0; i < 12; i++) { const dgt = payload12.charCodeAt(i) - 48; sum += i % 2 === 0 ? dgt : dgt * 3 }
+    return String((10 - (sum % 10)) % 10)
+  }
+  /** Gera um EAN-13 com prefixo "2" (circulação restrita / uso interno). */
+  private genEan(): string {
+    let base = '2'
+    for (let i = 0; i < 11; i++) base += Math.floor(Math.random() * 10)
+    return base + this.ean13Check(base)
+  }
+  /** EAN único na org (testa variantes E produtos; índice único é o backstop). */
+  private async uniqueEan(orgId: string): Promise<string> {
+    for (let i = 0; i < 8; i++) {
+      const ean = this.genEan()
+      const [a, b] = await Promise.all([
+        supabaseAdmin.from('product_dev_sku_variant').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('ean', ean),
+        supabaseAdmin.from('product_dev').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('ean', ean),
+      ])
+      if ((a.count ?? 0) === 0 && (b.count ?? 0) === 0) return ean
+    }
+    throw new BadRequestException('Não foi possível gerar um EAN único — tente de novo')
+  }
+
+  /**
+   * Gera EAN com 1 clique. Se o produto tem variantes de cor (unidades
+   * vendáveis), gera um EAN por variante que ainda não tem; senão gera o EAN do
+   * produto. Idempotente: não sobrescreve EAN já existente.
+   */
+  async generateEans(orgId: string, devId: string, force = false) {
+    const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id, ean').eq('product_dev_id', devId).eq('organization_id', orgId)
+    const variants = (vars ?? []) as Array<{ id: string; ean: string | null }>
+    if (variants.length) {
+      for (const v of variants) {
+        if (v.ean && !force) continue
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const ean = await this.uniqueEan(orgId)
+          const { error } = await supabaseAdmin.from('product_dev_sku_variant').update({ ean }).eq('id', v.id).eq('organization_id', orgId)
+          if (!error) break
+          if (!/duplicate|unique/i.test(error.message)) throw new BadRequestException(`Erro ao gravar EAN: ${error.message}`)
+        }
+      }
+    } else {
+      const { data: dev } = await supabaseAdmin.from('product_dev').select('ean').eq('id', devId).eq('organization_id', orgId).maybeSingle()
+      const cur = (dev as { ean: string | null } | null)?.ean
+      if (!cur || force) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const ean = await this.uniqueEan(orgId)
+          const { error } = await supabaseAdmin.from('product_dev').update({ ean }).eq('id', devId).eq('organization_id', orgId)
+          if (!error) break
+          if (!/duplicate|unique/i.test(error.message)) throw new BadRequestException(`Erro ao gravar EAN: ${error.message}`)
+        }
+      }
+    }
+    return this.getSku(orgId, devId)
+  }
+
+  /** Define/limpa o EAN de uma variante manualmente (aceita EAN-13 válido ou vazio). */
+  async setVariantEan(orgId: string, variantId: string, ean: string | null) {
+    let value: string | null = null
+    if (ean != null && String(ean).trim() !== '') {
+      const digits = String(ean).replace(/\D/g, '')
+      if (digits.length !== 13) throw new BadRequestException('EAN deve ter 13 dígitos')
+      if (this.ean13Check(digits.slice(0, 12)) !== digits[12]) throw new BadRequestException('Dígito verificador do EAN inválido')
+      value = digits
+    }
+    const { error } = await supabaseAdmin.from('product_dev_sku_variant').update({ ean: value }).eq('id', variantId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(/duplicate|unique/i.test(error.message) ? 'Esse EAN já está em uso' : `Erro: ${error.message}`)
+    return { ok: true, ean: value }
   }
 
   /** Valida a cadeia hierárquica e grava a classificação + sku_base. */
