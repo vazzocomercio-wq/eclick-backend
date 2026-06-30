@@ -677,6 +677,65 @@ export class ProductOsService {
     return { product_id: productId, price, cost_price: pd.estimated_cost, photos: photos.length, stock_seeded: stockSeeded, storefront, sku: skuBase, mode, variants: variants.length }
   }
 
+  /**
+   * Gera uma imagem de catálogo do produto aplicando a PALETA de cor escolhida.
+   * Recurso PRÓPRIO do Product OS (feature `product_os_image`) — NÃO usa o IA
+   * Criativo. Usa o LlmService compartilhado (Nano Banana / gpt-image-1), sobe a
+   * imagem no bucket product-os e devolve a URL pública. Se `save`, anexa às
+   * imagens de referência do produto.
+   */
+  async generateImageWithPalette(orgId: string, id: string, body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean } = {}) {
+    const pd = await this.get(id, orgId)
+    // resolve a paleta: explícita > primária da categoria do SKU do produto
+    let palette: { name: string; colors: Array<{ hex: string; label?: string }> } | null = null
+    if (body.palette_id) {
+      const { data } = await supabaseAdmin.from('product_os_palette').select('name, colors').eq('id', body.palette_id).eq('organization_id', orgId).maybeSingle()
+      palette = (data as typeof palette) ?? null
+    }
+    if (!palette) {
+      const catId = (pd as { sku_categoria_id?: string | null }).sku_categoria_id
+      if (catId) {
+        const { data } = await supabaseAdmin.from('product_os_palette').select('name, colors').eq('organization_id', orgId).eq('category_id', catId).eq('is_primary', true).maybeSingle()
+        palette = (data as typeof palette) ?? null
+      }
+    }
+    const colors = (palette?.colors ?? []).filter(c => /^#[0-9a-fA-F]{6}$/.test(String(c.hex)))
+    const paletteStr = colors.map(c => `${c.label ? c.label + ' ' : ''}${c.hex}`).join(', ')
+
+    const product = `${pd.name}${pd.category ? `, ${pd.category}` : ''}`
+    const desc = (pd.briefing_text || pd.description || '').slice(0, 300)
+    const prompt =
+      `Fotografia de catálogo de e-commerce de ${product}, produto impresso em 3D (FDM), em fundo branco neutro limpo, ` +
+      `iluminação de estúdio suave com sombra sutil, vista em três quartos, alta nitidez, estilo premium comercial. ` +
+      (desc ? `Detalhes do produto: ${desc}. ` : '') +
+      (paletteStr ? `Use EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : '') +
+      (body.extra ? `${body.extra}. ` : '') +
+      `Sem texto, sem marca d'água, sem pessoas.`
+
+    const out = await this.llm.generateImage({ orgId, feature: 'product_os_image', prompt, format: body.format ?? 'square', n: 1 })
+    const img = out.images?.[0]
+    if (!img) throw new BadRequestException('A IA não retornou imagem. Tente de novo.')
+
+    let url: string
+    if (img.url && img.url.startsWith('http')) {
+      url = img.url
+    } else if (img.b64) {
+      const buffer = Buffer.from(img.b64, 'base64')
+      const path = `gen/${id}-${Date.now()}.png`
+      const { error } = await supabaseAdmin.storage.from('product-os').upload(path, buffer, { contentType: 'image/png', upsert: true })
+      if (error) throw new BadRequestException(`Erro ao salvar imagem: ${error.message}`)
+      url = supabaseAdmin.storage.from('product-os').getPublicUrl(path).data.publicUrl
+    } else {
+      throw new BadRequestException('Imagem vazia')
+    }
+
+    if (body.save) {
+      const imgs = [...(pd.reference_images ?? []), { url, notes: `IA · paleta ${palette?.name ?? '—'}` }]
+      await supabaseAdmin.from('product_dev').update({ reference_images: imgs }).eq('id', id).eq('organization_id', orgId)
+    }
+    return { url, palette: palette?.name ?? null, colors, provider: out.provider, model: out.model, saved: !!body.save }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // versões CAD / protótipo
   // ─────────────────────────────────────────────────────────────────

@@ -789,4 +789,11 @@ export class ProductOsController {
   publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { produced_quantity?: number; target_margin_pct?: number; variation_mode?: 'single' | 'variable'; variants?: Array<{ id: string; price?: number | null; stock?: number | null }> } = {}) {
     return this.svc.publishToCatalog(id, this.org(u), u.id, body)
   }
+
+  @Post(':id/generate-image')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  generateImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean } = {}) {
+    return this.svc.generateImageWithPalette(this.org(u), id, body)
+  }
 }

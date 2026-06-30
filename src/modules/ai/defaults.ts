@@ -312,6 +312,14 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
     fallback:    { provider: 'openai', model: 'gpt-image-1' },
   },
+  // Product OS — imagem de catálogo do produto 3D aplicando a PALETA da
+  // categoria. Recurso PRÓPRIO do Product OS (não usa as features do Creative).
+  product_os_image: {
+    label:       'Imagem de produto com paleta (Product OS)',
+    description: 'Gera imagem de catálogo do produto impresso em 3D aplicando a paleta de cores escolhida da categoria',
+    primary:     { provider: 'google', model: 'gemini-2.5-flash-image' },
+    fallback:    { provider: 'openai', model: 'gpt-image-1' },
+  },
   // Telemetria — e-Click Insights (Fase 4). Analisa agregados de uso e gera
   // insights estruturados pro founder. Sonnet pra qualidade analítica + jsonMode.
   telemetry_insights: {
