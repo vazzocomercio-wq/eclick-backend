@@ -182,7 +182,7 @@ export class ProductOsController {
 
   @Post('production-orders')
   @RequirePermission('products.update')
-  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null }) {
+  createOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null; sku_variant_id?: string | null }) {
     return this.production.createOrder(this.org(u), u.id, body)
   }
 
@@ -786,7 +786,7 @@ export class ProductOsController {
   @Post(':id/publish-to-catalog')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { produced_quantity?: number; target_margin_pct?: number; variation_mode?: 'single' | 'variable'; variants?: Array<{ id: string; price?: number | null; stock?: number | null }> } = {}) {
+  publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { produced_quantity?: number; target_margin_pct?: number; variation_mode?: 'single' | 'variable'; variants?: Array<{ id: string; price?: number | null; stock?: number | null }>; photo_urls?: string[] } = {}) {
     return this.svc.publishToCatalog(id, this.org(u), u.id, body)
   }
 

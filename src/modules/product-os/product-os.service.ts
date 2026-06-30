@@ -568,6 +568,7 @@ export class ProductOsService {
     produced_quantity?: number; target_margin_pct?: number
     variation_mode?: 'single' | 'variable'
     variants?: Array<{ id: string; price?: number | null; stock?: number | null }>
+    photo_urls?: string[]
   } = {}): Promise<{
     product_id: string; price: number | null; cost_price: number | null; photos: number; stock_seeded: number; storefront: boolean; sku: string | null; mode: 'single' | 'variable'; variants: number; already?: boolean
   }> {
@@ -589,8 +590,12 @@ export class ProductOsService {
     if (!qualityOk) throw new BadRequestException('Conclua o checklist de qualidade (aprovado) antes de publicar.')
 
     // fotos: protótipo aprovado > referências
+    // fotos do anúncio: lista escolhida pelo usuário (capa = 1ª) OU, por padrão,
+    // combina fotos do protótipo aprovado + reference_images (que inclui as
+    // IMAGENS GERADAS pela IA e as importadas do MakerWorld), dedupada.
     const approvedV = pd.versions.find(v => v.approved)
-    const photos = (approvedV?.prototype_photo_urls?.length ? approvedV.prototype_photo_urls : (pd.reference_images ?? []).map(r => r.url)).filter(Boolean)
+    const defaultPhotos = [...(approvedV?.prototype_photo_urls ?? []), ...(pd.reference_images ?? []).map(r => r.url)].filter(Boolean)
+    const photos = (body.photo_urls && body.photo_urls.length ? body.photo_urls : [...new Set(defaultPhotos)]).filter(Boolean)
 
     // preço: target_price > sugerido do canal primário
     let price = pd.target_price ?? null

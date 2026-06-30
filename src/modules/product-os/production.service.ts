@@ -183,7 +183,7 @@ export class ProductionService {
     return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
   }
 
-  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null }) {
+  async createOrder(orgId: string, userId: string | null, body: { product_dev_id: string; version_id?: string; quantity: number; machine?: string; printer_id?: string; is_prototype?: boolean; part_id?: string | null; loaded_input_id?: string | null; filament_map?: Array<{ index: number; input_id: string }> | null; sku_variant_id?: string | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     const partId = body.part_id ?? null
     // protótipo (projeto sem produto cadastrado) consome insumo mas NÃO vira estoque
@@ -203,7 +203,7 @@ export class ProductionService {
 
     const { data, error } = await supabaseAdmin.from('production_order').insert({
       organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? metrics.versionId ?? null, part_id: partId,
-      order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null,
+      order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null, sku_variant_id: body.sku_variant_id ?? null,
       estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
@@ -375,8 +375,29 @@ export class ProductionService {
       return
     }
     const qty = Number(order.quantity) || 0
-    const { data: prod } = await supabaseAdmin.from('products').select('stock').eq('id', productId).maybeSingle()
-    const novo = (Number((prod as { stock: number | null } | null)?.stock) || 0) + qty
+    const { data: prod } = await supabaseAdmin.from('products').select('stock, has_variations, variations').eq('id', productId).maybeSingle()
+    const p = prod as { stock: number | null; has_variations: boolean | null; variations: Array<Record<string, unknown>> | null } | null
+
+    // PRODUTO VARIÁVEL + OP com cor definida → credita a variação certa (match por sku=base-cor)
+    const variantId = (order.sku_variant_id as string | null) ?? null
+    if (variantId && p?.has_variations) {
+      const { data: variant } = await supabaseAdmin.from('product_dev_sku_variant').select('sku').eq('id', variantId).maybeSingle()
+      const vsku = (variant as { sku: string } | null)?.sku
+      const variations = (p.variations ?? []) as Array<{ sku?: string; stock?: number } & Record<string, unknown>>
+      let matched = false
+      const updated = variations.map(v => (vsku && v.sku === vsku) ? (matched = true, { ...v, stock: (Number(v.stock) || 0) + qty }) : v)
+      if (matched) {
+        const total = updated.reduce((s, v) => s + (Number(v.stock) || 0), 0)
+        await supabaseAdmin.from('products').update({ variations: updated, stock: total, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+        await supabaseAdmin.from('product_stock').update({ quantity: total, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
+        await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
+        this.logger.log(`[producao] +${qty} un na cor ${vsku} (products.stock=${total}) p/ ${productId.slice(0, 8)}`)
+        return
+      }
+    }
+
+    // produto único (ou variável sem cor definida) → estoque no nível do produto
+    const novo = (Number(p?.stock) || 0) + qty
     await supabaseAdmin.from('products').update({ stock: novo, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
     // espelha no registro mestre criado pela plataforma (consistência) — SEM
     // sync de canal/marketplace (não chama recalcAndPropagate = sem Icarus)
