@@ -326,7 +326,8 @@ export class ProductionService {
     if (to === 'imprimindo' && !(order as { started_at: string | null }).started_at) patch.started_at = new Date().toISOString()
     if (to === completionState) patch.completed_at = new Date().toISOString()
 
-    await supabaseAdmin.from('production_order').update(patch).eq('id', oid).eq('organization_id', orgId)
+    const { error: upErr } = await supabaseAdmin.from('production_order').update(patch).eq('id', oid).eq('organization_id', orgId)
+    if (upErr) throw new BadRequestException(`Erro ao mudar status para '${to}': ${upErr.message}`)   // não segue p/ baixar estoque se o status não mudou
 
     const devId = (order as { product_dev_id: string }).product_dev_id
     if (to === 'acabamento') await this.markUnitsProduced(orgId, oid)   // peças físicas existem

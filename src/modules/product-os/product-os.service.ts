@@ -684,7 +684,7 @@ export class ProductOsService {
    * imagem no bucket product-os e devolve a URL pública. Se `save`, anexa às
    * imagens de referência do produto.
    */
-  async generateImageWithPalette(orgId: string, id: string, body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean; use_reference?: boolean; reference_url?: string } = {}) {
+  async generateImageWithPalette(orgId: string, id: string, body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean; use_reference?: boolean; reference_url?: string; reference_urls?: string[] } = {}) {
     const pd = await this.get(id, orgId)
     // resolve a paleta: explícita > primária da categoria do SKU do produto
     let palette: { name: string; colors: Array<{ hex: string; label?: string }> } | null = null
@@ -713,11 +713,15 @@ export class ProductOsService {
     for (const u of approvedV?.prototype_photo_urls ?? []) if (u && !photos.includes(u)) photos.push(u)
     for (const v of pd.versions ?? []) for (const u of v.prototype_photo_urls ?? []) if (u && !photos.includes(u)) photos.push(u)
     for (const r of pd.reference_images ?? []) if (r.url && !photos.includes(r.url)) photos.push(r.url)
-    const refUrl = body.reference_url || photos[0] || null
-    const useRef = body.use_reference !== false && !!refUrl
+    // múltiplas referências: usa o que o usuário escolheu (vários ângulos do MESMO
+    // produto, ex. do MakerWorld) ou cai na melhor foto automática. Cap em 4.
+    const requested = (body.reference_urls && body.reference_urls.length) ? body.reference_urls : (body.reference_url ? [body.reference_url] : photos.slice(0, 1))
+    const refUrls = [...new Set(requested.filter(u => /^https?:\/\//i.test(String(u))))].slice(0, 4)
+    const useRef = body.use_reference !== false && refUrls.length > 0
+    const multi = refUrls.length > 1
 
     const prompt = useRef
-      ? `A partir da foto de referência do produto, gere uma foto de catálogo de e-commerce profissional MANTENDO a forma, as proporções e os detalhes reais do produto (impresso em 3D). ` +
+      ? `A partir d${multi ? 'as fotos' : 'a foto'} de referência do produto${multi ? ` (${refUrls.length} ângulos do MESMO produto)` : ''}, gere UMA foto de catálogo de e-commerce profissional MANTENDO a forma, as proporções e os detalhes reais do produto (impresso em 3D). ` +
         `Fundo branco neutro limpo, iluminação de estúdio suave com sombra sutil, vista em três quartos, alta nitidez, estilo premium comercial. ` +
         (paletteStr ? `Aplique EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : 'Mantenha as cores do produto. ') +
         (body.extra ? `${body.extra}. ` : '') + `Sem texto, sem marca d'água, sem pessoas.`
@@ -727,7 +731,7 @@ export class ProductOsService {
         (paletteStr ? `Use EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : '') +
         (body.extra ? `${body.extra}. ` : '') + `Sem texto, sem marca d'água, sem pessoas.`
 
-    const out = await this.llm.generateImage({ orgId, feature: 'product_os_image', prompt, format: body.format ?? 'square', n: 1, ...(useRef && refUrl ? { sourceImageUrls: [refUrl] } : {}) })
+    const out = await this.llm.generateImage({ orgId, feature: 'product_os_image', prompt, format: body.format ?? 'square', n: 1, ...(useRef ? { sourceImageUrls: refUrls } : {}) })
     const img = out.images?.[0]
     if (!img) throw new BadRequestException('A IA não retornou imagem. Tente de novo.')
 
@@ -748,7 +752,7 @@ export class ProductOsService {
       const imgs = [...(pd.reference_images ?? []), { url, notes: `IA · paleta ${palette?.name ?? '—'}` }]
       await supabaseAdmin.from('product_dev').update({ reference_images: imgs }).eq('id', id).eq('organization_id', orgId)
     }
-    return { url, palette: palette?.name ?? null, colors, provider: out.provider, model: out.model, saved: !!body.save, used_reference: useRef, reference_url: useRef ? refUrl : null, candidates: photos }
+    return { url, palette: palette?.name ?? null, colors, provider: out.provider, model: out.model, saved: !!body.save, used_reference: useRef, reference_url: useRef ? refUrls[0] : null, reference_urls: useRef ? refUrls : [], candidates: photos }
   }
 
   // ─────────────────────────────────────────────────────────────────

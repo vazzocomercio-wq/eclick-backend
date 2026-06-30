@@ -793,7 +793,7 @@ export class ProductOsController {
   @Post(':id/generate-image')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  generateImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean; use_reference?: boolean; reference_url?: string } = {}) {
+  generateImage(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean; use_reference?: boolean; reference_url?: string; reference_urls?: string[] } = {}) {
     return this.svc.generateImageWithPalette(this.org(u), id, body)
   }
 }
