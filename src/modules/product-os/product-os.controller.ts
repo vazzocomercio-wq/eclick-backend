@@ -13,6 +13,7 @@ import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakeToOrderService, type MtoConfig } from './make-to-order.service'
 import { SkuService } from './sku.service'
+import { PaletteService, type PaletteColor } from './palette.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { NfeImportService } from './nfe-import.service'
@@ -34,6 +35,7 @@ export class ProductOsController {
     private readonly active: ProductOsActiveService,
     private readonly mto: MakeToOrderService,
     private readonly sku: SkuService,
+    private readonly palettes: PaletteService,
     private readonly radar: MakerworldRadarService,
     private readonly sources: ModelSourceRegistry,
     private readonly nfe: NfeImportService,
@@ -81,6 +83,39 @@ export class ProductOsController {
   @RequirePermission('products.update')
   skuTaxonomyDelete(@ReqUser() u: ReqUserPayload, @Param('tid') tid: string) {
     return this.sku.deleteTaxonomy(this.org(u), tid)
+  }
+
+  // ── Paletas de cor por categoria (recurso próprio do Product OS) ──
+  @Get('palettes')
+  @RequirePermission('products.view')
+  listPalettes(@ReqUser() u: ReqUserPayload, @Query('category_id') categoryId?: string) {
+    return this.palettes.list(this.org(u), categoryId || null)
+  }
+
+  @Post('palettes')
+  @RequirePermission('products.update')
+  createPalette(@ReqUser() u: ReqUserPayload, @Body() body: { name: string; category_id?: string | null; colors?: PaletteColor[]; notes?: string; is_primary?: boolean }) {
+    return this.palettes.create(this.org(u), u.id, body)
+  }
+
+  @Patch('palettes/:pid')
+  @RequirePermission('products.update')
+  updatePalette(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { name?: string; category_id?: string | null; colors?: PaletteColor[]; notes?: string | null }) {
+    return this.palettes.update(this.org(u), pid, body)
+  }
+
+  @Post('palettes/:pid/delete')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  deletePalette(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) {
+    return this.palettes.remove(this.org(u), pid)
+  }
+
+  @Post('palettes/:pid/primary')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  setPrimaryPalette(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) {
+    return this.palettes.setPrimary(this.org(u), pid)
   }
 
   // ── Make-to-order (T1-B): reposição da produção a partir do estoque ──
