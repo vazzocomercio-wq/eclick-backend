@@ -12,6 +12,7 @@ import { ProductPartService } from './product-part.service'
 import { PrinterService, type Printer } from './printer.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakeToOrderService, type MtoConfig } from './make-to-order.service'
+import { SkuService } from './sku.service'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { NfeImportService } from './nfe-import.service'
@@ -32,6 +33,7 @@ export class ProductOsController {
     private readonly printers: PrinterService,
     private readonly active: ProductOsActiveService,
     private readonly mto: MakeToOrderService,
+    private readonly sku: SkuService,
     private readonly radar: MakerworldRadarService,
     private readonly sources: ModelSourceRegistry,
     private readonly nfe: NfeImportService,
@@ -54,6 +56,32 @@ export class ProductOsController {
     labor_cost_per_hour?: number; packaging_cost?: number; default_waste_pct?: number
     machines?: Array<{ name: string; model?: string; bed_mm?: number[] }>
   }) { return this.svc.updateSettings(this.org(u), body) }
+
+  // ── Gerador de SKU: catálogo de taxonomia ─────────────────────────
+  @Get('sku/taxonomy')
+  @RequirePermission('products.view')
+  skuTaxonomy(@ReqUser() u: ReqUserPayload, @Query('kind') kind: string, @Query('parent_id') parentId?: string) {
+    return this.sku.listTaxonomy(this.org(u), kind, parentId || null)
+  }
+
+  @Post('sku/taxonomy')
+  @RequirePermission('products.update')
+  skuTaxonomyCreate(@ReqUser() u: ReqUserPayload, @Body() body: { kind: string; label: string; parent_id?: string | null; code?: string; notes?: string }) {
+    return this.sku.createTaxonomy(this.org(u), u.id, body)
+  }
+
+  @Patch('sku/taxonomy/:tid')
+  @RequirePermission('products.update')
+  skuTaxonomyUpdate(@ReqUser() u: ReqUserPayload, @Param('tid') tid: string, @Body() body: { label?: string; notes?: string; sort_order?: number }) {
+    return this.sku.updateTaxonomy(this.org(u), tid, body)
+  }
+
+  @Post('sku/taxonomy/:tid/delete')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  skuTaxonomyDelete(@ReqUser() u: ReqUserPayload, @Param('tid') tid: string) {
+    return this.sku.deleteTaxonomy(this.org(u), tid)
+  }
 
   // ── Make-to-order (T1-B): reposição da produção a partir do estoque ──
   @Get('make-to-order/suggestions')
@@ -598,6 +626,24 @@ export class ProductOsController {
   @RequirePermission('products.update')
   setMtoConfig(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: Partial<MtoConfig>) {
     return this.mto.setConfig(this.org(u), id, body)
+  }
+
+  @Get(':id/sku')
+  @RequirePermission('products.view')
+  getSku(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.sku.getSku(this.org(u), id)
+  }
+
+  @Put(':id/sku')
+  @RequirePermission('products.update')
+  setSkuClassification(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { marca_id: string; categoria_id: string; sub_id: string; linha_id: string; caracteristica_id: string }) {
+    return this.sku.setClassification(this.org(u), id, body)
+  }
+
+  @Put(':id/sku/colors')
+  @RequirePermission('products.update')
+  setSkuColors(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { cor_ids: string[] }) {
+    return this.sku.setColors(this.org(u), id, body?.cor_ids ?? [])
   }
 
   @Post(':id/archive')
