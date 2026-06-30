@@ -18,7 +18,7 @@ const PARENT_KIND: Record<SkuKind, SkuKind | null> = {
 }
 const ZERO = '00000000-0000-0000-0000-000000000000'
 
-interface TaxRow { id: string; organization_id: string; kind: string; code: string; label: string; parent_id: string | null; sort_order: number }
+export interface TaxRow { id: string; organization_id: string; kind: string; code: string; label: string; parent_id: string | null; sort_order: number }
 
 @Injectable()
 export class SkuService {
