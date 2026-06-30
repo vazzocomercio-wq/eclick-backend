@@ -21,7 +21,7 @@ interface NfeItem {
   code: string | null; ean: string | null; description: string; ncm: string | null; cfop: string | null
   // valores RESOLVIDOS p/ o insumo (filamento já convertido p/ gramas)
   unit: string; quantity: number; unit_cost: number; total: number
-  kind: string; material: string | null; color: string | null; diameter_mm: number | null; spool_weight_g: number | null
+  kind: string; material: string | null; color: string | null; color_hex: string | null; diameter_mm: number | null; spool_weight_g: number | null
   // valores ORIGINAIS da NF (p/ transparência na revisão)
   raw_unit: string; raw_quantity: number; raw_unit_cost: number; conversion: string | null
 }
@@ -79,7 +79,7 @@ export class NfeImportService {
         ncm: p.ncm != null ? String(p.ncm) : null, cfop: p.cfop != null ? String(p.cfop) : null,
         total: Math.round((Number(p.total ?? 0) || 0) * 100) / 100, kind,
         unit: r.unit, quantity: r.quantity, unit_cost: r.unit_cost,
-        material: r.material, color: r.color, diameter_mm: r.diameter_mm, spool_weight_g: r.spool_weight_g,
+        material: r.material, color: r.color, color_hex: r.color_hex, diameter_mm: r.diameter_mm, spool_weight_g: r.spool_weight_g,
         raw_unit: rawUnit, raw_quantity: rawQty, raw_unit_cost: rawCost, conversion: r.conversion,
       }
     }).filter((i: NfeItem) => i.description)
@@ -110,8 +110,30 @@ export class NfeImportService {
     return m ? m[1].toUpperCase() : null
   }
   private inferColor(desc: string): string | null {
-    const m = (desc || '').match(/\b(branco|preto|cinza|prata|dourado|vermelho|laranja|amarelo|verde|azul|roxo|violeta|rosa|marrom|bege|natural|transl[uú]cido|transparente|fluor|neon|ouro)\w*/i)
-    return m ? m[0][0].toUpperCase() + m[0].slice(1).toLowerCase() : null
+    const d = (desc || '')
+    // cores compostas primeiro (verde oliva, azul petróleo, cinza chumbo…)
+    const comp = d.match(/\b(verde\s+(?:oliva|militar|menta|lim[ãa]o|gua|água)|azul\s+(?:petr[óo]leo|beb[êe]|marinho|royal|turquesa)|cinza\s+(?:chumbo|espacial|grafite)|rosa\s+(?:beb[êe]|choque))\b/i)
+    if (comp) return this.titleCase(comp[1])
+    const m = d.match(/\b(branco|preto|cinza|prata|dourado|vermelho|laranja|amarelo|verde|azul|roxo|violeta|lil[áa]s|rosa|marrom|bege|oliva|petr[óo]leo|turquesa|ciano|magenta|vinho|grafite|chumbo|natural|transl[uú]cido|transparente|fluor|neon|ouro)\w*/i)
+    return m ? this.titleCase(m[0]) : null
+  }
+  private titleCase(s: string): string { return s.split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w).join(' ') }
+  /** Hex aproximado da cor (p/ swatch + auto-match por cor no multicor). Best-effort. */
+  private colorHex(color: string | null): string | null {
+    if (!color) return null
+    const c = color.toLowerCase()
+    const map: Array<[RegExp, string]> = [
+      [/oliva|militar/, '#68724D'], [/petr[óo]leo/, '#1B4D5C'], [/turquesa/, '#30D5C8'], [/menta/, '#9FE2BF'],
+      [/marinho/, '#1F2A44'], [/royal/, '#2547C0'], [/beb[êe]/, '#A7C7E7'],
+      [/chumbo|grafite/, '#3A3A3A'], [/osso/, '#E3DAC9'], [/bege|natural/, '#E8DBB7'],
+      [/vinho/, '#722F37'], [/laranja/, '#F97316'], [/amarelo|ouro|dourado/, '#EAB308'],
+      [/lil[áa]s|violeta|roxo/, '#7C3AED'], [/magenta/, '#D6336C'], [/rosa/, '#EC4899'], [/marrom/, '#7C4A2D'],
+      [/ciano/, '#22D3EE'], [/prata/, '#C0C0C0'],
+      [/\bazul\b|^azul/, '#2563EB'], [/\bcinza\b|^cinza/, '#9AA0A6'], [/\bpreto\b|^preto/, '#111111'],
+      [/\bbranco\b|^branco/, '#F5F5F5'], [/\bvermelho\b|^vermelho/, '#DC2626'], [/\bverde\b|^verde/, '#16A34A'],
+    ]
+    for (const [re, hex] of map) if (re.test(c)) return hex
+    return null
   }
   private inferDiameter(desc: string): number | null {
     const m = (desc || '').match(/\b(1[.,]75|2[.,]85|3[.,]0{1,2}|3)\s*mm/i)
@@ -131,11 +153,12 @@ export class NfeImportService {
    *  do sistema): qtd em g, custo por g, peso do rolo. Ex: 1 UN "PLA 1kg" R$110
    *  → 1000 g @ R$0,11/g. Outros tipos mantêm a unidade da NF. */
   private resolveItem(desc: string, kind: string, rawUnit: string, rawQty: number, rawCost: number): {
-    unit: string; quantity: number; unit_cost: number; material: string | null; color: string | null
+    unit: string; quantity: number; unit_cost: number; material: string | null; color: string | null; color_hex: string | null
     diameter_mm: number | null; spool_weight_g: number | null; conversion: string | null
   } {
     const material = this.inferMaterial(desc)
     const color = this.inferColor(desc)
+    const color_hex = this.colorHex(color)
     const diameter_mm = this.inferDiameter(desc)
     const weight = this.inferWeightGrams(desc)
     const u = (rawUnit || '').toLowerCase()
@@ -154,11 +177,11 @@ export class NfeImportService {
         const unit_cost = Math.round(perG * 1e6) / 1e6
         const detail = weight ? ` de ${weight}g` : (assumed ? ' (rolo 1kg assumido)' : '')
         const conversion = `${rawQty} ${rawUnit}${detail} → ${quantity} g @ R$ ${unit_cost.toFixed(5)}/g${assumed ? ' — confira o peso do rolo' : ''}`
-        return { unit: 'g', quantity, unit_cost, material, color, diameter_mm, spool_weight_g: spool, conversion }
+        return { unit: 'g', quantity, unit_cost, material, color, color_hex, diameter_mm, spool_weight_g: spool, conversion }
       }
     }
     // não-filamento (ou filamento sem peso detectável): mantém a unidade da NF
-    return { unit: this.normUnit(rawUnit), quantity: rawQty, unit_cost: rawCost, material, color, diameter_mm, spool_weight_g: weight, conversion: null }
+    return { unit: this.normUnit(rawUnit), quantity: rawQty, unit_cost: rawCost, material, color, color_hex, diameter_mm, spool_weight_g: weight, conversion: null }
   }
 
   /** Parseia o XML da NF-e e normaliza fornecedor + itens. */
@@ -209,7 +232,7 @@ export class NfeImportService {
         ncm: p.NCM ? String(p.NCM) : null, cfop: p.CFOP ? String(p.CFOP) : null,
         total: Math.round((Number(p.vProd ?? 0) || 0) * 100) / 100, kind,
         unit: r.unit, quantity: r.quantity, unit_cost: r.unit_cost,
-        material: r.material, color: r.color, diameter_mm: r.diameter_mm, spool_weight_g: r.spool_weight_g,
+        material: r.material, color: r.color, color_hex: r.color_hex, diameter_mm: r.diameter_mm, spool_weight_g: r.spool_weight_g,
         raw_unit: rawUnit, raw_quantity: rawQty, raw_unit_cost: rawCost, conversion: r.conversion,
       }
     }).filter(i => i.description)
@@ -275,7 +298,7 @@ export class NfeImportService {
   async importCommit(orgId: string, userId: string | null, body: {
     supplier: NfeSupplier & { use_existing_id?: string | null }
     nf: { access_key: string | null; number: string | null; total?: number }
-    items: Array<{ include?: boolean; link_input_id?: string | null; name: string; sku?: string | null; unit?: string; quantity: number; unit_cost: number; kind?: string; material?: string | null; description?: string | null; color?: string | null; diameter_mm?: number | null; spool_weight_g?: number | null }>
+    items: Array<{ include?: boolean; link_input_id?: string | null; name: string; sku?: string | null; barcode?: string | null; unit?: string; quantity: number; unit_cost: number; kind?: string; material?: string | null; description?: string | null; color?: string | null; color_hex?: string | null; diameter_mm?: number | null; spool_weight_g?: number | null }>
     force?: boolean // reimportar uma NF já carimbada (ex.: insumos foram excluídos e o user quer recriar)
   }): Promise<{ supplier_id: string; created: number; restocked: number }> {
     // trava anti-duplicação — só barra quando NÃO é reimportação explícita
@@ -326,9 +349,9 @@ export class NfeImportService {
       let inputId = it.link_input_id ?? null
       if (!inputId) {
         const novo = await this.inputs.create(orgId, {
-          name: it.name, sku: it.sku ?? null, kind: this.normKind(it.kind), material: it.material ?? null,
+          name: it.name, sku: it.sku ?? null, barcode: it.barcode ?? null, kind: this.normKind(it.kind), material: it.material ?? null,
           unit: this.normUnit(it.unit), supplier: supplierName, description: it.description ?? null,
-          color: it.color ?? null, diameter_mm: it.diameter_mm ?? null, spool_weight_g: it.spool_weight_g ?? null,
+          color: it.color ?? null, color_hex: it.color_hex ?? null, diameter_mm: it.diameter_mm ?? null, spool_weight_g: it.spool_weight_g ?? null,
           quantity: 0, cost_per_unit: 0,
         })
         inputId = novo.id
