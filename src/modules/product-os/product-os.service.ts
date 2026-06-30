@@ -684,7 +684,7 @@ export class ProductOsService {
    * imagem no bucket product-os e devolve a URL pública. Se `save`, anexa às
    * imagens de referência do produto.
    */
-  async generateImageWithPalette(orgId: string, id: string, body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean } = {}) {
+  async generateImageWithPalette(orgId: string, id: string, body: { palette_id?: string; extra?: string; format?: 'square' | 'story' | 'wide'; save?: boolean; use_reference?: boolean; reference_url?: string } = {}) {
     const pd = await this.get(id, orgId)
     // resolve a paleta: explícita > primária da categoria do SKU do produto
     let palette: { name: string; colors: Array<{ hex: string; label?: string }> } | null = null
@@ -704,15 +704,30 @@ export class ProductOsService {
 
     const product = `${pd.name}${pd.category ? `, ${pd.category}` : ''}`
     const desc = (pd.briefing_text || pd.description || '').slice(0, 300)
-    const prompt =
-      `Fotografia de catálogo de e-commerce de ${product}, produto impresso em 3D (FDM), em fundo branco neutro limpo, ` +
-      `iluminação de estúdio suave com sombra sutil, vista em três quartos, alta nitidez, estilo premium comercial. ` +
-      (desc ? `Detalhes do produto: ${desc}. ` : '') +
-      (paletteStr ? `Use EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : '') +
-      (body.extra ? `${body.extra}. ` : '') +
-      `Sem texto, sem marca d'água, sem pessoas.`
 
-    const out = await this.llm.generateImage({ orgId, feature: 'product_os_image', prompt, format: body.format ?? 'square', n: 1 })
+    // imagens de referência disponíveis (prioridade: foto do protótipo aprovado >
+    // qualquer protótipo > reference_images — que inclui as fotos/renders do
+    // MakerWorld e outros bancos importados). Usadas no modo image-to-image.
+    const photos: string[] = []
+    const approvedV = (pd.versions ?? []).find(v => v.approved)
+    for (const u of approvedV?.prototype_photo_urls ?? []) if (u && !photos.includes(u)) photos.push(u)
+    for (const v of pd.versions ?? []) for (const u of v.prototype_photo_urls ?? []) if (u && !photos.includes(u)) photos.push(u)
+    for (const r of pd.reference_images ?? []) if (r.url && !photos.includes(r.url)) photos.push(r.url)
+    const refUrl = body.reference_url || photos[0] || null
+    const useRef = body.use_reference !== false && !!refUrl
+
+    const prompt = useRef
+      ? `A partir da foto de referência do produto, gere uma foto de catálogo de e-commerce profissional MANTENDO a forma, as proporções e os detalhes reais do produto (impresso em 3D). ` +
+        `Fundo branco neutro limpo, iluminação de estúdio suave com sombra sutil, vista em três quartos, alta nitidez, estilo premium comercial. ` +
+        (paletteStr ? `Aplique EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : 'Mantenha as cores do produto. ') +
+        (body.extra ? `${body.extra}. ` : '') + `Sem texto, sem marca d'água, sem pessoas.`
+      : `Fotografia de catálogo de e-commerce de ${product}, produto impresso em 3D (FDM), em fundo branco neutro limpo, ` +
+        `iluminação de estúdio suave com sombra sutil, vista em três quartos, alta nitidez, estilo premium comercial. ` +
+        (desc ? `Detalhes do produto: ${desc}. ` : '') +
+        (paletteStr ? `Use EXATAMENTE esta paleta de cores no produto: ${paletteStr}. ` : '') +
+        (body.extra ? `${body.extra}. ` : '') + `Sem texto, sem marca d'água, sem pessoas.`
+
+    const out = await this.llm.generateImage({ orgId, feature: 'product_os_image', prompt, format: body.format ?? 'square', n: 1, ...(useRef && refUrl ? { sourceImageUrls: [refUrl] } : {}) })
     const img = out.images?.[0]
     if (!img) throw new BadRequestException('A IA não retornou imagem. Tente de novo.')
 
@@ -733,7 +748,7 @@ export class ProductOsService {
       const imgs = [...(pd.reference_images ?? []), { url, notes: `IA · paleta ${palette?.name ?? '—'}` }]
       await supabaseAdmin.from('product_dev').update({ reference_images: imgs }).eq('id', id).eq('organization_id', orgId)
     }
-    return { url, palette: palette?.name ?? null, colors, provider: out.provider, model: out.model, saved: !!body.save }
+    return { url, palette: palette?.name ?? null, colors, provider: out.provider, model: out.model, saved: !!body.save, used_reference: useRef, reference_url: useRef ? refUrl : null, candidates: photos }
   }
 
   // ─────────────────────────────────────────────────────────────────
