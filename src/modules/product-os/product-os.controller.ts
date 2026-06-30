@@ -751,7 +751,7 @@ export class ProductOsController {
   @Post(':id/publish-to-catalog')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { produced_quantity?: number; target_margin_pct?: number } = {}) {
+  publish(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { produced_quantity?: number; target_margin_pct?: number; variation_mode?: 'single' | 'variable'; variants?: Array<{ id: string; price?: number | null; stock?: number | null }> } = {}) {
     return this.svc.publishToCatalog(id, this.org(u), u.id, body)
   }
 }

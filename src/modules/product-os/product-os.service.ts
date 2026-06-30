@@ -564,11 +564,15 @@ export class ProductOsService {
    * (opcional) publica na loja. Reusa ProductsService p/ taxa+vitrine e
    * StockService p/ o estoque. Idempotente (se já tem product_id, no-op).
    */
-  async publishToCatalog(id: string, orgId: string, userId: string | null, body: { produced_quantity?: number; target_margin_pct?: number } = {}): Promise<{
-    product_id: string; price: number | null; cost_price: number | null; photos: number; stock_seeded: number; storefront: boolean; already?: boolean
+  async publishToCatalog(id: string, orgId: string, userId: string | null, body: {
+    produced_quantity?: number; target_margin_pct?: number
+    variation_mode?: 'single' | 'variable'
+    variants?: Array<{ id: string; price?: number | null; stock?: number | null }>
+  } = {}): Promise<{
+    product_id: string; price: number | null; cost_price: number | null; photos: number; stock_seeded: number; storefront: boolean; sku: string | null; mode: 'single' | 'variable'; variants: number; already?: boolean
   }> {
     const pd = await this.get(id, orgId)
-    if (pd.product_id) return { product_id: pd.product_id, price: null, cost_price: pd.estimated_cost, photos: 0, stock_seeded: 0, storefront: false, already: true }
+    if (pd.product_id) return { product_id: pd.product_id, price: null, cost_price: pd.estimated_cost, photos: 0, stock_seeded: 0, storefront: false, sku: null, mode: 'single', variants: 0, already: true }
     if (pd.status !== 'aprovado') throw new BadRequestException('Só produtos aprovados podem virar anúncio. Aprove uma versão primeiro.')
 
     // porteiro de licença (Peça 2): importados não-verdes só publicam com liberação
@@ -600,6 +604,34 @@ export class ProductOsService {
 
     const tax = await this.products.getTaxConfig(orgId).catch(() => ({ default_tax_percentage: null, default_tax_on_freight: false }))
 
+    // SKU + EAN gerados (Product OS) → fluem pro catálogo. Variantes de cor = unidades vendáveis.
+    const { data: skuRow } = await supabaseAdmin.from('product_dev').select('sku_base, ean').eq('id', id).eq('organization_id', orgId).maybeSingle()
+    const skuBase = (skuRow as { sku_base: string | null } | null)?.sku_base ?? null
+    const baseEan = (skuRow as { ean: string | null } | null)?.ean ?? null
+    const { data: varRows } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id, sku, ean, cor:cor_id(label)').eq('product_dev_id', id).order('sku')
+    const variants = (varRows ?? []).map(v => {
+      const r = v as { id: string; sku: string; ean: string | null; cor: { label?: string } | Array<{ label?: string }> | null }
+      const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
+      return { id: r.id, sku: r.sku, ean: r.ean, label: cor?.label ?? '' }
+    })
+    // modo: 'variable' só faz sentido com variantes; default = variável se há cores, senão único.
+    const mode: 'single' | 'variable' = variants.length === 0 ? 'single' : (body.variation_mode ?? 'variable')
+
+    // produto variável = 1 produto com variations[] jsonb (1 linha/cor), como a aba "Variações"
+    // do catálogo (System 1, consumido pelo ML). EAN por cor estende a linha (aditivo no jsonb).
+    const ovById = new Map((body.variants ?? []).map(v => [v.id, v]))
+    const variationsJson = mode === 'variable' ? variants.map(v => {
+      const ov = ovById.get(v.id)
+      return {
+        id: v.id, type: 'Cor', value: v.label,
+        price: ov?.price != null ? Number(ov.price) : (price ?? 0),
+        stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : 0,
+        sku: v.sku, ean: v.ean,
+      }
+    }) : []
+    const variableStock = variationsJson.reduce((s, r) => s + (Number(r.stock) || 0), 0)
+
     const { data: created, error } = await supabaseAdmin.from('products').insert({
       organization_id: orgId,
       name: pd.name,
@@ -608,6 +640,10 @@ export class ProductOsService {
       photo_urls: photos,
       cost_price: pd.estimated_cost,
       price,
+      sku: skuBase,
+      ean: baseEan,
+      has_variations: mode === 'variable',
+      variations: variationsJson,
       tax_percentage: tax.default_tax_percentage,
       tax_on_freight: tax.default_tax_on_freight,
       status: 'draft',
@@ -617,10 +653,13 @@ export class ProductOsService {
     const productId = (created as { id: string }).id
 
     await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' }).eq('id', id).eq('organization_id', orgId)
+    // back-link: cada variante de cor aponta pro produto publicado (acende o selo "publicado")
+    if (variants.length) await supabaseAdmin.from('product_dev_sku_variant').update({ product_id: productId }).eq('product_dev_id', id).eq('organization_id', orgId)
 
-    // estoque inicial NATIVO — produto vem do nosso sistema, SEM sync de canal
+    // estoque inicial NATIVO — produto vem do nosso sistema, SEM sync de canal.
+    // variável: soma dos estoques por cor; único: quantidade produzida informada.
     let stockSeeded = 0
-    const qty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
+    const qty = mode === 'variable' ? variableStock : Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
     if (qty > 0) {
       await supabaseAdmin.from('products').update({ stock: qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
       await supabaseAdmin.from('product_stock').update({ quantity: qty, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
@@ -634,8 +673,8 @@ export class ProductOsService {
       storefront = res.updated > 0
     }
 
-    await this.emitEvent(orgId, id, 'published', { product_id: productId }, userId)
-    return { product_id: productId, price, cost_price: pd.estimated_cost, photos: photos.length, stock_seeded: stockSeeded, storefront }
+    await this.emitEvent(orgId, id, 'published', { product_id: productId, sku: skuBase, mode, variants: variants.length }, userId)
+    return { product_id: productId, price, cost_price: pd.estimated_cost, photos: photos.length, stock_seeded: stockSeeded, storefront, sku: skuBase, mode, variants: variants.length }
   }
 
   // ─────────────────────────────────────────────────────────────────
