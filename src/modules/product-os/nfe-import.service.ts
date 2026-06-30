@@ -142,13 +142,18 @@ export class NfeImportService {
 
     if (kind === 'filamento') {
       let totalG: number | null = null, perG: number | null = null, spool: number | null = weight
+      let assumed = false
       if (/^kg|quilo/.test(u))      { totalG = rawQty * 1000; perG = rawCost / 1000 }
       else if (/^g\b|grama/.test(u)) { totalG = rawQty; perG = rawCost }
       else if (weight)               { totalG = rawQty * weight; perG = rawCost / weight; spool = weight } // UN/PC/ROLO + peso na descrição
+      else if (!/^m\b|^mt|metro/.test(u)) {                                                                // UN/PC/ROLO sem peso → assume rolo de 1kg (revisável)
+        spool = 1000; totalG = rawQty * 1000; perG = rawCost / 1000; assumed = true
+      }
       if (totalG != null && perG != null && totalG > 0) {
         const quantity = Math.round(totalG)
         const unit_cost = Math.round(perG * 1e6) / 1e6
-        const conversion = `${rawQty} ${rawUnit}${weight ? ` de ${weight}g` : ''} → ${quantity} g @ R$ ${unit_cost.toFixed(5)}/g`
+        const detail = weight ? ` de ${weight}g` : (assumed ? ' (rolo 1kg assumido)' : '')
+        const conversion = `${rawQty} ${rawUnit}${detail} → ${quantity} g @ R$ ${unit_cost.toFixed(5)}/g${assumed ? ' — confira o peso do rolo' : ''}`
         return { unit: 'g', quantity, unit_cost, material, color, diameter_mm, spool_weight_g: spool, conversion }
       }
     }
