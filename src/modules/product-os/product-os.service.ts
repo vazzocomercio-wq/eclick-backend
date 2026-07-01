@@ -86,6 +86,7 @@ export interface ProductDev {
   final_width_mm?:         number | null
   final_depth_mm?:         number | null
   final_height_mm?:        number | null
+  cost_breakdown?:         Record<string, unknown> | null
   created_by:          string | null
   created_at:          string
   updated_at:          string
@@ -993,13 +994,17 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const photos = (body.photo_urls && body.photo_urls.length ? body.photo_urls : [...new Set(defaultPhotos)]).filter(Boolean)
 
     // preço: target_price > sugerido do canal primário
+    // custo: usa o calculado no projeto (estimated_cost). Se ainda não calcularam,
+    // calcula agora (best-effort) — o total alimenta o campo de custo do produto.
+    let costPrice: number | null = pd.estimated_cost ?? null
     let price = pd.target_price ?? null
-    if (price == null) {
+    if (price == null || costPrice == null) {
       const primary = (pd.target_marketplaces ?? [])[0] ?? 'mercado_livre'
       try {
         const c = await this.computeCost(id, orgId, { target_margin_pct: body.target_margin_pct })
-        price = c.suggested_prices.find(s => s.channel === primary)?.price ?? c.suggested_prices[0]?.price ?? null
-      } catch { /* segue sem preço */ }
+        if (costPrice == null) costPrice = c.cost.total
+        if (price == null) price = c.suggested_prices.find(s => s.channel === primary)?.price ?? c.suggested_prices[0]?.price ?? null
+      } catch { /* segue sem preço/custo */ }
     }
 
     const tax = await this.products.getTaxConfig(orgId).catch(() => ({ default_tax_percentage: null, default_tax_on_freight: false }))
@@ -1059,7 +1064,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       category_ml_id: pd.category_ml_id ?? null,
       description: fichaDesc,
       photo_urls: photos,
-      cost_price: pd.estimated_cost,
+      cost_price: costPrice,
       price,
       sku: skuBase,
       ean: baseEan,
@@ -1102,7 +1107,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     }
 
     await this.emitEvent(orgId, id, 'published', { product_id: productId, sku: skuBase, mode, variants: variants.length }, userId)
-    return { product_id: productId, price, cost_price: pd.estimated_cost, photos: photos.length, stock_seeded: stockSeeded, storefront, sku: skuBase, mode, variants: variants.length }
+    return { product_id: productId, price, cost_price: costPrice, photos: photos.length, stock_seeded: stockSeeded, storefront, sku: skuBase, mode, variants: variants.length }
   }
 
   /**
@@ -1384,17 +1389,18 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       return { channel, fee_pct: fee, price, margin_pct: marginPct }
     })
 
-    // cacheia o custo no produto
-    await supabaseAdmin.from('product_dev')
-      .update({ estimated_cost: total })
-      .eq('id', productDevId).eq('organization_id', orgId)
-
-    return {
+    const result = {
       cost: { filament, energy, labor, packaging, waste, total },
       inputs: { weight_g: w, print_time_minutes: min, material: mat, cost_per_kg: costPerKg },
       target_margin_pct: targetMargin,
       suggested_prices: suggested,
     }
+    // cacheia o custo (total) + o detalhamento completo no projeto (persiste na tela)
+    await supabaseAdmin.from('product_dev')
+      .update({ estimated_cost: total, cost_breakdown: { ...result, computed_at: new Date().toISOString() } })
+      .eq('id', productDevId).eq('organization_id', orgId)
+
+    return result
   }
 
   // ─────────────────────────────────────────────────────────────────
