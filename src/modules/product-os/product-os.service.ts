@@ -975,7 +975,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
 
     const { data: created, error } = await supabaseAdmin.from('products').insert({
       organization_id: orgId,
-      name: pd.name,
+      name: fichaTitle,          // Nome do produto = mesmo do Título ML (ficha)
       ml_title: fichaTitle,
       brand: fichaBrand,
       category: categoryName,
