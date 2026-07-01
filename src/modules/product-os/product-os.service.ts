@@ -600,25 +600,34 @@ export class ProductOsService {
   /** Busca categorias na ÁRVORE CLONADA do ML (espelho local `ml_categories`,
    *  ~12k categorias) por nome. Não depende da API pública do ML (que o servidor
    *  não alcança de dentro do datacenter). Ordena por relevância + especificidade. */
-  async searchMlCategories(query: string, limit = 12): Promise<Array<{ id: string; name: string; path: string }>> {
-    const q = (query ?? '').trim()
-    if (!q) return []
+  async searchMlCategories(query: string, limit = 15): Promise<Array<{ id: string; name: string; path: string }>> {
+    const ql = (query ?? '').trim().toLowerCase()
+    if (!ql) return []
+    // casa por PALAVRA (não pela frase inteira): "suporte maquiagem" → nomes com
+    // "suporte" OU "maquiagem". Ignora conectores curtos.
+    const stop = new Set(['de', 'da', 'do', 'para', 'com', 'e', 'em', 'os', 'as', 'kit', 'un', 'cm'])
+    const words = ql.split(/\s+/).map(w => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(w => w.length >= 3 && !stop.has(w))
+    const terms = words.length ? words : [ql]
+    const orFilter = terms.map(w => `name.ilike.%${w}%`).join(',')
     const { data } = await supabaseAdmin.from('ml_categories')
-      .select('id, name, path_from_root')
-      .ilike('name', `%${q}%`)
-      .limit(80)
-    const ql = q.toLowerCase()
+      .select('id, name, path_from_root').or(orFilter).limit(300)
+
+    const first = terms[0]
     const scored = ((data ?? []) as Array<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> | null }>)
       .map(r => {
         const path = Array.isArray(r.path_from_root) ? r.path_from_root : []
         const nl = (r.name ?? '').toLowerCase()
+        const pathHay = path.map(p => (p.name ?? '').toLowerCase()).join(' ')
         let score = 0
-        if (nl === ql) score += 100
-        else if (nl.startsWith(ql)) score += 50
-        score += Math.min(path.length, 6) * 3   // categorias mais específicas primeiro
+        for (const w of terms) { if (nl.includes(w)) score += 12; else if (pathHay.includes(w)) score += 3 }
+        if (nl === ql) score += 80
+        else if (first && nl.startsWith(first)) score += 30
+        const nameWords = nl.split(/\s+/).length
+        if (nameWords <= 2) score += 20; else if (nameWords === 3) score += 8   // nome curto = categoria "cabeça"
+        score += Math.min(path.length, 5)   // desempate leve por especificidade
         return { id: r.id, name: r.name, path: path.map(p => p.name).join(' › '), depth: path.length, score }
       })
-      .filter(r => r.depth >= 2)   // precisa ter pai (Categoria) + folha (Sub)
+      .filter(r => r.depth >= 2 && r.score > 0)   // precisa ter pai (Categoria) + folha (Sub)
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
     return scored.slice(0, Math.max(1, Math.min(30, limit))).map(({ id, name, path }) => ({ id, name, path }))
   }
