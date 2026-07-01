@@ -243,6 +243,67 @@ export class SkuService {
     return this.getSku(orgId, devId)
   }
 
+  /** Acha um nó da taxonomia por rótulo (case-insensitive) dentro do escopo
+   *  (org, kind, pai). Usado pelo "aplicar sugestão da IA". */
+  private async findByLabel(orgId: string, kind: SkuKind, parentId: string | null, label: string): Promise<TaxRow | null> {
+    const l = (label ?? '').trim()
+    if (!l) return null
+    let q = supabaseAdmin.from('sku_taxonomy').select('id, organization_id, kind, code, label, parent_id, sort_order')
+      .eq('organization_id', orgId).eq('kind', kind).ilike('label', l)
+    q = parentId ? q.eq('parent_id', parentId) : q.is('parent_id', null)
+    const { data } = await q.limit(1).maybeSingle()
+    return (data as TaxRow | null) ?? null
+  }
+
+  /** Acha OU cria um nó (idempotente por rótulo). marca aceita código alfa. */
+  private async resolveOrCreate(orgId: string, userId: string | null, kind: SkuKind, parentId: string | null, label: string, code?: string): Promise<TaxRow> {
+    const found = await this.findByLabel(orgId, kind, parentId, label)
+    if (found) return found
+    const created = await this.createTaxonomy(orgId, userId, { kind, label, parent_id: parentId, code })
+    // createTaxonomy devolve um shape reduzido; recarrega completo
+    const full = await this.loadRow(orgId, (created as { id: string }).id)
+    if (!full) throw new BadRequestException('Falha ao criar nó da taxonomia')
+    return full
+  }
+
+  /**
+   * Resolve (ou cria) a cadeia Marca→Categoria→Sub→Linha→Característica a partir
+   * de RÓTULOS (o que a IA sugere) e grava a classificação + sku_base. Nós que já
+   * existem são reaproveitados; os que faltam são criados no nível certo. É o
+   * motor do "aplicar sugestão da ficha" com 1 clique. `caracteristica` é
+   * opcional — sem ela, grava só a linha (produto ainda sem sku_base completo).
+   */
+  async resolveOrCreateClassification(orgId: string, userId: string | null, devId: string, labels: {
+    marca?: string | null; marca_code?: string | null
+    categoria?: string | null; sub?: string | null; linha?: string | null; caracteristica?: string | null
+  }) {
+    const marcaLbl = (labels.marca ?? '').trim() || 'Vazzo'
+    const marcaCode = (labels.marca_code ?? '').trim() || (marcaLbl.slice(0, 2).toUpperCase())
+    const catLbl = (labels.categoria ?? '').trim()
+    const subLbl = (labels.sub ?? '').trim()
+    const linhaLbl = (labels.linha ?? '').trim()
+    const caracLbl = (labels.caracteristica ?? '').trim()
+    if (!catLbl || !subLbl || !linhaLbl) throw new BadRequestException('Categoria, sub-categoria e linha são obrigatórias para classificar')
+
+    const marca = await this.resolveOrCreate(orgId, userId, 'marca', null, marcaLbl, marcaCode)
+    const categoria = await this.resolveOrCreate(orgId, userId, 'categoria', null, catLbl)
+    const sub = await this.resolveOrCreate(orgId, userId, 'sub', categoria.id, subLbl)
+    const linha = await this.resolveOrCreate(orgId, userId, 'linha', sub.id, linhaLbl)
+
+    if (caracLbl) {
+      const carac = await this.resolveOrCreate(orgId, userId, 'caracteristica', linha.id, caracLbl)
+      return this.setClassification(orgId, devId, {
+        marca_id: marca.id, categoria_id: categoria.id, sub_id: sub.id, linha_id: linha.id, caracteristica_id: carac.id,
+      })
+    }
+    // sem característica: grava a classificação parcial (linha definida), sku_base pendente
+    const { error } = await supabaseAdmin.from('product_dev').update({
+      sku_marca_id: marca.id, sku_categoria_id: categoria.id, sku_sub_id: sub.id, sku_linha_id: linha.id,
+    }).eq('id', devId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro ao salvar linha: ${error.message}`)
+    return this.getSku(orgId, devId)
+  }
+
   /** Define as cores do modelo → 1 SKU (base-cor) por cor. */
   async setColors(orgId: string, devId: string, corIds: string[]) {
     const { data: dev } = await supabaseAdmin.from('product_dev').select('sku_base').eq('id', devId).eq('organization_id', orgId).maybeSingle()

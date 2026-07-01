@@ -451,6 +451,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Product OS — Preenche a FICHA de catálogo do produto a partir da fonte
+  // (MakerWorld etc.): título de marketplace, descrição, marca, atributos, tags e
+  // sugere a classificação Marca/Categoria/Sub/Linha/Característica. É a transição
+  // projeto → produto pronto para a IA Criativo. Redação comercial → Sonnet.
+  product_os_catalog: {
+    label:       'Ficha de catálogo do produto (Product OS)',
+    description: 'A partir da fonte do modelo (MakerWorld etc.), imagens e métricas, gera título de marketplace, descrição, marca, bullets, atributos e tags, e sugere a classificação (Marca/Categoria/Sub/Linha/Característica) para o produto virar catálogo pronto para a IA Criativo',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY

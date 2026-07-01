@@ -783,6 +783,27 @@ export class ProductOsController {
     return this.svc.setLicenseClearance(id, this.org(u), u.id, body)
   }
 
+  // ── Ficha de catálogo (transição projeto → produto pronto p/ IA Criativo) ──
+  @Post(':id/enrich')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update', 'ai.view_usage')
+  enrich(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { force?: boolean } = {}) {
+    return this.svc.enrichForCatalog(this.org(u), id, u.id, { force: body?.force === true })
+  }
+
+  @Put(':id/ficha')
+  @RequirePermission('products.update')
+  saveFicha(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { title?: string; description?: string; brand?: string; bullets?: string[]; attributes?: Record<string, string>; tags?: string[]; ready?: boolean }) {
+    return this.svc.saveFicha(this.org(u), id, u.id, body ?? {})
+  }
+
+  @Post(':id/ficha/apply-classification')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  applyClassification(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { marca?: string | null; marca_code?: string | null; categoria?: string | null; sub?: string | null; linha?: string | null; caracteristica?: string | null }) {
+    return this.svc.applyClassificationFromLabels(this.org(u), id, u.id, body ?? {})
+  }
+
   @Post(':id/publish-to-catalog')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

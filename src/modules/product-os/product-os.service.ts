@@ -8,6 +8,7 @@ import { StockService } from '../stock/stock.service'
 import { ProductionService } from './production.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakerworldService } from './makerworld.service'
+import { SkuService } from './sku.service'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { type SourceModel, type LicenseVerdict } from './model-sources/source.types'
 
@@ -60,6 +61,23 @@ export interface ProductDev {
   license_clearance_note:  string | null
   license_cleared_by:      string | null
   license_cleared_at:      string | null
+  // classificação de SKU (linha de produtos etc.) — colunas gravadas pelo SkuService
+  sku_marca_id?:           string | null
+  sku_categoria_id?:       string | null
+  sku_sub_id?:             string | null
+  sku_linha_id?:           string | null
+  sku_caracteristica_id?:  string | null
+  sku_base?:               string | null
+  ean?:                    string | null
+  // ficha de catálogo (transição projeto → produto pronto p/ IA Criativo)
+  catalog_title?:          string | null
+  catalog_description?:    string | null
+  catalog_brand?:          string | null
+  catalog_bullets?:        string[]
+  catalog_attributes?:     Record<string, string>
+  catalog_tags?:           string[]
+  catalog_ready?:          boolean
+  enrichment?:             Record<string, unknown> | null
   created_by:          string | null
   created_at:          string
   updated_at:          string
@@ -132,6 +150,7 @@ export class ProductOsService {
     private readonly production: ProductionService,
     private readonly active: ProductOsActiveService,
     private readonly makerworld: MakerworldService,
+    private readonly sku: SkuService,
     private readonly sources: ModelSourceRegistry,
   ) {}
 
@@ -558,6 +577,164 @@ export class ProductOsService {
     return data as ProductDev
   }
 
+  // ══ Ficha de catálogo (transição projeto → produto pronto p/ IA Criativo) ═══
+  /** Vocabulário de taxonomia da org (rótulos por nível) — dado à IA para que ela
+   *  REAPROVEITE nós existentes em vez de inventar sinônimos. */
+  private async taxonomyVocab(orgId: string): Promise<Record<string, string[]>> {
+    const { data } = await supabaseAdmin.from('sku_taxonomy').select('kind, label').eq('organization_id', orgId).order('code')
+    const by: Record<string, string[]> = { marca: [], categoria: [], sub: [], linha: [], caracteristica: [] }
+    for (const r of (data ?? []) as Array<{ kind: string; label: string }>) if (by[r.kind]) by[r.kind].push(r.label)
+    return by
+  }
+
+  /**
+   * IA preenche a FICHA de catálogo a partir da fonte (MakerWorld/Thingiverse/…),
+   * imagens, briefing e métricas de fabricação: título de marketplace, descrição
+   * rica, marca, bullets, atributos e tags — e SUGERE a classificação
+   * (Marca/Categoria/Sub/Linha/Característica), reaproveitando a taxonomia
+   * existente. Recurso PRÓPRIO do Product OS (feature `product_os_catalog`); não
+   * toca na IA Criativo. Grava em catalog_* + enrichment; não sobrescreve uma
+   * ficha já validada (catalog_ready) a menos que `force`.
+   */
+  async enrichForCatalog(orgId: string, devId: string, userId: string | null, opts: { force?: boolean } = {}): Promise<{
+    ficha: { title: string; description: string; brand: string; bullets: string[]; attributes: Record<string, string>; tags: string[] }
+    suggestion: { marca: string | null; marca_code: string | null; categoria: string | null; sub: string | null; linha: string | null; caracteristica: string | null }
+    already_ready: boolean
+  }> {
+    const pd = await this.get(devId, orgId)
+    if (pd.catalog_ready && !opts.force) {
+      // já validada — devolve o que está gravado sem gastar IA
+      return {
+        ficha: { title: pd.catalog_title ?? pd.name, description: pd.catalog_description ?? pd.description ?? '', brand: pd.catalog_brand ?? '', bullets: pd.catalog_bullets ?? [], attributes: pd.catalog_attributes ?? {}, tags: pd.catalog_tags ?? [] },
+        suggestion: this.readSuggestion(pd),
+        already_ready: true,
+      }
+    }
+
+    const meta = (pd.source_metadata ?? {}) as Record<string, unknown>
+    const tags = Array.isArray(meta.tags) ? (meta.tags as string[]).slice(0, 20) : []
+    const approvedV = (pd.versions ?? []).find(v => v.approved) ?? (pd.versions ?? [])[0]
+    const dims = (pd.briefing as { dimensoes_mm?: { largura?: number; profundidade?: number; altura?: number } } | null)?.dimensoes_mm
+    const vocab = await this.taxonomyVocab(orgId)
+    const refs = (pd.reference_images ?? []).map(r => r.url).filter(Boolean).slice(0, 3)
+    const marketplaces = (pd.target_marketplaces ?? []).join(', ') || 'Mercado Livre, Shopee, loja própria'
+
+    const userPrompt = `## PRODUTO (projeto do Product OS — impressão 3D)
+Nome interno: ${pd.name}
+Categoria livre atual: ${pd.category ?? '—'}
+Descrição/ideia atual: ${(pd.briefing_text || pd.description || '—').slice(0, 800)}
+Origem: ${pd.source_platform ? `${pd.source_platform} — ${pd.inspiration_url ?? ''}` : 'produto próprio'}
+Título na origem: ${typeof meta.title === 'string' ? meta.title : (pd.name)}
+Criador na origem: ${typeof meta.creator === 'string' ? meta.creator : '—'}
+Tags da origem: ${tags.length ? tags.join(', ') : '—'}
+Material: ${approvedV?.material ?? 'PLA'}
+Peso aprox.: ${approvedV?.weight_g ?? '—'} g
+Dimensões aprox. (mm): ${dims ? `${dims.largura ?? '?'}×${dims.profundidade ?? '?'}×${dims.altura ?? '?'}` : '—'}
+Imagens de referência: ${refs.length ? refs.join(' , ') : '—'}
+Canais-alvo: ${marketplaces}
+
+## TAXONOMIA JÁ EXISTENTE (REAPROVEITE quando fizer sentido — não invente sinônimos)
+Marcas: ${vocab.marca.join(' | ') || '—'}
+Categorias: ${vocab.categoria.join(' | ') || '—'}
+Sub-categorias: ${vocab.sub.join(' | ') || '—'}
+Linhas: ${vocab.linha.join(' | ') || '—'}
+Características: ${vocab.caracteristica.join(' | ') || '—'}
+
+## SAÍDA — JSON PURO
+{
+  "ml_title": "título de marketplace, PT-BR, ATÉ 60 caracteres, começa pelo produto + atributo forte, sem CAIXA ALTA gritante, sem emoji",
+  "description": "descrição comercial PT-BR, 400-900 caracteres, benefícios + uso + material (impresso em 3D) + dimensões se houver; parágrafos curtos",
+  "brand": "marca comercial (ex: Vazzo). Se a origem não define, use a marca da taxonomia existente",
+  "bullets": ["4 a 6 bullets curtos de benefício/atributo"],
+  "attributes": { "Material": "PLA", "Cor": "…", "Tipo de produto": "…", "Público": "…", "…": "…" },
+  "tags": ["8-15 palavras-chave de busca, minúsculas, sem #"],
+  "categoria": "categoria (reaproveite da lista se possível)",
+  "sub": "sub-categoria",
+  "linha": "LINHA de produtos (família do modelo)",
+  "caracteristica": "o que diferencia ESTE modelo dentro da linha (curto)",
+  "marca_code": "código curto da marca em MAIÚSCULAS (ex: VZ) — só se for marca nova"
+}`
+
+    const out = await this.llm.generateText({
+      orgId, feature: 'product_os_catalog', systemPrompt: CATALOG_SYSTEM_PROMPT,
+      userPrompt, maxTokens: 1800, temperature: 0.5, jsonMode: true,
+    })
+    const parsed = (parseJsonLoose(out.text) ?? {}) as Record<string, unknown>
+    const str = (v: unknown, fb = ''): string => typeof v === 'string' ? v.trim() : fb
+    const arr = (v: unknown): string[] => Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean).slice(0, 20) : []
+    const attrs: Record<string, string> = {}
+    if (parsed.attributes && typeof parsed.attributes === 'object') for (const [k, v] of Object.entries(parsed.attributes as Record<string, unknown>)) { const kk = k.trim(); const vv = String(v ?? '').trim(); if (kk && vv) attrs[kk] = vv }
+
+    const ficha = {
+      title: str(parsed.ml_title, pd.name).slice(0, 60),
+      description: str(parsed.description, pd.description ?? ''),
+      brand: str(parsed.brand),
+      bullets: arr(parsed.bullets),
+      attributes: attrs,
+      tags: arr(parsed.tags),
+    }
+    const suggestion = {
+      marca: str(parsed.brand) || null,
+      marca_code: str(parsed.marca_code) || null,
+      categoria: str(parsed.categoria) || (pd.category ?? null),
+      sub: str(parsed.sub) || null,
+      linha: str(parsed.linha) || null,
+      caracteristica: str(parsed.caracteristica) || null,
+    }
+
+    await supabaseAdmin.from('product_dev').update({
+      catalog_title: ficha.title, catalog_description: ficha.description, catalog_brand: ficha.brand,
+      catalog_bullets: ficha.bullets, catalog_attributes: ficha.attributes, catalog_tags: ficha.tags,
+      enrichment: { ...parsed, suggestion, generated_at: new Date().toISOString() },
+    }).eq('id', devId).eq('organization_id', orgId)
+    await this.emitEvent(orgId, devId, 'catalog_enriched', { cost_usd: out.costUsd, title: ficha.title }, userId)
+    return { ficha, suggestion, already_ready: false }
+  }
+
+  private readSuggestion(pd: ProductDev) {
+    const s = (pd.enrichment as { suggestion?: Record<string, string | null> } | null)?.suggestion ?? {}
+    return {
+      marca: s.marca ?? pd.catalog_brand ?? null, marca_code: s.marca_code ?? null,
+      categoria: s.categoria ?? pd.category ?? null, sub: s.sub ?? null,
+      linha: s.linha ?? null, caracteristica: s.caracteristica ?? null,
+    }
+  }
+
+  /** Salva a ficha editada pelo operador e (opcional) marca "pronto p/ IA Criativo". */
+  async saveFicha(orgId: string, devId: string, userId: string | null, body: {
+    title?: string; description?: string; brand?: string; bullets?: string[]; attributes?: Record<string, string>; tags?: string[]; ready?: boolean
+  }): Promise<ProductDev> {
+    await this.get(devId, orgId) // garante escopo
+    const safe: Record<string, unknown> = {}
+    if (body.title != null) safe.catalog_title = String(body.title).slice(0, 120)
+    if (body.description != null) safe.catalog_description = String(body.description)
+    if (body.brand != null) safe.catalog_brand = String(body.brand).trim() || null
+    if (Array.isArray(body.bullets)) safe.catalog_bullets = body.bullets.map(b => String(b).trim()).filter(Boolean).slice(0, 12)
+    if (body.attributes && typeof body.attributes === 'object') {
+      const a: Record<string, string> = {}
+      for (const [k, v] of Object.entries(body.attributes)) { const kk = k.trim(); const vv = String(v ?? '').trim(); if (kk && vv) a[kk] = vv }
+      safe.catalog_attributes = a
+    }
+    if (Array.isArray(body.tags)) safe.catalog_tags = body.tags.map(t => String(t).trim().toLowerCase()).filter(Boolean).slice(0, 30)
+    if (typeof body.ready === 'boolean') safe.catalog_ready = body.ready
+    if (!Object.keys(safe).length) throw new BadRequestException('Nada para salvar na ficha')
+    const { data, error } = await supabaseAdmin.from('product_dev').update(safe).eq('id', devId).eq('organization_id', orgId).select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao salvar ficha: ${error?.message ?? 'sem dados'}`)
+    if (typeof body.ready === 'boolean') await this.emitEvent(orgId, devId, body.ready ? 'catalog_ready' : 'catalog_ready_removed', {}, userId)
+    return data as ProductDev
+  }
+
+  /** Aplica a classificação sugerida (rótulos → nós, criando o que faltar) e grava
+   *  a linha/SKU. Delega ao SkuService. */
+  async applyClassificationFromLabels(orgId: string, devId: string, userId: string | null, labels: {
+    marca?: string | null; marca_code?: string | null; categoria?: string | null; sub?: string | null; linha?: string | null; caracteristica?: string | null
+  }) {
+    await this.get(devId, orgId)
+    const res = await this.sku.resolveOrCreateClassification(orgId, userId, devId, labels)
+    await this.emitEvent(orgId, devId, 'classified', { linha: labels.linha ?? null, caracteristica: labels.caracteristica ?? null }, userId)
+    return res
+  }
+
   /**
    * Fase 3 — "aprovado → virar anúncio". Cria um SKU real em `products` a
    * partir do product_dev, vincula, semeia estoque das unidades produzidas e
@@ -588,6 +765,10 @@ export class ProductOsService {
     // gate de qualidade
     const qualityOk = await this.production.isQualityPassed(orgId, id, pd.production_profile)
     if (!qualityOk) throw new BadRequestException('Conclua o checklist de qualidade (aprovado) antes de publicar.')
+
+    // LINHA obrigatória: todo produto precisa pertencer a uma linha de produtos
+    // (família). Sem ela, o SKU não fecha e o catálogo fica sem "tipo de produto".
+    if (!pd.sku_linha_id) throw new BadRequestException('Defina a LINHA de produtos deste modelo antes de publicar (aba Ficha ou SKU). Se ainda não existe uma linha, crie uma.')
 
     // fotos: protótipo aprovado > referências
     // fotos do anúncio: lista escolhida pelo usuário (capa = 1ª) OU, por padrão,
@@ -637,16 +818,39 @@ export class ProductOsService {
     }) : []
     const variableStock = variationsJson.reduce((s, r) => s + (Number(r.stock) || 0), 0)
 
+    // FICHA de catálogo (transição pronta p/ IA Criativo): usa os campos validados
+    // quando existem, senão cai no nome/descrição crus. Preenche as colunas que o
+    // checklist de completude (products-completeness) e a IA Criativo/ML consomem:
+    // ml_title, brand, description(≥80), attributes, tags, gtin, peso e dimensões.
+    const fichaTitle = (pd.catalog_title ?? '').trim() || pd.name
+    const fichaDesc = (pd.catalog_description ?? '').trim() || (pd.description ?? '')
+    const fichaBrand = (pd.catalog_brand ?? '').trim() || null
+    const attrs: Record<string, string> = { ...(pd.catalog_attributes ?? {}) }
+    const tags = Array.isArray(pd.catalog_tags) ? pd.catalog_tags : []
+    // peso/dimensões da versão aprovada + briefing → cadastro logístico do ML
+    const weightKg = approvedV?.weight_g != null ? Math.round((approvedV.weight_g / 1000) * 1000) / 1000 : null
+    const bdims = (pd.briefing as { dimensoes_mm?: { largura?: number; profundidade?: number; altura?: number } } | null)?.dimensoes_mm
+    const cm = (mm?: number | null): number | null => (mm != null && mm > 0 ? Math.round((mm / 10) * 10) / 10 : null)
+
     const { data: created, error } = await supabaseAdmin.from('products').insert({
       organization_id: orgId,
       name: pd.name,
+      ml_title: fichaTitle,
+      brand: fichaBrand,
       category: pd.category,
-      description: pd.description,
+      description: fichaDesc,
       photo_urls: photos,
       cost_price: pd.estimated_cost,
       price,
       sku: skuBase,
       ean: baseEan,
+      gtin: baseEan,
+      attributes: attrs,
+      tags,
+      weight_kg: weightKg,
+      width_cm: cm(bdims?.largura),
+      length_cm: cm(bdims?.profundidade),
+      height_cm: cm(bdims?.altura),
       has_variations: mode === 'variable',
       variations: variationsJson,
       tax_percentage: tax.default_tax_percentage,
@@ -1068,6 +1272,18 @@ REGRAS:
 - ORIGINALIDADE: nunca copiar a referência 1:1 — sempre propor diferenças concretas pra evitar infração.
 - Ser concreto: dar números, não generalidades.
 - Saída JSON puro, sem markdown wrapper (exceto dentro do campo "briefing_markdown").`
+
+const CATALOG_SYSTEM_PROMPT = `Você é um especialista em cadastro de produtos para marketplaces brasileiros
+(Mercado Livre, Shopee) e loja própria, focado em produtos DECORATIVOS e
+UTILITÁRIOS impressos em 3D (decoração, organização, suportes de maquiagem,
+utensílios). Escreve em PT-BR, comercial, honesto e otimizado para busca.
+
+REGRAS:
+- Título: até 60 caracteres, começa pelo tipo do produto + atributo forte; sem CAIXA ALTA gritante, sem emoji, sem "frete grátis".
+- Descrição: benefícios concretos + uso + material (impresso em 3D, PLA por padrão) + dimensões quando houver; parágrafos curtos; sem promessas falsas.
+- Reaproveite a taxonomia existente informada (não crie sinônimos novos se já existe um nível equivalente).
+- Atributos: só o que dá pra inferir com segurança (Material, Cor, Tipo de produto, Público, Ambiente). Não invente medidas exatas.
+- Saída JSON puro, sem markdown wrapper.`
 
 /** Arredonda pra 2 casas (centavos). */
 function round2(n: number): number {
