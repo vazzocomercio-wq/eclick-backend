@@ -365,6 +365,21 @@ export class SkuService {
     return this.getSku(orgId, devId)
   }
 
+  /** Define Categoria + Sub a partir de RÓTULOS (ex: do caminho da categoria do
+   *  ML), criando os nós internos com código sequencial, e recomputa sku_base.
+   *  É o que faz a árvore do ML alimentar a Categoria/Sub do SKU. */
+  async setCategorySub(orgId: string, userId: string | null, devId: string, categoria: string | null, sub: string | null) {
+    const patch: Record<string, unknown> = {}
+    let cat: TaxRow | null = null
+    if ((categoria ?? '').trim()) { cat = await this.resolveOrCreate(orgId, userId, 'categoria', null, categoria!.trim()); patch.sku_categoria_id = cat.id }
+    if ((sub ?? '').trim() && cat) { const s = await this.resolveOrCreate(orgId, userId, 'sub', cat.id, sub!.trim()); patch.sku_sub_id = s.id }
+    if (Object.keys(patch).length) {
+      await supabaseAdmin.from('product_dev').update(patch).eq('id', devId).eq('organization_id', orgId)
+      await this.recomputeBase(orgId, devId)
+    }
+    return this.getSku(orgId, devId)
+  }
+
   /** Define as cores do modelo → 1 SKU (base-cor) por cor. */
   async setColors(orgId: string, devId: string, corIds: string[]) {
     const { data: dev } = await supabaseAdmin.from('product_dev').select('sku_base').eq('id', devId).eq('organization_id', orgId).maybeSingle()

@@ -827,7 +827,7 @@ export class ProductOsController {
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
   setMlCategory(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { category_id: string | null }) {
-    return this.svc.setMlCategory(this.org(u), id, body?.category_id ?? null)
+    return this.svc.setMlCategory(this.org(u), id, u.id, body?.category_id ?? null)
   }
 
   @Post(':id/line')

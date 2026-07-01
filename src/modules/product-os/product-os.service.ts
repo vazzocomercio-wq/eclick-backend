@@ -630,8 +630,10 @@ export class ProductOsService {
     } catch { return [] }
   }
 
-  /** Define a categoria do ML no projeto (resolve o caminho e grava id+path). */
-  async setMlCategory(orgId: string, devId: string, categoryId: string | null): Promise<{ category_ml_id: string | null; path: Array<{ id: string; name: string }> }> {
+  /** Define a categoria do ML no projeto (resolve o caminho e grava id+path) E
+   *  deriva a Categoria+Sub INTERNAS (do SKU) a partir do caminho do ML — é o que
+   *  faz a árvore clonada do ML alimentar o SKU. Recomputa sku_base. */
+  async setMlCategory(orgId: string, devId: string, userId: string | null, categoryId: string | null): Promise<{ category_ml_id: string | null; path: Array<{ id: string; name: string }> }> {
     await this.get(devId, orgId)
     if (!categoryId) {
       await supabaseAdmin.from('product_dev').update({ category_ml_id: null, category_ml_path: null }).eq('id', devId).eq('organization_id', orgId)
@@ -644,6 +646,10 @@ export class ProductOsService {
       // espelha o nome da categoria no campo livre (exibição/coerência)
       ...(leaf?.name ? { category: leaf.name } : {}),
     }).eq('id', devId).eq('organization_id', orgId)
+    // deriva Categoria (nível pai) + Sub (folha) internas do caminho do ML → SKU
+    const categoria = path.length >= 2 ? path[path.length - 2]?.name ?? null : (path[0]?.name ?? null)
+    const sub = path.length >= 1 ? path[path.length - 1]?.name ?? null : null
+    if (categoria && sub) await this.sku.setCategorySub(orgId, userId, devId, categoria, sub).catch(() => {})
     return { category_ml_id: categoryId, path }
   }
 
