@@ -608,23 +608,28 @@ export class ProductOsService {
     const stop = new Set(['de', 'da', 'do', 'para', 'com', 'e', 'em', 'os', 'as', 'kit', 'un', 'cm'])
     const words = ql.split(/\s+/).map(w => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(w => w.length >= 3 && !stop.has(w))
     const terms = words.length ? words : [ql]
+    // peso IDF: palavra RARA (ex: "maquiagem") vale muito mais que comum ("suporte"),
+    // pra a palavra distintiva mandar no ranking em vez da genérica.
+    const counts = await Promise.all(terms.map(w =>
+      supabaseAdmin.from('ml_categories').select('id', { count: 'exact', head: true }).ilike('name', `%${w}%`).then(r => r.count ?? 1),
+    ))
+    const weight = new Map(terms.map((w, i) => [w, 1 / Math.log2((counts[i] || 1) + 2)]))
+    const rarest = terms.slice().sort((a, b) => (weight.get(b) ?? 0) - (weight.get(a) ?? 0))[0]
     const orFilter = terms.map(w => `name.ilike.%${w}%`).join(',')
     const { data } = await supabaseAdmin.from('ml_categories')
       .select('id, name, path_from_root').or(orFilter).limit(300)
 
-    const first = terms[0]
     const scored = ((data ?? []) as Array<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> | null }>)
       .map(r => {
         const path = Array.isArray(r.path_from_root) ? r.path_from_root : []
         const nl = (r.name ?? '').toLowerCase()
         const pathHay = path.map(p => (p.name ?? '').toLowerCase()).join(' ')
         let score = 0
-        for (const w of terms) { if (nl.includes(w)) score += 12; else if (pathHay.includes(w)) score += 3 }
-        if (nl === ql) score += 80
-        else if (first && nl.startsWith(first)) score += 30
+        for (const w of terms) { const wt = weight.get(w) ?? 0.2; if (nl.includes(w)) score += 40 * wt; else if (pathHay.includes(w)) score += 10 * wt }
+        if (nl === ql) score += 40
+        else if (rarest && nl.startsWith(rarest)) score += 12
         const nameWords = nl.split(/\s+/).length
-        if (nameWords <= 2) score += 20; else if (nameWords === 3) score += 8   // nome curto = categoria "cabeça"
-        score += Math.min(path.length, 5)   // desempate leve por especificidade
+        if (nameWords <= 2) score += 8; else if (nameWords === 3) score += 3   // nome curto = categoria "cabeça"
         return { id: r.id, name: r.name, path: path.map(p => p.name).join(' › '), depth: path.length, score }
       })
       .filter(r => r.depth >= 2 && r.score > 0)   // precisa ter pai (Categoria) + folha (Sub)
