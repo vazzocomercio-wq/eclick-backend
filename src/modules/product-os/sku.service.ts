@@ -13,8 +13,11 @@ import { supabaseAdmin } from '../../common/supabase'
 export type SkuKind = 'marca' | 'categoria' | 'sub' | 'linha' | 'caracteristica' | 'cor'
 const KINDS: SkuKind[] = ['marca', 'categoria', 'sub', 'linha', 'caracteristica', 'cor']
 // pai esperado de cada kind (null = topo). Define a hierarquia.
+// Linha é COLEÇÃO TRANSVERSAL (topo, independente de categoria) — reúne produtos
+// de qualquer categoria sob a mesma linha de lançamento. Característica continua
+// DENTRO da linha (única por linha). Ver mig 20260766.
 const PARENT_KIND: Record<SkuKind, SkuKind | null> = {
-  marca: null, categoria: null, cor: null, sub: 'categoria', linha: 'sub', caracteristica: 'linha',
+  marca: null, categoria: null, cor: null, linha: null, sub: 'categoria', caracteristica: 'linha',
 }
 const ZERO = '00000000-0000-0000-0000-000000000000'
 
@@ -225,7 +228,7 @@ export class SkuService {
     if (!marca || marca.kind !== 'marca') throw new BadRequestException('Marca inválida')
     if (!categoria || categoria.kind !== 'categoria') throw new BadRequestException('Categoria inválida')
     if (!sub || sub.kind !== 'sub' || sub.parent_id !== categoria.id) throw new BadRequestException('Sub-categoria não pertence à categoria')
-    if (!linha || linha.kind !== 'linha' || linha.parent_id !== sub.id) throw new BadRequestException('Linha não pertence à sub-categoria')
+    if (!linha || linha.kind !== 'linha') throw new BadRequestException('Linha inválida')   // linha é coleção transversal (topo)
     if (!carac || carac.kind !== 'caracteristica' || carac.parent_id !== linha.id) throw new BadRequestException('Característica não pertence à linha')
 
     const base = `${marca.code}${categoria.code}${sub.code}${linha.code}${carac.code}`
@@ -288,7 +291,7 @@ export class SkuService {
     const marca = await this.resolveOrCreate(orgId, userId, 'marca', null, marcaLbl, marcaCode)
     const categoria = await this.resolveOrCreate(orgId, userId, 'categoria', null, catLbl)
     const sub = await this.resolveOrCreate(orgId, userId, 'sub', categoria.id, subLbl)
-    const linha = await this.resolveOrCreate(orgId, userId, 'linha', sub.id, linhaLbl)
+    const linha = await this.resolveOrCreate(orgId, userId, 'linha', null, linhaLbl)   // topo (coleção transversal)
 
     if (caracLbl) {
       const carac = await this.resolveOrCreate(orgId, userId, 'caracteristica', linha.id, caracLbl)
@@ -301,6 +304,64 @@ export class SkuService {
       sku_marca_id: marca.id, sku_categoria_id: categoria.id, sku_sub_id: sub.id, sku_linha_id: linha.id,
     }).eq('id', devId).eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Erro ao salvar linha: ${error.message}`)
+    return this.getSku(orgId, devId)
+  }
+
+  // ── Linha = coleção transversal (topo) ────────────────────────────
+  /** Lista as linhas (coleções) da org — nível de topo. */
+  listLines(orgId: string) { return this.listTaxonomy(orgId, 'linha', null) }
+
+  /** Cria uma linha (coleção) por nome — topo, código sequencial automático. */
+  createLine(orgId: string, userId: string | null, label: string) {
+    return this.createTaxonomy(orgId, userId, { kind: 'linha', label })
+  }
+
+  /** Recalcula sku_base (e os SKUs de variante) SE as 5 dimensões estiverem
+   *  definidas; senão deixa como está (classificação parcial). */
+  private async recomputeBase(orgId: string, devId: string) {
+    const { data: dev } = await supabaseAdmin.from('product_dev')
+      .select('sku_marca_id, sku_categoria_id, sku_sub_id, sku_linha_id, sku_caracteristica_id')
+      .eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    const d = dev as Record<string, string | null> | null
+    if (!d) return
+    const [m, c, s, l, ch] = await Promise.all([
+      this.loadRow(orgId, d.sku_marca_id), this.loadRow(orgId, d.sku_categoria_id), this.loadRow(orgId, d.sku_sub_id),
+      this.loadRow(orgId, d.sku_linha_id), this.loadRow(orgId, d.sku_caracteristica_id),
+    ])
+    if (!(m && c && s && l && ch)) return
+    const base = `${m.code}${c.code}${s.code}${l.code}${ch.code}`
+    await supabaseAdmin.from('product_dev').update({ sku_base: base }).eq('id', devId).eq('organization_id', orgId)
+    const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
+    for (const v of (vars ?? []) as Array<{ id: string; cor_id: string }>) {
+      const cor = await this.loadRow(orgId, v.cor_id)
+      if (cor) await supabaseAdmin.from('product_dev_sku_variant').update({ sku: `${base}-${cor.code}` }).eq('id', v.id)
+    }
+  }
+
+  /**
+   * Atribui a LINHA (coleção) ao projeto e completa o que der da classificação a
+   * partir de rótulos parciais (marca/categoria/sub/característica). Cada rótulo é
+   * resolvido-ou-criado no nível certo; sku_base é recomputado se as 5 dimensões
+   * estiverem prontas. Usado pelo "definir linha" da Ficha (categoria/sub vêm do ML).
+   */
+  async assignLineAndClassify(orgId: string, userId: string | null, devId: string, opts: {
+    lineId?: string | null; lineName?: string | null
+    marca?: string | null; marcaCode?: string | null; categoria?: string | null; sub?: string | null; caracteristica?: string | null
+  }) {
+    let line: TaxRow | null = null
+    if (opts.lineId) line = await this.loadRow(orgId, opts.lineId)
+    if (!line && (opts.lineName ?? '').trim()) line = await this.resolveOrCreate(orgId, userId, 'linha', null, opts.lineName!.trim())
+    if (!line || line.kind !== 'linha') throw new BadRequestException('Informe uma linha (escolha uma existente ou crie pelo nome)')
+
+    const patch: Record<string, unknown> = { sku_linha_id: line.id }
+    let categoria: TaxRow | null = null
+    if ((opts.marca ?? '').trim()) { const m = await this.resolveOrCreate(orgId, userId, 'marca', null, opts.marca!.trim(), opts.marcaCode ?? undefined); patch.sku_marca_id = m.id }
+    if ((opts.categoria ?? '').trim()) { categoria = await this.resolveOrCreate(orgId, userId, 'categoria', null, opts.categoria!.trim()); patch.sku_categoria_id = categoria.id }
+    if ((opts.sub ?? '').trim() && categoria) { const s = await this.resolveOrCreate(orgId, userId, 'sub', categoria.id, opts.sub!.trim()); patch.sku_sub_id = s.id }
+    if ((opts.caracteristica ?? '').trim()) { const c = await this.resolveOrCreate(orgId, userId, 'caracteristica', line.id, opts.caracteristica!.trim()); patch.sku_caracteristica_id = c.id }
+
+    await supabaseAdmin.from('product_dev').update(patch).eq('id', devId).eq('organization_id', orgId)
+    await this.recomputeBase(orgId, devId)
     return this.getSku(orgId, devId)
   }
 

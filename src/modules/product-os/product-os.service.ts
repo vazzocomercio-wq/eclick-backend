@@ -812,6 +812,25 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     return data as ProductDev
   }
 
+  /**
+   * Atribui a LINHA (coleção transversal, ex: "Ella") ao projeto — escolhida ou
+   * criada pelo nome. Aproveita para completar Marca (da marca da ficha) e
+   * Categoria/Sub (do caminho da categoria do ML) para o SKU já fechar. É o campo
+   * "definir linha" da Ficha / início do projeto.
+   */
+  async assignLine(orgId: string, devId: string, userId: string | null, body: { line_id?: string | null; line_name?: string | null }) {
+    const pd = await this.get(devId, orgId)
+    const path = pd.category_ml_path ?? []
+    const categoria = path.length >= 2 ? path[path.length - 2]?.name ?? null : (path[0]?.name ?? null)
+    const sub = path.length >= 1 ? path[path.length - 1]?.name ?? null : null
+    const marca = (pd.catalog_brand ?? '').trim() || 'Vazzo'
+    const res = await this.sku.assignLineAndClassify(orgId, userId, devId, {
+      lineId: body.line_id ?? null, lineName: body.line_name ?? null, marca, categoria, sub,
+    })
+    await this.emitEvent(orgId, devId, 'line_assigned', { line: body.line_name ?? body.line_id ?? null }, userId)
+    return res
+  }
+
   /** Aplica a classificação sugerida (rótulos → nós, criando o que faltar) e grava
    *  a linha/SKU. Delega ao SkuService. */
   async applyClassificationFromLabels(orgId: string, devId: string, userId: string | null, labels: {

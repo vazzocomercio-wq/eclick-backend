@@ -67,6 +67,17 @@ export class ProductOsController {
     return this.svc.searchMlCategories(q ?? '')
   }
 
+  // ── Linhas de produto (coleções transversais, ex: "Ella") ─────────
+  @Get('lines')
+  @RequirePermission('products.view')
+  listLines(@ReqUser() u: ReqUserPayload) { return this.sku.listLines(this.org(u)) }
+
+  @Post('lines')
+  @RequirePermission('products.update')
+  createLine(@ReqUser() u: ReqUserPayload, @Body() body: { label: string }) {
+    return this.sku.createLine(this.org(u), u.id, body?.label ?? '')
+  }
+
   // ── Gerador de SKU: catálogo de taxonomia ─────────────────────────
   @Get('sku/taxonomy')
   @RequirePermission('products.view')
@@ -817,6 +828,13 @@ export class ProductOsController {
   @RequirePermission('products.update')
   setMlCategory(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { category_id: string | null }) {
     return this.svc.setMlCategory(this.org(u), id, body?.category_id ?? null)
+  }
+
+  @Post(':id/line')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  assignLine(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { line_id?: string | null; line_name?: string | null }) {
+    return this.svc.assignLine(this.org(u), id, u.id, body ?? {})
   }
 
   @Post(':id/publish-to-catalog')
