@@ -580,37 +580,47 @@ export class ProductOsService {
     return data as ProductDev
   }
 
-  // ══ Categoria do Mercado Livre (árvore real que já espelhamos/prevemos) ═════
-  /** Prevê a categoria do ML a partir de um título (domain_discovery, público). */
+  // ══ Categoria do Mercado Livre (árvore clonada em ml_categories) ══════════
+  /** Prevê a categoria do ML a partir de um título. Usa o espelho local: busca as
+   *  palavras-chave do título na árvore clonada e pega a mais específica. (A API
+   *  pública domain_discovery não é alcançável de dentro do datacenter.) */
   private async mlPredictCategory(title: string): Promise<{ id: string; name: string } | null> {
-    const q = (title ?? '').trim().slice(0, 60)
-    if (!q) return null
-    try {
-      const res = await fetch(`https://api.mercadolibre.com/sites/MLB/domain_discovery/search?q=${encodeURIComponent(q)}&limit=1`)
-      if (!res.ok) return null
-      const arr = (await res.json()) as Array<{ category_id?: string; category_name?: string }>
-      const top = arr?.[0]
-      return top?.category_id ? { id: top.category_id, name: top.category_name ?? top.category_id } : null
-    } catch { return null }
+    const t = (title ?? '').trim()
+    if (!t) return null
+    // termos relevantes do título (ignora conectores/curtos), do mais distintivo p/ o menos
+    const stop = new Set(['de', 'da', 'do', 'para', 'com', 'e', 'em', 'o', 'a', 'os', 'as', 'kit', 'un', 'cm'])
+    const terms = t.toLowerCase().normalize('NFD').replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length >= 4 && !stop.has(w))
+    for (const term of terms) {
+      const hits = await this.searchMlCategories(term, 1)
+      if (hits.length) return { id: hits[0].id, name: hits[0].name }
+    }
+    return null
   }
 
-  /** Busca candidatos de categoria do ML por palavra (para o seletor manual). */
-  async searchMlCategories(query: string, limit = 10): Promise<Array<{ id: string; name: string; path: string }>> {
-    const q = (query ?? '').trim().slice(0, 60)
+  /** Busca categorias na ÁRVORE CLONADA do ML (espelho local `ml_categories`,
+   *  ~12k categorias) por nome. Não depende da API pública do ML (que o servidor
+   *  não alcança de dentro do datacenter). Ordena por relevância + especificidade. */
+  async searchMlCategories(query: string, limit = 12): Promise<Array<{ id: string; name: string; path: string }>> {
+    const q = (query ?? '').trim()
     if (!q) return []
-    try {
-      const res = await fetch(`https://api.mercadolibre.com/sites/MLB/domain_discovery/search?q=${encodeURIComponent(q)}&limit=${Math.max(1, Math.min(20, limit))}`)
-      if (!res.ok) return []
-      const arr = (await res.json()) as Array<{ category_id?: string; category_name?: string }>
-      const seen = new Set<string>(); const out: Array<{ id: string; name: string; path: string }> = []
-      for (const d of arr ?? []) {
-        if (!d.category_id || seen.has(d.category_id)) continue
-        seen.add(d.category_id)
-        const path = await this.mlCategoryPath(d.category_id)
-        out.push({ id: d.category_id, name: d.category_name ?? d.category_id, path: path.map(p => p.name).join(' › ') })
-      }
-      return out
-    } catch { return [] }
+    const { data } = await supabaseAdmin.from('ml_categories')
+      .select('id, name, path_from_root')
+      .ilike('name', `%${q}%`)
+      .limit(80)
+    const ql = q.toLowerCase()
+    const scored = ((data ?? []) as Array<{ id: string; name: string; path_from_root: Array<{ id: string; name: string }> | null }>)
+      .map(r => {
+        const path = Array.isArray(r.path_from_root) ? r.path_from_root : []
+        const nl = (r.name ?? '').toLowerCase()
+        let score = 0
+        if (nl === ql) score += 100
+        else if (nl.startsWith(ql)) score += 50
+        score += Math.min(path.length, 6) * 3   // categorias mais específicas primeiro
+        return { id: r.id, name: r.name, path: path.map(p => p.name).join(' › '), depth: path.length, score }
+      })
+      .filter(r => r.depth >= 2)   // precisa ter pai (Categoria) + folha (Sub)
+      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    return scored.slice(0, Math.max(1, Math.min(30, limit))).map(({ id, name, path }) => ({ id, name, path }))
   }
 
   /** Caminho da categoria (path_from_root) — espelho local ml_categories primeiro,
