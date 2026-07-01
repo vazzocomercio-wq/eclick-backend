@@ -152,10 +152,12 @@ export class SkuService {
     for (let i = 0; i < 12; i++) { const dgt = payload12.charCodeAt(i) - 48; sum += i % 2 === 0 ? dgt : dgt * 3 }
     return String((10 - (sum % 10)) % 10)
   }
-  /** Gera um EAN-13 com prefixo "2" (circulação restrita / uso interno). */
+  /** Gera um EAN-13 com prefixo GS1 Brasil (789/790). ⚠️ Faixa oficial do Brasil —
+   *  sem um prefixo de empresa GS1 próprio, o restante é aleatório (código interno,
+   *  não é GTIN oficial). Único dentro da org. */
   private genEan(): string {
-    let base = '2'
-    for (let i = 0; i < 11; i++) base += Math.floor(Math.random() * 10)
+    let base = Math.random() < 0.5 ? '789' : '790'
+    for (let i = 0; i < 9; i++) base += Math.floor(Math.random() * 10)
     return base + this.ean13Check(base)
   }
   /** EAN único na org (testa variantes E produtos; índice único é o backstop). */
