@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { MakerworldRadarService } from './makerworld-radar.service'
 import { MakeToOrderService } from './make-to-order.service'
+import { FarmService } from './farm.service'
 
 /**
  * Product OS — Fase 7: alerta automático de insumo.
@@ -19,7 +20,25 @@ export class ProductOsCronService {
     private readonly bridge: ActiveBridgeClient,
     private readonly radar: MakerworldRadarService,
     private readonly mto: MakeToOrderService,
+    private readonly farm: FarmService,
   ) {}
+
+  /**
+   * Auto-dispatch (lights-out) — backstop. A cada 10 min, tenta iniciar a próxima
+   * ordem em impressoras ociosas com auto_dispatch ligado (o gatilho principal é a
+   * telemetria: impressora terminou → despacha). Só age em orgs que optaram.
+   */
+  @Cron('*/10 * * * *', { name: 'product-os-auto-dispatch' })
+  async autoDispatchCron(): Promise<{ dispatched: number }> {
+    const orgs = await this.farm.orgsWithAutoDispatch().catch(() => [])
+    let total = 0
+    for (const orgId of orgs) {
+      try { const r = await this.farm.autoDispatch(orgId); total += r.dispatched.length }
+      catch (e) { this.logger.warn(`[product-os.cron] auto-dispatch ${orgId.slice(0, 8)}: ${(e as Error).message}`) }
+    }
+    if (total) this.logger.log(`[product-os.cron] auto-dispatch iniciou ${total} ordem(ns)`)
+    return { dispatched: total }
+  }
 
   /**
    * Make-to-order (T1-B): reconcilia o estoque dos produtos 3D com reposição

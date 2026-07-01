@@ -106,6 +106,18 @@ export class FarmController {
   @RequirePermission('products.view')
   schedulePlan(@ReqUser() u: ReqUserPayload) { return this.farm.schedulePlan(this.org(u)) }
 
+  @Post('auto-dispatch')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  autoDispatch(@ReqUser() u: ReqUserPayload) { return this.farm.autoDispatch(this.org(u)) }
+
+  @Post('printers/:pid/auto-dispatch')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  setAutoDispatch(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { enabled: boolean }) {
+    return this.farm.setAutoDispatch(this.org(u), pid, body?.enabled === true)
+  }
+
   @Post('scheduler/apply')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

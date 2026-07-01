@@ -136,6 +136,8 @@ export class FarmService {
     }
     for (const pid of finished) await this.autoCloseFinished(a.organization_id, pid).catch(e => this.logger.warn(`[farm.autoclose] ${(e as Error).message}`))
     for (const f of failures) await this.handleFailure(a.organization_id, f.printerId, f.p).catch(e => this.logger.warn(`[farm.failure] ${(e as Error).message}`))
+    // lights-out: impressora que terminou → inicia sozinha a próxima ordem (se auto_dispatch ligado)
+    for (const pid of finished) await this.autoDispatch(a.organization_id, { printerId: pid }).catch(e => this.logger.warn(`[farm.autodispatch] ${(e as Error).message}`))
 
     // entrega comandos pendentes das impressoras desse agente
     const commands = await this.pullCommands(a.id, a.organization_id)
@@ -377,6 +379,58 @@ export class FarmService {
       if (!error) assigned++
     }
     return { ok: true, assigned }
+  }
+
+  // ── T1-C: auto-dispatch (lights-out) ──────────────────────────────
+  /** Liga/desliga o auto-dispatch de uma impressora (opt-in — ação real na máquina). */
+  async setAutoDispatch(orgId: string, printerId: string, enabled: boolean) {
+    const { error } = await supabaseAdmin.from('production_printer').update({ auto_dispatch: !!enabled }).eq('id', printerId).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    return { ok: true, auto_dispatch: !!enabled }
+  }
+
+  /** Orgs com alguma impressora em auto_dispatch (p/ o cron). */
+  async orgsWithAutoDispatch(): Promise<string[]> {
+    const { data } = await supabaseAdmin.from('production_printer').select('organization_id').eq('auto_dispatch', true)
+    return [...new Set((data ?? []).map(r => (r as { organization_id: string }).organization_id))]
+  }
+
+  /**
+   * Auto-dispatch: numa impressora OCIOSA+online com auto_dispatch ligado, INICIA
+   * sozinho a próxima ordem que ela consegue rodar. Reusa o schedulePlan (matching
+   * de filamento + prioridade R$/h) e o sendOrderToPrinter (valida .3mf + rolo).
+   * 1 ordem por impressora por passada. Opt-in por impressora.
+   */
+  async autoDispatch(orgId: string, opts: { printerId?: string } = {}) {
+    const [statuses, plan, prs] = await Promise.all([
+      this.status(orgId), this.schedulePlan(orgId),
+      supabaseAdmin.from('production_printer').select('id').eq('organization_id', orgId).eq('auto_dispatch', true),
+    ])
+    const autoOn = new Set(((prs.data ?? []) as Array<{ id: string }>).map(r => r.id))
+    const idleOnline = new Set(statuses.filter(s => s.online && s.state === 'idle').map(s => s.id))
+    type Asg = { order_id: string; order_number: number; name: string; printer_id: string; fit: string; start_at: string }
+    const assignments = (plan.assignments as unknown as Asg[])
+    // 1ª ordem (start mais cedo) de cada impressora
+    const firstByPrinter = new Map<string, Asg>()
+    for (const a of assignments) {
+      const cur = firstByPrinter.get(a.printer_id)
+      if (!cur || new Date(a.start_at).getTime() < new Date(cur.start_at).getTime()) firstByPrinter.set(a.printer_id, a)
+    }
+    const dispatched: Array<{ printer_id: string; order_id: string; order_number: number; name: string }> = []
+    for (const [pid, a] of firstByPrinter) {
+      if (opts.printerId && pid !== opts.printerId) continue
+      if (!autoOn.has(pid) || !idleOnline.has(pid) || a.fit === 'none') continue
+      const { count } = await supabaseAdmin.from('production_order').select('id', { count: 'exact', head: true })
+        .eq('organization_id', orgId).eq('printer_id', pid).eq('status', 'imprimindo')
+      if ((count ?? 0) > 0) continue   // já está imprimindo
+      try {
+        await supabaseAdmin.from('production_order').update({ printer_id: pid }).eq('id', a.order_id).eq('organization_id', orgId).eq('status', 'fila')
+        await this.sendOrderToPrinter(orgId, a.order_id, null)
+        dispatched.push({ printer_id: pid, order_id: a.order_id, order_number: a.order_number, name: a.name })
+        this.logger.log(`[farm.autodispatch] iniciou OP-${String(a.order_number).padStart(4, '0')} em ${pid.slice(0, 8)}`)
+      } catch (e) { this.logger.warn(`[farm.autodispatch] ${pid.slice(0, 8)}: ${(e as Error).message}`) }
+    }
+    return { dispatched }
   }
 
   // ── T1-C: scheduler de capacidade finita (Gantt + prazo + matching) ──
@@ -622,7 +676,7 @@ export class FarmService {
 
   async status(orgId: string) {
     const { data: printers } = await supabaseAdmin.from('production_printer')
-      .select('id, name, brand, model, status, serial_number, ai_detection_enabled, ai_sensitivity').eq('organization_id', orgId).order('name')
+      .select('id, name, brand, model, status, serial_number, ai_detection_enabled, ai_sensitivity, auto_dispatch').eq('organization_id', orgId).order('name')
     const { data: statuses } = await supabaseAdmin.from('printer_status')
       .select('*').eq('organization_id', orgId)
     const byId = new Map((statuses ?? []).map(s => [(s as { printer_id: string }).printer_id, s as Record<string, unknown>]))
@@ -632,7 +686,7 @@ export class FarmService {
     const failByPid = new Map((openFails ?? []).map(f => [(f as { printer_id: string }).printer_id, f as Record<string, unknown>]))
 
     return (printers ?? []).map(p => {
-      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null; ai_detection_enabled: boolean | null; ai_sensitivity: string | null }
+      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null; ai_detection_enabled: boolean | null; ai_sensitivity: string | null; auto_dispatch: boolean | null }
       const st = byId.get(pr.id)
       const fresh = st ? this.isFresh(st.updated_at as string) : false
       const fail = failByPid.get(pr.id)
@@ -641,6 +695,7 @@ export class FarmService {
         bound: !!pr.serial_number,
         ai_detection_enabled: pr.ai_detection_enabled !== false,
         ai_sensitivity: pr.ai_sensitivity || 'medium',
+        auto_dispatch: pr.auto_dispatch === true,
         open_failure: fail ? { id: fail.id, reason: fail.reason, detected_at: fail.detected_at } : null,
         online: fresh && (st?.online === true),
         state: !st ? 'sem_dados' : !fresh ? 'offline' : (st.state as string) ?? 'idle',
