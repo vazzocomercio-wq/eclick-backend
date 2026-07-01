@@ -78,6 +78,9 @@ export interface ProductDev {
   catalog_tags?:           string[]
   catalog_ready?:          boolean
   enrichment?:             Record<string, unknown> | null
+  // categoria da árvore do Mercado Livre (espelho ml_categories) → products.category_ml_id
+  category_ml_id?:         string | null
+  category_ml_path?:       Array<{ id: string; name: string }> | null
   created_by:          string | null
   created_at:          string
   updated_at:          string
@@ -577,6 +580,73 @@ export class ProductOsService {
     return data as ProductDev
   }
 
+  // ══ Categoria do Mercado Livre (árvore real que já espelhamos/prevemos) ═════
+  /** Prevê a categoria do ML a partir de um título (domain_discovery, público). */
+  private async mlPredictCategory(title: string): Promise<{ id: string; name: string } | null> {
+    const q = (title ?? '').trim().slice(0, 60)
+    if (!q) return null
+    try {
+      const res = await fetch(`https://api.mercadolibre.com/sites/MLB/domain_discovery/search?q=${encodeURIComponent(q)}&limit=1`)
+      if (!res.ok) return null
+      const arr = (await res.json()) as Array<{ category_id?: string; category_name?: string }>
+      const top = arr?.[0]
+      return top?.category_id ? { id: top.category_id, name: top.category_name ?? top.category_id } : null
+    } catch { return null }
+  }
+
+  /** Busca candidatos de categoria do ML por palavra (para o seletor manual). */
+  async searchMlCategories(query: string, limit = 10): Promise<Array<{ id: string; name: string; path: string }>> {
+    const q = (query ?? '').trim().slice(0, 60)
+    if (!q) return []
+    try {
+      const res = await fetch(`https://api.mercadolibre.com/sites/MLB/domain_discovery/search?q=${encodeURIComponent(q)}&limit=${Math.max(1, Math.min(20, limit))}`)
+      if (!res.ok) return []
+      const arr = (await res.json()) as Array<{ category_id?: string; category_name?: string }>
+      const seen = new Set<string>(); const out: Array<{ id: string; name: string; path: string }> = []
+      for (const d of arr ?? []) {
+        if (!d.category_id || seen.has(d.category_id)) continue
+        seen.add(d.category_id)
+        const path = await this.mlCategoryPath(d.category_id)
+        out.push({ id: d.category_id, name: d.category_name ?? d.category_id, path: path.map(p => p.name).join(' › ') })
+      }
+      return out
+    } catch { return [] }
+  }
+
+  /** Caminho da categoria (path_from_root) — espelho local ml_categories primeiro,
+   *  cai na API pública só se não estiver espelhada. */
+  private async mlCategoryPath(id: string): Promise<Array<{ id: string; name: string }>> {
+    if (!id) return []
+    try {
+      const { data } = await supabaseAdmin.from('ml_categories').select('id, name, path_from_root').eq('id', id).maybeSingle()
+      const p = (data as { path_from_root?: Array<{ id: string; name: string }> } | null)?.path_from_root
+      if (Array.isArray(p) && p.length) return p
+    } catch { /* fallback */ }
+    try {
+      const res = await fetch(`https://api.mercadolibre.com/categories/${encodeURIComponent(id)}`)
+      if (!res.ok) return []
+      const d = (await res.json()) as { path_from_root?: Array<{ id: string; name: string }> }
+      return Array.isArray(d.path_from_root) ? d.path_from_root : []
+    } catch { return [] }
+  }
+
+  /** Define a categoria do ML no projeto (resolve o caminho e grava id+path). */
+  async setMlCategory(orgId: string, devId: string, categoryId: string | null): Promise<{ category_ml_id: string | null; path: Array<{ id: string; name: string }> }> {
+    await this.get(devId, orgId)
+    if (!categoryId) {
+      await supabaseAdmin.from('product_dev').update({ category_ml_id: null, category_ml_path: null }).eq('id', devId).eq('organization_id', orgId)
+      return { category_ml_id: null, path: [] }
+    }
+    const path = await this.mlCategoryPath(categoryId)
+    const leaf = path[path.length - 1]
+    await supabaseAdmin.from('product_dev').update({
+      category_ml_id: categoryId, category_ml_path: path.length ? path : null,
+      // espelha o nome da categoria no campo livre (exibição/coerência)
+      ...(leaf?.name ? { category: leaf.name } : {}),
+    }).eq('id', devId).eq('organization_id', orgId)
+    return { category_ml_id: categoryId, path }
+  }
+
   // ══ Ficha de catálogo (transição projeto → produto pronto p/ IA Criativo) ═══
   /** Vocabulário de taxonomia da org (rótulos por nível) — dado à IA para que ela
    *  REAPROVEITE nós existentes em vez de inventar sinônimos. */
@@ -599,14 +669,17 @@ export class ProductOsService {
   async enrichForCatalog(orgId: string, devId: string, userId: string | null, opts: { force?: boolean } = {}): Promise<{
     ficha: { title: string; description: string; brand: string; bullets: string[]; attributes: Record<string, string>; tags: string[] }
     suggestion: { marca: string | null; marca_code: string | null; categoria: string | null; sub: string | null; linha: string | null; caracteristica: string | null }
+    ml_category: { id: string | null; name: string | null; path: string | null }
     already_ready: boolean
   }> {
     const pd = await this.get(devId, orgId)
     if (pd.catalog_ready && !opts.force) {
       // já validada — devolve o que está gravado sem gastar IA
+      const p = pd.category_ml_path ?? []
       return {
         ficha: { title: pd.catalog_title ?? pd.name, description: pd.catalog_description ?? pd.description ?? '', brand: pd.catalog_brand ?? '', bullets: pd.catalog_bullets ?? [], attributes: pd.catalog_attributes ?? {}, tags: pd.catalog_tags ?? [] },
         suggestion: this.readSuggestion(pd),
+        ml_category: { id: pd.category_ml_id ?? null, name: p[p.length - 1]?.name ?? null, path: p.length ? p.map(x => x.name).join(' › ') : null },
         already_ready: true,
       }
     }
@@ -673,11 +746,25 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       attributes: attrs,
       tags: arr(parsed.tags),
     }
+
+    // Categoria do MERCADO LIVRE (árvore real): mantém a já escolhida ou prevê pelo
+    // título. O caminho path_from_root vira a sugestão de Categoria/Sub do SKU —
+    // alinhando a taxonomia interna com a do ML (pedido do lojista).
+    let mlId = pd.category_ml_id ?? null
+    let mlPath = pd.category_ml_path ?? []
+    if (!mlId) {
+      const pred = await this.mlPredictCategory(ficha.title || pd.name)
+      if (pred) { mlId = pred.id; mlPath = await this.mlCategoryPath(pred.id) }
+    }
+    const mlLeaf = mlPath[mlPath.length - 1]?.name ?? null
+    const mlParent = mlPath.length >= 2 ? mlPath[mlPath.length - 2]?.name ?? null : null
+
     const suggestion = {
       marca: str(parsed.brand) || null,
       marca_code: str(parsed.marca_code) || null,
-      categoria: str(parsed.categoria) || (pd.category ?? null),
-      sub: str(parsed.sub) || null,
+      // Categoria/Sub vêm da árvore do ML quando disponíveis; senão, do texto da IA
+      categoria: mlParent || str(parsed.categoria) || (pd.category ?? null),
+      sub: mlLeaf || str(parsed.sub) || null,
       linha: str(parsed.linha) || null,
       caracteristica: str(parsed.caracteristica) || null,
     }
@@ -685,10 +772,11 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     await supabaseAdmin.from('product_dev').update({
       catalog_title: ficha.title, catalog_description: ficha.description, catalog_brand: ficha.brand,
       catalog_bullets: ficha.bullets, catalog_attributes: ficha.attributes, catalog_tags: ficha.tags,
-      enrichment: { ...parsed, suggestion, generated_at: new Date().toISOString() },
+      ...(mlId ? { category_ml_id: mlId, category_ml_path: mlPath.length ? mlPath : null } : {}),
+      enrichment: { ...parsed, suggestion, ml_category_id: mlId, generated_at: new Date().toISOString() },
     }).eq('id', devId).eq('organization_id', orgId)
-    await this.emitEvent(orgId, devId, 'catalog_enriched', { cost_usd: out.costUsd, title: ficha.title }, userId)
-    return { ficha, suggestion, already_ready: false }
+    await this.emitEvent(orgId, devId, 'catalog_enriched', { cost_usd: out.costUsd, title: ficha.title, ml_category: mlId }, userId)
+    return { ficha, suggestion, ml_category: { id: mlId, name: mlLeaf, path: mlPath.length ? mlPath.map(x => x.name).join(' › ') : null }, already_ready: false }
   }
 
   private readSuggestion(pd: ProductDev) {
@@ -832,12 +920,17 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const bdims = (pd.briefing as { dimensoes_mm?: { largura?: number; profundidade?: number; altura?: number } } | null)?.dimensoes_mm
     const cm = (mm?: number | null): number | null => (mm != null && mm > 0 ? Math.round((mm / 10) * 10) / 10 : null)
 
+    // categoria: nome-folha da árvore do ML (se escolhida) + o id oficial p/ o ML
+    const mlPath = pd.category_ml_path ?? []
+    const categoryName = mlPath[mlPath.length - 1]?.name ?? pd.category
+
     const { data: created, error } = await supabaseAdmin.from('products').insert({
       organization_id: orgId,
       name: pd.name,
       ml_title: fichaTitle,
       brand: fichaBrand,
-      category: pd.category,
+      category: categoryName,
+      category_ml_id: pd.category_ml_id ?? null,
       description: fichaDesc,
       photo_urls: photos,
       cost_price: pd.estimated_cost,

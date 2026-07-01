@@ -59,6 +59,14 @@ export class ProductOsController {
     machines?: Array<{ name: string; model?: string; bed_mm?: number[] }>
   }) { return this.svc.updateSettings(this.org(u), body) }
 
+  // ── Categoria do Mercado Livre (árvore real espelhada/prevista) ───
+  @Get('ml-categories/search')
+  @RequirePermission('products.view')
+  mlCategorySearch(@ReqUser() u: ReqUserPayload, @Query('q') q: string) {
+    this.org(u)
+    return this.svc.searchMlCategories(q ?? '')
+  }
+
   // ── Gerador de SKU: catálogo de taxonomia ─────────────────────────
   @Get('sku/taxonomy')
   @RequirePermission('products.view')
@@ -802,6 +810,13 @@ export class ProductOsController {
   @RequirePermission('products.update')
   applyClassification(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { marca?: string | null; marca_code?: string | null; categoria?: string | null; sub?: string | null; linha?: string | null; caracteristica?: string | null }) {
     return this.svc.applyClassificationFromLabels(this.org(u), id, u.id, body ?? {})
+  }
+
+  @Post(':id/ml-category')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  setMlCategory(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { category_id: string | null }) {
+    return this.svc.setMlCategory(this.org(u), id, body?.category_id ?? null)
   }
 
   @Post(':id/publish-to-catalog')
