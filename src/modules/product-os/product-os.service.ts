@@ -81,6 +81,11 @@ export interface ProductDev {
   // categoria da árvore do Mercado Livre (espelho ml_categories) → products.category_ml_id
   category_ml_id?:         string | null
   category_ml_path?:       Array<{ id: string; name: string }> | null
+  // medidas do produto FINAL (montado) — para envio no anúncio
+  final_weight_g?:         number | null
+  final_width_mm?:         number | null
+  final_depth_mm?:         number | null
+  final_height_mm?:        number | null
   created_by:          string | null
   created_at:          string
   updated_at:          string
@@ -541,6 +546,7 @@ export class ProductOsService {
       'name', 'category', 'description', 'production_profile',
       'inspiration_url', 'reference_images', 'target_marketplaces',
       'target_price', 'estimated_cost',
+      'final_weight_g', 'final_width_mm', 'final_depth_mm', 'final_height_mm',
     ]
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
@@ -873,6 +879,77 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
   }
 
   /**
+   * Medidas do PRODUTO FINAL (montado) p/ o anúncio. Peso e dimensões são do
+   * produto inteiro — nunca das peças isoladas:
+   *  - Peso: correção manual (final_weight_g) > SOMA das peças (peso da versão da
+   *    peça × qtd) > peso da versão do produto (que já é o corrigido/puxado).
+   *  - Dimensões: informadas (final_*) > bounding das peças (larg/prof = maior,
+   *    altura = soma, aproximação p/ montagem empilhada) > dimensões do briefing.
+   */
+  async computeMeasures(orgId: string, pd: ProductDev & { versions?: ProductDevVersion[] }): Promise<{
+    weight_g: number | null; width_mm: number | null; depth_mm: number | null; height_mm: number | null
+    weight_source: 'manual' | 'pecas' | 'versao' | 'none'; dims_source: 'manual' | 'pecas' | 'briefing' | 'parcial' | 'none'
+    parts: number
+  }> {
+    const { data: partsData } = await supabaseAdmin.from('product_dev_part')
+      .select('id, qty_per_product, width_mm, depth_mm, height_mm').eq('product_dev_id', pd.id).eq('organization_id', orgId)
+    const parts = (partsData ?? []) as Array<{ id: string; qty_per_product: number; width_mm: number | null; depth_mm: number | null; height_mm: number | null }>
+
+    // ── peso ──
+    let weight: number | null = pd.final_weight_g != null ? Number(pd.final_weight_g) : null
+    let wSource: 'manual' | 'pecas' | 'versao' | 'none' = weight != null ? 'manual' : 'none'
+    if (weight == null && parts.length) {
+      let sum = 0, any = false
+      for (const p of parts) {
+        const { data: vs } = await supabaseAdmin.from('product_dev_version')
+          .select('weight_g, approved, version_number').eq('part_id', p.id).eq('organization_id', orgId)
+          .order('version_number', { ascending: false })
+        const list = (vs ?? []) as Array<{ weight_g: number | null; approved: boolean }>
+        const ref = list.find(v => v.approved) ?? list[0]
+        if (ref?.weight_g != null) { sum += Number(ref.weight_g) * Math.max(1, Number(p.qty_per_product) || 1); any = true }
+      }
+      if (any) { weight = Math.round(sum * 100) / 100; wSource = 'pecas' }
+    }
+    if (weight == null) {
+      const approvedV = (pd.versions ?? []).find(v => v.approved) ?? (pd.versions ?? [])[0]
+      if (approvedV?.weight_g != null) { weight = Number(approvedV.weight_g); wSource = 'versao' }
+    }
+
+    // ── dimensões ──
+    let width = pd.final_width_mm != null ? Number(pd.final_width_mm) : null
+    let depth = pd.final_depth_mm != null ? Number(pd.final_depth_mm) : null
+    let height = pd.final_height_mm != null ? Number(pd.final_height_mm) : null
+    const allManual = width != null && depth != null && height != null
+    let dSource: 'manual' | 'pecas' | 'briefing' | 'parcial' | 'none' = allManual ? 'manual' : 'none'
+    if (!allManual) {
+      if (parts.length) {
+        const ws = parts.map(p => Number(p.width_mm) || 0), ds = parts.map(p => Number(p.depth_mm) || 0), hs = parts.map(p => Number(p.height_mm) || 0)
+        if (width == null && ws.some(x => x > 0)) width = Math.max(...ws)
+        if (depth == null && ds.some(x => x > 0)) depth = Math.max(...ds)
+        if (height == null && hs.some(x => x > 0)) height = Math.round(hs.reduce((a, b) => a + b, 0) * 10) / 10
+        if (width != null || depth != null || height != null) dSource = 'pecas'
+      }
+      const bd = (pd.briefing as { dimensoes_mm?: { largura?: number; profundidade?: number; altura?: number } } | null)?.dimensoes_mm
+      if (bd) {
+        if (width == null && bd.largura) { width = Number(bd.largura) }
+        if (depth == null && bd.profundidade) { depth = Number(bd.profundidade) }
+        if (height == null && bd.altura) { height = Number(bd.altura) }
+        if (dSource === 'none' && (width != null || depth != null || height != null)) dSource = 'briefing'
+      }
+      if (dSource !== 'none' && !(width != null && depth != null && height != null)) dSource = dSource === 'manual' ? 'manual' : 'parcial'
+    }
+
+    return { weight_g: weight, width_mm: width, depth_mm: depth, height_mm: height, weight_source: wSource, dims_source: dSource, parts: parts.length }
+  }
+
+  /** Medidas calculadas do produto final + overrides atuais (p/ a tela de ficha). */
+  async getMeasures(orgId: string, devId: string) {
+    const pd = await this.get(devId, orgId)
+    const computed = await this.computeMeasures(orgId, pd)
+    return { ...computed, override: { weight_g: pd.final_weight_g ?? null, width_mm: pd.final_width_mm ?? null, depth_mm: pd.final_depth_mm ?? null, height_mm: pd.final_height_mm ?? null } }
+  }
+
+  /**
    * Fase 3 — "aprovado → virar anúncio". Cria um SKU real em `products` a
    * partir do product_dev, vincula, semeia estoque das unidades produzidas e
    * (opcional) publica na loja. Reusa ProductsService p/ taxa+vitrine e
@@ -964,9 +1041,9 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const fichaBrand = (pd.catalog_brand ?? '').trim() || null
     const attrs: Record<string, string> = { ...(pd.catalog_attributes ?? {}) }
     const tags = Array.isArray(pd.catalog_tags) ? pd.catalog_tags : []
-    // peso/dimensões da versão aprovada + briefing → cadastro logístico do ML
-    const weightKg = approvedV?.weight_g != null ? Math.round((approvedV.weight_g / 1000) * 1000) / 1000 : null
-    const bdims = (pd.briefing as { dimensoes_mm?: { largura?: number; profundidade?: number; altura?: number } } | null)?.dimensoes_mm
+    // peso/dimensões do PRODUTO FINAL (montado, soma das peças) → cadastro logístico do ML
+    const meas = await this.computeMeasures(orgId, pd)
+    const weightKg = meas.weight_g != null ? Math.round((meas.weight_g / 1000) * 1000) / 1000 : null
     const cm = (mm?: number | null): number | null => (mm != null && mm > 0 ? Math.round((mm / 10) * 10) / 10 : null)
 
     // categoria: nome-folha da árvore do ML (se escolhida) + o id oficial p/ o ML
@@ -990,9 +1067,9 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       attributes: attrs,
       tags,
       weight_kg: weightKg,
-      width_cm: cm(bdims?.largura),
-      length_cm: cm(bdims?.profundidade),
-      height_cm: cm(bdims?.altura),
+      width_cm: cm(meas.width_mm),
+      length_cm: cm(meas.depth_mm),
+      height_cm: cm(meas.height_mm),
       has_variations: mode === 'variable',
       variations: variationsJson,
       tax_percentage: tax.default_tax_percentage,

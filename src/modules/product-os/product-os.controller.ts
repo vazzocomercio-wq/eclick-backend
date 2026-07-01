@@ -830,6 +830,10 @@ export class ProductOsController {
     return this.svc.setMlCategory(this.org(u), id, u.id, body?.category_id ?? null)
   }
 
+  @Get(':id/measures')
+  @RequirePermission('products.view')
+  measures(@ReqUser() u: ReqUserPayload, @Param('id') id: string) { return this.svc.getMeasures(this.org(u), id) }
+
   @Post(':id/line')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
