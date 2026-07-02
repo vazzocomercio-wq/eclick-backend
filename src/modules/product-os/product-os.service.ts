@@ -1050,8 +1050,13 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
       return { id: r.id, sku: r.sku, ean: r.ean, label: cor?.label ?? '' }
     })
-    // modo: 'variable' só faz sentido com variantes; default = variável se há cores, senão único.
-    const mode: 'single' | 'variable' = variants.length === 0 ? 'single' : (body.variation_mode ?? 'variable')
+    // modo: cor cadastrada ⇒ SEMPRE variável (cada cor = 1 SKU vendável). Publicar
+    // "único" com cor criada perdia a variação — produto nascia só com o SKU base.
+    const mode: 'single' | 'variable' = variants.length === 0 ? 'single' : 'variable'
+    const singleQty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
+    if (variants.length > 1 && body.variation_mode === 'single' && singleQty > 0) {
+      throw new BadRequestException('Este produto tem mais de uma cor — informe o estoque por cor (modo variações) em vez de uma quantidade única.')
+    }
 
     // produto variável = 1 produto com variations[] jsonb (1 linha/cor), como a aba "Variações"
     // do catálogo (System 1, consumido pelo ML). EAN por cor estende a linha (aditivo no jsonb).
@@ -1061,7 +1066,8 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       return {
         id: v.id, type: 'Cor', value: v.label,
         price: ov?.price != null ? Number(ov.price) : (price ?? 0),
-        stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : 0,
+        // publish "único" curado p/ variável: com 1 cor, a quantidade produzida vira o estoque dela
+        stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : (variants.length === 1 ? singleQty : 0),
         sku: v.sku, ean: v.ean,
       }
     }) : []
