@@ -41,7 +41,11 @@ export interface ListingScoreCard {
 export class ShopeeListingsService {
   private readonly logger = new Logger(ShopeeListingsService.name)
 
-  async listLatestScores(f: ListingScoreFilters): Promise<{ items: ListingScoreCard[]; total: number }> {
+  async listLatestScores(f: ListingScoreFilters): Promise<{
+    items: ListingScoreCard[]
+    total: number
+    shops: Array<{ shop_id: number; nickname: string }>
+  }> {
     let q = supabaseAdmin
       .schema('shopee')
       .from('v_latest_algo_score')
@@ -59,15 +63,27 @@ export class ShopeeListingsService {
     if (f.minScore != null) q = q.gte('algo_score', f.minScore)
     if (f.maxScore != null) q = q.lte('algo_score', f.maxScore)
 
-    const { data, count, error } = await q
+    // nomes das lojas (nickname da conexão) — a UI identifica a loja pelo nome,
+    // não pelo shop_id numérico (mesmo padrão de /shopee/reviews)
+    const connsQ = supabaseAdmin
+      .from('marketplace_connections')
+      .select('shop_id, nickname')
+      .eq('organization_id', f.orgId)
+      .eq('platform', 'shopee')
+
+    const [{ data, count, error }, { data: conns }] = await Promise.all([q, connsQ])
     if (error) {
       this.logger.error(`[shopee.listings] query falhou: ${error.message}`)
       throw new Error(error.message)
     }
 
+    const shops = (conns ?? [])
+      .filter(c => c.shop_id != null)
+      .map(c => ({ shop_id: Number(c.shop_id), nickname: (c.nickname as string | null) ?? `Shopee #${c.shop_id}` }))
+
     const rows = (data ?? []) as unknown as Row[]
     const items = rows.map(r => this.toCard(r))
-    return { items, total: count ?? items.length }
+    return { items, total: count ?? items.length, shops }
   }
 
   private toCard(r: Row): ListingScoreCard {
