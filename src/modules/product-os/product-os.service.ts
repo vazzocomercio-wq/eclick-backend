@@ -559,12 +559,33 @@ export class ProductOsService {
     return data as ProductDev
   }
 
-  /** Move o card no kanban: muda status e/ou reordena dentro da coluna. */
+  /** Move o card no kanban: muda status e/ou reordena dentro da coluna.
+   *  O arrasto é livre entre as etapas de desenvolvimento, mas as etapas com
+   *  CONSEQUÊNCIA têm porteiro: 'aprovado' exige versão aprovada, 'publicado'
+   *  exige produto no catálogo, e produto publicado não volta pro funil. */
   async move(id: string, orgId: string, body: { status?: ProductDevStatus; position?: number }): Promise<ProductDev> {
     const safe: Record<string, unknown> = {}
     if (body.status)              safe.status   = body.status
     if (typeof body.position === 'number') safe.position = body.position
     if (Object.keys(safe).length === 0) throw new BadRequestException('Informe status ou position')
+    if (body.status) {
+      const { data: cur } = await supabaseAdmin.from('product_dev').select('status, product_id')
+        .eq('id', id).eq('organization_id', orgId).maybeSingle()
+      const c = cur as { status: string; product_id: string | null } | null
+      if (!c) throw new BadRequestException('Produto não encontrado')
+      const POST_PUBLISH = ['publicado', 'monitorando']
+      if (POST_PUBLISH.includes(c.status) && !POST_PUBLISH.includes(body.status) && body.status !== 'arquivado') {
+        throw new BadRequestException('Produto já publicado no catálogo — ele não volta pro funil de desenvolvimento (só entre Publicado ↔ Monitorando ou Arquivado).')
+      }
+      if (body.status === 'publicado' && !c.product_id) {
+        throw new BadRequestException('Esse produto ainda não virou anúncio — use o botão "Virar anúncio" (a coluna Publicado é consequência, não atalho).')
+      }
+      if (body.status === 'aprovado') {
+        const { count } = await supabaseAdmin.from('product_dev_version').select('id', { count: 'exact', head: true })
+          .eq('organization_id', orgId).eq('product_dev_id', id).is('part_id', null).eq('approved', true)
+        if ((count ?? 0) === 0) throw new BadRequestException('Aprove uma versão do modelo antes de mover pra Aprovado (aba Versões).')
+      }
+    }
     const { data, error } = await supabaseAdmin
       .from('product_dev').update(safe)
       .eq('id', id).eq('organization_id', orgId).select('*').maybeSingle()
@@ -984,6 +1005,11 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     // LINHA obrigatória: todo produto precisa pertencer a uma linha de produtos
     // (família). Sem ela, o SKU não fecha e o catálogo fica sem "tipo de produto".
     if (!pd.sku_linha_id) throw new BadRequestException('Defina a LINHA de produtos deste modelo antes de publicar (aba Ficha ou SKU). Se ainda não existe uma linha, crie uma.')
+    // CLASSIFICAÇÃO COMPLETA obrigatória: produto não entra no catálogo sem SKU
+    // (era o buraco que deixava products.sku = null em produto publicado).
+    if (!pd.sku_base) throw new BadRequestException('Complete a classificação do SKU (Marca, Categoria, Sub-categoria, Linha e Característica) na aba SKU antes de publicar.')
+    // EAN: gera o que faltar com 1 clique automático (idempotente — não sobrescreve)
+    await this.sku.generateEans(orgId, id).catch(() => {})
 
     // fotos: protótipo aprovado > referências
     // fotos do anúncio: lista escolhida pelo usuário (capa = 1ª) OU, por padrão,
@@ -1085,17 +1111,30 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     if (error || !created) throw new BadRequestException(`Erro ao criar produto no catálogo: ${error?.message ?? 'sem dados'}`)
     const productId = (created as { id: string }).id
 
-    await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' }).eq('id', id).eq('organization_id', orgId)
+    // compare-and-swap no vínculo: se outro publish ganhou a corrida, desfaz o
+    // produto recém-criado (senão nasceriam 2 produtos duplicados no catálogo)
+    const { data: linked } = await supabaseAdmin.from('product_dev').update({ product_id: productId, status: 'publicado' })
+      .eq('id', id).eq('organization_id', orgId).is('product_id', null).select('id')
+    if (!linked?.length) {
+      await supabaseAdmin.from('products').delete().eq('id', productId).eq('organization_id', orgId)
+      const cur = await this.get(id, orgId)
+      return { product_id: cur.product_id as string, price: null, cost_price: cur.estimated_cost, photos: 0, stock_seeded: 0, storefront: false, sku: null, mode: 'single', variants: 0, already: true }
+    }
     // back-link: cada variante de cor aponta pro produto publicado (acende o selo "publicado")
     if (variants.length) await supabaseAdmin.from('product_dev_sku_variant').update({ product_id: productId }).eq('product_dev_id', id).eq('organization_id', orgId)
 
-    // estoque inicial NATIVO — produto vem do nosso sistema, SEM sync de canal.
-    // variável: soma dos estoques por cor; único: quantidade produzida informada.
+    // estoque inicial no LEDGER UNIFICADO: garante a linha mestre (sem ela o
+    // Make-to-Order e o crédito de produção viravam no-op silencioso) e lança o
+    // estoque semeado como movimento idempotente, propagando products.stock/canais.
     let stockSeeded = 0
     const qty = mode === 'variable' ? variableStock : Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
+    const { data: master } = await supabaseAdmin.from('product_stock').select('id').eq('product_id', productId).is('platform', null).maybeSingle()
+    if (!master) await supabaseAdmin.from('product_stock').insert({ product_id: productId, platform: null, quantity: 0 })
     if (qty > 0) {
-      await supabaseAdmin.from('products').update({ stock: qty, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
-      await supabaseAdmin.from('product_stock').update({ quantity: qty, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
+      await this.stock.applyProductionRestock({
+        productId, quantity: qty, refId: `publish:${id}`,
+        note: 'Estoque inicial — publicação Product OS',
+      })
       stockSeeded = qty
     }
 

@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductionInputService } from './production-input.service'
+import { StockService } from '../stock/stock.service'
 import { LlmService } from '../ai/llm.service'
 
 /**
@@ -36,6 +37,7 @@ export class ProductPartService {
 
   constructor(
     private readonly inputs: ProductionInputService,
+    private readonly stock: StockService,
     private readonly llm: LlmService,
   ) {}
 
@@ -391,8 +393,13 @@ export class ProductPartService {
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar montagem: ${error?.message ?? 'sem dados'}`)
     const asm = data as { id: string }
-    // reserva peças + insumos de montagem
-    for (const l of preview.parts) await this.reservePart(orgId, l.part_id, l.needed, 'assembly_order', asm.id)
+    // reserva peças + insumos de montagem. Peça OPCIONAL sem saldo não entra
+    // (o preview só valida as obrigatórias — reservar opcional sem estoque
+    // deixaria reserved_qty > stock_qty no ledger de peças).
+    for (const l of preview.parts) {
+      if (l.is_optional && !l.sufficient) continue
+      await this.reservePart(orgId, l.part_id, l.needed, 'assembly_order', asm.id)
+    }
     for (const l of preview.insumos) await this.inputs.reserveInput(orgId, l.input_id, l.needed, 'assembly_order', asm.id)
     await this.emit(orgId, devId, 'assembly_created' as string, { assembly_order_id: asm.id, qty }, userId)
     return this.getAssembly(orgId, asm.id)
@@ -407,7 +414,10 @@ export class ProductPartService {
     const patch: Record<string, unknown> = { status: to }
     if (to === 'montando' && !(asm as { started_at?: string }).started_at) patch.started_at = new Date().toISOString()
     if (to === 'disponivel' || to === 'concluido') patch.completed_at = new Date().toISOString()
-    await supabaseAdmin.from('assembly_order').update(patch).eq('id', aid).eq('organization_id', orgId)
+    // compare-and-swap: dois cliques simultâneos não consomem/creditam 2×
+    const { data: updated } = await supabaseAdmin.from('assembly_order').update(patch)
+      .eq('id', aid).eq('organization_id', orgId).eq('status', from).select('id')
+    if (!updated?.length) throw new BadRequestException('A montagem mudou de status em outra aba/clique — recarregue e tente de novo.')
 
     if (to === 'cancelado') {
       await this.releaseParts(orgId, 'assembly_order', aid)
@@ -434,8 +444,9 @@ export class ProductPartService {
     return this.getAssembly(orgId, aid)
   }
 
-  /** Credita os produtos montados em products.stock (se o produto já está cadastrado).
-   *  Idempotente via assembly_order.stock_movement_done. */
+  /** Credita os produtos montados no ESTOQUE UNIFICADO via StockService
+   *  (applyProductionRestock): cria a linha mestre se faltar, grava movimento
+   *  idempotente por montagem e propaga products.stock/canais. */
   private async creditProductStock(orgId: string, asm: { id: string; product_dev_id: string; quantity: number; stock_movement_done: boolean }) {
     if (asm.stock_movement_done === true) return
     const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id').eq('id', asm.product_dev_id).eq('organization_id', orgId).maybeSingle()
@@ -443,11 +454,11 @@ export class ProductPartService {
     await supabaseAdmin.from('assembly_order').update({ stock_movement_done: true }).eq('id', asm.id)
     if (!productId) { this.logger.log(`[montagem] ${asm.id.slice(0, 8)} concluída sem produto cadastrado — sem crédito de estoque vendável`); return }
     const qty = Number(asm.quantity) || 0
-    const { data: prod } = await supabaseAdmin.from('products').select('stock').eq('id', productId).maybeSingle()
-    const novo = (Number((prod as { stock: number | null } | null)?.stock) || 0) + qty
-    await supabaseAdmin.from('products').update({ stock: novo, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
-    await supabaseAdmin.from('product_stock').update({ quantity: novo, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
-    this.logger.log(`[montagem] +${qty} un montadas (products.stock=${novo}) p/ ${productId.slice(0, 8)}`)
+    const res = await this.stock.applyProductionRestock({
+      productId, quantity: qty, refId: `assembly:${asm.id}`,
+      note: 'Montagem concluída — Product OS',
+    })
+    this.logger.log(`[montagem] +${qty} un montadas no ledger (${res}) p/ ${productId.slice(0, 8)}`)
   }
 
   // ══ Custo somado: peças + insumos de montagem ══════════════════════

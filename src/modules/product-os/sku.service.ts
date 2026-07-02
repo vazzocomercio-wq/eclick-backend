@@ -4,10 +4,15 @@ import { supabaseAdmin } from '../../common/supabase'
 /**
  * Product OS — Gerador de SKU inteligível.
  *
- * SKU = MARCA + CATEGORIA + SUB + LINHA + CARACTERISTICA + "-" + COR
- * Categoria→Sub→Linha→Característica são hierárquicos (código sequencial dentro
- * do pai); a Característica é o discriminador do modelo na linha. Cor é o eixo de
- * variação: 1 modelo → N SKUs (base-cor). Só p/ produtos do Product OS.
+ * SKU = MARCA + "-" + CATEGORIA SUB LINHA CARACTERISTICA + "-" + COR
+ * Ex: VZ-07010202-47 (marca VZ · miolo de 4 blocos de 2 dígitos · cor 47).
+ * Categoria→Sub e Linha→Característica são hierárquicos (código sequencial de
+ * 2 dígitos dentro do pai, máx. 99 por nível); a Característica é o
+ * discriminador do modelo na linha. Cor é o eixo de variação: 1 modelo → N SKUs
+ * (base-cor). Só p/ produtos do Product OS.
+ *
+ * REGRA MASTER SKU: depois que o produto é publicado no catálogo, o SKU é
+ * PERMANENTE — histórico de pedidos, anúncios e analytics penduram nele.
  */
 
 export type SkuKind = 'marca' | 'categoria' | 'sub' | 'linha' | 'caracteristica' | 'cor'
@@ -32,12 +37,21 @@ export class SkuService {
     return kind as SkuKind
   }
 
-  /** Próximo código sequencial (2 díg.) dentro do escopo (org, kind, pai). */
+  /** Normaliza rótulo p/ comparação: sem acento, sem espaço duplo, minúsculo.
+   *  É o que impede "Giratório" e "Giratorio" virarem dois códigos. */
+  private normLabel(s: string): string {
+    return String(s ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').replace(/\s+/g, ' ').trim().toLowerCase()
+  }
+
+  /** Próximo código sequencial (2 díg.) dentro do escopo (org, kind, pai).
+   *  Trava em 99: o SKU tem largura fixa de 2 dígitos por bloco — um 3º dígito
+   *  quebraria todos os SKUs já impressos/anunciados. */
   private async nextNumericCode(orgId: string, kind: SkuKind, parentId: string | null): Promise<string> {
     let q = supabaseAdmin.from('sku_taxonomy').select('code').eq('organization_id', orgId).eq('kind', kind)
     q = parentId ? q.eq('parent_id', parentId) : q.is('parent_id', null)
     const { data } = await q
     const max = (data ?? []).reduce((m, r) => Math.max(m, parseInt((r as { code: string }).code, 10) || 0), 0)
+    if (max + 1 > 99) throw new BadRequestException(`Limite de 99 códigos de ${kind} nesse nível atingido — reorganize a taxonomia (ex: crie uma nova categoria/linha) antes de adicionar mais.`)
     return String(max + 1).padStart(2, '0')
   }
 
@@ -64,6 +78,12 @@ export class SkuService {
       if (!p || (p as { kind: string }).kind !== needsParent) throw new BadRequestException(`Pai inválido — esperado ${needsParent}`)
     } else if (parentId) throw new BadRequestException(`${k} é nível de topo (sem pai)`)
 
+    // criação IDEMPOTENTE por rótulo (ignorando acento/caixa): "Ella" de novo
+    // devolve a Ella existente em vez de criar um segundo código. Vale pra TODOS
+    // os caminhos (seletor da UI, modal, sugestão da IA) — antes só a IA deduplicava.
+    const dup = await this.findByLabel(orgId, k, parentId, label)
+    if (dup) return { id: dup.id, kind: dup.kind, code: dup.code, label: dup.label, parent_id: dup.parent_id }
+
     // marca = código alfanumérico do usuário (VZ); demais = sequencial numérico
     let code: string
     if (k === 'marca') {
@@ -71,7 +91,9 @@ export class SkuService {
       if (!code) throw new BadRequestException('Marca exige um código (ex: VZ)')
     } else {
       code = (body.code ?? '').trim() || await this.nextNumericCode(orgId, k, parentId)
-      code = String(parseInt(code, 10) || 0).padStart(2, '0')
+      const n = parseInt(code, 10) || 0
+      if (n > 99) throw new BadRequestException('Código numérico vai de 01 a 99 (largura fixa do SKU).')
+      code = String(n).padStart(2, '0')
     }
 
     // insere com retry simples em corrida de código sequencial
@@ -221,8 +243,23 @@ export class SkuService {
     return { ok: true, ean: value }
   }
 
+  /** Monta o sku_base no formato MARCA-MIOLO (ex: VZ-07010202). */
+  private buildBase(marca: TaxRow, categoria: TaxRow, sub: TaxRow, linha: TaxRow, carac: TaxRow): string {
+    return `${marca.code}-${categoria.code}${sub.code}${linha.code}${carac.code}`
+  }
+
+  /** Master SKU é permanente: produto publicado no catálogo não reclassifica
+   *  (pedidos, anúncios e analytics penduram no SKU). Lança erro se publicado. */
+  private async assertNotPublished(orgId: string, devId: string): Promise<void> {
+    const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id').eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    if ((dev as { product_id: string | null } | null)?.product_id) {
+      throw new BadRequestException('Esse produto já foi publicado no catálogo — o SKU é permanente (Master SKU) e a classificação não pode mais mudar. Se precisar mesmo corrigir, despublique/arquive e crie um novo projeto.')
+    }
+  }
+
   /** Valida a cadeia hierárquica e grava a classificação + sku_base. */
   async setClassification(orgId: string, devId: string, body: { marca_id: string; categoria_id: string; sub_id: string; linha_id: string; caracteristica_id: string }) {
+    await this.assertNotPublished(orgId, devId)
     const [marca, categoria, sub, linha, carac] = await Promise.all([
       this.loadRow(orgId, body.marca_id), this.loadRow(orgId, body.categoria_id), this.loadRow(orgId, body.sub_id),
       this.loadRow(orgId, body.linha_id), this.loadRow(orgId, body.caracteristica_id),
@@ -233,7 +270,7 @@ export class SkuService {
     if (!linha || linha.kind !== 'linha') throw new BadRequestException('Linha inválida')   // linha é coleção transversal (topo)
     if (!carac || carac.kind !== 'caracteristica' || carac.parent_id !== linha.id) throw new BadRequestException('Característica não pertence à linha')
 
-    const base = `${marca.code}${categoria.code}${sub.code}${linha.code}${carac.code}`
+    const base = this.buildBase(marca, categoria, sub, linha, carac)
     const { error } = await supabaseAdmin.from('product_dev').update({
       sku_marca_id: marca.id, sku_categoria_id: categoria.id, sku_sub_id: sub.id, sku_linha_id: linha.id, sku_caracteristica_id: carac.id, sku_base: base,
     }).eq('id', devId).eq('organization_id', orgId)
@@ -248,16 +285,19 @@ export class SkuService {
     return this.getSku(orgId, devId)
   }
 
-  /** Acha um nó da taxonomia por rótulo (case-insensitive) dentro do escopo
-   *  (org, kind, pai). Usado pelo "aplicar sugestão da IA". */
+  /** Acha um nó da taxonomia por rótulo dentro do escopo (org, kind, pai),
+   *  ignorando ACENTO e caixa ("Giratório" ≡ "Giratorio"). A comparação roda em
+   *  JS sobre os rótulos do nível (a taxonomia é pequena) — `ilike` não ignora
+   *  acento e foi o que deixou duplicatas passarem. */
   private async findByLabel(orgId: string, kind: SkuKind, parentId: string | null, label: string): Promise<TaxRow | null> {
-    const l = (label ?? '').trim()
+    const l = this.normLabel(label)
     if (!l) return null
     let q = supabaseAdmin.from('sku_taxonomy').select('id, organization_id, kind, code, label, parent_id, sort_order')
-      .eq('organization_id', orgId).eq('kind', kind).ilike('label', l)
+      .eq('organization_id', orgId).eq('kind', kind)
     q = parentId ? q.eq('parent_id', parentId) : q.is('parent_id', null)
-    const { data } = await q.limit(1).maybeSingle()
-    return (data as TaxRow | null) ?? null
+    const { data } = await q
+    const rows = (data ?? []) as TaxRow[]
+    return rows.find(r => this.normLabel(r.label) === l) ?? null
   }
 
   /** Acha OU cria um nó (idempotente por rótulo). marca aceita código alfa. */
@@ -289,6 +329,7 @@ export class SkuService {
     const linhaLbl = (labels.linha ?? '').trim()
     const caracLbl = (labels.caracteristica ?? '').trim()
     if (!catLbl || !subLbl || !linhaLbl) throw new BadRequestException('Categoria, sub-categoria e linha são obrigatórias para classificar')
+    await this.assertNotPublished(orgId, devId)
 
     const marca = await this.resolveOrCreate(orgId, userId, 'marca', null, marcaLbl, marcaCode)
     const categoria = await this.resolveOrCreate(orgId, userId, 'categoria', null, catLbl)
@@ -331,7 +372,7 @@ export class SkuService {
       this.loadRow(orgId, d.sku_linha_id), this.loadRow(orgId, d.sku_caracteristica_id),
     ])
     if (!(m && c && s && l && ch)) return
-    const base = `${m.code}${c.code}${s.code}${l.code}${ch.code}`
+    const base = this.buildBase(m, c, s, l, ch)
     await supabaseAdmin.from('product_dev').update({ sku_base: base }).eq('id', devId).eq('organization_id', orgId)
     const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
     for (const v of (vars ?? []) as Array<{ id: string; cor_id: string }>) {
@@ -350,6 +391,7 @@ export class SkuService {
     lineId?: string | null; lineName?: string | null
     marca?: string | null; marcaCode?: string | null; categoria?: string | null; sub?: string | null; caracteristica?: string | null
   }) {
+    await this.assertNotPublished(orgId, devId)
     let line: TaxRow | null = null
     if (opts.lineId) line = await this.loadRow(orgId, opts.lineId)
     if (!line && (opts.lineName ?? '').trim()) line = await this.resolveOrCreate(orgId, userId, 'linha', null, opts.lineName!.trim())
@@ -371,6 +413,7 @@ export class SkuService {
    *  ML), criando os nós internos com código sequencial, e recomputa sku_base.
    *  É o que faz a árvore do ML alimentar a Categoria/Sub do SKU. */
   async setCategorySub(orgId: string, userId: string | null, devId: string, categoria: string | null, sub: string | null) {
+    await this.assertNotPublished(orgId, devId)
     const patch: Record<string, unknown> = {}
     let cat: TaxRow | null = null
     if ((categoria ?? '').trim()) { cat = await this.resolveOrCreate(orgId, userId, 'categoria', null, categoria!.trim()); patch.sku_categoria_id = cat.id }
@@ -389,12 +432,18 @@ export class SkuService {
     if (!base) throw new BadRequestException('Defina a classificação (base do SKU) antes das cores')
     const wanted = [...new Set((corIds ?? []).filter(Boolean))]
 
-    const { data: existing } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
-    const existingByCor = new Map((existing ?? []).map(r => [(r as { cor_id: string }).cor_id, (r as { id: string }).id]))
+    const { data: existing } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id, sku, product_id').eq('product_dev_id', devId).eq('organization_id', orgId)
+    const rows = (existing ?? []) as Array<{ id: string; cor_id: string; sku: string; product_id: string | null }>
+    const existingByCor = new Map(rows.map(r => [r.cor_id, r]))
 
-    // remove as cores desmarcadas
+    // remove as cores desmarcadas — MENOS as já publicadas no catálogo
+    // (apagar variante publicada quebraria o vínculo com o anúncio/pedidos)
     const toRemove = [...existingByCor.keys()].filter(c => !wanted.includes(c))
-    for (const c of toRemove) await supabaseAdmin.from('product_dev_sku_variant').delete().eq('id', existingByCor.get(c)!)
+    const publicadas = toRemove.map(c => existingByCor.get(c)!).filter(r => r.product_id)
+    if (publicadas.length) {
+      throw new BadRequestException(`Não dá pra remover cor já publicada no catálogo: ${publicadas.map(r => r.sku).join(', ')}. Pause/ajuste a variação no catálogo em vez de removê-la aqui.`)
+    }
+    for (const c of toRemove) await supabaseAdmin.from('product_dev_sku_variant').delete().eq('id', existingByCor.get(c)!.id).eq('organization_id', orgId)
 
     // adiciona as novas
     for (const corId of wanted) {

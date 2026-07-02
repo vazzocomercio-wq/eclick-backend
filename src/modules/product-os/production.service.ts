@@ -201,15 +201,9 @@ export class ProductionService {
       .eq('organization_id', orgId).order('order_number', { ascending: false }).limit(1).maybeSingle()
     const nextNumber = seq ? Number((seq as { order_number: number }).order_number) + 1 : 1
 
-    const { data, error } = await supabaseAdmin.from('production_order').insert({
-      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? metrics.versionId ?? null, part_id: partId,
-      order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null, sku_variant_id: body.sku_variant_id ?? null,
-      estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
-    }).select('*').maybeSingle()
-    if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
-    const order = data as { id: string }
-
-    // reserva de insumos:
+    // ── PLANO de reserva (ANTES de criar a ordem): resolve de onde sai cada
+    // insumo e valida o saldo disponível. Sem saldo → erro claro e nada é criado
+    // (antes, a OP nascia mesmo sem insumo e a reserva estourava o estoque).
     //  - OP de PEÇA → só filamento pelo material/peso da peça (BOM é do produto montado, não da peça)
     //  - OP do produto inteiro → COMPOSIÇÃO (BOM) com insumos vinculados, se houver; senão filamento por peso
     const bom = partId ? [] : await this.getBom(orgId, body.product_dev_id, body.version_id ?? metrics.versionId ?? undefined) as Array<{ input_id: string | null; quantity: number; waste_pct: number }>
@@ -219,18 +213,14 @@ export class ProductionService {
       const need = Number(l.quantity) * qty * (1 + Number(l.waste_pct) / 100)
       needByInput.set(l.input_id, (needByInput.get(l.input_id) ?? 0) + need)
     }
+    const plan = new Map<string, number>()               // input_id → qtd a reservar
+    let planFilamentMap: Array<{ index: number; input_id: string; weight_g: number }> | null = null
     if (needByInput.size > 0) {
-      let firstFilament: string | null = null
-      for (const [inputId, need] of needByInput) {
-        const ok = await this.inputs.reserveInput(orgId, inputId, this.round2(need), 'production_order', order.id)
-        if (ok && !firstFilament) firstFilament = inputId   // p/ referência informativa
-      }
-      if (firstFilament) await supabaseAdmin.from('production_order').update({ reservation_id: firstFilament }).eq('id', order.id)
+      for (const [inputId, need] of needByInput) plan.set(inputId, this.round2(need))
     } else if (metrics.filaments.length > 1) {
       // MULTICOR: cada cor do .3mf reserva do rolo escolhido (filament_map index→rolo);
       // sem escolha, cai no rolo montado que casa o material. Agrega por insumo (mesma cor 2×).
       const chosen = new Map((body.filament_map ?? []).map(m => [Number(m.index), m.input_id]))
-      const need = new Map<string, number>()
       const stored: Array<{ index: number; input_id: string; weight_g: number }> = []
       for (const fil of metrics.filaments) {
         const g = this.round2(Number(fil.weight_g) * qty)
@@ -239,29 +229,48 @@ export class ProductionService {
         if (inputId && body.printer_id && !(await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, inputId))) inputId = null
         if (!inputId && body.printer_id) inputId = await this.inputs.loadedInputId(orgId, body.printer_id, fil.material)
         if (!inputId) continue
-        need.set(inputId, this.round2((need.get(inputId) ?? 0) + g))
+        plan.set(inputId, this.round2((plan.get(inputId) ?? 0) + g))
         stored.push({ index: fil.index, input_id: inputId, weight_g: g })
       }
-      for (const [inputId, g] of need) await this.inputs.reserveInput(orgId, inputId, g, 'production_order', order.id)
-      const patch: Record<string, unknown> = { filament_map: stored }
-      if (stored[0]) patch.reservation_id = stored[0].input_id
-      await supabaseAdmin.from('production_order').update(patch).eq('id', order.id)
+      planFilamentMap = stored
     } else if (estFilament && estFilament > 0) {
       // 1) rolo ESCOLHIDO pelo usuário (cor/slot exato) — só se estiver montado na impressora;
       // 2) senão, rolo MONTADO que casa o material; 3) senão, fallback por material/peso.
-      let reservedFrom: string | null = null
-      if (body.loaded_input_id && body.printer_id && await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, body.loaded_input_id)) {
-        if (await this.inputs.reserveInput(orgId, body.loaded_input_id, estFilament, 'production_order', order.id)) reservedFrom = body.loaded_input_id
+      let candidate: string | null = null
+      if (body.loaded_input_id && body.printer_id && await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, body.loaded_input_id)) candidate = body.loaded_input_id
+      if (!candidate && body.printer_id) candidate = await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material)
+      if (!candidate) candidate = await this.inputs.pickByMaterial(orgId, metrics.material)
+      if (candidate) plan.set(candidate, estFilament)
+    }
+
+    // valida disponibilidade (quantidade − já reservado) de cada insumo do plano
+    if (plan.size > 0) {
+      const { data: rows } = await supabaseAdmin.from('production_input')
+        .select('id, name, unit, quantity, reserved_quantity').eq('organization_id', orgId).in('id', [...plan.keys()])
+      const byId = new Map((rows ?? []).map(r => [(r as { id: string }).id, r as { id: string; name: string; unit: string; quantity: number; reserved_quantity: number }]))
+      const faltas: string[] = []
+      for (const [inputId, need] of plan) {
+        const i = byId.get(inputId)
+        const available = i ? this.round2(Number(i.quantity) - Number(i.reserved_quantity)) : 0
+        if (!i || available < need) faltas.push(`${i?.name ?? 'insumo removido'} (precisa ${need}${i?.unit ?? ''}, tem ${available}${i?.unit ?? ''})`)
       }
-      if (!reservedFrom && body.printer_id) {
-        const loadedId = await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material)
-        if (loadedId && await this.inputs.reserveInput(orgId, loadedId, estFilament, 'production_order', order.id)) reservedFrom = loadedId
-      }
-      if (!reservedFrom) {
-        const r = await this.inputs.reserveByMaterial(orgId, metrics.material, estFilament, 'production_order', order.id)
-        if (r) reservedFrom = r.inputId
-      }
-      if (reservedFrom) await supabaseAdmin.from('production_order').update({ reservation_id: reservedFrom }).eq('id', order.id)
+      if (faltas.length) throw new BadRequestException(`Estoque de insumo insuficiente para essa ordem: ${faltas.join(', ')}. Reponha o insumo ou reduza a quantidade.`)
+    }
+
+    const { data, error } = await supabaseAdmin.from('production_order').insert({
+      organization_id: orgId, product_dev_id: body.product_dev_id, version_id: body.version_id ?? metrics.versionId ?? null, part_id: partId,
+      order_number: nextNumber, quantity: qty, machine: body.machine ?? null, printer_id: body.printer_id ?? null, sku_variant_id: body.sku_variant_id ?? null,
+      estimated_time_minutes: estTime, estimated_filament_g: estFilament, is_prototype: isPrototype, created_by: userId,
+    }).select('*').maybeSingle()
+    if (error || !data) throw new BadRequestException(`Erro ao criar ordem: ${error?.message ?? 'sem dados'}`)
+    const order = data as { id: string }
+
+    // aplica as reservas do plano (idempotente por insumo+ordem)
+    if (plan.size > 0) {
+      for (const [inputId, need] of plan) await this.inputs.reserveInput(orgId, inputId, need, 'production_order', order.id)
+      const patch: Record<string, unknown> = { reservation_id: [...plan.keys()][0] }
+      if (planFilamentMap) patch.filament_map = planFilamentMap
+      await supabaseAdmin.from('production_order').update(patch).eq('id', order.id)
     }
     // gera as unidades físicas (serial único por unidade; lote = esta OP)
     await this.generateUnits(orgId, order.id, nextNumber, qty, body.product_dev_id, partId).catch(() => {})
@@ -326,8 +335,12 @@ export class ProductionService {
     if (to === 'imprimindo' && !(order as { started_at: string | null }).started_at) patch.started_at = new Date().toISOString()
     if (to === completionState) patch.completed_at = new Date().toISOString()
 
-    const { error: upErr } = await supabaseAdmin.from('production_order').update(patch).eq('id', oid).eq('organization_id', orgId)
+    // compare-and-swap: só atualiza se o status AINDA é o lido — dois cliques
+    // simultâneos não concluem 2× (consumo/crédito de estoque duplicado)
+    const { data: updated, error: upErr } = await supabaseAdmin.from('production_order').update(patch)
+      .eq('id', oid).eq('organization_id', orgId).eq('status', from).select('id')
     if (upErr) throw new BadRequestException(`Erro ao mudar status para '${to}': ${upErr.message}`)   // não segue p/ baixar estoque se o status não mudou
+    if (!updated?.length) throw new BadRequestException('A ordem mudou de status em outra aba/clique — recarregue o quadro e tente de novo.')
 
     const devId = (order as { product_dev_id: string }).product_dev_id
     if (to === 'acabamento') await this.markUnitsProduced(orgId, oid)   // peças físicas existem
@@ -367,6 +380,10 @@ export class ProductionService {
     const from = (order as { status: string }).status
     if (from === to) return order
     if (!SAFE.includes(from) || !SAFE.includes(to)) throw new BadRequestException('Esse movimento não pode ser desfeito (a etapa mexe em estoque/reserva).')
+    // desfazer = SÓ o inverso de um avanço válido (to → from existe na máquina de
+    // estados). Sem isso, "desfazer" viraria atalho pra PULAR etapas pra frente.
+    const partUndo = (order as { part_id: string | null }).part_id ? PART_ORDER_TRANSITIONS : ORDER_TRANSITIONS
+    if (!(partUndo[to] ?? []).includes(from)) throw new BadRequestException(`Desfazer de '${from}' para '${to}' não é um retorno válido — use o avanço normal do quadro.`)
     const { error } = await supabaseAdmin.from('production_order')
       .update({ status: to, last_transition_source: 'manual', status_changed_at: new Date().toISOString() })
       .eq('id', oid).eq('organization_id', orgId).eq('status', from)
@@ -375,9 +392,11 @@ export class ProductionService {
     return this.getOrder(orgId, oid)
   }
 
-  /** Credita as unidades produzidas DIRETO em products.stock (NATIVO).
-   *  Produto vem do nosso sistema → NÃO usa Icarus (sem ledger/sync de canal).
-   *  Idempotente via stock_movement_done. */
+  /** Credita as unidades produzidas no ESTOQUE UNIFICADO via StockService
+   *  (applyProductionRestock): cria a linha mestre do ledger se faltar, grava
+   *  stock_movements (idempotente por OP) e propaga products.stock/canais.
+   *  Antes era um UPDATE direto que virava no-op silencioso sem a linha mestre
+   *  — o que quebrava o Make-to-Order em loop de sugestão infinita. */
   private async creditNativeStock(orgId: string, order: Record<string, unknown>) {
     if (order.stock_movement_done === true) return
     if (order.is_prototype === true) {
@@ -393,35 +412,34 @@ export class ProductionService {
       return
     }
     const qty = Number(order.quantity) || 0
-    const { data: prod } = await supabaseAdmin.from('products').select('stock, has_variations, variations').eq('id', productId).maybeSingle()
-    const p = prod as { stock: number | null; has_variations: boolean | null; variations: Array<Record<string, unknown>> | null } | null
 
-    // PRODUTO VARIÁVEL + OP com cor definida → credita a variação certa (match por sku=base-cor)
+    // PRODUTO VARIÁVEL + OP com cor definida → soma na variação certa (match por
+    // sku=base-cor) no jsonb; o total/mestre é responsabilidade do ledger abaixo.
     const variantId = (order.sku_variant_id as string | null) ?? null
-    if (variantId && p?.has_variations) {
-      const { data: variant } = await supabaseAdmin.from('product_dev_sku_variant').select('sku').eq('id', variantId).maybeSingle()
-      const vsku = (variant as { sku: string } | null)?.sku
-      const variations = (p.variations ?? []) as Array<{ sku?: string; stock?: number } & Record<string, unknown>>
-      let matched = false
-      const updated = variations.map(v => (vsku && v.sku === vsku) ? (matched = true, { ...v, stock: (Number(v.stock) || 0) + qty }) : v)
-      if (matched) {
-        const total = updated.reduce((s, v) => s + (Number(v.stock) || 0), 0)
-        await supabaseAdmin.from('products').update({ variations: updated, stock: total, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
-        await supabaseAdmin.from('product_stock').update({ quantity: total, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
-        await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
-        this.logger.log(`[producao] +${qty} un na cor ${vsku} (products.stock=${total}) p/ ${productId.slice(0, 8)}`)
-        return
+    if (variantId) {
+      const { data: prod } = await supabaseAdmin.from('products').select('has_variations, variations').eq('id', productId).eq('organization_id', orgId).maybeSingle()
+      const p = prod as { has_variations: boolean | null; variations: Array<Record<string, unknown>> | null } | null
+      if (p?.has_variations) {
+        const { data: variant } = await supabaseAdmin.from('product_dev_sku_variant').select('sku').eq('id', variantId).eq('organization_id', orgId).maybeSingle()
+        const vsku = (variant as { sku: string } | null)?.sku
+        const variations = (p.variations ?? []) as Array<{ sku?: string; stock?: number } & Record<string, unknown>>
+        let matched = false
+        const updated = variations.map(v => (vsku && v.sku === vsku) ? (matched = true, { ...v, stock: (Number(v.stock) || 0) + qty }) : v)
+        if (matched) {
+          await supabaseAdmin.from('products').update({ variations: updated, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+          this.logger.log(`[producao] +${qty} un na cor ${vsku} p/ ${productId.slice(0, 8)}`)
+        } else {
+          this.logger.warn(`[producao] variante ${variantId.slice(0, 8)} não casa nenhuma variação do produto ${productId.slice(0, 8)} — crédito cai no total`)
+        }
       }
     }
 
-    // produto único (ou variável sem cor definida) → estoque no nível do produto
-    const novo = (Number(p?.stock) || 0) + qty
-    await supabaseAdmin.from('products').update({ stock: novo, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
-    // espelha no registro mestre criado pela plataforma (consistência) — SEM
-    // sync de canal/marketplace (não chama recalcAndPropagate = sem Icarus)
-    await supabaseAdmin.from('product_stock').update({ quantity: novo, updated_at: new Date().toISOString() }).eq('product_id', productId).is('platform', null)
+    const res = await this.stock.applyProductionRestock({
+      productId, quantity: qty, refId: order.id as string,
+      note: `Produção concluída — ${this.opCode(Number(order.order_number) || 0)} (Product OS)`,
+    })
     await supabaseAdmin.from('production_order').update({ stock_movement_done: true }).eq('id', order.id as string)
-    this.logger.log(`[producao] +${qty} un nativas (products.stock=${novo}) p/ ${productId.slice(0, 8)} — sem sync de canal`)
+    this.logger.log(`[producao] +${qty} un no ledger (${res}) p/ ${productId.slice(0, 8)}`)
   }
 
   /** Carimba custo/preço/contribuição na ordem concluída → alimenta o payback
@@ -701,6 +719,8 @@ export class ProductionService {
   }
 
   async transitionJob(orgId: string, jid: string, body: { status: string; filament_used_g?: number; print_time_minutes?: number; failure_reason?: string }) {
+    const JOB_STATUSES = ['fila', 'imprimindo', 'concluido', 'falhou', 'cancelado']
+    if (!JOB_STATUSES.includes(body.status)) throw new BadRequestException(`Status de job inválido: '${body.status}'`)
     const { data: job } = await supabaseAdmin.from('print_job').select('*').eq('id', jid).eq('organization_id', orgId).maybeSingle()
     if (!job) throw new NotFoundException('Job não encontrado')
     const patch: Record<string, unknown> = { status: body.status }
@@ -732,6 +752,9 @@ export class ProductionService {
       return
     }
     if (jobStatus === 'concluido') {
+      // só avança pra acabamento se a OP ainda está na fase de impressão —
+      // um job atrasado não pode REGREDIR uma OP que já foi pra qualidade/embalado
+      if (!['fila', 'imprimindo', 'pausado', 'reimpressao'].includes(cur)) return
       const { data: jobs } = await supabaseAdmin.from('print_job').select('status, filament_used_g, print_time_minutes').eq('production_order_id', oid)
       const all = jobs ?? []
       if (all.length && all.every(j => (j as { status: string }).status === 'concluido')) {
@@ -776,11 +799,13 @@ export class ProductionService {
     return data
   }
 
-  /** Gate de publicação: qualidade aprovada? (bypass p/ perfil genérico sem QC). */
+  /** Gate de publicação: qualidade aprovada? Sem registro de QC, genérico e
+   *  marca própria não travam (o checklist é recomendado, não obrigatório);
+   *  se EXISTE registro, ele precisa estar aprovado. */
   async isQualityPassed(orgId: string, devId: string, profile: string): Promise<boolean> {
     const q = await this.getQuality(orgId, devId) as { approved: boolean } | null
     if (q) return q.approved === true
-    return profile === 'generico'   // genérico/marca própria sem QC não trava
+    return ['generico', 'marca_propria'].includes(profile)
   }
 
   // ── helpers ───────────────────────────────────────────────────────

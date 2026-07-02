@@ -141,6 +141,17 @@ export class ProductionInputService {
 
   // ── reserva/consumo p/ ordens de produção ─────────────────────────
 
+  /** Escolhe o rolo de filamento ativo com MAIS estoque que casa o material
+   *  (sem reservar nada). Usado pelo plano de reserva do createOrder. */
+  async pickByMaterial(orgId: string, material: string | null): Promise<string | null> {
+    let q = supabaseAdmin.from('production_input').select('id')
+      .eq('organization_id', orgId).eq('kind', 'filamento').eq('is_active', true)
+      .order('quantity', { ascending: false }).limit(1)
+    if (material) q = q.eq('material', material.toUpperCase())
+    const { data } = await q
+    return ((data ?? [])[0] as { id: string } | undefined)?.id ?? null
+  }
+
   /** Reserva `quantity` do 1º insumo de filamento ativo que casa com o material.
    *  Idempotente por (refType, refId). Retorna o input_id reservado ou null. */
   async reserveByMaterial(orgId: string, material: string | null, quantity: number, refType: string, refId: string): Promise<{ inputId: string } | null> {
@@ -157,6 +168,11 @@ export class ProductionInputService {
     const { data: existing } = await supabaseAdmin.from('production_input_movement').select('id')
       .eq('input_id', input.id).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
     if (existing) return { inputId: input.id }
+    // trava de saldo (backstop — quem chama deve validar antes)
+    if (qty > Number(input.quantity) - Number(input.reserved_quantity)) {
+      this.logger.warn(`[insumo] reserva negada ${input.id.slice(0, 8)}: precisa ${qty}, disponível ${Number(input.quantity) - Number(input.reserved_quantity)}`)
+      return null
+    }
     await supabaseAdmin.from('production_input').update({
       reserved_quantity: Number(input.reserved_quantity) + qty, updated_at: new Date().toISOString(),
     }).eq('id', input.id)
@@ -175,11 +191,16 @@ export class ProductionInputService {
     const { data: existing } = await supabaseAdmin.from('production_input_movement').select('id')
       .eq('input_id', inputId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
     if (existing) return true
-    const { data: input } = await supabaseAdmin.from('production_input').select('reserved_quantity')
+    const { data: input } = await supabaseAdmin.from('production_input').select('quantity, reserved_quantity')
       .eq('id', inputId).eq('organization_id', orgId).maybeSingle()
     if (!input) { this.logger.warn(`[insumo] insumo ${inputId.slice(0, 8)} não encontrado p/ reservar (org ${orgId.slice(0, 8)})`); return false }
+    const i = input as { quantity: number; reserved_quantity: number }
+    // trava de saldo: reservar além do disponível corromperia o ledger
+    // (reserved > quantity) — quem chama valida antes; aqui é o backstop.
+    const available = Number(i.quantity) - Number(i.reserved_quantity)
+    if (qty > available) { this.logger.warn(`[insumo] reserva negada ${inputId.slice(0, 8)}: precisa ${qty}, disponível ${available}`); return false }
     await supabaseAdmin.from('production_input').update({
-      reserved_quantity: Number((input as { reserved_quantity: number }).reserved_quantity) + qty, updated_at: new Date().toISOString(),
+      reserved_quantity: Number(i.reserved_quantity) + qty, updated_at: new Date().toISOString(),
     }).eq('id', inputId)
     await supabaseAdmin.from('production_input_movement').insert({
       organization_id: orgId, input_id: inputId, movement_type: 'reserve', quantity: qty,
