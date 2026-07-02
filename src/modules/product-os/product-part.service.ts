@@ -328,15 +328,43 @@ export class ProductPartService {
     }
   }
 
+  /** Reservas ativas por peça (reserve sem release/consume), com o nº da montagem que segura cada uma. */
+  private async activeReservations(partIds: string[]): Promise<Map<string, Array<{ assembly_id: string; order_number: number | null; qty: number }>>> {
+    const out = new Map<string, Array<{ assembly_id: string; order_number: number | null; qty: number }>>()
+    if (!partIds.length) return out
+    const { data: movs } = await supabaseAdmin.from('product_dev_part_movement')
+      .select('part_id, quantity, movement_type, reference_id')
+      .in('part_id', partIds).eq('reference_type', 'assembly_order').in('movement_type', ['reserve', 'release', 'consume'])
+    const net = new Map<string, number>()
+    for (const m of (movs ?? []) as Array<{ part_id: string; quantity: number; movement_type: string; reference_id: string }>) {
+      const key = `${m.part_id}|${m.reference_id}`
+      const sign = m.movement_type === 'reserve' ? 1 : -1
+      net.set(key, this.round2((net.get(key) ?? 0) + sign * Number(m.quantity)))
+    }
+    const active = [...net.entries()].filter(([, q]) => q > 0)
+    if (!active.length) return out
+    const asmIds = [...new Set(active.map(([k]) => k.split('|')[1]))]
+    const { data: asms } = await supabaseAdmin.from('assembly_order').select('id, order_number').in('id', asmIds)
+    const numbers = new Map((asms ?? []).map(a => [(a as { id: string }).id, (a as { order_number: number }).order_number]))
+    for (const [key, q] of active) {
+      const [partId, asmId] = key.split('|')
+      const list = out.get(partId) ?? []
+      list.push({ assembly_id: asmId, order_number: numbers.get(asmId) ?? null, qty: q })
+      out.set(partId, list)
+    }
+    return out
+  }
+
   // ══ Montagem (assembly) ════════════════════════════════════════════
   /** Prévia: o que montar X produtos consome de peças + insumos, com faltas. */
   async previewAssembly(orgId: string, devId: string, quantity: number) {
     const qty = Math.max(1, Math.floor(Number(quantity) || 0))
     const parts = await this.listParts(orgId, devId) as Array<PartRef & { available: number; is_optional: boolean }>
     if (!parts.length) throw new BadRequestException('Este produto não tem peças cadastradas. Cadastre as peças primeiro.')
+    const reservedBy = await this.activeReservations(parts.filter(p => Number(p.reserved_qty) > 0).map(p => p.id))
     const partLines = parts.map(p => {
       const needed = this.round2(Number(p.qty_per_product) * qty)
-      return { type: 'peca', part_id: p.id, name: p.name, needed, available: p.available, unit: 'un', is_optional: p.is_optional, sufficient: p.available >= needed, missing: Math.max(0, this.round2(needed - p.available)) }
+      return { type: 'peca', part_id: p.id, name: p.name, needed, available: p.available, unit: 'un', is_optional: p.is_optional, sufficient: p.available >= needed, missing: Math.max(0, this.round2(needed - p.available)), reserved: this.round2(Number(p.reserved_qty)), reserved_by: reservedBy.get(p.id) ?? [] }
     })
     // insumos de montagem: linhas de BOM do produto que NÃO são filamento (embalagem/etiqueta/mão de obra)
     const { data: bom } = await supabaseAdmin.from('product_dev_bom').select('input_id, kind, description, quantity, waste_pct')
@@ -387,7 +415,7 @@ export class ProductPartService {
     const preview = await this.previewAssembly(orgId, devId, qty)
     if (!preview.all_sufficient) {
       const faltas = [
-        ...preview.parts.filter(l => !l.is_optional && !l.sufficient).map(l => `${l.name} (faltam ${l.missing})`),
+        ...preview.parts.filter(l => !l.is_optional && !l.sufficient).map(l => `${l.name} (faltam ${l.missing}${l.reserved_by.length ? `; ${l.reserved} já reservada(s) p/ ${l.reserved_by.map(r => `Montagem #${r.order_number ?? '?'}`).join(', ')}` : ''})`),
         ...preview.insumos.filter(l => !l.sufficient).map(l => `${l.name} (faltam ${l.missing} ${l.unit})`),
       ].join(', ')
       throw new BadRequestException(`Estoque insuficiente p/ montar ${qty}: ${faltas}. Gere as OPs de impressão das peças que faltam ou reponha os insumos.`)
