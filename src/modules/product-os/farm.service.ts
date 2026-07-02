@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto'
 import { supabaseAdmin } from '../../common/supabase'
 import { ProductionService } from './production.service'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
+import { SliceService, type SliceJobOut } from './slice.service'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -41,6 +42,7 @@ export class FarmService {
   constructor(
     private readonly production: ProductionService,
     private readonly bridge: ActiveBridgeClient,
+    private readonly slice: SliceService,
   ) {}
 
   // ── agentes ───────────────────────────────────────────────────────
@@ -69,7 +71,7 @@ export class FarmService {
   }
 
   // ── ingestão de telemetria (chamada PELO agente, auth por token) ──
-  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[]; command_results?: Array<{ id: string; ok: boolean; result?: string }> }): Promise<{ ok: true; matched: number; unmatched: string[]; commands: FarmCommandOut[]; detection_config: Record<string, { enabled: boolean; sensitivity: string }> }> {
+  async ingest(token: string, body: { agent_version?: string; printers?: TelemetryPrinter[]; command_results?: Array<{ id: string; ok: boolean; result?: string }> }): Promise<{ ok: true; matched: number; unmatched: string[]; commands: FarmCommandOut[]; detection_config: Record<string, { enabled: boolean; sensitivity: string }>; slice_jobs: SliceJobOut[] }> {
     if (!token) throw new UnauthorizedException('token ausente')
     const { data: agent } = await supabaseAdmin.from('farm_agent')
       .select('id, organization_id, status').eq('token', token).maybeSingle()
@@ -141,7 +143,9 @@ export class FarmService {
 
     // entrega comandos pendentes das impressoras desse agente
     const commands = await this.pullCommands(a.id, a.organization_id)
-    return { ok: true, matched, unmatched, commands, detection_config }
+    // fatiamento: no máx. 1 job por vez pro agente (CPU pesada no PC da farm)
+    const slice_jobs = await this.slice.pullJobs(a.organization_id, a.id).catch(e => { this.logger.warn(`[slice.pull] ${(e as Error).message}`); return [] as SliceJobOut[] })
+    return { ok: true, matched, unmatched, commands, detection_config, slice_jobs }
   }
 
   /** Sinal de que a impressão foi interrompida por falha:
@@ -246,22 +250,25 @@ export class FarmService {
     // só manda job pra máquina a partir da fila/reimpressão — fora disso seria imprimir DE NOVO uma ordem em andamento/pronta
     if (!['fila', 'reimpressao'].includes(o.status)) throw new BadRequestException(`Esta OP está em '${o.status}' — enviar agora imprimiria o job de novo. Só ordens na Fila ou em Reimpressão podem ser enviadas.`)
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
+    // arquivo fatiado (auto-slicing) tem prioridade sobre o modelo original
     let fileUrl: string | null = null, fileName = 'job.3mf'
     if (o.version_id) {
-      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, version_number').eq('id', o.version_id).maybeSingle()
-      fileUrl = (v as { file_url: string | null } | null)?.file_url ?? null
-      fileName = `v${(v as { version_number: number } | null)?.version_number ?? 1}.3mf`
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, sliced_file_url, version_number').eq('id', o.version_id).maybeSingle()
+      const ver = v as { file_url: string | null; sliced_file_url: string | null; version_number: number } | null
+      fileUrl = ver?.sliced_file_url ?? ver?.file_url ?? null
+      fileName = `v${ver?.version_number ?? 1}.3mf`
     }
     // fallback: OP de peça sem version_id → pega a versão mais recente da peça que tenha arquivo
     if (!fileUrl && o.part_id) {
-      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, version_number')
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, sliced_file_url, version_number')
         .eq('part_id', o.part_id).not('file_url', 'is', null).order('created_at', { ascending: false }).limit(1).maybeSingle()
-      fileUrl = (v as { file_url: string | null } | null)?.file_url ?? null
-      fileName = `peca-v${(v as { version_number: number } | null)?.version_number ?? 1}.3mf`
+      const ver = v as { file_url: string | null; sliced_file_url: string | null; version_number: number } | null
+      fileUrl = ver?.sliced_file_url ?? ver?.file_url ?? null
+      fileName = `peca-v${ver?.version_number ?? 1}.3mf`
     }
-    if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o .3mf fatiado na peça.')
+    if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o modelo e fatie (botão Fatiar) ou suba o .3mf já fatiado.')
     // só .3mf imprime via FTP — STL não serve pra impressora
-    if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão não é .3mf fatiado — a impressora só aceita .3mf. Suba o arquivo fatiado do Bambu.')
+    if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão ainda não está fatiado — use o botão Fatiar (automático) na versão, ou suba o .3mf fatiado do Bambu Studio.')
     // descobre o slot do AMS de cada cor → manda imprimir no(s) rolo(s) certo(s)
     let amsMapping: number[] | undefined
     const { data: loaded } = await supabaseAdmin.from('printer_loaded_filament')
@@ -334,11 +341,20 @@ export class FarmService {
     if (!uses.length) return
 
     // AMS físico via telemetria fresca: a bandeja existe? o material bate?
+    // O agente reporta slot como "unidade-bandeja" (ex: "0-1"); nosso rastreio e o
+    // ams_mapping usam o índice global (unidade×4+bandeja) — normaliza os dois lados.
+    const trayIdx = (v: unknown): number => {
+      const str = String(v ?? '')
+      const m = /^(\d+)-(\d+)$/.exec(str)
+      if (m) return Number(m[1]) * 4 + Number(m[2])
+      const n = Number(str)
+      return Number.isFinite(n) ? n : -1
+    }
     const { data: st } = await supabaseAdmin.from('printer_status')
       .select('ams, updated_at').eq('printer_id', o.printer_id!).maybeSingle()
-    const s = st as { ams: Array<{ slot?: number; material?: string | null; remain_pct?: number | null }> | null; updated_at: string | null } | null
+    const s = st as { ams: Array<{ slot?: number | string; material?: string | null; remain_pct?: number | null }> | null; updated_at: string | null } | null
     const trays = this.isFresh(s?.updated_at) && Array.isArray(s?.ams) && s!.ams!.length ? s!.ams! : null
-    const trayBySlot = trays ? new Map(trays.map(t => [Number(t.slot), t])) : null
+    const trayBySlot = trays ? new Map(trays.map(t => [trayIdx(t.slot), t])) : null
 
     for (const u of uses) {
       const roll = rollOf.get(u.inputId)!

@@ -3,6 +3,7 @@ import {
   UseGuards, BadRequestException, HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { FarmService, type TelemetryPrinter } from './farm.service'
+import { SliceService } from './slice.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -14,7 +15,7 @@ interface ReqUserPayload { id: string; orgId: string | null }
  *  (header x-farm-agent-token), não por login de usuário. */
 @Controller('product-os/farm')
 export class FarmIngestController {
-  constructor(private readonly farm: FarmService) {}
+  constructor(private readonly farm: FarmService, private readonly slice: SliceService) {}
 
   @Public()
   @Post('telemetry')
@@ -29,13 +30,20 @@ export class FarmIngestController {
   ingestCamera(@Headers('x-farm-agent-token') token: string, @Body() body: { serial: string; image_base64: string }) {
     return this.farm.ingestCamera(token, body?.serial ?? '', body?.image_base64 ?? '')
   }
+
+  @Public()
+  @Post('slice-result')
+  @HttpCode(HttpStatus.OK)
+  sliceResult(@Headers('x-farm-agent-token') token: string, @Body() body: { job_id?: string; ok?: boolean; error?: string; meta?: { prediction_s?: number; filaments?: Array<{ id?: number; filament_id?: string; used_g?: number }>; duration_ms?: number } }) {
+    return this.slice.completeJob(token, body ?? {})
+  }
 }
 
 /** Gerenciamento do agente + leitura do estado ao vivo (login de usuário). */
 @Controller('product-os/farm')
 @UseGuards(SupabaseAuthGuard, RequirePermissionGuard)
 export class FarmController {
-  constructor(private readonly farm: FarmService) {}
+  constructor(private readonly farm: FarmService, private readonly slice: SliceService) {}
 
   private org(u: ReqUserPayload): string {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
@@ -96,6 +104,19 @@ export class FarmController {
   @RequirePermission('products.update')
   ackFailure(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: { false_positive?: boolean }) {
     return this.farm.ackFailure(this.org(u), id, !!body?.false_positive, u.id)
+  }
+
+  @Post('versions/:vid/slice')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  requestSlice(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string) {
+    return this.slice.requestSlice(this.org(u), vid, u.id)
+  }
+
+  @Get('versions/:vid/slice')
+  @RequirePermission('products.view')
+  latestSlice(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string) {
+    return this.slice.latestJob(this.org(u), vid)
   }
 
   @Get('scheduler')

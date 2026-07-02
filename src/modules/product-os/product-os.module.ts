@@ -11,6 +11,7 @@ import { MakeToOrderService } from './make-to-order.service'
 import { SkuService } from './sku.service'
 import { PaletteService } from './palette.service'
 import { FarmService } from './farm.service'
+import { SliceService } from './slice.service'
 import { FarmController, FarmIngestController } from './farm.controller'
 import { MakerworldService } from './makerworld.service'
 import { ThingiverseService } from './thingiverse.service'
@@ -29,7 +30,7 @@ import { StockModule } from '../stock/stock.module'
 @Module({
   imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
-  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, ProductPartService, PrinterService, ProductOsCronService, MakeToOrderService, SkuService, PaletteService, FarmService, MakerworldService, ThingiverseService, CultsService, ModelSourceRegistry, MakerworldRadarService, NfeImportService],
+  providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, ProductPartService, PrinterService, ProductOsCronService, MakeToOrderService, SkuService, PaletteService, FarmService, SliceService, MakerworldService, ThingiverseService, CultsService, ModelSourceRegistry, MakerworldRadarService, NfeImportService],
   exports:     [ProductOsService],
 })
 export class ProductOsModule {}
