@@ -240,9 +240,11 @@ export class FarmService {
   /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
   async sendOrderToPrinter(orgId: string, orderId: string, userId: string | null) {
     const { data: order } = await supabaseAdmin.from('production_order')
-      .select('id, printer_id, version_id, part_id, reservation_id, filament_map').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      .select('id, status, printer_id, version_id, part_id, reservation_id, filament_map').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
     if (!order) throw new BadRequestException('Ordem não encontrada')
-    const o = order as { printer_id: string | null; version_id: string | null; part_id: string | null; reservation_id: string | null; filament_map: Array<{ index: number; input_id: string }> | null }
+    const o = order as { status: string; printer_id: string | null; version_id: string | null; part_id: string | null; reservation_id: string | null; filament_map: Array<{ index: number; input_id: string }> | null }
+    // só manda job pra máquina a partir da fila/reimpressão — fora disso seria imprimir DE NOVO uma ordem em andamento/pronta
+    if (!['fila', 'reimpressao'].includes(o.status)) throw new BadRequestException(`Esta OP está em '${o.status}' — enviar agora imprimiria o job de novo. Só ordens na Fila ou em Reimpressão podem ser enviadas.`)
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
     let fileUrl: string | null = null, fileName = 'job.3mf'
     if (o.version_id) {
@@ -284,9 +286,10 @@ export class FarmService {
       throw new BadRequestException('O filamento reservado para esta OP não está montado nesta impressora. Monte o rolo certo no AMS ou troque o rolo da OP antes de imprimir.')
     }
     const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ams_mapping: amsMapping }, userId)
-    // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento)
+    // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento).
+    // auto-dispatch chama sem userId → origem 'auto' (badge ⚡ no quadro)
     await supabaseAdmin.from('production_order')
-      .update({ status: 'imprimindo', started_at: new Date().toISOString() })
+      .update({ status: 'imprimindo', started_at: new Date().toISOString(), last_transition_source: userId ? 'manual' : 'auto' })
       .eq('id', orderId).eq('organization_id', orgId).in('status', ['fila', 'reimpressao'])
     return cmd
   }
@@ -306,7 +309,7 @@ export class FarmService {
       .update({ status: 'concluido', finished_at: new Date().toISOString(), print_time_minutes: elapsed })
       .eq('production_order_id', o.id).in('status', ['imprimindo', 'fila'])
     await supabaseAdmin.from('production_order')
-      .update({ status: 'acabamento', actual_time_minutes: elapsed })
+      .update({ status: 'acabamento', actual_time_minutes: elapsed, last_transition_source: 'auto' })
       .eq('id', o.id).eq('status', 'imprimindo')
     // peças físicas existem → marca as unidades planejadas como produzidas
     await supabaseAdmin.from('production_unit').update({ status: 'produzida' })
@@ -335,7 +338,7 @@ export class FarmService {
     if (!data) return
     const o = data as { id: string; status: string; product_dev_id: string }
     if (!m.from.includes(o.status)) return
-    const patch: Record<string, unknown> = { status: m.to }
+    const patch: Record<string, unknown> = { status: m.to, last_transition_source: 'auto' }
     if (m.to === 'falhou') patch.notes = `Falha reportada pela impressora (${state})`
     await supabaseAdmin.from('production_order').update(patch).eq('id', o.id).eq('status', o.status)
     await supabaseAdmin.from('product_dev_event').insert({

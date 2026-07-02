@@ -322,7 +322,7 @@ export class ProductionService {
 
     // OP de peça conclui em 'pronta' (vira estoque de peça); produto inteiro em 'disponivel'.
     const completionState = partId ? 'pronta' : 'disponivel'
-    const patch: Record<string, unknown> = { status: to }
+    const patch: Record<string, unknown> = { status: to, last_transition_source: 'manual' }
     if (to === 'imprimindo' && !(order as { started_at: string | null }).started_at) patch.started_at = new Date().toISOString()
     if (to === completionState) patch.completed_at = new Date().toISOString()
 
