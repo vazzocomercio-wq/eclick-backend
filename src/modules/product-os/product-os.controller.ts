@@ -345,8 +345,17 @@ export class ProductOsController {
         }
       } catch { /* best-effort */ }
     }
-    return this.parts.addPartVersion(this.org(u), pid, u.id, body)
+    const v = await this.parts.addPartVersion(this.org(u), pid, u.id, body)
+    // .3mf tem o render do prato embutido → vira a foto do card de produção (best-effort)
+    const vv = v as { id?: string; file_url?: string | null }
+    if (vv?.id && vv.file_url && /\.3mf($|\?)/i.test(vv.file_url)) void this.svc.extractVersionThumbnail(this.org(u), vv.id).catch(() => {})
+    return v
   }
+
+  @Post('versions/backfill-thumbnails')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  backfillThumbnails(@ReqUser() u: ReqUserPayload) { return this.svc.backfillThumbnails(this.org(u)) }
 
   @Get('parts/:pid/movements')
   @RequirePermission('products.view')

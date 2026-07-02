@@ -1231,6 +1231,45 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
   // versões CAD / protótipo
   // ─────────────────────────────────────────────────────────────────
 
+  /** Extrai a IMAGEM DE PREVIEW embutida no .3mf (o Bambu Studio salva o render
+   *  do prato em Metadata/plate_*.png) e grava como thumbnail da versão — é a
+   *  foto do card de produção. Best-effort: arquivo sem imagem não é erro. */
+  async extractVersionThumbnail(orgId: string, versionId: string): Promise<{ thumbnail_url: string | null }> {
+    const { data: v } = await supabaseAdmin.from('product_dev_version')
+      .select('id, file_url, thumbnail_url').eq('id', versionId).eq('organization_id', orgId).maybeSingle()
+    if (!v) throw new BadRequestException('Versão não encontrada')
+    const fileUrl = (v as { file_url: string | null }).file_url
+    if (!fileUrl || !/\.3mf($|\?)/i.test(fileUrl)) return { thumbnail_url: (v as { thumbnail_url: string | null }).thumbnail_url ?? null }
+    let buf: Uint8Array
+    try { const res = await fetch(fileUrl); if (!res.ok) throw new Error(`HTTP ${res.status}`); buf = new Uint8Array(await res.arrayBuffer()) } catch { return { thumbnail_url: null } }
+    let files: Record<string, Uint8Array>
+    try { files = unzipSync(buf) } catch { return { thumbnail_url: null } }
+    // preferência: render do prato > sem luz > pequeno > topo > thumbnail genérica do 3MF
+    const keys = Object.keys(files)
+    const pick = keys.find(k => /Metadata\/plate_\d+\.png$/i.test(k))
+      ?? keys.find(k => /Metadata\/plate_no_light_\d+\.png$/i.test(k))
+      ?? keys.find(k => /Metadata\/plate_\d+_small\.png$/i.test(k))
+      ?? keys.find(k => /Metadata\/top_\d+\.png$/i.test(k))
+      ?? keys.find(k => /thumbnail\.png$/i.test(k))
+    if (!pick || !files[pick]?.length) return { thumbnail_url: null }
+    const path = `thumbs/${orgId}/${versionId}.png`
+    const { error: upErr } = await supabaseAdmin.storage.from('product-os').upload(path, Buffer.from(files[pick]), { contentType: 'image/png', upsert: true })
+    if (upErr) { this.logger.warn(`[thumb] upload falhou v=${versionId.slice(0, 8)}: ${upErr.message}`); return { thumbnail_url: null } }
+    const url = supabaseAdmin.storage.from('product-os').getPublicUrl(path).data.publicUrl
+    await supabaseAdmin.from('product_dev_version').update({ thumbnail_url: url }).eq('id', versionId).eq('organization_id', orgId)
+    return { thumbnail_url: url }
+  }
+
+  /** Gera thumbnail pra TODAS as versões .3mf da org que ainda não têm (1 vez). */
+  async backfillThumbnails(orgId: string): Promise<{ processed: number; ok: number }> {
+    const { data } = await supabaseAdmin.from('product_dev_version')
+      .select('id').eq('organization_id', orgId).ilike('file_url', '%.3mf%').is('thumbnail_url', null).limit(100)
+    const rows = (data ?? []) as Array<{ id: string }>
+    let ok = 0
+    for (const r of rows) { try { const t = await this.extractVersionThumbnail(orgId, r.id); if (t.thumbnail_url) ok++ } catch { /* segue */ } }
+    return { processed: rows.length, ok }
+  }
+
   async listVersions(productDevId: string, orgId: string): Promise<ProductDevVersion[]> {
     const { data, error } = await supabaseAdmin
       .from('product_dev_version').select('*')
@@ -1288,6 +1327,8 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const v = data as ProductDevVersion
     await this.emitEvent(orgId, productDevId, 'version_added', { version_id: v.id, version_number: v.version_number }, userId)
     void this.active.reflectStatus(orgId, productDevId).catch(() => {})
+    // .3mf tem o render do prato embutido → vira a foto do card de produção (best-effort)
+    if (v.file_url && /\.3mf($|\?)/i.test(v.file_url)) void this.extractVersionThumbnail(orgId, v.id).catch(() => {})
     return v
   }
 
@@ -1318,6 +1359,8 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const { data, error } = await supabaseAdmin.from('product_dev_version').update(safe)
       .eq('id', versionId).eq('organization_id', orgId).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'não encontrado'}`)
+    // trocou o arquivo por um .3mf novo → re-extrai o preview do prato
+    if (typeof safe.file_url === 'string' && /\.3mf($|\?)/i.test(safe.file_url)) void this.extractVersionThumbnail(orgId, versionId).catch(() => {})
     return data as ProductDevVersion
   }
 
