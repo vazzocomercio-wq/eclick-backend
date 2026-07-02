@@ -8,12 +8,13 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
 
 const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)))
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.3.1'
+const AGENT_VERSION = '1.4.0'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -152,6 +153,85 @@ async function dispatchPrint(serial, payload) {
   })
 }
 
+// ── fatiamento automático (Bambu Studio CLI instalado no PC da farm) ─
+const STUDIO_EXE = cfg.bambu_studio_exe || 'C:\\Program Files\\Bambu Studio\\bambu-studio.exe'
+const PROFILES_DIR = cfg.bambu_profiles_dir || path.join(path.dirname(STUDIO_EXE), 'resources', 'profiles', 'BBL')
+let slicing = false
+
+// Os perfis oficiais usam herança ("inherits") que o CLI NÃO resolve sozinho —
+// sem achatar, densidade/temperatura saem genéricas (bico 200 em vez de 220).
+function flattenProfile(kind, name) {
+  const chain = []; const seen = new Set(); let n = name
+  while (n && !seen.has(n)) {
+    seen.add(n)
+    const f = path.join(PROFILES_DIR, kind, n + '.json')
+    if (!fs.existsSync(f)) throw new Error(`perfil não encontrado: ${kind}/${n}`)
+    const j = JSON.parse(fs.readFileSync(f)); chain.push(j); n = j.inherits || null
+  }
+  if (!chain.length) throw new Error(`perfil não encontrado: ${kind}/${name}`)
+  let merged = {}
+  for (const j of chain.reverse()) merged = { ...merged, ...j }
+  delete merged.inherits
+  return merged
+}
+
+async function runSlice(job) {
+  const t0 = Date.now()
+  const tag = `slice ${String(job.id).slice(0, 8)}`
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eclick-slice-'))
+  const post = body => fetch(`${BACKEND}/product-os/farm/slice-result`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-farm-agent-token': TOKEN }, body: JSON.stringify(body),
+  }).catch(() => {})
+  try {
+    console.log(`[${tag}] baixando ${job.source_name || 'modelo'}…`)
+    const srcName = (job.source_name || 'model.stl').replace(/[^\w.\-]/g, '_')
+    const src = path.join(dir, srcName)
+    const ac = new AbortController(); const dl = setTimeout(() => ac.abort(), 180000)
+    let buf
+    try {
+      const r = await fetch(job.source_url, { signal: ac.signal })
+      if (!r.ok) throw new Error(`download do modelo falhou (HTTP ${r.status})`)
+      buf = Buffer.from(await r.arrayBuffer())
+    } finally { clearTimeout(dl) }
+    fs.writeFileSync(src, buf)
+
+    const args = []
+    if (/\.(stl|obj)$/i.test(srcName)) {
+      fs.writeFileSync(path.join(dir, 'machine.json'), JSON.stringify(flattenProfile('machine', job.machine_profile)))
+      fs.writeFileSync(path.join(dir, 'process.json'), JSON.stringify(flattenProfile('process', job.process_profile)))
+      fs.writeFileSync(path.join(dir, 'filament.json'), JSON.stringify(flattenProfile('filament', job.filament_profile)))
+      args.push('--load-settings', `${path.join(dir, 'machine.json')};${path.join(dir, 'process.json')}`,
+        '--load-filaments', path.join(dir, 'filament.json'), '--orient', '1', '--arrange', '1')
+    }
+    // projeto .3mf: fatia com as configurações embutidas (o designer já preparou)
+    args.push('--slice', String(job.plate || 1), '--export-3mf', 'out.gcode.3mf', '--outputdir', dir, src)
+    console.log(`[${tag}] fatiando…`)
+    await new Promise((resolve, reject) => {
+      execFile(STUDIO_EXE, args, { timeout: 15 * 60000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+        err => err ? reject(new Error(`bambu-studio falhou: ${err.message}`)) : resolve(null))
+    })
+    const outFile = path.join(dir, 'out.gcode.3mf')
+    if (!fs.existsSync(outFile)) throw new Error('o fatiamento não gerou arquivo de saída')
+    const meta = { duration_ms: Date.now() - t0 }
+    try {
+      const rj = JSON.parse(fs.readFileSync(path.join(dir, 'result.json')))
+      const p = (rj.sliced_plates || [])[0] || {}
+      meta.prediction_s = Math.round(p.total_predication || 0)
+      meta.filaments = (p.filaments || []).map(f => ({ id: f.id, filament_id: f.filament_id, used_g: Math.round((f.total_used_g || 0) * 100) / 100 }))
+    } catch { /* segue sem meta fina */ }
+    console.log(`[${tag}] subindo resultado…`)
+    const up = await fetch(job.upload_url, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: fs.readFileSync(outFile) })
+    if (!up.ok) throw new Error(`upload do fatiado falhou (HTTP ${up.status})`)
+    await post({ job_id: job.id, ok: true, meta })
+    console.log(`[${tag}] ok em ${Math.round((Date.now() - t0) / 1000)}s (impressão prevista: ${meta.prediction_s ?? '?'}s)`)
+  } catch (e) {
+    console.log(`[${tag}] FALHOU: ${e.message}`)
+    await post({ job_id: job.id, ok: false, error: e.message })
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* */ }
+  }
+}
+
 async function push() {
   const printers = (cfg.printers || []).map(snapshot)
   const command_results = acks.splice(0, acks.length)  // envia e limpa
@@ -166,6 +246,12 @@ async function push() {
     // backend manda a config de vigilância por impressora → aplica se mudou
     for (const [serial, dc] of Object.entries(data.detection_config || {})) { detectionCfg[serial] = dc; applyDetection(serial) }
     for (const cmd of (data.commands || [])) await runCommand(cmd)
+    // fatiamento: 1 por vez (CPU pesada); roda em paralelo ao loop de telemetria
+    for (const job of (data.slice_jobs || [])) {
+      if (slicing) break
+      slicing = true
+      runSlice(job).finally(() => { slicing = false })
+    }
   } catch (e) { console.log(`[push] ${e.message}`) }
 }
 
