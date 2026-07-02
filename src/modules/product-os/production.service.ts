@@ -119,8 +119,8 @@ export class ProductionService {
 
   // ── ordens de produção ────────────────────────────────────────────
   async listOrders(orgId: string, opts: { status?: string } = {}) {
-    // embute o preview extraído do .3mf (imagem do card no quadro de produção)
-    let q = supabaseAdmin.from('production_order').select('*, version:product_dev_version(thumbnail_url)')
+    // embute o preview extraído do .3mf (imagem do card) + nome/código da peça
+    let q = supabaseAdmin.from('production_order').select('*, version:product_dev_version(thumbnail_url), part:product_dev_part(name, code)')
       .eq('organization_id', orgId).order('created_at', { ascending: false })
     if (opts.status) q = q.eq('status', opts.status)
     const { data, error } = await q
