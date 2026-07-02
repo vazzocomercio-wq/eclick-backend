@@ -209,9 +209,16 @@ export class ProductPartService {
 
   /** Métricas de fabricação da peça: versão aprovada > última. */
   private async resolvePartMetrics(orgId: string, partId: string): Promise<PartVersionMetrics> {
-    const versions = await this.listPartVersions(orgId, partId) as Array<{ approved: boolean; weight_g: number | null; print_time_minutes: number | null; material: string | null }>
+    const versions = await this.listPartVersions(orgId, partId) as Array<{ approved: boolean; weight_g: number | null; print_time_minutes: number | null; material: string | null; plate_composition: Array<{ part_id?: string; units?: number }> | null }>
     const ref = versions.find(v => v.approved) ?? versions[0]
-    return { weight_g: ref?.weight_g ?? null, print_time_minutes: ref?.print_time_minutes ?? null, material: ref?.material ?? null }
+    // prato com composição: peso/tempo da versão valem POR PRATO — divide pelo
+    // total de unidades pra virar custo POR PEÇA (aproximação: rateio uniforme
+    // entre as peças do prato; suficiente pro custo, que fecha no produto)
+    const comp = Array.isArray(ref?.plate_composition) ? ref!.plate_composition!.filter(c => c && Number(c.units) > 0) : []
+    const totalUnits = comp.reduce((s, c) => s + Math.max(1, Math.round(Number(c.units) || 1)), 0)
+    const div = totalUnits > 1 ? totalUnits : 1
+    const per = (v: number | null | undefined) => v != null ? Math.round((Number(v) / div) * 100) / 100 : null
+    return { weight_g: per(ref?.weight_g), print_time_minutes: per(ref?.print_time_minutes), material: ref?.material ?? null }
   }
 
   // ══ Estoque de peças prontas (ledger) ══════════════════════════════

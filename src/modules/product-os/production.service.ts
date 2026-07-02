@@ -273,8 +273,15 @@ export class ProductionService {
       if (planFilamentMap) patch.filament_map = planFilamentMap
       await supabaseAdmin.from('production_order').update(patch).eq('id', order.id)
     }
-    // gera as unidades físicas (serial único por unidade; lote = esta OP)
-    await this.generateUnits(orgId, order.id, nextNumber, qty, body.product_dev_id, partId).catch(() => {})
+    // gera as unidades físicas (serial único por unidade; lote = esta OP).
+    // Prato com composição: seriais = unidades da PRÓPRIA peça por prato × pratos.
+    let serialQty = qty
+    if (partId) {
+      const comp = await this.plateComposition(orgId, body.version_id ?? metrics.versionId ?? null).catch(() => [])
+      const own = comp.find(c => c.part_id === partId)
+      if (own) serialQty = own.units * qty
+    }
+    await this.generateUnits(orgId, order.id, nextNumber, serialQty, body.product_dev_id, partId).catch(() => {})
     await this.emit(orgId, body.product_dev_id, 'production_order_created', { production_order_id: order.id, qty }, userId)
     return this.getOrder(orgId, order.id)
   }
@@ -360,8 +367,16 @@ export class ProductionService {
       const gUsed = (order as { actual_filament_g: number | null }).actual_filament_g ?? (order as { estimated_filament_g: number | null }).estimated_filament_g
       if (printerId && gUsed) await this.inputs.bumpLoadedSession(orgId, printerId, Number(gUsed))
       if (partId) {
-        // OP de PEÇA → credita o estoque de peças prontas (não o produto acabado)
-        await this.parts.creditFromOrder(orgId, partId, Number((order as { quantity: number }).quantity) || 0, oid, userId)
+        // OP de PEÇA → credita o estoque de peças prontas (não o produto acabado).
+        // Prato com COMPOSIÇÃO (várias cópias e/ou peças diferentes juntas):
+        // quantity = PRATOS e cada peça listada recebe units × pratos.
+        const qtyOrd = Number((order as { quantity: number }).quantity) || 0
+        const comp = await this.plateComposition(orgId, (order as { version_id: string | null }).version_id)
+        if (comp.length) {
+          for (const c of comp) await this.parts.creditFromOrder(orgId, c.part_id, c.units * qtyOrd, oid, userId)
+        } else {
+          await this.parts.creditFromOrder(orgId, partId, qtyOrd, oid, userId)
+        }
       } else {
         await this.snapshotContribution(orgId, devId, oid, Number((order as { quantity: number }).quantity) || 0)
         await this.creditNativeStock(orgId, order as Record<string, unknown>)
@@ -369,6 +384,19 @@ export class ProductionService {
       await this.emit(orgId, devId, 'production_completed', { production_order_id: oid, part_id: partId }, userId)
     }
     return this.getOrder(orgId, oid)
+  }
+
+  /** Composição do prato da versão: [{ part_id, units }] normalizado (units
+   *  int ≥1). Vazio = versão comum (1 arquivo = quantity unidades da peça). */
+  private async plateComposition(orgId: string, versionId: string | null): Promise<Array<{ part_id: string; units: number }>> {
+    if (!versionId) return []
+    const { data } = await supabaseAdmin.from('product_dev_version')
+      .select('plate_composition').eq('id', versionId).eq('organization_id', orgId).maybeSingle()
+    const raw = (data as { plate_composition: Array<{ part_id?: string; units?: number }> | null } | null)?.plate_composition
+    if (!Array.isArray(raw)) return []
+    return raw
+      .filter(c => c && typeof c.part_id === 'string' && Number(c.units) > 0)
+      .map(c => ({ part_id: c.part_id as string, units: Math.max(1, Math.round(Number(c.units))) }))
   }
 
   /** Desfaz o último movimento do quadro (toast "Desfazer"). Só entre etapas

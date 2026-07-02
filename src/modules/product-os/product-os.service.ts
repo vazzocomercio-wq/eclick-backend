@@ -122,6 +122,10 @@ export interface ProductDevVersion {
   status:               'rascunho' | 'impressao' | 'aprovado' | 'reprovado'
   approved:             boolean
   notes:                string | null
+  /** composição do prato: o que sai de UMA impressão deste arquivo
+   *  (cópias da mesma peça e/ou peças diferentes juntas). Quando presente,
+   *  peso/tempo da versão valem POR PRATO e a OP conta PRATOS. */
+  plate_composition:    Array<{ part_id: string; units: number }> | null
   created_by:           string | null
   created_at:           string
 }
@@ -1352,7 +1356,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
   }
 
   async updateVersion(versionId: string, orgId: string, patch: Partial<ProductDevVersion>): Promise<ProductDevVersion> {
-    const allowed: (keyof ProductDevVersion)[] = ['changelog', 'file_url', 'file_type', 'material', 'weight_g', 'print_time_minutes', 'volume_cm3', 'prototype_photo_urls', 'notes']
+    const allowed: (keyof ProductDevVersion)[] = ['changelog', 'file_url', 'file_type', 'material', 'weight_g', 'print_time_minutes', 'volume_cm3', 'prototype_photo_urls', 'notes', 'plate_composition']
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
     if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
