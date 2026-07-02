@@ -322,7 +322,7 @@ export class ProductionService {
 
     // OP de peça conclui em 'pronta' (vira estoque de peça); produto inteiro em 'disponivel'.
     const completionState = partId ? 'pronta' : 'disponivel'
-    const patch: Record<string, unknown> = { status: to, last_transition_source: 'manual' }
+    const patch: Record<string, unknown> = { status: to, last_transition_source: 'manual', status_changed_at: new Date().toISOString() }
     if (to === 'imprimindo' && !(order as { started_at: string | null }).started_at) patch.started_at = new Date().toISOString()
     if (to === completionState) patch.completed_at = new Date().toISOString()
 
@@ -354,6 +354,24 @@ export class ProductionService {
       }
       await this.emit(orgId, devId, 'production_completed', { production_order_id: oid, part_id: partId }, userId)
     }
+    return this.getOrder(orgId, oid)
+  }
+
+  /** Desfaz o último movimento do quadro (toast "Desfazer"). Só entre etapas
+   *  SEM efeito colateral de estoque — conclusão (pronta/disponivel) e
+   *  cancelamento (libera reserva) NÃO têm undo. Volta direto pro status
+   *  anterior sem passar pela máquina de estados (é um desfazer, não avanço). */
+  async undoTransition(orgId: string, oid: string, to: string, userId: string | null) {
+    const SAFE = ['fila', 'imprimindo', 'pausado', 'acabamento', 'qualidade', 'embalado', 'reimpressao', 'falhou']
+    const order = await this.getOrder(orgId, oid)
+    const from = (order as { status: string }).status
+    if (from === to) return order
+    if (!SAFE.includes(from) || !SAFE.includes(to)) throw new BadRequestException('Esse movimento não pode ser desfeito (a etapa mexe em estoque/reserva).')
+    const { error } = await supabaseAdmin.from('production_order')
+      .update({ status: to, last_transition_source: 'manual', status_changed_at: new Date().toISOString() })
+      .eq('id', oid).eq('organization_id', orgId).eq('status', from)
+    if (error) throw new BadRequestException(`Erro ao desfazer: ${error.message}`)
+    await this.emit(orgId, (order as { product_dev_id: string }).product_dev_id, 'status_changed', { production_order_id: oid, to, undo: true }, userId)
     return this.getOrder(orgId, oid)
   }
 

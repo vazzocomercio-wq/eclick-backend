@@ -216,6 +216,13 @@ export class ProductOsController {
     return this.production.transitionOrder(this.org(u), oid, body.status, u.id)
   }
 
+  @Post('production-orders/:oid/undo')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  undoOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string, @Body() body: { to: string }) {
+    return this.production.undoTransition(this.org(u), oid, body.to, u.id)
+  }
+
   @Patch('production-orders/:oid')
   @RequirePermission('products.update')
   updateOrder(@ReqUser() u: ReqUserPayload, @Param('oid') oid: string, @Body() body: { actual_filament_g?: number | null; actual_time_minutes?: number | null; notes?: string | null; due_at?: string | null }) {

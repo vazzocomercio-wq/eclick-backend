@@ -289,7 +289,7 @@ export class FarmService {
     // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento).
     // auto-dispatch chama sem userId → origem 'auto' (badge ⚡ no quadro)
     await supabaseAdmin.from('production_order')
-      .update({ status: 'imprimindo', started_at: new Date().toISOString(), last_transition_source: userId ? 'manual' : 'auto' })
+      .update({ status: 'imprimindo', started_at: new Date().toISOString(), last_transition_source: userId ? 'manual' : 'auto', status_changed_at: new Date().toISOString() })
       .eq('id', orderId).eq('organization_id', orgId).in('status', ['fila', 'reimpressao'])
     return cmd
   }
@@ -309,7 +309,7 @@ export class FarmService {
       .update({ status: 'concluido', finished_at: new Date().toISOString(), print_time_minutes: elapsed })
       .eq('production_order_id', o.id).in('status', ['imprimindo', 'fila'])
     await supabaseAdmin.from('production_order')
-      .update({ status: 'acabamento', actual_time_minutes: elapsed, last_transition_source: 'auto' })
+      .update({ status: 'acabamento', actual_time_minutes: elapsed, last_transition_source: 'auto', status_changed_at: new Date().toISOString() })
       .eq('id', o.id).eq('status', 'imprimindo')
     // peças físicas existem → marca as unidades planejadas como produzidas
     await supabaseAdmin.from('production_unit').update({ status: 'produzida' })
@@ -338,7 +338,7 @@ export class FarmService {
     if (!data) return
     const o = data as { id: string; status: string; product_dev_id: string }
     if (!m.from.includes(o.status)) return
-    const patch: Record<string, unknown> = { status: m.to, last_transition_source: 'auto' }
+    const patch: Record<string, unknown> = { status: m.to, last_transition_source: 'auto', status_changed_at: new Date().toISOString() }
     if (m.to === 'falhou') patch.notes = `Falha reportada pela impressora (${state})`
     await supabaseAdmin.from('production_order').update(patch).eq('id', o.id).eq('status', o.status)
     await supabaseAdmin.from('product_dev_event').insert({
