@@ -251,20 +251,32 @@ export class FarmService {
     if (!['fila', 'reimpressao'].includes(o.status)) throw new BadRequestException(`Esta OP está em '${o.status}' — enviar agora imprimiria o job de novo. Só ordens na Fila ou em Reimpressão podem ser enviadas.`)
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
     // arquivo fatiado (auto-slicing) tem prioridade sobre o modelo original
-    let fileUrl: string | null = null, fileName = 'job.3mf'
+    let fileUrl: string | null = null, fileName = 'job.3mf', slicedVersionId: string | null = null
     if (o.version_id) {
-      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, sliced_file_url, version_number').eq('id', o.version_id).maybeSingle()
-      const ver = v as { file_url: string | null; sliced_file_url: string | null; version_number: number } | null
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('id, file_url, sliced_file_url, version_number').eq('id', o.version_id).maybeSingle()
+      const ver = v as { id: string; file_url: string | null; sliced_file_url: string | null; version_number: number } | null
       fileUrl = ver?.sliced_file_url ?? ver?.file_url ?? null
+      if (ver?.sliced_file_url) slicedVersionId = ver.id
       fileName = `v${ver?.version_number ?? 1}.3mf`
     }
     // fallback: OP de peça sem version_id → pega a versão mais recente da peça que tenha arquivo
     if (!fileUrl && o.part_id) {
-      const { data: v } = await supabaseAdmin.from('product_dev_version').select('file_url, sliced_file_url, version_number')
+      const { data: v } = await supabaseAdmin.from('product_dev_version').select('id, file_url, sliced_file_url, version_number')
         .eq('part_id', o.part_id).not('file_url', 'is', null).order('created_at', { ascending: false }).limit(1).maybeSingle()
-      const ver = v as { file_url: string | null; sliced_file_url: string | null; version_number: number } | null
+      const ver = v as { id: string; file_url: string | null; sliced_file_url: string | null; version_number: number } | null
       fileUrl = ver?.sliced_file_url ?? ver?.file_url ?? null
+      if (ver?.sliced_file_url) slicedVersionId = ver.id
       fileName = `peca-v${ver?.version_number ?? 1}.3mf`
+    }
+    // arquivo veio do auto-slicing? → o G-code dentro do .3mf leva o Nº do prato
+    // fatiado (projeto multi-peça fatia o prato 3 → Metadata/plate_3.gcode)
+    let gcodeParam: string | null = null
+    if (slicedVersionId) {
+      const { data: sj } = await supabaseAdmin.from('slice_job').select('result_meta')
+        .eq('version_id', slicedVersionId).eq('status', 'done')
+        .order('created_at', { ascending: false }).limit(1).maybeSingle()
+      const pid = Number((sj as { result_meta: { plate_id?: number } | null } | null)?.result_meta?.plate_id)
+      if (Number.isFinite(pid) && pid >= 1) gcodeParam = `Metadata/plate_${pid}.gcode`
     }
     if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o modelo e fatie (botão Fatiar) ou suba o .3mf já fatiado.')
     // só .3mf imprime via FTP — STL não serve pra impressora
@@ -297,7 +309,7 @@ export class FarmService {
     // enviar — mapping errado faz a A1 pausar em silêncio sem começar, e rolo
     // curto mata a impressão no meio.
     await this.preflightAms(o, amsMapping, (loaded ?? []) as Array<{ slot: number; input_id: string; loaded_g: number | null; consumed_g: number | null; input: unknown }>)
-    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ams_mapping: amsMapping }, userId)
+    const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ams_mapping: amsMapping, ...(gcodeParam ? { gcode_param: gcodeParam } : {}) }, userId)
     // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento).
     // auto-dispatch chama sem userId → origem 'auto' (badge ⚡ no quadro)
     await supabaseAdmin.from('production_order')

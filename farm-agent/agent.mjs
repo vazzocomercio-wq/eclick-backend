@@ -14,7 +14,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.4.0'
+const AGENT_VERSION = '1.4.1'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -143,7 +143,8 @@ async function dispatchPrint(serial, payload) {
   const amsMap = Array.isArray(payload.ams_mapping) && payload.ams_mapping.length > 0 ? payload.ams_mapping : null
   publishCmd(serial, {
     print: {
-      sequence_id: '0', command: 'project_file', param: 'Metadata/plate_1.gcode',
+      // arquivo do auto-slicing pode ser de outro prato (projeto multi-peça)
+      sequence_id: '0', command: 'project_file', param: payload.gcode_param || 'Metadata/plate_1.gcode',
       subtask_name: name.replace(/\.(gcode\.)?3mf$/i, ''), url: `file:///mnt/sdcard/${name}`, md5,
       bed_type: 'auto', timelapse: false, bed_leveling: true, flow_cali: false,
       vibration_cali: false, layer_inspect: false, use_ams: true,
@@ -217,6 +218,7 @@ async function runSlice(job) {
       const rj = JSON.parse(fs.readFileSync(path.join(dir, 'result.json')))
       const p = (rj.sliced_plates || [])[0] || {}
       meta.prediction_s = Math.round(p.total_predication || 0)
+      meta.plate_id = Number(p.id) >= 1 ? Number(p.id) : (Number(job.plate) || 1)   // qual prato virou G-code (projeto multi-peça)
       meta.filaments = (p.filaments || []).map(f => ({ id: f.id, filament_id: f.filament_id, used_g: Math.round((f.total_used_g || 0) * 100) / 100 }))
     } catch { /* segue sem meta fina */ }
     console.log(`[${tag}] subindo resultado…`)

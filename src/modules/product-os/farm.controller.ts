@@ -109,8 +109,8 @@ export class FarmController {
   @Post('versions/:vid/slice')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
-  requestSlice(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string) {
-    return this.slice.requestSlice(this.org(u), vid, u.id)
+  requestSlice(@ReqUser() u: ReqUserPayload, @Param('vid') vid: string, @Body() body: { plate?: number }) {
+    return this.slice.requestSlice(this.org(u), vid, u.id, body?.plate)
   }
 
   @Get('versions/:vid/slice')

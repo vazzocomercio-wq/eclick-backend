@@ -51,8 +51,9 @@ export class SliceService {
     return `${(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/storage/v1/object/public/product-os/${path}`
   }
 
-  /** Cria (ou devolve o já aberto) job de fatiamento de uma versão. */
-  async requestSlice(orgId: string, versionId: string, userId: string | null) {
+  /** Cria (ou devolve o já aberto) job de fatiamento de uma versão.
+   *  `plate`: projeto .3mf com várias peças = um prato por peça; fatia só ele. */
+  async requestSlice(orgId: string, versionId: string, userId: string | null, plate?: number) {
     const { data: v } = await supabaseAdmin.from('product_dev_version')
       .select('id, organization_id, file_url, material, product_dev_id, part_id')
       .eq('id', versionId).maybeSingle()
@@ -69,9 +70,10 @@ export class SliceService {
     if (open) return { ...(open as Record<string, unknown>), already_queued: true }
 
     const name = decodeURIComponent(String(ver.file_url).split('?')[0].split('/').pop() || 'model.stl')
+    const pl = Math.min(36, Math.max(1, Math.round(Number(plate) || 1)))
     const { data, error } = await supabaseAdmin.from('slice_job').insert({
       organization_id: orgId, version_id: versionId, source_url: ver.file_url, source_name: name,
-      filament_profile: this.filamentProfile(ver.material), requested_by: userId,
+      plate: pl, filament_profile: this.filamentProfile(ver.material), requested_by: userId,
     }).select('id, status, created_at').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar job de fatiamento: ${error?.message ?? 'sem dados'}`)
     return data
