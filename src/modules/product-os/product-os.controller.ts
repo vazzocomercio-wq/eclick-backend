@@ -754,10 +754,26 @@ export class ProductOsController {
 
   @Post(':id/versions')
   @RequirePermission('products.update')
-  addVersion(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: {
+  async addVersion(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
-  }) { return this.svc.addVersion(id, this.org(u), u.id, body) }
+  }) {
+    // blindagem (igual à versão de PEÇA): .3mf sem peso/material no body → lê do
+    // arquivo no servidor. Versão sem peso cria OP SEM reserva de filamento e o
+    // envio pra impressora é bloqueado depois (causa raiz da OP-0028).
+    if (body.file_url && /\.3mf($|\?)/i.test(body.file_url) && (body.weight_g == null || !body.material)) {
+      try {
+        const m = await this.svc.parse3mf(body.file_url)
+        if (m.found) body = {
+          ...body,
+          weight_g: body.weight_g ?? m.weight_g ?? undefined,
+          material: body.material ?? m.material ?? undefined,
+          print_time_minutes: body.print_time_minutes ?? m.print_time_minutes ?? undefined,
+        }
+      } catch { /* best-effort */ }
+    }
+    return this.svc.addVersion(id, this.org(u), u.id, body)
+  }
 
   // ── BOM ───────────────────────────────────────────────────────────
   @Get(':id/bom')
