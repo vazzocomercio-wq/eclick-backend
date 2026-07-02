@@ -240,9 +240,9 @@ export class FarmService {
   /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
   async sendOrderToPrinter(orgId: string, orderId: string, userId: string | null) {
     const { data: order } = await supabaseAdmin.from('production_order')
-      .select('id, status, printer_id, version_id, part_id, reservation_id, filament_map').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+      .select('id, status, printer_id, version_id, part_id, reservation_id, filament_map, quantity, estimated_filament_g').eq('id', orderId).eq('organization_id', orgId).maybeSingle()
     if (!order) throw new BadRequestException('Ordem não encontrada')
-    const o = order as { status: string; printer_id: string | null; version_id: string | null; part_id: string | null; reservation_id: string | null; filament_map: Array<{ index: number; input_id: string }> | null }
+    const o = order as { status: string; printer_id: string | null; version_id: string | null; part_id: string | null; reservation_id: string | null; filament_map: Array<{ index: number; input_id: string }> | null; quantity: number; estimated_filament_g: number | null }
     // só manda job pra máquina a partir da fila/reimpressão — fora disso seria imprimir DE NOVO uma ordem em andamento/pronta
     if (!['fila', 'reimpressao'].includes(o.status)) throw new BadRequestException(`Esta OP está em '${o.status}' — enviar agora imprimiria o job de novo. Só ordens na Fila ou em Reimpressão podem ser enviadas.`)
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
@@ -265,7 +265,8 @@ export class FarmService {
     // descobre o slot do AMS de cada cor → manda imprimir no(s) rolo(s) certo(s)
     let amsMapping: number[] | undefined
     const { data: loaded } = await supabaseAdmin.from('printer_loaded_filament')
-      .select('slot, input_id').eq('printer_id', o.printer_id).is('unloaded_at', null)
+      .select('slot, input_id, loaded_g, consumed_g, input:input_id(material, color, name, spool_weight_g)')
+      .eq('printer_id', o.printer_id).is('unloaded_at', null)
     const slotOf = new Map((loaded ?? []).map(r => [(r as { input_id: string }).input_id, (r as { slot: number }).slot]))
     if (Array.isArray(o.filament_map) && o.filament_map.length > 1) {
       // MULTICOR: ams_mapping é POSICIONAL pelo índice do filamento do .3mf
@@ -285,6 +286,10 @@ export class FarmService {
       if (!temRolo.data) throw new BadRequestException('Nenhum rolo montado nesta impressora. Carregue o filamento no AMS (aba Impressoras → Filamento na impressora) antes de imprimir.')
       throw new BadRequestException('O filamento reservado para esta OP não está montado nesta impressora. Monte o rolo certo no AMS ou troque o rolo da OP antes de imprimir.')
     }
+    // PRÉ-FLIGHT: confere o AMS FÍSICO (telemetria) e as gramas do rolo antes de
+    // enviar — mapping errado faz a A1 pausar em silêncio sem começar, e rolo
+    // curto mata a impressão no meio.
+    await this.preflightAms(o, amsMapping, (loaded ?? []) as Array<{ slot: number; input_id: string; loaded_g: number | null; consumed_g: number | null; input: unknown }>)
     const cmd = await this.enqueueCommand(orgId, o.printer_id, 'print', { file_url: fileUrl, file_name: fileName, order_id: orderId, ams_mapping: amsMapping }, userId)
     // enviado → marca a OP como imprimindo (a telemetria refina depois: pausado/falhou/acabamento).
     // auto-dispatch chama sem userId → origem 'auto' (badge ⚡ no quadro)
@@ -292,6 +297,74 @@ export class FarmService {
       .update({ status: 'imprimindo', started_at: new Date().toISOString(), last_transition_source: userId ? 'manual' : 'auto', status_changed_at: new Date().toISOString() })
       .eq('id', orderId).eq('organization_id', orgId).in('status', ['fila', 'reimpressao'])
     return cmd
+  }
+
+  /** PRÉ-FLIGHT do envio: valida o mapa de filamento contra o AMS FÍSICO
+   *  (telemetria) e checa se o rolo tem gramas suficientes pro job.
+   *  Só bloqueia com evidência — sem telemetria fresca ou sem dado de peso,
+   *  deixa passar (não pode travar a farm por falta de sinal). */
+  private async preflightAms(
+    o: { printer_id: string | null; version_id: string | null; reservation_id: string | null; filament_map: Array<{ index: number; input_id: string }> | null; quantity: number; estimated_filament_g: number | null },
+    amsMapping: number[],
+    loaded: Array<{ slot: number; input_id: string; loaded_g: number | null; consumed_g: number | null; input: unknown }>,
+  ) {
+    type Roll = { slot: number; loaded_g: number | null; consumed_g: number | null; inp: { material: string | null; color: string | null; name: string | null; spool_weight_g: number | null } | null }
+    const rollOf = new Map<string, Roll>(loaded.map(l => {
+      const inp = (Array.isArray(l.input) ? l.input[0] : l.input) as Roll['inp']
+      return [l.input_id, { slot: l.slot, loaded_g: l.loaded_g, consumed_g: l.consumed_g, inp }]
+    }))
+    // o que o job usa: bandeja → rolo + gramas necessárias (por filamento)
+    const uses: Array<{ slot: number; inputId: string; needG: number | null }> = []
+    if (Array.isArray(o.filament_map) && o.filament_map.length > 1) {
+      let weights: Array<number | null> = []
+      if (o.version_id) {
+        const { data: v } = await supabaseAdmin.from('product_dev_version').select('filaments').eq('id', o.version_id).maybeSingle()
+        const fils = (v as { filaments: Array<{ weight_g: number | null }> | null } | null)?.filaments ?? []
+        weights = fils.map(f => Number(f?.weight_g) > 0 ? Number(f.weight_g) : null)
+      }
+      for (const f of o.filament_map) {
+        const roll = rollOf.get(f.input_id)
+        if (!roll) continue
+        const w = weights[Number(f.index) - 1]
+        uses.push({ slot: roll.slot, inputId: f.input_id, needG: w != null ? Math.round(w * (Number(o.quantity) || 1)) : null })
+      }
+    } else if (o.reservation_id && rollOf.has(o.reservation_id)) {
+      uses.push({ slot: rollOf.get(o.reservation_id)!.slot, inputId: o.reservation_id, needG: o.estimated_filament_g != null ? Number(o.estimated_filament_g) : null })
+    }
+    if (!uses.length) return
+
+    // AMS físico via telemetria fresca: a bandeja existe? o material bate?
+    const { data: st } = await supabaseAdmin.from('printer_status')
+      .select('ams, updated_at').eq('printer_id', o.printer_id!).maybeSingle()
+    const s = st as { ams: Array<{ slot?: number; material?: string | null; remain_pct?: number | null }> | null; updated_at: string | null } | null
+    const trays = this.isFresh(s?.updated_at) && Array.isArray(s?.ams) && s!.ams!.length ? s!.ams! : null
+    const trayBySlot = trays ? new Map(trays.map(t => [Number(t.slot), t])) : null
+
+    for (const u of uses) {
+      const roll = rollOf.get(u.inputId)!
+      const rollName = [roll.inp?.color, roll.inp?.material].filter(Boolean).join(' ') || roll.inp?.name || 'rolo'
+      const tray = trayBySlot?.get(Number(u.slot))
+      if (trayBySlot && !tray) {
+        throw new BadRequestException(`O AMS da impressora não reporta rolo na bandeja ${u.slot + 1}, onde o sistema esperava ${rollName}. Encaixe o rolo na bandeja certa (ou corrija a bandeja na aba Impressoras) antes de enviar — com o mapa errado a impressora pausa em silêncio sem começar.`)
+      }
+      if (tray) {
+        const matAms = String(tray.material ?? '').trim().toUpperCase()
+        const matOur = String(roll.inp?.material ?? '').trim().toUpperCase()
+        if (matAms && matOur && matAms !== matOur) {
+          throw new BadRequestException(`O AMS reporta ${matAms} na bandeja ${u.slot + 1}, mas a OP pede ${matOur} (${rollName}). O cadastro do filamento está desatualizado — recarregue o rolo certo ou corrija na aba Impressoras.`)
+        }
+      }
+      // gramas restantes: nosso rastreio por rolo primeiro; senão % do AMS × peso do rolo
+      let remaining: number | null = roll.loaded_g != null ? Math.max(0, Number(roll.loaded_g) - (Number(roll.consumed_g) || 0)) : null
+      if (remaining == null && tray) {
+        const pct = Number(tray.remain_pct)
+        const cap = Number(roll.inp?.spool_weight_g)
+        if (Number.isFinite(pct) && pct >= 0 && cap > 0) remaining = Math.round((pct / 100) * cap)
+      }
+      if (remaining != null && u.needG != null && u.needG > remaining) {
+        throw new BadRequestException(`O rolo da bandeja ${u.slot + 1} (${rollName}) tem ~${Math.round(remaining)}g e este job precisa de ~${Math.round(u.needG)}g — a impressão morreria no meio. Troque por um rolo com mais filamento, ou monte o rolo de novo informando as gramas reais se a conta estiver defasada.`)
+      }
+    }
   }
 
   // ── Fase C: auto-fechamento da produção pela telemetria ───────────
