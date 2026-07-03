@@ -835,7 +835,8 @@ export class OrdersIngestionService {
         const taxBase = taxOnFreight ? itemTotal + shippingAlloc : itemTotal
         const taxAmount = prod?.tax_percentage != null ? taxBase * (prod.tax_percentage / 100) : null
 
-        const saleFee = item.sale_fee ?? 0
+        // ML informa sale_fee POR UNIDADE — a tarifa da linha é fee × qty.
+        const saleFee = (item.sale_fee ?? 0) * qty
         const grossProfit = itemTotal - saleFee - shippingAlloc
         const cm = costPriceTotal != null
           ? grossProfit - costPriceTotal - (taxAmount ?? 0)
@@ -864,6 +865,8 @@ export class OrdersIngestionService {
           quantity:                qty,
           sale_price:              unitPrice,
           platform_fee:            Math.round(saleFee * 100) / 100,
+          // 'api' = tarifa real informada pelo ML no pedido (não estimada)
+          platform_fee_source:     item.sale_fee != null ? 'api' : 'estimated',
           shipping_cost:           Math.round(shippingAlloc * 100) / 100,
           shipping_buyer_paid:     Math.round(buyerPaidAlloc * 100) / 100,
           shipping_ml_refund:      Math.round(mlRefundAlloc * 100) / 100,

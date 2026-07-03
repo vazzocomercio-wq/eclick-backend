@@ -2538,8 +2538,10 @@ export class MercadolivreService {
       const ship        = shipMap[o.shipping?.id] ?? null
       const totalAmount: number = o.total_amount ?? 0
 
-      // Tarifa: soma real dos sale_fee dos itens (fallback: 11,5%)
-      const tarifaSaleFee = (o.order_items ?? []).reduce((s: number, i: any) => s + (i.sale_fee ?? 0), 0)
+      // Tarifa: soma real dos sale_fee dos itens (fallback: 11,5%).
+      // sale_fee do ML é POR UNIDADE — multiplica pela quantity de cada item.
+      const tarifaSaleFee = (o.order_items ?? []).reduce(
+        (s: number, i: any) => s + (i.sale_fee ?? 0) * (i.quantity ?? 1), 0)
       const tarifaML      = tarifaSaleFee > 0
         ? Math.round(tarifaSaleFee * 100) / 100
         : Math.round(totalAmount * 0.115 * 100) / 100
@@ -2551,10 +2553,14 @@ export class MercadolivreService {
 
       const lucroBruto = Math.round((totalAmount - tarifaML - freteVendedor) * 100) / 100
 
-      // product cost/tax for first item's SKU
+      // product cost/tax for first item's SKU — custo TOTAL (unitário × qty),
+      // mesmo critério da ingestão (orders.cost_price é total da linha)
       const firstSku = o.order_items?.[0]?.item?.seller_sku ?? null
+      const firstQty: number = o.order_items?.[0]?.quantity ?? 1
       const prodData = firstSku ? (productMap[firstSku] ?? null) : null
-      const costPrice: number | null   = prodData?.cost_price ?? null
+      const costPrice: number | null   = prodData?.cost_price != null
+        ? Math.round(prodData.cost_price * firstQty * 100) / 100
+        : null
       const taxPct: number | null      = prodData?.tax_percentage ?? null
       const taxOnFreight: boolean      = prodData?.tax_on_freight ?? false
       let taxAmount: number | null = null
