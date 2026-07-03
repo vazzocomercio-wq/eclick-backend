@@ -43,9 +43,11 @@ async function bootstrap() {
     limit: '8mb',
     // F18 F0.3 — captura raw body só pra /webhooks/* (Shopee assina url|body
     // EXATAMENTE como veio; JSON.parse + re-stringify destrói whitespace e
-    // quebra HMAC). Outras rotas seguem sem overhead.
+    // quebra HMAC) e /storefront/webhooks/* (Stripe assina t.rawBody — sem o
+    // raw, a verificação HMAC do webhook falha). Outras rotas sem overhead.
     verify: (req: any, _res, buf) => {
-      if (typeof req.url === 'string' && req.url.startsWith('/webhooks/')) {
+      if (typeof req.url === 'string'
+        && (req.url.startsWith('/webhooks/') || req.url.startsWith('/storefront/webhooks/'))) {
         req.rawBody = buf.toString('utf8')
       }
     },

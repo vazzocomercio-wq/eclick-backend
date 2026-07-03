@@ -89,16 +89,29 @@ export class StorefrontVisualizerService {
   constructor(
     private readonly bridge: ActiveBridgeClient,
     private readonly llm: LlmService,
-  ) {}
+  ) {
+    // Fail-fast em produção: sem o segredo, o token do Ambientador seria
+    // forjável (bypass do OTP). Derruba o boot com mensagem clara.
+    if (process.env.NODE_ENV === 'production'
+      && !process.env.STOREFRONT_VISUALIZER_SECRET
+      && !process.env.STOREFRONT_JWT_SECRET) {
+      throw new Error('STOREFRONT_VISUALIZER_SECRET não configurado — obrigatório em produção (assina o token do Ambientador IA). Defina a variável de ambiente no Railway.')
+    }
+  }
 
   // ── Helpers de identidade ──────────────────────────────────────────────
 
   private secret(): string {
-    // Sem fallback hardcoded: o segredo público permitia forjar token de
-    // cliente + bypassar OTP. Falha alto se não configurado.
+    // Sem fallback hardcoded em produção: o segredo público permitia forjar
+    // token de cliente + bypassar OTP. Fora de produção mantém fallback de
+    // dev com aviso (o construtor já derruba o boot em prod sem env).
     const s = process.env.STOREFRONT_VISUALIZER_SECRET ?? process.env.STOREFRONT_JWT_SECRET
-    if (!s) throw new HttpException('STOREFRONT_VISUALIZER_SECRET não configurado.', HttpStatus.SERVICE_UNAVAILABLE)
-    return s
+    if (s) return s
+    if (process.env.NODE_ENV === 'production') {
+      throw new HttpException('STOREFRONT_VISUALIZER_SECRET não configurado.', HttpStatus.SERVICE_UNAVAILABLE)
+    }
+    this.logger.warn('STOREFRONT_VISUALIZER_SECRET ausente — usando fallback de DEV (tokens do Ambientador NÃO são seguros).')
+    return 'eclick-visualizer-dev-secret'
   }
 
   /** Token leve (HMAC) que identifica o cliente validado nas chamadas

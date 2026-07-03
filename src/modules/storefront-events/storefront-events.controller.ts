@@ -1,6 +1,7 @@
-import { Controller, Post, Body, Req, BadRequestException } from '@nestjs/common'
+import { Controller, Post, Body, Req, UseGuards, BadRequestException } from '@nestjs/common'
 import { Request } from 'express'
 import { Public } from '../../common/decorators/public.decorator'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { StorefrontEventsService } from './storefront-events.service'
 import { hashIp } from '../storefront-leads/storefront-leads.service'
 
@@ -50,6 +51,8 @@ export class StorefrontEventsController {
    */
   @Post('track')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 120, windowMs: 60_000, keyPrefix: 'sf-events-track' })
   track(
     @Req() req: Request,
     @Body() body: {

@@ -564,31 +564,53 @@ export class PaymentsService {
 
     // Precisamos da org_id pra resolver o token — descobrimos pelo
     // external_reference depois de buscar o payment. Mas pra buscar precisamos
-    // do token. Catch-22 → fazemos lookup-by-session usando todos os tokens
-    // configurados? Versao pragmatica: tentamos com token GLOBAL primeiro,
-    // depois resolvemos org via external_reference, e refazemos lookup se
-    // necessario.
-    // No MVP: assumimos credencial GLOBAL (chave da Vazzo ou shared).
-    let payment
+    // do token. Catch-22 → tentamos o token GLOBAL primeiro (compat com o
+    // comportamento mono-tenant atual); se falhar, iteramos TODAS as orgs com
+    // MP configurado (sem cap). Anti cross-tenant: um payment id só é legível
+    // pela conta MP dona dele, mas se duas orgs compartilham a mesma conta MP,
+    // validamos que o external_reference (pedido) pertence à MESMA org do
+    // token usado — mismatch = warn + tenta a próxima org.
+    let payment: Awaited<ReturnType<MercadoPagoService['fetchPayment']>> | null = null
     try {
       payment = await this.mp.fetchPayment('global-noop', paymentId)
+      // Token global não tem org própria pra comparar — segue direto (mono-tenant).
     } catch {
-      // tenta a primeira org com MP configurado
       const { data: orgs } = await supabaseAdmin
         .from('api_credentials')
-        .select('organization_id').eq('provider', 'mercadopago').limit(5)
+        .select('organization_id')
+        .eq('provider', 'mercadopago')
+        .eq('key_name', 'MP_ACCESS_TOKEN')
+      const tried = new Set<string>()
       let lastErr: Error | null = null
       for (const row of orgs ?? []) {
+        const candidateOrg = row.organization_id as string | null
+        if (!candidateOrg || tried.has(candidateOrg)) continue
+        tried.add(candidateOrg)
         try {
-          payment = await this.mp.fetchPayment(row.organization_id as string, paymentId)
+          const candidate = await this.mp.fetchPayment(candidateOrg, paymentId)
+          const ref = candidate.externalReference
+          if (ref) {
+            const { data: ord } = await supabaseAdmin
+              .from('storefront_orders')
+              .select('organization_id')
+              .eq('id', ref)
+              .maybeSingle()
+            const orderOrg = (ord?.organization_id as string | undefined) ?? null
+            if (orderOrg && orderOrg !== candidateOrg) {
+              this.logger.warn(`[mp.webhook] payment ${paymentId} lido com token da org ${candidateOrg}, mas o pedido ${ref} pertence à org ${orderOrg} — tentando as demais orgs`)
+              continue
+            }
+          }
+          payment = candidate
           break
         } catch (e) { lastErr = e as Error }
       }
       if (!payment) {
-        this.logger.error(`[mp.webhook] payment ${paymentId} nao localizado: ${lastErr?.message}`)
+        this.logger.error(`[mp.webhook] payment ${paymentId} nao localizado em nenhuma org: ${lastErr?.message}`)
         return
       }
     }
+    if (!payment) return // narrowing pro TS — os dois caminhos acima garantem payment
 
     const orderId = payment.externalReference
     if (!orderId) { this.logger.warn(`[mp.webhook] payment ${paymentId} sem external_reference`); return }
@@ -695,8 +717,10 @@ export class PaymentsService {
 
     const ok = await this.stripe.verifyWebhookSignature(orgId, rawBody, signature)
     if (!ok) {
-      this.logger.warn(`[stripe.webhook] assinatura invalida pra order=${orderId}`)
-      return
+      // 400 (não 200): assinatura inválida ou secret ausente em prod. O Stripe
+      // reentrega depois — se era config faltando, o evento não se perde.
+      this.logger.warn(`[stripe.webhook] assinatura invalida pra order=${orderId} — rejeitando com 400`)
+      throw new BadRequestException('Assinatura do webhook Stripe inválida.')
     }
 
     let status: StorefrontOrder['status'] | null = null
@@ -943,13 +967,16 @@ export class PaymentsService {
     })
   }
 
-  /** Detalhe publico do pedido — usado pelas paginas /sucesso /falha /pendente. */
+  /** Detalhe publico do pedido — usado pelas paginas /sucesso /falha /pendente.
+   *  PII mascarada: o endpoint é público (só exige o UUID do pedido), então
+   *  nome vira só o primeiro nome e o email vira "vi***@gmail.com". A página
+   *  de retorno só usa o primeiro nome — mascarado continua funcionando. */
   async getPublicOrder(orderId: string): Promise<{
     id:        string
     status:    string
     total:     number
     items:     CheckoutItem[]
-    customer:  { name: string; email: string }   // dados sensíveis nunca expostos aqui
+    customer:  { name: string; email: string }   // mascarados — nunca PII completa aqui
     gateway:   Gateway | null
     initPoint: string | null
   } | null> {
@@ -965,11 +992,25 @@ export class PaymentsService {
       status:    data.status as string,
       total:     Number(data.total),
       items:     (data.items as CheckoutItem[]) ?? [],
-      customer:  { name: c.name ?? '', email: c.email ?? '' },
+      customer:  { name: maskName(c.name), email: maskEmail(c.email) },
       gateway:   (data.gateway as Gateway | null) ?? null,
       initPoint: (data.gateway_init_point as string | null) ?? null,
     }
   }
+}
+
+/** Só o primeiro nome — sobrenome não sai no endpoint público. */
+function maskName(name?: string): string {
+  return (name ?? '').trim().split(/\s+/)[0] ?? ''
+}
+
+/** "vinicius@gmail.com" → "vi***@gmail.com". Preserva o domínio pro cliente
+ *  reconhecer o próprio email sem expor o endereço completo. */
+function maskEmail(email?: string): string {
+  const e = (email ?? '').trim()
+  const at = e.indexOf('@')
+  if (at <= 0) return e ? '***' : ''
+  return `${e.slice(0, Math.min(2, at))}***@${e.slice(at + 1)}`
 }
 
 /** Mercado Pago payment.status -> storefront_orders.status. */

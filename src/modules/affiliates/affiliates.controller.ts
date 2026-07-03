@@ -6,6 +6,7 @@ import type { Request } from 'express'
 import { AffiliatesService, type AffiliateSettings } from './affiliates.service'
 import { AffiliateAttributionService } from './affiliate-attribution.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
@@ -211,6 +212,8 @@ export class AffiliatesPublicController {
 
   @Post('by-slug/:slug/signup')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 5, windowMs: 60_000, keyPrefix: 'sf-aff-signup' })
   async signup(
     @Param('slug') slug: string,
     @Body() body: { name?: string; email?: string; password?: string; phone?: string; doc?: string; code?: string },
@@ -232,6 +235,8 @@ export class AffiliatesPublicController {
 
   @Post('by-slug/:slug/login')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 5, windowMs: 60_000, keyPrefix: 'sf-aff-login' })
   async login(@Param('slug') slug: string, @Body() body: { email?: string; password?: string }) {
     const orgId = await this.resolveOrg(slug)
     if (!orgId) throw new BadRequestException('Loja não encontrada')

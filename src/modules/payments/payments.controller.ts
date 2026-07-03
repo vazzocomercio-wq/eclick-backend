@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { Public } from '../../common/decorators/public.decorator'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { PaymentsService } from './payments.service'
@@ -32,6 +33,8 @@ export class PaymentsController {
 
   @Post('checkout')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 10, windowMs: 60_000, keyPrefix: 'sf-checkout' })
   async checkout(@Body() body: {
     slug?:           string
     items?:          CheckoutItem[]

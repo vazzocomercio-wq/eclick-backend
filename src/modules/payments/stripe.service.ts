@@ -141,8 +141,14 @@ export class StripeService {
   ): Promise<boolean> {
     const secret = await this.getWebhookSecret(orgId)
     if (!secret) {
-      this.logger.warn('[stripe.webhook] STRIPE_WEBHOOK_SECRET nao configurado — pulando verificacao (NAO usar em prod)')
-      return process.env.NODE_ENV !== 'production'
+      // Em produção NUNCA aceitamos webhook sem verificar a assinatura —
+      // qualquer um poderia forjar um "pedido pago". Rejeita e loga claro.
+      if (process.env.NODE_ENV === 'production') {
+        this.logger.error(`[stripe.webhook] STRIPE_WEBHOOK_SECRET ausente em produção (org=${orgId}) — webhook REJEITADO. Cadastre a credencial STRIPE_WEBHOOK_SECRET pra aceitar eventos do Stripe.`)
+        return false
+      }
+      this.logger.warn('[stripe.webhook] STRIPE_WEBHOOK_SECRET nao configurado — pulando verificacao (só fora de produção)')
+      return true
     }
     // Stripe-Signature: t=TIMESTAMP,v1=HMAC
     const parts = signatureHeader.split(',').reduce<Record<string, string>>((acc, p) => {

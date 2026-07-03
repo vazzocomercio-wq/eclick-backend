@@ -6,6 +6,7 @@ import { Request } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { Public } from '../../common/decorators/public.decorator'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { StorefrontLeadsService, hashIp } from './storefront-leads.service'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
 
@@ -56,6 +57,8 @@ export class StorefrontLeadsPublicController {
 
   @Post(':slug/lead')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 10, windowMs: 60_000, keyPrefix: 'sf-lead' })
   async submit(
     @Req() req: Request,
     @Param('slug') slug: string,

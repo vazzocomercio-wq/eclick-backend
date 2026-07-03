@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, UnauthorizedException } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, NotFoundException, UnauthorizedException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import * as crypto from 'node:crypto'
 
@@ -8,7 +8,7 @@ import * as crypto from 'node:crypto'
  *    lojas diferentes com contas separadas).
  *  - Senha hasheada com PBKDF2 (10k iterations + 32-byte salt).
  *  - JWT próprio (HMAC-SHA256) com claims { sub, org_id, email, exp }.
- *  - Secret: env STOREFRONT_JWT_SECRET (fallback: SUPABASE_SERVICE_ROLE_KEY).
+ *  - Secret: env STOREFRONT_JWT_SECRET (obrigatório em produção; fallback de dev fora dela).
  */
 
 export interface StorefrontCustomer {
@@ -39,9 +39,17 @@ export interface Address {
 }
 
 // Sem fallback inseguro (literal público / reuso da service-role key): permitia
-// forjar sessão de qualquer cliente. Exige o segredo dedicado; falha no boot se faltar.
-const SECRET = process.env.STOREFRONT_JWT_SECRET
-if (!SECRET) throw new Error('STOREFRONT_JWT_SECRET não configurado — defina no ambiente (assina o token de cliente da loja).')
+// forjar sessão de qualquer cliente. Em produção o segredo dedicado é obrigatório
+// (derruba o boot com mensagem clara); fora de produção usa fallback de dev com aviso.
+const SECRET = ((): string => {
+  const s = process.env.STOREFRONT_JWT_SECRET
+  if (s) return s
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('STOREFRONT_JWT_SECRET não configurado — obrigatório em produção (assina o token de cliente da Loja Própria). Defina a variável de ambiente no Railway.')
+  }
+  Logger.warn('STOREFRONT_JWT_SECRET ausente — usando fallback de DEV (tokens de cliente NÃO são seguros). Configure a env fora de produção também.', 'StorefrontCustomers')
+  return 'eclick-storefront-dev-secret'
+})()
 const JWT_TTL_SECONDS = 60 * 60 * 24 * 30  // 30 dias
 
 const normalizeEmail = (raw: string): string => raw.trim().toLowerCase()
@@ -242,7 +250,17 @@ export class StorefrontCustomersService {
     return (products ?? []) as unknown as Array<Record<string, unknown>>
   }
 
-  async addToWishlist(customerId: string, productId: string): Promise<{ ok: true; alreadyExists: boolean }> {
+  async addToWishlist(orgId: string, customerId: string, productId: string): Promise<{ ok: true; alreadyExists: boolean }> {
+    // Multi-tenant: o produto precisa pertencer à MESMA org do cliente —
+    // senão qualquer token válido favoritaria produto de outra loja.
+    const { data: product } = await supabaseAdmin
+      .from('products')
+      .select('id')
+      .eq('id', productId)
+      .eq('organization_id', orgId)
+      .maybeSingle()
+    if (!product) throw new NotFoundException('Produto não encontrado nesta loja.')
+
     const { error } = await supabaseAdmin
       .from('customer_wishlists')
       .insert({ customer_id: customerId, product_id: productId })

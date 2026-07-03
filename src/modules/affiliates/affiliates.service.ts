@@ -66,7 +66,18 @@ export interface Affiliate {
   updated_at:             string
 }
 
-const SECRET = process.env.STOREFRONT_JWT_SECRET ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? 'INSECURE-FALLBACK'
+// Sem fallback inseguro (literal público / reuso da service-role key): permitia
+// forjar sessão de qualquer afiliado. Em produção o segredo dedicado é obrigatório
+// (derruba o boot com mensagem clara); fora de produção usa fallback de dev com aviso.
+const SECRET = ((): string => {
+  const s = process.env.STOREFRONT_JWT_SECRET
+  if (s) return s
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('STOREFRONT_JWT_SECRET não configurado — obrigatório em produção (assina o token de afiliado da Loja Própria). Defina a variável de ambiente no Railway.')
+  }
+  Logger.warn('STOREFRONT_JWT_SECRET ausente — usando fallback de DEV (tokens de afiliado NÃO são seguros). Configure a env fora de produção também.', 'Affiliates')
+  return 'eclick-storefront-dev-secret'
+})()
 const JWT_TTL_SECONDS = 60 * 60 * 24 * 30
 
 const normalizeEmail = (raw: string): string => raw.trim().toLowerCase()

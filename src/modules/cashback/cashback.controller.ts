@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { CashbackService, type CashbackSettings } from './cashback.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
@@ -127,6 +128,8 @@ export class CashbackPublicController {
   /** Vitrine: cliente informa email → vê saldo. Resolve org via slug. */
   @Get('by-slug/:slug/balance')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 30, windowMs: 60_000, keyPrefix: 'sf-cashback-balance' })
   async balanceBySlug(
     @Param('slug') slug: string,
     @Query('email') email?: string,
@@ -150,6 +153,8 @@ export class CashbackPublicController {
 
   @Post('by-slug/:slug/preview-redemption')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 30, windowMs: 60_000, keyPrefix: 'sf-cashback-preview' })
   async previewRedemption(
     @Param('slug') slug: string,
     @Body() body: { email: string; orderTotalCents: number },

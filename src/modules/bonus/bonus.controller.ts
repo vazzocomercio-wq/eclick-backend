@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common'
 import { BonusService, type BonusRule, type CartLineForEval } from './bonus.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { Public } from '../../common/decorators/public.decorator'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { supabaseAdmin } from '../../common/supabase'
@@ -52,6 +53,8 @@ export class BonusPublicController {
   /** Vitrine consulta brindes aplicáveis a um carrinho. Resolve org por slug. */
   @Post('by-slug/:slug/preview')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 30, windowMs: 60_000, keyPrefix: 'sf-bonus-preview' })
   async preview(
     @Param('slug') slug: string,
     @Body() body: { lines: CartLineForEval[] },

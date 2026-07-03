@@ -3,6 +3,7 @@ import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { CouponsService } from './coupons.service'
 import { Public } from '../../common/decorators/public.decorator'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { supabaseAdmin } from '../../common/supabase'
 import type { CouponType } from './coupons.types'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
@@ -75,6 +76,8 @@ export class CouponsController {
    */
   @Get('apply')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 20, windowMs: 60_000, keyPrefix: 'sf-coupon-apply' })
   async apply(
     @Query('slug') slug: string,
     @Query('code') code: string,

@@ -1,8 +1,9 @@
 import {
   Controller, Post, Get, Patch, Delete, Body, Param, Query, Headers,
-  BadRequestException, UnauthorizedException,
+  UseGuards, BadRequestException, UnauthorizedException,
 } from '@nestjs/common'
 import { Public } from '../../common/decorators/public.decorator'
+import { RateLimit, RateLimitGuard } from '../../common/guards/rate-limit.guard'
 import { StorefrontCustomersService, type Address } from './storefront-customers.service'
 import { supabaseAdmin } from '../../common/supabase'
 
@@ -23,6 +24,8 @@ export class StorefrontCustomersController {
 
   @Post('by-slug/:slug/signup')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 5, windowMs: 60_000, keyPrefix: 'sf-cust-signup' })
   async signup(
     @Param('slug') slug: string,
     @Body() body: { email?: string; password?: string; name?: string; phone?: string; doc?: string },
@@ -43,6 +46,8 @@ export class StorefrontCustomersController {
 
   @Post('by-slug/:slug/login')
   @Public()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ limit: 5, windowMs: 60_000, keyPrefix: 'sf-cust-login' })
   async login(
     @Param('slug') slug: string,
     @Body() body: { email?: string; password?: string },
@@ -108,7 +113,7 @@ export class StorefrontCustomersController {
   async addToWishlist(@Headers('authorization') auth: string | undefined, @Param('productId') productId: string) {
     const token = extractToken(auth)
     const cur = await this.svc.getCurrentByToken(token)
-    return this.svc.addToWishlist(cur.id, productId)
+    return this.svc.addToWishlist(cur.organization_id, cur.id, productId)
   }
 
   /** DELETE /public/store/auth/me/wishlist/:productId — remove. */
