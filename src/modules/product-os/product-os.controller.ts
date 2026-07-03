@@ -104,6 +104,14 @@ export class ProductOsController {
     return this.sku.deleteTaxonomy(this.org(u), tid)
   }
 
+  /** EAN interno avulso (789/790, único na org) — botão "gerar EAN" das variações do catálogo. */
+  @Post('sku/ean/mint')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.update')
+  skuEanMint(@ReqUser() u: ReqUserPayload) {
+    return this.sku.mintEan(this.org(u))
+  }
+
   // ── Paletas de cor por categoria (recurso próprio do Product OS) ──
   @Get('palettes')
   @RequirePermission('products.view')

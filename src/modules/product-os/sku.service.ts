@@ -182,17 +182,27 @@ export class SkuService {
     for (let i = 0; i < 9; i++) base += Math.floor(Math.random() * 10)
     return base + this.ean13Check(base)
   }
-  /** EAN único na org (testa variantes E produtos; índice único é o backstop). */
+  /** EAN único na org (testa variantes, projetos E catálogo — inclusive o EAN
+   *  por cor dentro de products.variations; índice único é o backstop). */
   private async uniqueEan(orgId: string): Promise<string> {
     for (let i = 0; i < 8; i++) {
       const ean = this.genEan()
-      const [a, b] = await Promise.all([
+      const [a, b, c, d, e] = await Promise.all([
         supabaseAdmin.from('product_dev_sku_variant').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('ean', ean),
         supabaseAdmin.from('product_dev').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('ean', ean),
+        supabaseAdmin.from('products').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('ean', ean),
+        supabaseAdmin.from('products').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('gtin', ean),
+        supabaseAdmin.from('products').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).contains('variations', [{ ean }]),
       ])
-      if ((a.count ?? 0) === 0 && (b.count ?? 0) === 0) return ean
+      if ([a, b, c, d, e].every(r => (r.count ?? 0) === 0)) return ean
     }
     throw new BadRequestException('Não foi possível gerar um EAN único — tente de novo')
+  }
+
+  /** EAN interno avulso (1 clique) — usado pelo formulário do catálogo
+   *  (variações do produto). Mesma faixa 789/790 e mesma checagem de unicidade. */
+  async mintEan(orgId: string): Promise<{ ean: string }> {
+    return { ean: await this.uniqueEan(orgId) }
   }
 
   /**
