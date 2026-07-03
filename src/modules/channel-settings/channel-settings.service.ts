@@ -54,12 +54,14 @@ export interface ChannelFeeRule {
 /** Escolhe a regra mais ESPECÍFICA que casa com (price, categoryId) — função
  *  pura, pra callers em lote resolverem N itens sem N queries. Especificidade:
  *  categoria casada > genérica; entre faixas que casam, a mais estreita.
- *  Retorna null se nenhuma regra casa (caller cai no take achatado). */
-export function pickRuleTakeRate(
+ *  Retorna null se nenhuma regra casa (caller cai no take achatado).
+ *  ⚠️ Shopee cobra % + TAXA FIXA por unidade (tabela mar/2026) — a faixa é
+ *  escolhida pelo preço UNITÁRIO do item, e a fixa multiplica a quantidade. */
+export function pickRuleFee(
   rules: ChannelFeeRule[],
   price: number | null | undefined,
   categoryId?: string | null,
-): number | null {
+): { pct: number; fixed: number } | null {
   const p = Number(price)
   const matches = rules.filter(r => {
     if (r.category_id != null && r.category_id !== categoryId) return false
@@ -79,7 +81,47 @@ export function pickRuleTakeRate(
     return wa - wb
   })
   const pct = Number(matches[0].estimated_take_rate_pct)
-  return Number.isFinite(pct) ? pct : null
+  if (!Number.isFinite(pct)) return null
+  return { pct, fixed: Number(matches[0].fixed_fee) || 0 }
+}
+
+/** Compat: só o % da regra (callers antigos). Prefira estimateSaleFee, que
+ *  aplica também a taxa fixa por unidade. */
+export function pickRuleTakeRate(
+  rules: ChannelFeeRule[],
+  price: number | null | undefined,
+  categoryId?: string | null,
+): number | null {
+  return pickRuleFee(rules, price, categoryId)?.pct ?? null
+}
+
+/** Tarifa estimada em R$ de uma linha de venda: regra por faixa do preço
+ *  UNITÁRIO (% sobre o total + fixa × quantidade); sem regra → % achatado. */
+export function estimateSaleFee(
+  rules: ChannelFeeRule[],
+  unitPrice: number,
+  qty: number,
+  flatPct: number,
+  categoryId?: string | null,
+): number {
+  const q = Math.max(1, Number(qty) || 1)
+  const total = unitPrice * q
+  const rule = pickRuleFee(rules, unitPrice, categoryId)
+  if (!rule) return Math.round(total * flatPct / 100 * 100) / 100
+  return Math.round((total * rule.pct / 100 + rule.fixed * q) * 100) / 100
+}
+
+/** Take efetivo (%) de 1 unidade a um dado preço — pra motores que trabalham
+ *  em % (margem de campanha): converte % + fixa no equivalente percentual. */
+export function effectiveTakePct(
+  rules: ChannelFeeRule[],
+  unitPrice: number,
+  flatPct: number,
+  categoryId?: string | null,
+): number {
+  if (!(unitPrice > 0)) return flatPct
+  const fee = estimateSaleFee(rules, unitPrice, 1, flatPct, categoryId)
+  return Math.round(fee / unitPrice * 10000) / 100
 }
 
 /** Custos por canal (org × canal) — take rate estimado %, taxa fixa, etc.

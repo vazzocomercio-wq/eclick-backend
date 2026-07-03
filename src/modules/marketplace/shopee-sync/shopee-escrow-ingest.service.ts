@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
+import { round2 } from '../../../common/margin'
 import { supabaseAdmin } from '../../../common/supabase'
 import { MarketplaceService } from '../marketplace.service'
 import { MpConnection } from '../adapters/base'
@@ -116,7 +117,89 @@ export class ShopeeEscrowIngestService {
     }
 
     this.logger.log(`[shopee.escrow] org=${orgId.slice(0, 8)} processed=${todo.length} upserted=${upserted} failed=${failed}`)
+
+    // Fase 2: reconcilia a tarifa REAL de volta nos pedidos (inclui backfill
+    // de escrow ingerido em execuções anteriores). Best-effort.
+    await this.reconcileOrders(orgId).catch(e =>
+      this.logger.warn(`[shopee.escrow] reconcile falhou: ${(e as Error).message}`))
+
     return { processed: todo.length, upserted, skipped: allSns.length - todo.length, failed }
+  }
+
+  /** Reconciliação: aplica a tarifa REAL (escrow → platform_charges) de volta
+   *  nas linhas de `orders` — a tela de pedidos passa a mostrar o dinheiro
+   *  exato, não a estimativa. Distribui o total do pedido por linha
+   *  proporcional ao valor (resto na última, soma fecha no centavo) e
+   *  recalcula lucro bruto e margem. Idempotente: linha vira
+   *  platform_fee_source='escrow' e a ingestão não regride (guard). */
+  async reconcileOrders(orgId: string): Promise<{ orders: number; lines: number }> {
+    const { data: chRows } = await supabaseAdmin
+      .from('platform_charges')
+      .select('external_order_id, amount')
+      .eq('organization_id', orgId)
+      .eq('source', 'shopee_escrow')
+      .limit(20000)
+    const realBySn = new Map<string, number>()
+    for (const c of (chRows ?? []) as Array<{ external_order_id: string; amount: number }>) {
+      const sn = String(c.external_order_id)
+      realBySn.set(sn, round2((realBySn.get(sn) ?? 0) + Number(c.amount)))
+    }
+    if (!realBySn.size) return { orders: 0, lines: 0 }
+
+    let nOrders = 0, nLines = 0
+    const sns = [...realBySn.keys()]
+    for (let i = 0; i < sns.length; i += 200) {
+      const chunk = sns.slice(i, i + 200)
+      const { data: ordRows } = await supabaseAdmin
+        .from('orders')
+        .select('id, external_order_id, sale_price, shipping_cost, cost_price, tax_amount')
+        .eq('organization_id', orgId)
+        .eq('source', 'shopee')
+        .neq('platform_fee_source', 'escrow')
+        .in('external_order_id', chunk)
+      type Line = { id: string; external_order_id: string; sale_price: number | null; shipping_cost: number | null; cost_price: number | null; tax_amount: number | null }
+      const bySn = new Map<string, Line[]>()
+      for (const r of (ordRows ?? []) as Line[]) {
+        const sn = String(r.external_order_id)
+        if (!bySn.has(sn)) bySn.set(sn, [])
+        bySn.get(sn)!.push(r)
+      }
+
+      for (const [sn, rows] of bySn) {
+        const totalFee = realBySn.get(sn)
+        if (totalFee == null) continue
+        const totalPrice = rows.reduce((s, r) => s + (Number(r.sale_price) || 0), 0)
+        let distributed = 0
+        for (let j = 0; j < rows.length; j++) {
+          const r = rows[j]
+          const price = Number(r.sale_price) || 0
+          // última linha leva o resto — a soma das linhas fecha no total real
+          const fee = j === rows.length - 1
+            ? round2(totalFee - distributed)
+            : (totalPrice > 0 ? round2(totalFee * price / totalPrice) : 0)
+          distributed = round2(distributed + fee)
+          const ship = Number(r.shipping_cost) || 0
+          const gross = round2(price - fee - ship)
+          const patch: Record<string, unknown> = {
+            platform_fee:        fee,
+            gross_profit:        gross,
+            platform_fee_source: 'escrow',
+            updated_at:          new Date().toISOString(),
+          }
+          if (r.cost_price != null) {
+            const margin = round2(gross - Number(r.cost_price) - (Number(r.tax_amount) || 0))
+            patch.contribution_margin = margin
+            patch.contribution_margin_pct = price > 0 ? round2(margin / price * 100) : 0
+          }
+          const { error } = await supabaseAdmin.from('orders').update(patch).eq('id', r.id)
+          if (error) this.logger.warn(`[shopee.escrow] reconcile ${sn}: ${error.message}`)
+          else nLines++
+        }
+        nOrders++
+      }
+    }
+    if (nOrders > 0) this.logger.log(`[shopee.escrow] reconcile org=${orgId.slice(0, 8)}: ${nOrders} pedidos, ${nLines} linhas → tarifa REAL`)
+    return { orders: nOrders, lines: nLines }
   }
 
   /** Cron diário 04:50 — ingere escrow de toda org com loja Shopee conectada. */

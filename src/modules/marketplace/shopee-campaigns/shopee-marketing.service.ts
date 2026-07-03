@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { round2, computeContributionMargin } from '../../../common/margin'
-import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, estimateSaleFee, pickRuleFee } from '../../channel-settings/channel-settings.service'
 import { ShopeeListingLinkService } from '../shopee-sync/shopee-listing-link.service'
 import { CampaignMarginService } from './campaign-margin.service'
 import { MarketplaceService } from '../marketplace.service'
@@ -94,6 +94,7 @@ export class ShopeeMarketingService {
     if (cost == null || cost <= 0) throw new BadRequestException('Produto sem custo cadastrado — sem custo não dá pra garantir a margem da promoção.')
 
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
     const { data: org } = await supabaseAdmin.from('organizations').select('min_campaign_margin_pct').eq('id', orgId).maybeSingle<{ min_campaign_margin_pct: number | null }>()
     const floorPct = org?.min_campaign_margin_pct ?? 8
 
@@ -106,7 +107,8 @@ export class ShopeeMarketingService {
     const mkModel = (model_id: number, original: number) => {
       const promo = round2(original * (1 - d / 100))
       const mm = computeContributionMargin({
-        price: promo, saleFee: round2(promo * commissionPct / 100), shipping: 0,
+        // tarifa % + fixa no PREÇO PROMOCIONAL (faixa pode mudar com o desconto)
+        price: promo, saleFee: estimateSaleFee(feeRules, promo, 1, commissionPct), shipping: 0,
         cost, taxPercentage: prod?.tax_percentage ?? 0, taxOnFreight: prod?.tax_on_freight ?? false,
       })
       return { model_id, original_price: original, promotion_price: promo, margin_pct: mm.contributionMarginPct }
@@ -224,7 +226,8 @@ export class ShopeeMarketingService {
     // 1) anúncios vinculados + produto + margem (reuso do keystone)
     const status = await this.link.getLinkStatus(orgId)
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
-    if (commissionPct === 0) {
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
+    if (commissionPct === 0 && !feeRules.length) {
       warnings.push('Comissão Shopee = 0% (Configurações › Canais). As margens estão otimistas; o piso de margem só fica real com a comissão configurada.')
     }
 
@@ -285,13 +288,19 @@ export class ShopeeMarketingService {
 
       if (cost == null || cost <= 0) continue // sem custo não dá pra garantir margem
 
-      // desconto máximo que mantém margem ≥ piso (fechado; shipping 0)
-      const k = commissionPct / 100
+      // desconto máximo que mantém margem ≥ piso (fechado; shipping 0).
+      // Tarifa = % + FIXA por unidade: p(1−k−t) − F − custo ≥ piso·p →
+      // preço mínimo = (custo + F) / (1 − k − t − piso). k e F saem da faixa
+      // do preço ATUAL (aprox.: desconto grande pode mudar de faixa; a trava
+      // do apply re-valida com a faixa do preço promocional).
+      const rule = pickRuleFee(feeRules, price)
+      const k = (rule?.pct ?? commissionPct) / 100
+      const F = rule?.fixed ?? 0
       const t = (it.product?.tax_percentage != null ? Number(it.product.tax_percentage) : 0) / 100
       const denom = 1 - k - t - floorPct / 100
       let maxSafePct = 0
       if (denom > 0) {
-        const minPrice = cost / denom
+        const minPrice = (cost + F) / denom
         maxSafePct = Math.max(0, Math.floor((1 - minPrice / price) * 100))
       }
       maxSafePct = Math.min(maxSafePct, 90)

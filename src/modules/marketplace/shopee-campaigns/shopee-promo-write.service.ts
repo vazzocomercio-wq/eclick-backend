@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import axios from 'axios'
 import { supabaseAdmin } from '../../../common/supabase'
 import { round2, computeContributionMargin } from '../../../common/margin'
-import { ChannelSettingsService } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, effectiveTakePct, pickRuleFee } from '../../channel-settings/channel-settings.service'
 import { CampaignMarginService } from './campaign-margin.service'
 import { MarketplaceService } from '../marketplace.service'
 import { ShopeeProductSyncService } from '../shopee-sync/shopee-product-sync.service'
@@ -288,6 +288,7 @@ export class ShopeePromoWriteService {
     if (!itemIds?.length) throw new BadRequestException('Informe os itens (item_ids) pra sugerir desconto.')
     const status = await this.link.getLinkStatus(orgId)
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
     const floor = await this.floorPct(orgId)
     const wanted = new Set(itemIds.map(Number))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -308,10 +309,14 @@ export class ShopeePromoWriteService {
       const price = Number(r.price)
       const cost = Number(r.product.cost_price) || 0
       const t = (Number(r.product.tax_percentage) || 0) / 100
-      const k = commissionPct / 100
+      // tarifa = % + FIXA por unidade (faixa do preço atual; a trava re-valida
+      // depois com a faixa do preço promocional)
+      const rule = pickRuleFee(feeRules, price)
+      const k = (rule?.pct ?? commissionPct) / 100
+      const F = rule?.fixed ?? 0
       // teto: maior desconto que ainda deixa margem ≥ 0 (a trava re-valida depois)
       const denom = 1 - k - t
-      const maxSafe = cost > 0 && denom > 0 && price > 0 ? Math.max(0, Math.min(90, Math.floor((1 - (cost / denom) / price) * 100))) : 0
+      const maxSafe = cost > 0 && denom > 0 && price > 0 ? Math.max(0, Math.min(90, Math.floor((1 - ((cost + F) / denom) / price) * 100))) : 0
       return {
         item_id: Number(r.item_id), title: String(r.title ?? '').slice(0, 60),
         price, cost, margin_pct: r.margin?.contribution_margin_pct ?? null,
@@ -375,6 +380,7 @@ export class ShopeePromoWriteService {
   private async previewByDiscount(orgId: string, shopId: number | null, discountPct: number, itemIds: number[] | null): Promise<PromoPreview> {
     const status = await this.link.getLinkStatus(orgId)
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
     const floor = await this.floorPct(orgId)
     const wanted = itemIds ? new Set(itemIds.map(Number)) : null
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -389,10 +395,12 @@ export class ShopeePromoWriteService {
     }
     const items: PromoItemPreview[] = []
     for (const r of rows) {
+      // take EFETIVO (% + fixa convertida) na faixa do preço PROMOCIONAL
+      const promoPrice = Number(r.price) * (1 - discountPct / 100)
       const sim = await this.margin.evaluate(orgId, {
         price: Number(r.price),
         discount_pct: discountPct / 100,
-        shopee_commission_pct: commissionPct / 100,
+        shopee_commission_pct: effectiveTakePct(feeRules, promoPrice, commissionPct) / 100,
         cost: Number(r.product.cost_price),
         tax_percentage: r.product.tax_percentage ?? undefined,
       })
@@ -443,6 +451,7 @@ export class ShopeePromoWriteService {
     const adapter = (await this.mp.resolveByShop(orgId, conn.shop_id!, 'shopee'))?.adapter as ShopeeAdapter
     const status = await this.link.getLinkStatus(orgId)
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'shopee', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'shopee')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const byItem = new Map((status.items as any[]).map(i => [Number(i.item_id), i]))
     const out: FlashItemDetail[] = []
@@ -466,7 +475,7 @@ export class ShopeePromoWriteService {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mk = (model_id: number, original: number, available: number) => {
         const promo = round2(original * (1 - d / 100))
-        const sim = this.simMargin(promo, commissionPct, cost, taxPct)
+        const sim = this.simMargin(promo, effectiveTakePct(feeRules, promo, commissionPct), cost, taxPct)
         return {
           model_id, original_price: original, promotion_price: promo,
           margin_pct: sim, available_stock: available,

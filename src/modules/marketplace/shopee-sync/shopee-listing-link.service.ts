@@ -7,7 +7,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
-import { ChannelSettingsService, pickRuleTakeRate } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, estimateSaleFee } from '../../channel-settings/channel-settings.service'
 
 /** F18 Fase A — Vínculo anúncio Shopee ↔ produto do catálogo (keystone).
  *
@@ -281,10 +281,12 @@ export class ShopeeListingLinkService {
         tax_amount: number; contribution_margin: number; contribution_margin_pct: number
       } | null = null
       if (prod && prod.cost_price != null && price != null && price > 0) {
-        // take por categoria + faixa de ticket do anúncio (regra mais específica
-        // ganha); cai no achatado se não houver regra.
-        const itemTakePct = pickRuleTakeRate(feeRules, price, prod.category ?? null) ?? flatTakePct
-        const saleFee = round2(price * itemTakePct / 100)
+        // Tarifa Shopee = % + FIXA por unidade (tabela mar/2026), regra por
+        // faixa/categoria; cai no % achatado se não houver regra. O
+        // commission_pct devolvido é o take EFETIVO (fee/preço) — a UI
+        // recalcula a tarifa a partir dele e fecha no mesmo valor.
+        const saleFee = estimateSaleFee(feeRules, price, 1, flatTakePct, prod.category ?? null)
+        const itemTakePct = round2(saleFee / price * 100)
         const m = computeContributionMargin({
           price, saleFee, shipping: 0,
           cost:          Number(prod.cost_price),

@@ -6,7 +6,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import type { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
-import { ChannelSettingsService, ChannelFeeRule, pickRuleTakeRate } from '../../channel-settings/channel-settings.service'
+import { ChannelSettingsService, ChannelFeeRule, estimateSaleFee } from '../../channel-settings/channel-settings.service'
 import { StockService } from '../../stock/stock.service'
 
 /** F18 F1.6 — Ingestão de pedidos Shopee na tabela unificada `public.orders`.
@@ -255,14 +255,20 @@ export class ShopeeOrdersIngestionService {
       return s && !/^\*+$/.test(s) ? s : null
     }
 
-    // valores já capturados em syncs anteriores (janela aberta)
-    const { data: prevRow } = await supabaseAdmin
+    // valores já capturados em syncs anteriores (janela aberta) + linhas cuja
+    // tarifa REAL (escrow) já reconciliou — essas o re-sync NÃO pode regredir
+    // pra estimativa.
+    const { data: prevRows } = await supabaseAdmin
       .from('orders')
-      .select('buyer_doc_number, buyer_phone, buyer_name, raw_data')
+      .select('sku, platform_fee_source, buyer_doc_number, buyer_phone, buyer_name, raw_data')
       .eq('source', 'shopee')
       .eq('external_order_id', String(od?.order_sn))
-      .limit(1)
-      .maybeSingle<{ buyer_doc_number: string | null; buyer_phone: string | null; buyer_name: string | null; raw_data: Record<string, unknown> | null }>()
+    const prevRow = (prevRows ?? [])[0] as { buyer_doc_number: string | null; buyer_phone: string | null; buyer_name: string | null; raw_data: Record<string, unknown> | null } | undefined
+    const escrowLockedSkus = new Set(
+      ((prevRows ?? []) as Array<{ sku: string | null; platform_fee_source: string | null }>)
+        .filter(r => r.platform_fee_source === 'escrow')
+        .map(r => String(r.sku)),
+    )
 
     const buyerOpen = unmasked(rcpt?.name)
     const buyer = buyerOpen
@@ -301,9 +307,11 @@ export class ShopeeOrdersIngestionService {
     for (const g of groups.values()) {
       const link = linkByItemId.get(g.item_id) ?? null
       const sale_price = round2(g.sale_total)
-      // take por faixa de ticket do pedido; cai no achatado se não houver regra.
-      const takePct = pickRuleTakeRate(feeRules, sale_price) ?? commissionPct
-      const platform_fee = round2(sale_price * takePct / 100)
+      // Tarifa Shopee (tabela mar/2026) = % + FIXA por unidade. A faixa é pelo
+      // preço UNITÁRIO (não pelo total da linha); a fixa multiplica a qtd.
+      // Sem regra configurada → % achatado da org (fallback).
+      const unitPrice = g.qty > 0 ? sale_price / g.qty : sale_price
+      const platform_fee = estimateSaleFee(feeRules, unitPrice, g.qty, commissionPct)
       const shipping_cost = subTotalAll > 0 ? round2(shippingFee * sale_price / subTotalAll) : 0
       const cost_price = link?.cost_price != null ? round2(Number(link.cost_price) * g.qty) : null
 
@@ -321,6 +329,16 @@ export class ShopeeOrdersIngestionService {
       }
       const gross_profit = round2(sale_price - platform_fee - shipping_cost)
 
+      // linha já reconciliada com o escrow REAL → não regride pra estimativa
+      const locked = escrowLockedSkus.has(g.sku)
+      const feeFields = locked ? {} : {
+        platform_fee,
+        gross_profit,
+        tax_amount,
+        contribution_margin,
+        contribution_margin_pct,
+        platform_fee_source: 'estimated',
+      }
       const { error } = await supabaseAdmin.from('orders').upsert(
         {
           organization_id:   orgId,
@@ -332,16 +350,13 @@ export class ShopeeOrdersIngestionService {
           product_title:     g.product_title,
           quantity:          g.qty,
           sale_price,
-          platform_fee,
+          ...feeFields,
           shipping_cost,
           cost_price,
-          tax_amount,
-          gross_profit,
-          contribution_margin,
-          contribution_margin_pct,
           status,
           shipping_status:    this.mapShippingStatus(od?.order_status),
           channel_account_id: String(shopId),  // carimbo da loja (multi-loja dropship)
+          marketplace_listing_id: g.item_id || null,  // vínculo na tela de pedidos
           buyer_name:        buyer,
           buyer_username:    buyerUsername,
           buyer_phone:       phone,

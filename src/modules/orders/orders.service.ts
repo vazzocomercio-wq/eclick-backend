@@ -1502,6 +1502,7 @@ interface DbOrderRow {
   gross_profit:     number | null
   contribution_margin:     number | null
   contribution_margin_pct: number | null
+  platform_fee_source?: string | null
   buyer_name:       string | null
   buyer_last_name:  string | null
   buyer_username:   string | null
@@ -1718,6 +1719,8 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     order_items:   [orderItem],
     cost_price:    row.cost_price ?? 0,
     platform_fee:  row.platform_fee ?? 0,
+    // 'escrow' = tarifa REAL reconciliada do repasse; 'estimated' = regra de tarifa
+    platform_fee_source: row.platform_fee_source ?? 'estimated',
     shipping_cost: row.shipping_cost ?? 0,
     tax_amount:    row.tax_amount ?? 0,
     gross_profit:  row.gross_profit ?? 0,
