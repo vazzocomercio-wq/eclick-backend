@@ -163,7 +163,96 @@ export class ShopeeOrdersIngestionService {
     await this.captureOpenRecipient(conn, od)
     const lines = await this.mirrorOrder(orgId, od, commissionPct, Number(shopId), feeRules)
     this.logger.log(`[shopee.orders.push] pedido=${orderSn} shop=${shopId} linhas=${lines} (tempo real)`)
+    // Sinal "venda nova" no Intelligence Hub (toast com valores/margem) —
+    // paridade com o notifier do ML. Fire-and-forget: falha não afeta o ack.
+    if (lines > 0) {
+      void this.notifyNewSaleSignal(orgId, orderSn).catch(e =>
+        this.logger.warn(`[shopee.new-sale] ${orderSn}: ${(e as Error)?.message ?? e}`))
+    }
     return { ingested: lines > 0 }
+  }
+
+  /** Sinal `new_sale` pra venda Shopee — lê as linhas recém-gravadas em
+   *  `orders` (margem/tarifa já calculadas) e insere em alert_signals com o
+   *  MESMO shape do NewSaleNotifierService do ML (a UI de toasts/hub já
+   *  entende). Guard de idempotência: 1 sinal por pedido (webhooks de
+   *  status/rastreio/etiqueta chegam em sequência pro mesmo pedido).
+   *  analyzer='ml' porque o CHECK de alert_signals ainda não tem valor por
+   *  canal — a plataforma real vai em data.platform (refactor futuro). */
+  private async notifyNewSaleSignal(orgId: string, orderSn: string): Promise<void> {
+    const { data: existing } = await supabaseAdmin
+      .from('alert_signals')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('category', 'new_sale')
+      .eq('data->>order_id', orderSn)
+      .limit(1)
+    if (existing?.length) return
+
+    const { data: rows } = await supabaseAdmin
+      .from('orders')
+      .select('product_id, product_title, sku, quantity, sale_price, cost_price, platform_fee, shipping_cost, tax_amount, contribution_margin, contribution_margin_pct, status, sold_at, channel_account_id')
+      .eq('organization_id', orgId)
+      .eq('source', 'shopee')
+      .eq('external_order_id', orderSn)
+    const lines = (rows ?? []) as Array<{
+      product_id: string | null; product_title: string | null; sku: string | null
+      quantity: number | null; sale_price: number | null; cost_price: number | null
+      platform_fee: number | null; shipping_cost: number | null; tax_amount: number | null
+      contribution_margin: number | null; contribution_margin_pct: number | null
+      status: string | null; sold_at: string | null; channel_account_id: string | null
+    }>
+    if (!lines.length || lines[0].status === 'cancelled') return
+
+    // agrega o pedido (sale_price Shopee JÁ é o total da linha)
+    const total   = round2(lines.reduce((s, l) => s + (Number(l.sale_price) || 0), 0))
+    const qty     = lines.reduce((s, l) => s + (Number(l.quantity) || 0), 0)
+    const tarifa  = round2(lines.reduce((s, l) => s + (Number(l.platform_fee) || 0), 0))
+    const frete   = round2(lines.reduce((s, l) => s + (Number(l.shipping_cost) || 0), 0))
+    const cost    = round2(lines.reduce((s, l) => s + (Number(l.cost_price) || 0), 0))
+    const tax     = round2(lines.reduce((s, l) => s + (Number(l.tax_amount) || 0), 0))
+    const hasMargin = lines.some(l => l.contribution_margin != null)
+    const margemBrl = hasMargin
+      ? round2(lines.reduce((s, l) => s + (Number(l.contribution_margin) || 0), 0))
+      : round2(total - cost - tarifa - frete - tax)
+    const margemPct = total > 0 ? round2(margemBrl / total * 100) : 0
+
+    const first = lines[0]
+    const title = String(first.product_title ?? '').trim() || `Venda ${orderSn}`
+    const summary = qty > 1
+      ? `Shopee: ${qty}× ${title} · R$ ${total.toFixed(2)} · margem ${margemPct.toFixed(1)}%`
+      : `Shopee: ${title} · R$ ${total.toFixed(2)} · margem ${margemPct.toFixed(1)}%`
+    const severity = margemPct < 10 ? 'warning' : 'info'
+    const score = margemPct < 0 ? 75 : margemPct < 10 ? 55 : 25
+
+    const { error } = await supabaseAdmin.from('alert_signals').insert({
+      organization_id: orgId,
+      analyzer:        'ml',
+      category:        'new_sale',
+      severity,
+      score,
+      entity_type:     'product',
+      entity_id:       first.product_id ?? first.sku ?? orderSn,
+      entity_name:     title,
+      summary_pt:      summary,
+      suggestion_pt:   hasMargin ? null : 'Venda sem custo cadastrado — vincule o anúncio a um produto com custo pra margem real.',
+      status:          'new',
+      data: {
+        order_id: orderSn,
+        platform: 'shopee',
+        shop_id:  first.channel_account_id,
+        sku:      first.sku ?? null,
+        sold_at:  first.sold_at ?? null,
+        values: {
+          quantity: qty, total, cost, tarifa_ml: tarifa,
+          frete_vendedor: frete, imposto: tax,
+          margem_brl: margemBrl, margem_pct: margemPct,
+        },
+      },
+      expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
+    })
+    if (error) throw new Error(error.message)
+    this.logger.log(`[shopee.new-sale] sinal emitido pedido=${orderSn} total=R$${total} margem=${margemPct}%`)
   }
 
   /** Captura o endereço ABERTO do destinatário via documento de envio

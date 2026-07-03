@@ -1284,7 +1284,7 @@ export class OrdersService {
           item_id: (itemRaw.id as string) ?? row.marketplace_listing_id ?? null,
           title: (itemRaw.title as string) ?? row.product_title,
           quantity: row.quantity ?? 1,
-          unit_price: Number(row.sale_price ?? 0),
+          unit_price: rowUnitPrice(row),
           seller_sku: row.sku ?? null,
         }],
         shipping_state: shippingState,
@@ -1389,7 +1389,7 @@ export class OrdersService {
         sku: row.sku,
         thumbnail: (itemRaw.thumbnail as string) ?? null,
         quantity: row.quantity ?? 1,
-        unit_price: Number(row.sale_price ?? 0),
+        unit_price: rowUnitPrice(row),
         total_amount: totalAmount,
         shipping_type: (shipping.logistic_type as string) ?? null,
         frete_comprador: freteComprador,
@@ -1532,6 +1532,19 @@ function rowRevenue(row: { source?: string | null; sale_price?: number | null; q
   return price * Number(row.quantity ?? 1)
 }
 
+/** Preço UNITÁRIO real da linha (espelho do rowRevenue): Shopee/TikTok gravam
+ *  sale_price como TOTAL da linha → dividir pela qtd. Sem isso o campo
+ *  `unit_price` das respostas vinha com o total e consumidores que fazem
+ *  `unit_price × quantity` (Top produtos do dashboard) dobravam a receita. */
+function rowUnitPrice(row: { source?: string | null; sale_price?: number | null; quantity?: number | null }): number {
+  const price = Number(row.sale_price ?? 0)
+  if (row.source === 'shopee' || row.source === 'tiktok_shop') {
+    const q = Number(row.quantity ?? 1) || 1
+    return Math.round((price / q) * 100) / 100
+  }
+  return price
+}
+
 /** Converte row da tabela orders pro shape consumido por PedidosTable
  *  / OrderCard. raw_data tem shape simplificado salvo pelo worker
  *  (item singular, sem array order_items) — re-empacotamos pra
@@ -1616,8 +1629,8 @@ function mapRowToFrontend(row: DbOrderRow): Record<string, unknown> {
     variation_id:         itemRaw.variation_id  ?? row.variation_id           ?? null,
     variation_attributes: (itemRaw.variation_attributes as unknown[]) ?? [],
     quantity:             itemRaw.quantity      ?? row.quantity               ?? 1,
-    unit_price:           itemRaw.unit_price    ?? row.sale_price             ?? 0,
-    full_unit_price:      itemRaw.full_unit_price ?? itemRaw.unit_price       ?? row.sale_price ?? 0,
+    unit_price:           itemRaw.unit_price    ?? rowUnitPrice(row),
+    full_unit_price:      itemRaw.full_unit_price ?? itemRaw.unit_price       ?? rowUnitPrice(row),
     sale_fee:             itemRaw.sale_fee      ?? row.platform_fee           ?? 0,
   }
 

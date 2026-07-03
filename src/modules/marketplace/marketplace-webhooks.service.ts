@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, Optional } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import { EventsGateway } from '../events/events.gateway'
 import { MarketplaceAdapterRegistry } from './adapters/registry'
 import { ShopeeAdapter } from './adapters/shopee.adapter'
 import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
@@ -22,6 +23,8 @@ export class MarketplaceWebhooksService {
   constructor(
     private readonly registry: MarketplaceAdapterRegistry,
     private readonly orders:   ShopeeOrdersIngestionService,
+    /** EventsModule é @Global; Optional só por segurança em testes. */
+    @Optional() private readonly events?: EventsGateway,
   ) {}
 
   /** Entry point pra webhook Shopee. Sempre retorna 200 (mesmo em sig falha)
@@ -167,6 +170,18 @@ export class MarketplaceWebhooksService {
         const r = await this.orders.ingestSingleOrder(organizationId, shopId, orderSn)
         if (!r.ingested && r.reason !== 'debounce') {
           this.logger.warn(`[shopee.webhook] ${tag} pedido=${orderSn}: ${r.reason}`)
+        }
+        // Paridade com o ML: avisa a UI em tempo real (tela de pedidos e
+        // dashboard escutam 'order:invalidate' e re-buscam em ~3s). Sem isso
+        // a venda Shopee só aparecia no próximo polling (60s+).
+        if (r.ingested) {
+          this.events?.emitToOrg(organizationId, 'order:invalidate', {
+            external_order_id:  orderSn,
+            channel_account_id: shopId,
+            topic:              `shopee_${tag}`,
+            kind:               'orders',
+            received_at:        new Date().toISOString(),
+          })
         }
       } catch (e: unknown) {
         // erro na ingestão NÃO derruba o ack — cron horário cobre o gap
