@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
   Inject,
+  Optional,
   forwardRef,
 } from '@nestjs/common'
 import * as crypto from 'node:crypto'
@@ -12,7 +13,8 @@ import { supabaseAdmin } from '../../common/supabase'
 import { encryptConfig, decryptConfig } from '../marketplace/crypto.util'
 import { signTikTokShop } from './tiktok-shop-sign.util'
 import { StockService } from '../stock/stock.service'
-import { ChannelSettingsService } from '../channel-settings/channel-settings.service'
+import { ChannelSettingsService, estimateSaleFee } from '../channel-settings/channel-settings.service'
+import { EventsGateway } from '../events/events.gateway'
 import { computeContributionMargin, round2 } from '../../common/margin'
 import { resolveCatalogProductIdBySku, linkProductListing } from '../../common/product-listing-link'
 
@@ -172,6 +174,7 @@ export class TikTokShopService {
     @Inject(forwardRef(() => StockService))
     private readonly stockService: StockService,
     private readonly channelSettings: ChannelSettingsService,
+    @Optional() private readonly events?: EventsGateway,
   ) {}
 
   private env(): { appKey: string; appSecret: string; serviceId: string } {
@@ -536,6 +539,24 @@ export class TikTokShopService {
     return cipher
   }
 
+  /** GET assinado às APIs de Finance (statements/settlement) — usado pelo
+   *  TikTokFinanceIngestService. Resolve token + shop_cipher da org. */
+  async financeGet<T>(
+    orgId: string,
+    path: string,
+    query: Record<string, string | number | undefined> = {},
+  ): Promise<T> {
+    const accessToken = await this.getAccessToken(orgId)
+    if (!accessToken) throw new BadRequestException('Loja TikTok Shop não conectada')
+    const shopCipher = await this.getShopCipher(orgId)
+    return this.ttsRequest<T>({
+      method: 'GET',
+      path,
+      accessToken,
+      query: { shop_cipher: shopCipher, ...query },
+    })
+  }
+
   /** Importa pedidos do TikTok Shop → tiktok_shop_orders (isolada). Até maxPages. */
   async importOrders(
     orgId: string,
@@ -803,8 +824,23 @@ export class TikTokShopService {
       }
     }
 
-    // Custos do canal — comissão configurada da org pro tiktok_shop.
+    // Custos do canal — regra % + FIXA por item (channel_fee_rules; TikTok BR =
+    // 12% + R$4/item, validado no settlement). Fallback: % achatado da org.
     const commissionPct = await this.channelSettings.getEstimatedTakeRatePct(orgId, 'tiktok_shop', 0)
+    const feeRules = await this.channelSettings.getFeeRules(orgId, 'tiktok_shop')
+
+    // Linhas já reconciliadas com o settlement REAL — o re-sync (cron 30min)
+    // NÃO pode regredir essas pra estimativa.
+    const { data: prevRows } = await supabaseAdmin
+      .from('orders')
+      .select('sku, platform_fee_source')
+      .eq('source', 'tiktok_shop')
+      .eq('external_order_id', o.id)
+    const settledSkus = new Set(
+      ((prevRows ?? []) as Array<{ sku: string | null; platform_fee_source: string | null }>)
+        .filter(r => r.platform_fee_source === 'settlement')
+        .map(r => String(r.sku)),
+    )
 
     // Sub_total e frete vindos do payment do pedido (rateio por SKU).
     const subTotalAll =
@@ -831,7 +867,9 @@ export class TikTokShopService {
     for (const g of groups.values()) {
       const link = linkBySkuId.get(g.sku_id) ?? null
       const sale_price = round2(g.sale_total)
-      const platform_fee = round2(sale_price * commissionPct / 100)
+      // Faixa pelo preço UNITÁRIO; taxa fixa multiplica a quantidade.
+      const unitPrice = g.qty > 0 ? sale_price / g.qty : sale_price
+      const platform_fee = estimateSaleFee(feeRules, unitPrice, g.qty, commissionPct)
       const shipping_cost = subTotalAll > 0 ? round2(shippingFee * sale_price / subTotalAll) : 0
       const cost_price = link?.cost_price != null ? round2(Number(link.cost_price) * g.qty) : null
 
@@ -854,6 +892,17 @@ export class TikTokShopService {
       // Lucro bruto = receita − tarifa − frete (antes de custo/imposto).
       const gross_profit = round2(sale_price - platform_fee - shipping_cost)
 
+      // Linha já reconciliada com o settlement REAL → não regride pra estimativa.
+      const locked = settledSkus.has(g.sku)
+      const feeFields = locked ? {} : {
+        platform_fee,
+        shipping_cost,
+        tax_amount,
+        gross_profit,
+        contribution_margin,
+        contribution_margin_pct,
+        platform_fee_source: 'estimated',
+      }
       const { error } = await supabaseAdmin.from('orders').upsert(
         {
           organization_id: orgId,
@@ -865,13 +914,8 @@ export class TikTokShopService {
           product_title: g.product_title,
           quantity: g.qty,
           sale_price,
-          platform_fee,
-          shipping_cost,
+          ...feeFields,
           cost_price,
-          tax_amount,
-          gross_profit,
-          contribution_margin,
-          contribution_margin_pct,
           status,
           shipping_status: shippingStatus,
           channel_account_id: shopId ? String(shopId) : null,
@@ -1015,6 +1059,16 @@ export class TikTokShopService {
       if (orderId != null) {
         const ok = await this.syncOrderById(orgId, String(orderId))
         this.logger.log(`[tts.webhook] order=${orderId} sync=${ok} type=${payload.type}`)
+        // Tempo real: painel/Vendas ao Vivo invalidam cache (paridade ML/Shopee).
+        if (ok) {
+          this.events?.emitToOrg(orgId, 'order:invalidate', {
+            external_order_id: String(orderId),
+            channel_account_id: shopId,
+            topic: 'tiktok_order',
+            kind: 'orders',
+            received_at: new Date().toISOString(),
+          })
+        }
         return { handled: true, action: 'order' }
       }
       if (productId != null) {

@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common'
 import type { Response } from 'express'
 import { TikTokShopService } from './tiktok-shop.service'
+import { TikTokFinanceIngestService } from './tiktok-finance-ingest.service'
 import { composeListingDescription } from '../../common/listing-description'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { Public } from '../../common/decorators/public.decorator'
@@ -34,7 +35,10 @@ interface ReqUserPayload {
  */
 @Controller('tiktok-shop')
 export class TikTokShopController {
-  constructor(private readonly svc: TikTokShopService) {}
+  constructor(
+    private readonly svc: TikTokShopService,
+    private readonly finance: TikTokFinanceIngestService,
+  ) {}
 
   /** Front chama, recebe a URL e faz window.location.href. */
   @Get('oauth/auth-url')
@@ -110,6 +114,15 @@ export class TikTokShopController {
   shops(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     return this.svc.getAuthorizedShops(u.orgId)
+  }
+
+  /** Settlement REAL (Finance API) → platform_charges + reconciliação dos pedidos. */
+  @Post('finance/ingest')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SupabaseAuthGuard)
+  financeIngest(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.finance.ingest(u.orgId)
   }
 
   /** Importa pedidos do TikTok Shop pra tabela isolada (tiktok_shop_orders). */

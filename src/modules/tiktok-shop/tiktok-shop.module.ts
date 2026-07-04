@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common'
 import { TikTokShopController } from './tiktok-shop.controller'
 import { TikTokShopService } from './tiktok-shop.service'
 import { TikTokShopSyncCron } from './tiktok-shop-sync.cron'
+import { TikTokFinanceIngestService } from './tiktok-finance-ingest.service'
 import { StockModule } from '../stock/stock.module'
 import { ChannelSettingsModule } from '../channel-settings/channel-settings.module'
 
@@ -13,7 +14,7 @@ import { ChannelSettingsModule } from '../channel-settings/channel-settings.modu
 @Module({
   imports: [forwardRef(() => StockModule), ChannelSettingsModule],
   controllers: [TikTokShopController],
-  providers: [TikTokShopService, TikTokShopSyncCron],
+  providers: [TikTokShopService, TikTokShopSyncCron, TikTokFinanceIngestService],
   exports: [TikTokShopService],
 })
 export class TikTokShopModule {}
