@@ -1,6 +1,8 @@
 import {
-  Controller, Get, Post, Body, Query, UseGuards, HttpCode, HttpStatus, BadRequestException,
+  Controller, Get, Post, Body, Query, UseGuards, UseInterceptors, UploadedFile,
+  HttpCode, HttpStatus, BadRequestException,
 } from '@nestjs/common'
+import { FileInterceptor } from '@nestjs/platform-express'
 import { SupabaseAuthGuard } from '../../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../../common/decorators/user.decorator'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
@@ -14,6 +16,7 @@ import { ShopeeReturnsSyncService } from './shopee-returns-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
 
 interface ReqUserPayload { id: string; orgId: string | null }
+type UploadedReportFile = { originalname: string; size: number; buffer: Buffer; mimetype: string }
 
 /** F18 F0.7/F1.3 — Triggers manuais dos syncs Shopee.
  *
@@ -68,6 +71,22 @@ export class ShopeeSyncController {
   async syncAdsSpend(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.adsSpend.ingest(user.orgId)
+  }
+
+  /** Upload do RELATÓRIO de Ads do Seller Center (xlsx/csv com dados diários)
+   *  → platform_charges ('ads'). Caminho manual — a Shopee não libera mais o
+   *  módulo Ads da API. Re-upload do mesmo período atualiza (idempotente). */
+  @Post('ads-report')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  async uploadAdsReport(
+    @ReqUser() user: ReqUserPayload,
+    @UploadedFile() file: UploadedReportFile | undefined,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    if (!file) throw new BadRequestException('arquivo "file" obrigatório (multipart/form-data)')
+    return this.adsSpend.ingestReport(user.orgId, file.buffer, file.originalname)
   }
 
   /** F1.6 — Ingestão de pedidos Shopee na CENTRAL (source='shopee').
