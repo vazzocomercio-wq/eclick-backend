@@ -33,6 +33,7 @@ import { ShopeeShopMetricsSyncService } from './shopee-sync/shopee-metrics-sync.
 import { ShopeeCampaignsSyncService } from './shopee-sync/shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-sync/shopee-orders-ingestion.service'
 import { ShopeeEscrowIngestService } from './shopee-sync/shopee-escrow-ingest.service'
+import { ShopeeAdsSpendIngestService } from './shopee-sync/shopee-ads-spend-ingest.service'
 import { ShopeeListingLinkService } from './shopee-sync/shopee-listing-link.service'
 import { ShopeeListingLinkController } from './shopee-sync/shopee-listing-link.controller'
 import { ShopeeStockSyncService } from './shopee-sync/shopee-stock-sync.service'
@@ -98,6 +99,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeCampaignsSyncService,      // F1.4 — sync de campanhas (voucher + flash_sale)
     ShopeeOrdersIngestionService,    // F1.6 — ingestão de pedidos Shopee na CENTRAL
     ShopeeEscrowIngestService,       // Fase 2.3 — escrow real → platform_charges
+    ShopeeAdsSpendIngestService,     // Shopee Ads — gasto diário real → platform_charges (cron 05:10)
     ShopeeListingLinkService,        // F18 Fase A — vínculo anúncio↔produto (keystone)
     ShopeeStockSyncService,          // F18 Fase C — propaga estoque do ledger → anúncio Shopee
     ShopeeReturnsSyncService,        // Pós-venda Fase C — devoluções (returns API) → mediações

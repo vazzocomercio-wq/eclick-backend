@@ -8,6 +8,7 @@ import { ShopeeShopMetricsSyncService } from './shopee-metrics-sync.service'
 import { ShopeeCampaignsSyncService } from './shopee-campaigns-sync.service'
 import { ShopeeOrdersIngestionService } from './shopee-orders-ingestion.service'
 import { ShopeeEscrowIngestService } from './shopee-escrow-ingest.service'
+import { ShopeeAdsSpendIngestService } from './shopee-ads-spend-ingest.service'
 import { ShopeeStockSyncService } from './shopee-stock-sync.service'
 import { ShopeeReturnsSyncService } from './shopee-returns-sync.service'
 import { RequirePermission, RequirePermissionGuard } from '../../rbac'
@@ -29,6 +30,7 @@ export class ShopeeSyncController {
     private readonly campaigns: ShopeeCampaignsSyncService,
     private readonly orders:    ShopeeOrdersIngestionService,
     private readonly escrow:    ShopeeEscrowIngestService,
+    private readonly adsSpend:  ShopeeAdsSpendIngestService,
     private readonly stock:     ShopeeStockSyncService,
     private readonly returns:   ShopeeReturnsSyncService,
   ) {}
@@ -55,6 +57,17 @@ export class ShopeeSyncController {
   async syncCampaigns(@ReqUser() user: ReqUserPayload) {
     if (!user.orgId) throw new BadRequestException('orgId ausente')
     return this.campaigns.syncCampaigns(user.orgId)
+  }
+
+  /** Gasto REAL de Shopee Ads (diário, 30d) → platform_charges ('ads').
+   *  Exige o módulo Ads habilitado no app da Open Platform (senão a resposta
+   *  traz errors[] com error_api_permission — nada quebra). */
+  @Post('ads-spend')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async syncAdsSpend(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    return this.adsSpend.ingest(user.orgId)
   }
 
   /** F1.6 — Ingestão de pedidos Shopee na CENTRAL (source='shopee').

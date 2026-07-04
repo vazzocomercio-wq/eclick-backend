@@ -2101,6 +2101,112 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return { campaigns, errors }
   }
 
+  /** Gasto DIÁRIO de Shopee Ads por campanha (últimos `days` dias) — alimenta
+   *  o ledger `platform_charges` (categoria ads). Mesmo módulo 105 do
+   *  getCampaigns: exige o escopo Ads habilitado no app (senão
+   *  error_api_permission — caller trata). Data defensiva: a API devolve
+   *  metrics_list por dia; aceita `date` DD-MM-YYYY, YYYY-MM-DD ou epoch. */
+  async getAdsDailySpend(conn: MpConnection, days = 30): Promise<{
+    rows: Array<{ campaign_id: string; name: string | null; date: string; expense: number; gmv: number }>
+    errors: string[]
+  }> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const errors: string[] = []
+    const rows: Array<{ campaign_id: string; name: string | null; date: string; expense: number; gmv: number }> = []
+
+    const qs = (path: string, extra: Record<string, string>): string => {
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = this.signShop(path, ts, accessToken, shopId)
+      return new URLSearchParams({
+        partner_id: partnerId, timestamp: String(ts),
+        access_token: accessToken, shop_id: String(shopId), sign, ...extra,
+      }).toString()
+    }
+    const toIsoDate = (v: unknown): string | null => {
+      if (v == null) return null
+      const s = String(v)
+      let m = s.match(/^(\d{2})-(\d{2})-(\d{4})$/)          // DD-MM-YYYY
+      if (m) return `${m[3]}-${m[2]}-${m[1]}`
+      m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)                // YYYY-MM-DD
+      if (m) return `${m[1]}-${m[2]}-${m[3]}`
+      const n = Number(s)                                    // epoch (segundos)
+      if (Number.isFinite(n) && n > 1e9) return new Date(n * 1000).toISOString().slice(0, 10)
+      return null
+    }
+
+    try {
+      // probe de permissão (módulo 105)
+      const balPath = '/api/v2/ads/get_total_balance'
+      const { data: bal } = await this.callShopee({
+        key: `shop:${shopId}`, tag: 'shopee.adsBalance',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        exec: () => axios.get<any>(`${SHOPEE_BASE}${balPath}?${qs(balPath, {})}`),
+      })
+      if (bal?.error) throw new Error(`${bal.error}: ${bal.message}`)
+
+      const adIds: number[] = []
+      let offset = 0
+      for (;;) {
+        const path = '/api/v2/ads/get_product_level_campaign_id_list'
+        const { data } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.adsIdList',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs(path, { ad_type: 'all', offset: String(offset), limit: '1000' })}`),
+        })
+        if (data?.error) throw new Error(`${data.error}: ${data.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const list = (data?.response?.campaign_list ?? []) as any[]
+        for (const c of list) if (c?.campaign_id != null) adIds.push(Number(c.campaign_id))
+        if (!data?.response?.has_next_page || list.length === 0) break
+        offset += list.length
+        if (offset > 10000) break
+      }
+
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const ddmmyyyy = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`
+      const endD = new Date()
+      const startD = new Date(Date.now() - Math.min(days, 30) * 86400 * 1000)
+
+      for (let i = 0; i < adIds.length; i += 100) {
+        const chunk = adIds.slice(i, i + 100).join(',')
+        const pPath = '/api/v2/ads/get_product_campaign_daily_performance'
+        const { data: pData } = await this.callShopee({
+          key: `shop:${shopId}`, tag: 'shopee.adsPerfDaily',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          exec: () => axios.get<any>(`${SHOPEE_BASE}${pPath}?${qs(pPath, { start_date: ddmmyyyy(startD), end_date: ddmmyyyy(endD), campaign_id_list: chunk })}`),
+        })
+        if (pData?.error) throw new Error(`${pData.error}: ${pData.message}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const sh of (pData?.response ?? []) as any[]) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          for (const c of (sh?.campaign_list ?? []) as any[]) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            for (const m of (c?.metrics_list ?? []) as any[]) {
+              const date = toIsoDate(m?.date ?? m?.calc_date ?? m?.day)
+              const expense = Number(m?.expense) || 0
+              if (!date) {
+                if (expense > 0) errors.push(`campaign ${c?.campaign_id}: metric sem data reconhecível (keys: ${Object.keys(m ?? {}).join(',')})`)
+                continue
+              }
+              if (expense <= 0) continue
+              rows.push({
+                campaign_id: String(c.campaign_id),
+                name: c?.ad_name ?? null,
+                date,
+                expense,
+                gmv: Number(m?.broad_gmv) || 0,
+              })
+            }
+          }
+        }
+      }
+    } catch (e: unknown) {
+      errors.push(`ads_daily: ${(e as Error)?.message}`)
+    }
+    return { rows, errors }
+  }
+
   /** F0.3/F0.5 — webhook Push. Shopee envia header `Authorization` com
    *  HMAC-SHA256(push_key, `${url}|${body}`) em hex lowercase. Validação
    *  síncrona (sem fetch). rawBody DEVE ser o body cru (não JSON.parsed) —
