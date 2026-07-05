@@ -259,24 +259,43 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       return data
     }
 
-    // 1) garante o documento criado (best-effort; "já criado" não é erro,
-    //    "can not print" = fora da janela — o data_info abaixo decide)
-    await post('/api/v2/logistics/create_shipping_document', {
-      order_list: [{ order_sn: orderSn, package_number: packageNumber, shipping_document_type: 'NORMAL_AIR_WAYBILL' }],
-    }).catch(() => null)
-
-    // 2) lê os dados do documento (recipient incluso)
-    const info = await post('/api/v2/logistics/get_shipping_document_data_info', {
+    // 1) data_info ANTES do create — dele sai o tracking_number (o create
+    //    sem tracking falha com logistics.tracking_number_invalid no SPX BR;
+    //    validado ao vivo 2026-07-05)
+    const readInfo = () => post('/api/v2/logistics/get_shipping_document_data_info', {
       order_sn: orderSn, package_number: packageNumber,
     })
-    if (info?.error) throw new Error(`Shopee get_shipping_document_data_info ${info.error}: ${info.message}`)
-    // shape defensivo: recipient pode vir em shipping_document_info.recipient_address
-    // ou no topo — loga o raw pra calibrar na 1ª captura real
-    const resp = info?.response ?? {}
-    const rcpt = resp?.shipping_document_info?.recipient_address
+    // recipient pode vir em recipient_address_info (chave real do SPX BR),
+    // shipping_document_info.recipient_address ou no topo
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pickRecipient = (resp: any) =>
+      resp?.recipient_address_info
+      ?? resp?.shipping_document_info?.recipient_address
       ?? resp?.recipient_address
       ?? null
-    this.logger.log(`[shopee.shippingDoc] ${orderSn} recipient=${JSON.stringify(rcpt ?? resp).slice(0, 500)}`)
+
+    let info = await readInfo()
+    if (info?.error) throw new Error(`Shopee get_shipping_document_data_info ${info.error}: ${info.message}`)
+    let rcpt = pickRecipient(info?.response)
+
+    // 2) sem recipient ainda → cria o documento (com tracking) e relê.
+    //    ⚠️ SPX BR hoje devolve recipient_address_info=null mesmo com o
+    //    documento criado (endereço aberto só existe no PDF da etiqueta) —
+    //    o caminho fica pronto caso a Shopee passe a popular o campo.
+    if (!rcpt) {
+      const tracking = info?.response?.shipping_document_info?.shopee_tracking_number
+        ?? info?.response?.shipping_document_info?.tracking_number
+      await post('/api/v2/logistics/create_shipping_document', {
+        order_list: [{
+          order_sn: orderSn, package_number: packageNumber,
+          ...(tracking ? { tracking_number: String(tracking) } : {}),
+          shipping_document_type: 'NORMAL_AIR_WAYBILL',
+        }],
+      }).catch(() => null)
+      info = await readInfo()
+      rcpt = pickRecipient(info?.response)
+    }
+    this.logger.log(`[shopee.shippingDoc] ${orderSn} recipient=${JSON.stringify(rcpt) ?? 'null'}`)
     return rcpt as Record<string, unknown> | null
   }
 
