@@ -27,6 +27,14 @@ export class ShopeeAutoBoostService {
   private readonly logger = new Logger(ShopeeAutoBoostService.name)
   /** Teto real da Shopee, validado live (6º item → bump slot limit). */
   private static readonly SHOPEE_SLOTS = 5
+  /** Quarentena: item com ≥N boosts nos últimos 14d e ZERO vendas 30d sai do
+   *  rodízio (auditoria 2026-07-06: top-boostados com 0 conversão ocupavam a
+   *  vitrine). Sem estado extra: a janela móvel de 14d solta o item sozinho
+   *  (~1 semana sem boost) — se continuar sem vender, volta pra quarentena. */
+  private static readonly QUARANTINE_BOOSTS_14D = 6
+  /** Slots do ciclo reservados pros itens que VENDEM (giro 30d>0) — garante
+   *  que a vitrine grátis não seja 100% aposta de margem. */
+  private static readonly GIRO_RESERVED_SLOTS = 2
 
   constructor(
     private readonly mp:          MarketplaceService,
@@ -109,18 +117,24 @@ export class ShopeeAutoBoostService {
     const status = await this.linkService.getLinkStatus(orgId)
     const excluded = new Set(cfg.excluded_item_ids)
 
-    // rotação: último boost por item dentro da janela
-    const since = new Date(Date.now() - cfg.rotation_hours * 3600_000).toISOString()
+    // Uma query (14d) alimenta rotação E quarentena: último boost dentro da
+    // janela de rotação + contagem de boosts nos últimos 14 dias por item.
+    const rotationSince = Date.now() - cfg.rotation_hours * 3600_000
+    const since14d = new Date(Date.now() - 14 * 86400_000).toISOString()
     const { data: recent } = await supabaseAdmin
       .schema('shopee').from('boost_log')
       .select('item_id, boosted_at')
       .eq('organization_id', orgId)
       .eq('shop_id', shopId)
-      .gte('boosted_at', since)
+      .gte('boosted_at', since14d)
     const lastBoost = new Map<number, string>()
+    const boosts14d = new Map<number, number>()
     for (const r of (recent ?? []) as Array<{ item_id: number; boosted_at: string }>) {
       const id = Number(r.item_id)
-      if (!lastBoost.has(id)) lastBoost.set(id, r.boosted_at)
+      boosts14d.set(id, (boosts14d.get(id) ?? 0) + 1)
+      if (new Date(r.boosted_at).getTime() >= rotationSince && !lastBoost.has(id)) {
+        lastBoost.set(id, r.boosted_at)
+      }
     }
 
     // giro 30d por produto (vendas Shopee não-canceladas)
@@ -155,10 +169,15 @@ export class ShopeeAutoBoostService {
         w.score * scoreNorm + w.margin * marginNorm + w.sales * salesNorm + w.stock * stockNorm,
       )
 
+      // Quarentena: muita vitrine sem NENHUMA venda = slot desperdiçado.
+      const nBoosts14d = boosts14d.get(itemId) ?? 0
+      const inQuarantine = sold30 === 0 && nBoosts14d >= ShopeeAutoBoostService.QUARANTINE_BOOSTS_14D
+
       const motivo =
         `Score ${algo}` +
         (marginPct != null ? `, margem ${marginPct.toFixed(1)}%` : ', margem n/d') +
-        `, ${sold30} venda(s) 30d, estoque ${stock} → composto ${composite.toFixed(2)} (${cfg.strategy})`
+        `, ${sold30} venda(s) 30d, estoque ${stock} → composto ${composite.toFixed(2)} (${cfg.strategy})` +
+        (inQuarantine ? ` · QUARENTENA: ${nBoosts14d} boosts em 14d sem nenhuma venda` : '')
 
       out.push({
         item_id:     itemId,
@@ -172,6 +191,8 @@ export class ShopeeAutoBoostService {
         motivo,
         blocked_by_rotation: rotBlock != null,
         last_boosted_at:     rotBlock,
+        boosts_14d:          nBoosts14d,
+        in_quarantine:       inQuarantine,
       })
     }
     out.sort((a, b) => b.composite - a.composite)
@@ -223,8 +244,18 @@ export class ShopeeAutoBoostService {
     }
 
     const candidates = await this.getCandidates(orgId, shopId, cfg)
-    const eligible = candidates.filter(c => !c.blocked_by_rotation)
-    const picks = eligible.slice(0, freeSlots)
+    const eligible = candidates.filter(c => !c.blocked_by_rotation && !c.in_quarantine)
+
+    // Slots reservados pro GIRO: até 2 dos slots livres vão pros elegíveis
+    // que VENDEM (sales_30d>0, maiores primeiro); o resto segue o composto.
+    // Sem vendedor elegível disponível, os slots voltam pro ranking normal.
+    const giroPool = [...eligible]
+      .filter(c => c.sales_30d > 0)
+      .sort((a, b) => b.sales_30d - a.sales_30d)
+    const giroPicks = giroPool.slice(0, Math.min(ShopeeAutoBoostService.GIRO_RESERVED_SLOTS, freeSlots))
+    const giroIds = new Set(giroPicks.map(p => p.item_id))
+    const rest = eligible.filter(c => !giroIds.has(c.item_id)).slice(0, freeSlots - giroPicks.length)
+    const picks = [...giroPicks, ...rest]
     if (!picks.length) {
       return { shop_id: shopId, active_count: active.length, free_slots: freeSlots, boosted: [], skipped_reason: 'Nenhum candidato elegível (estoque/margem/rotação/exclusões).' }
     }
@@ -348,6 +379,8 @@ export interface BoostCandidate {
   motivo:              string
   blocked_by_rotation: boolean
   last_boosted_at:     string | null
+  boosts_14d:          number
+  in_quarantine:       boolean
   fail_reason?:        string
 }
 
