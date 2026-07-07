@@ -61,11 +61,14 @@ export async function parseShopeeLabelRecipient(
 
   const labelIdx = block.findIndex(l => /^(bairro|cep|pedido):/i.test(l.text))
   if (labelIdx < 1) return null
-  const name = block[0].text
-  const address = block.slice(1, labelIdx).map(l => l.text).join(' ').trim()
+  // higieniza: rótulos podem dividir a MESMA linha do valor anterior no PDF
+  // ("CEP:06333-450Pedido:2607...") — corta qualquer rótulo colado no fim
+  const clean = (s: string) => s.replace(/(bairro|cep|pedido):.*$/i, '').trim()
+  const name = clean(block[0].text)
+  const address = clean(block.slice(1, labelIdx).map(l => l.text).join(' '))
   const get = (re: RegExp) => { const l = block.find(b => re.test(b.text)); return l ? l.text.replace(re, '').trim() : '' }
-  const bairro = get(/^bairro:\s*/i)
-  const cep    = get(/^cep:\s*/i)
+  const bairro = clean(get(/^bairro:\s*/i))
+  const cep    = (get(/^cep:\s*/i).match(/\d{5}-?\d{3}/) ?? [''])[0]
   if (!name || !address) return null
   return {
     name,
