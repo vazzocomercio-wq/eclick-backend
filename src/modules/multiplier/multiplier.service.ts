@@ -1222,21 +1222,40 @@ export class MultiplierService {
     const channelTitle = key ? product.channel_titles?.[key] : null
     const channelDesc  = key ? product.channel_descriptions?.[key] : null
 
+    // REGRA DE NEGÓCIO: quem multiplica é o ANÚNCIO de origem — título,
+    // descrição, marca, GTIN e fotos vêm dele. O produto do catálogo entra
+    // como fallback e pro que é dele mesmo (SKU, estoque, peso/dimensões).
+    // Best-effort: se a leitura do anúncio falhar, segue com produto (antigo).
+    let src: { title: string | null; description: string | null; brand: string | null; gtin: string | null; images: string[] } | null = null
+    if (source) {
+      try {
+        src = await this.fetchSourceListing(orgId, source.platform, source.listing_id, source.account_id)
+      } catch (e) {
+        this.logger.warn(`[multiplier] conteúdo do anúncio origem ${source.platform}/${source.listing_id} falhou (usando produto): ${(e as Error)?.message}`)
+      }
+    }
+
     const rawTitle =
-      channelTitle?.trim() ||
+      src?.title?.trim() ||
       source?.listing_title?.trim() ||
+      channelTitle?.trim() ||
       product.ml_title?.trim() ||
       product.name?.trim() || ''
     const title = rawTitle.slice(0, CHANNEL_TITLE_LIMITS[target as ChannelPlatform] ?? 255)
 
     const description =
+      src?.description?.trim() ||
       channelDesc?.trim() ||
       product.ai_long_description?.trim() ||
       product.description?.trim() ||
       product.ai_short_description?.trim() || null
 
     const price = source?.listing_price ?? product.price ?? null
-    const images = this.collectImageUrls(product).slice(0, 9)
+
+    // FOTOS: as do anúncio de origem primeiro; as do produto completam.
+    let images = this.collectImageUrls(product)
+    if (src?.images.length) images = this.normalizeImageUrls([...src.images, ...images])
+    images = images.slice(0, 9)
 
     const dims = (product.length_cm && product.width_cm && product.height_cm)
       ? { length: product.length_cm, width: product.width_cm, height: product.height_cm }
@@ -1248,8 +1267,8 @@ export class MultiplierService {
       price: price != null ? Math.round(Number(price) * 100) / 100 : null,
       image_urls: images,
       sku: product.sku,
-      brand: product.brand,
-      gtin: product.gtin,
+      brand: src?.brand ?? product.brand,
+      gtin: src?.gtin ?? product.gtin,
       weight_kg: product.weight_kg,
       package_dimensions_cm: dims,
       stock: product.stock,
@@ -1401,6 +1420,113 @@ export class MultiplierService {
     return out
   }
 
+  /** Conteúdo do ANÚNCIO de origem — a fonte de verdade do multiplicador:
+   *  quem multiplica é o ANÚNCIO (título/descrição/marca/GTIN/fotos); o
+   *  produto do catálogo entra só como vínculo/estoque/logística. Cobre as
+   *  3 origens:
+   *  - ML: item + descrição AO VIVO via API com o token da conta DONA (o
+   *    vínculo sabe; token de outra conta dá 403 no PolicyAgent);
+   *  - Shopee: get_item_base_info da loja dona (via publicador);
+   *  - TikTok: raw sincronizado em tiktok_shop_products (listing_id do
+   *    vínculo é o sku_id — resolve pelo produto que contém esse sku). */
+  private async fetchSourceListing(
+    orgId: string,
+    platform: string,
+    listingId: string,
+    accountId?: string | null,
+  ): Promise<{ title: string | null; description: string | null; brand: string | null; gtin: string | null; images: string[] }> {
+    const empty = { title: null, description: null, brand: null, gtin: null, images: [] as string[] }
+
+    // conta dona do anúncio (quando o caller não sabe, o vínculo sabe)
+    let owner = accountId ?? null
+    if (!owner && (platform === 'mercadolivre' || platform === 'shopee')) {
+      const { data: link } = await supabaseAdmin
+        .from('product_listings')
+        .select('account_id')
+        .eq('platform', platform)
+        .eq('listing_id', listingId)
+        .not('account_id', 'is', null)
+        .limit(1)
+        .maybeSingle<{ account_id: string | null }>()
+      owner = link?.account_id ?? null
+    }
+
+    if (platform === 'mercadolivre') {
+      const ownerId = owner ? Number(owner) : undefined
+      const { token } = await this.mercadolivre.getTokenForOrg(
+        orgId, Number.isFinite(ownerId) && (ownerId as number) > 0 ? ownerId : undefined,
+      )
+      const cfg = { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 }
+      const [itemRes, descRes] = await Promise.allSettled([
+        axios.get<{
+          title?: string
+          pictures?: Array<{ secure_url?: string; url?: string }>
+          attributes?: Array<{ id: string; value_name?: string | null }>
+        }>(`https://api.mercadolibre.com/items/${listingId}?include_attributes=all`, cfg),
+        axios.get<{ plain_text?: string }>(`https://api.mercadolibre.com/items/${listingId}/description`, cfg),
+      ])
+      if (itemRes.status === 'rejected') throw itemRes.reason
+      const item = itemRes.value.data
+      const attr = (id: string) => item.attributes?.find(a => a.id === id)?.value_name?.trim() || null
+      const pics = (item.pictures ?? []).map(p => p.secure_url ?? p.url).filter(Boolean) as string[]
+      return {
+        title:       item.title?.trim() || null,
+        description: descRes.status === 'fulfilled' ? (descRes.value.data?.plain_text?.trim() || null) : null,
+        brand:       attr('BRAND'),
+        gtin:        attr('GTIN'),
+        images:      this.normalizeImageUrls(pics),
+      }
+    }
+
+    if (platform === 'shopee') {
+      const shopId = owner ? Number(owner) : null
+      const c = await this.shopeePublisher.getItemContent(
+        orgId, Number.isFinite(shopId as number) && (shopId as number) > 0 ? (shopId as number) : null, Number(listingId),
+      )
+      return {
+        title:       c.title?.trim() || null,
+        description: c.description?.trim() || null,
+        brand:       c.brand,
+        gtin:        null,
+        images:      this.normalizeImageUrls(c.images),
+      }
+    }
+
+    if (platform === 'tiktok_shop') {
+      // listing_id do vínculo TikTok = sku_id (product_id só como fallback)
+      const { data } = await supabaseAdmin
+        .from('tiktok_shop_products')
+        .select('tts_product_id, title, raw')
+        .eq('organization_id', orgId)
+        .limit(500)
+      type TtRaw = {
+        skus?: Array<{ id?: string | number }>
+        main_images?: Array<{ urls?: string[] }>
+        description?: string
+      }
+      const rows = (data ?? []) as Array<{ tts_product_id: string; title: string | null; raw: TtRaw | null }>
+      const hit = rows.find(r =>
+        r.tts_product_id === listingId ||
+        (r.raw?.skus ?? []).some(s => String(s?.id ?? '') === listingId),
+      )
+      if (!hit) return empty
+      const urls = (hit.raw?.main_images ?? []).map(m => m.urls?.[0]).filter(Boolean) as string[]
+      // descrição do TikTok vem em HTML — vira texto puro pros outros canais
+      const desc = (hit.raw?.description ?? '')
+        .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').trim() || null
+      return {
+        title:       hit.title?.trim() || null,
+        description: desc,
+        brand:       null,
+        gtin:        null,
+        images:      this.normalizeImageUrls(urls),
+      }
+    }
+
+    return empty
+  }
+
   /** Fotos pro publish: payload normalizado; se ficar vazio (ex.: origem tinha
    *  só placeholder "processando"), re-coleta FRESCO do produto — as fotos
    *  podem ter terminado de processar depois que o rascunho foi criado. */
@@ -1414,30 +1540,12 @@ export class MultiplierService {
       if (fromProduct.length > 0) return fromProduct
     } catch { /* segue pro fallback do anúncio de origem */ }
 
-    // último recurso: fotos AO VIVO do anúncio ML de origem (o catálogo pode
-    // ter sincronizado só o placeholder, mas o anúncio já tem as fotos prontas).
-    // ⚠️ multi-conta: usar o token da conta DONA do anúncio (o vínculo sabe);
-    // token de outra conta dá 403 no PolicyAgent.
-    if (draft.source_platform === 'mercadolivre' && draft.source_listing_id) {
+    // último recurso: fotos AO VIVO do anúncio de origem (o catálogo pode ter
+    // sincronizado só o placeholder, mas o anúncio já tem as fotos prontas).
+    if (draft.source_platform && draft.source_listing_id) {
       try {
-        const { data: link } = await supabaseAdmin
-          .from('product_listings')
-          .select('account_id')
-          .eq('platform', 'mercadolivre')
-          .eq('listing_id', draft.source_listing_id)
-          .not('account_id', 'is', null)
-          .limit(1)
-          .maybeSingle<{ account_id: string | null }>()
-        const ownerId = link?.account_id ? Number(link.account_id) : undefined
-        const { token } = await this.mercadolivre.getTokenForOrg(
-          orgId, Number.isFinite(ownerId) && (ownerId as number) > 0 ? ownerId : undefined,
-        )
-        const { data } = await axios.get<{ pictures?: Array<{ secure_url?: string; url?: string }> }>(
-          `https://api.mercadolibre.com/items/${draft.source_listing_id}?attributes=pictures`,
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
-        )
-        const pics = (data?.pictures ?? []).map(p => p.secure_url ?? p.url).filter(Boolean) as string[]
-        return this.normalizeImageUrls(pics).slice(0, 9)
+        const src = await this.fetchSourceListing(orgId, draft.source_platform, draft.source_listing_id)
+        return src.images.slice(0, 9)
       } catch (e) {
         this.logger.warn(`[multiplier] fotos do anúncio origem ${draft.source_listing_id} falharam: ${(e as Error)?.message}`)
       }

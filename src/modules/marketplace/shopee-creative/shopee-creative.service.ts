@@ -465,6 +465,32 @@ export class ShopeeCreativePublisherService {
       .map(c => ({ shop_id: c.shop_id as number, nickname: c.nickname ?? null }))
   }
 
+  /** Conteúdo AO VIVO de um item desta loja (get_item_base_info): título,
+   *  descrição, marca e TODAS as fotos. O Multiplicador usa pra copiar o
+   *  ANÚNCIO de origem — o produto do catálogo é só vínculo/estoque. */
+  async getItemContent(orgId: string, shopId: number | null, itemId: number): Promise<{
+    title: string | null
+    description: string | null
+    brand: string | null
+    images: string[]
+  }> {
+    const { conn, adapter } = await this.resolveConnForShop(orgId, shopId)
+    const info = await adapter.getItemForEdit(conn, itemId)
+    const raw = info.raw as {
+      image?: { image_url_list?: unknown[] }
+      brand?: { original_brand_name?: string | null }
+    } | null
+    const brandName = raw?.brand?.original_brand_name?.trim() || null
+    return {
+      title:       info.item_name,
+      description: info.description,
+      // 'No Brand' / 'NoBrand' é o placeholder da Shopee — não é marca real
+      brand:       brandName && !/^no\s*brand$/i.test(brandName) ? brandName : null,
+      images:      (raw?.image?.image_url_list ?? [])
+        .filter((u): u is string => typeof u === 'string' && u.startsWith('http')),
+    }
+  }
+
   /** Multiplicador — inicializa variações (tier + models) num item recém-criado
    *  desta loja. Reusa a resolução multi-loja/token fresco do publish. */
   async initVariations(orgId: string, shopId: number | null, args: {
