@@ -448,6 +448,14 @@ export class MultiplierService {
     if (merged.title) {
       merged.title = merged.title.trim().slice(0, CHANNEL_TITLE_LIMITS[draft.target_platform as ChannelPlatform] ?? 255)
     }
+    // categoria Shopee é id NUMÉRICO — valida na edição pro erro aparecer aqui
+    // (acionável) e não só no publish
+    if (draft.target_platform === 'shopee' && merged.category_id != null && String(merged.category_id).trim() !== '') {
+      if (!/^\d+$/.test(String(merged.category_id).trim())) {
+        throw new BadRequestException('Categoria Shopee: informe o id numérico da categoria (ex.: 101178) — ou deixe vazio pra usar a recomendação automática.')
+      }
+      merged.category_id = String(merged.category_id).trim()
+    }
     // edição do grupo de variações passa pelas MESMAS validações da criação
     if (patch.variations !== undefined) {
       if (patch.variations && patch.variations.length > 0) {
@@ -577,6 +585,11 @@ export class MultiplierService {
       package_width_cm:   p.package_dimensions_cm?.width ?? null,
       package_height_cm:  p.package_dimensions_cm?.height ?? null,
       brand:              p.brand,
+      // categoria escolhida no rascunho (id numérico) — sem ela o publisher
+      // usa a recomendação automática
+      category_id:        /^\d+$/.test(String(p.category_id ?? '').trim())
+        ? Number(String(p.category_id).trim())
+        : null,
     }
     const res = await this.shopeePublisher.publish(orgId, shopeeDraft)
     if (!res.ok || !res.item_id) {
@@ -722,6 +735,11 @@ export class MultiplierService {
     const ttImages = await this.resolveImagesForPublish(orgId, draft)
     if (!ttImages.length) throw new BadRequestException('Produto sem foto válida — adicione imagens antes de publicar no TikTok.')
 
+    // ficha técnica obrigatória da categoria: determinístico + IA (nunca
+    // inventa) — mesmo padrão do buildMlAttributes. Sem isso, categorias com
+    // atributos obrigatórios rejeitavam a publicação.
+    const productAttributes = await this.buildTikTokAttributes(orgId, draft, categoryId)
+
     const res = await this.tiktok.publishProduct(orgId, {
       title:                 p.title,
       description:           p.description ?? undefined,
@@ -733,9 +751,116 @@ export class MultiplierService {
       package_weight_kg:     p.weight_kg ?? undefined,
       package_dimensions_cm: p.package_dimensions_cm ?? undefined,
       brand_name:            p.brand ?? undefined,
+      product_attributes:    productAttributes.length ? productAttributes : undefined,
     })
     if (!res.product_id) throw new BadRequestException('TikTok não retornou product_id.')
     return String(res.product_id)
+  }
+
+  /** Atributos TikTok: determinísticos (marca) + IA pros obrigatórios da
+   *  categoria — espelho do buildMlAttributes. A IA nunca inventa: sem
+   *  confiança, omite (o erro do TikTok aponta o que faltou, acionável no
+   *  draft). NÃO-FATAL: qualquer falha aqui segue sem atributos. */
+  private async buildTikTokAttributes(
+    orgId: string,
+    draft: MultiplierDraft,
+    categoryId: string,
+  ): Promise<Array<{ id: string; values: Array<{ id?: string; name: string }> }>> {
+    const p = draft.payload
+    type TtAttr = { id: string; name: string; required: boolean; type: string; values: Array<{ id: string; name: string }> }
+    let all: TtAttr[] = []
+    try {
+      all = await this.tiktok.getCategoryAttributes(orgId, categoryId)
+    } catch (e) {
+      this.logger.warn(`[multiplier.tt] atributos da categoria ${categoryId} falharam (segue sem): ${(e as Error)?.message}`)
+      return []
+    }
+    const required = all.filter(a => a.required)
+    if (!required.length) return []
+
+    const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+    const out: Array<{ id: string; values: Array<{ id?: string; name: string }> }> = []
+    const done = new Set<string>()
+    const push = (attr: TtAttr, value: { id?: string; name: string }) => {
+      if (done.has(attr.id)) return
+      done.add(attr.id)
+      out.push({ id: attr.id, values: [value] })
+    }
+
+    // determinístico: atributo "marca" da categoria ← marca do produto
+    const pending: TtAttr[] = []
+    for (const a of required) {
+      const brand = p.brand?.trim()
+      if (brand && /(marca|brand)/.test(norm(a.name))) {
+        const opt = a.values.find(v => norm(v.name) === norm(brand))
+        if (opt) { push(a, { id: opt.id, name: opt.name }); continue }
+        if (!a.values.length) { push(a, { name: brand.slice(0, 100) }); continue }
+      }
+      pending.push(a)
+    }
+
+    // obrigatórios restantes → IA (opção exata em lista fechada; texto curto
+    // em campo livre; sem confiança = omite)
+    if (pending.length) {
+      try {
+        const attrLines = pending.map(a => {
+          const opts = a.values.map(v => v.name).filter(Boolean)
+          const spec = opts.length
+            ? `escolha UMA opção exata: ${opts.slice(0, 60).join(' | ')}`
+            : 'texto curto'
+          return `- ${a.id} ("${a.name}") — ${spec}`
+        }).join('\n')
+
+        const outLlm = await this.llm.generateText({
+          orgId,
+          feature:    'creative_listing',
+          userPrompt: [
+            'Você preenche a ficha técnica de um anúncio do TikTok Shop.',
+            '',
+            'PRODUTO:',
+            `- Título: ${p.title}`,
+            `- Marca: ${p.brand ?? '—'}`,
+            `- Descrição: ${(p.description ?? '').slice(0, 2000)}`,
+            '',
+            'ATRIBUTOS OBRIGATÓRIOS A PREENCHER:',
+            attrLines,
+            '',
+            'REGRAS:',
+            '- Preencha apenas o que der pra deduzir COM CONFIANÇA dos dados acima.',
+            '- Para atributos com opções, use EXATAMENTE uma das opções listadas.',
+            '- Se não der pra determinar, omita o atributo.',
+            '- NUNCA invente valores.',
+            '',
+            'Responda só JSON: {"attributes":[{"id":"X","value":"Y"}]}',
+          ].join('\n'),
+          jsonMode:  true,
+          maxTokens: 1500,
+        })
+        // o modelo às vezes embrulha em cerca markdown (```json … ```)
+        const cleaned = outLlm.text.trim()
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```\s*$/, '')
+        const parsed = JSON.parse(cleaned) as { attributes?: Array<{ id?: string; value?: string }> }
+        const byId = new Map(pending.map(a => [a.id, a]))
+        for (const it of parsed?.attributes ?? []) {
+          const attr = byId.get(String(it?.id ?? '').trim())
+          const raw = String(it?.value ?? '').trim()
+          if (!attr || !raw) continue
+          if (attr.values.length) {
+            const opt = attr.values.find(v => norm(v.name) === norm(raw))
+            if (opt) push(attr, { id: opt.id, name: opt.name })
+            // lista fechada sem match exato → não força valor inválido
+          } else {
+            push(attr, { name: raw.slice(0, 100) })
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`[multiplier.tt] IA de atributos falhou (segue sem): ${(e as Error)?.message}`)
+      }
+    }
+
+    this.logger.log(`[multiplier.tt] atributos obrigatórios da categoria ${categoryId}: ${required.length}, preenchidos: ${out.length}`)
+    return out
   }
 
   /** Publica no Mercado Livre direto do produto canônico (POST /items).
@@ -1167,6 +1292,7 @@ export class MultiplierService {
     if (target === 'shopee') {
       const desc = p.channel_descriptions?.['shopee'] ?? p.ai_long_description ?? p.description ?? ''
       if ((desc ?? '').trim().length < 20) w.push('descrição curta (<20 chars)')
+      if (!p.weight_kg) w.push('sem peso (publica com 0,5 kg padrão — frete pode sair errado)')
     }
     if (target === 'mercadolivre') {
       if (!p.brand?.trim()) w.push('sem marca (muitas categorias ML exigem)')

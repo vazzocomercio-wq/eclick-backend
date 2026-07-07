@@ -1524,6 +1524,10 @@ export class TikTokShopService {
       // Atributos do IA Criativo (formato ML: [{id, value_name, value_id}]) —
       // mapeados pros atributos/marca do TikTok. Opcional.
       ml_attributes?: Array<{ id: string; value_name?: string; value_id?: string }>
+      // Atributos JÁ no formato do TikTok (id + values da categoria) — caller
+      // que resolveu sozinho (ex.: Multiplicador via IA). Têm prioridade sobre
+      // os mapeados de ml_attributes (dedup por id do atributo).
+      product_attributes?: Array<{ id: string; values: Array<{ id?: string; name: string }> }>
       brand_name?: string
       // IDs do anúncio do IA Criativo pra registrar em creative_publications.
       listing_id?: string
@@ -1575,12 +1579,20 @@ export class TikTokShopService {
     if (!uris.length) throw new BadRequestException('Falha ao subir as imagens pro TikTok')
 
     // Mapeia atributos ML → TikTok + resolve a marca (reusa o que o IA Criativo
-    // já cadastrou pro ML — não redigita nada).
-    const productAttributes = await this.mapMlAttributesToTikTok(
+    // já cadastrou pro ML — não redigita nada). Atributos já no formato TikTok
+    // (input.product_attributes) têm prioridade; os mapeados completam.
+    const mappedAttributes = await this.mapMlAttributesToTikTok(
       orgId,
       input.category_id,
       input.ml_attributes ?? [],
     )
+    const productAttributes: Array<{ id: string; values: Array<{ id?: string; name: string }> }> = []
+    const seenAttrIds = new Set<string>()
+    for (const a of [...(input.product_attributes ?? []), ...mappedAttributes]) {
+      if (!a?.id || seenAttrIds.has(a.id)) continue
+      seenAttrIds.add(a.id)
+      productAttributes.push(a)
+    }
     const brandName =
       input.brand_name ??
       input.ml_attributes?.find((a) => a.id === 'BRAND')?.value_name

@@ -42,6 +42,10 @@ export interface ShopeeDraftListing {
   package_width_cm?:      number | null
   package_height_cm?:     number | null
   brand?:                 string | null
+  /** Categoria Shopee escolhida pelo usuário (id numérico). Quando ausente,
+   *  o publish usa a recomendação automática (category_recommend). É a saída
+   *  do beco "recomendação falhou → informe manualmente" (Multiplicador). */
+  category_id?:           number | null
   /** Atributos do IA Criativo (formato ML: [{id, value_name, value_id}]) —
    *  mapeados pros atributos da categoria Shopee por nome+valor (de-para). */
   ml_attributes?:         Array<{ id: string; value_name?: string; value_id?: string }> | null
