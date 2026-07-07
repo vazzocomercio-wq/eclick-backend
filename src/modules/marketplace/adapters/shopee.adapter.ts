@@ -310,6 +310,34 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return { recipient: rcpt as Record<string, unknown> | null, buyer_cpf_id: cpf }
   }
 
+  /** Baixa o PDF da etiqueta (download_shipping_document). O documento precisa
+   *  existir (fetchShippingDocumentRecipient já cria com tracking). Fora da
+   *  janela a Shopee devolve JSON de erro em vez de PDF → null. É a fonte do
+   *  NOME/ENDEREÇO abertos do destinatário (parser: shopee-label-parser). */
+  async downloadShippingDocumentPdf(conn: MpConnection, orderSn: string, packageNumber: string): Promise<Buffer | null> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const apiPath = '/api/v2/logistics/download_shipping_document'
+    const ts = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(apiPath, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
+      shop_id: String(shopId), sign,
+    })
+    const { data } = await this.callShopee({
+      key: `shop:${shopId}`, tag: 'shopee.labelPdf',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.post<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`, {
+        order_list: [{ order_sn: orderSn, package_number: packageNumber }],
+        shipping_document_type: 'NORMAL_AIR_WAYBILL',
+      }, { responseType: 'arraybuffer' }),
+    })
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer)
+    // resposta JSON = erro (fora da janela/não criado); PDF começa com %PDF
+    if (buf.length < 4 || buf.subarray(0, 4).toString('latin1') !== '%PDF') return null
+    return buf
+  }
+
   /** Repasse REAL (escrow) de 1 pedido concluído — a fonte da verdade das
    *  taxas Shopee. Devolve o EscrowDetail normalizado (cross-plataforma) E o
    *  order_income cru em `raw` (de onde o ingest lê service_fee/seller_transaction_fee,

@@ -6,6 +6,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import type { MpConnection } from '../adapters/base'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
+import { parseShopeeLabelRecipient } from './shopee-label-parser.util'
 import { ChannelSettingsService, ChannelFeeRule, estimateSaleFee } from '../../channel-settings/channel-settings.service'
 import { StockService } from '../../stock/stock.service'
 
@@ -269,9 +270,31 @@ export class ShopeeOrdersIngestionService {
     const masked = (v: unknown) => typeof v !== 'string' || !v.trim() || /^\*+$/.test(v.trim())
     if (this.mapShippingStatus(od?.order_status) !== 'ready_to_ship') return
     const r = od?.recipient_address
-    const addressOpen = Boolean(r && !masked(r.full_address))
-    const cpfOpen = !masked(od?.buyer_cpf_id)
+    let addressOpen = Boolean(r && !masked(r.full_address))
+    let cpfOpen = !masked(od?.buyer_cpf_id)
+
+    // já capturado num sync anterior? reusa do banco (evita re-baixar a
+    // etiqueta a cada ciclo do cron enquanto o pedido está na janela)
+    if (!addressOpen || !cpfOpen) {
+      const { data: prev } = await supabaseAdmin
+        .from('orders')
+        .select('buyer_doc_number, raw_data')
+        .eq('source', 'shopee')
+        .eq('external_order_id', String(od.order_sn))
+        .limit(1)
+      const prevRow = (prev ?? [])[0] as { buyer_doc_number: string | null; raw_data: Record<string, unknown> | null } | undefined
+      const prevRcpt = prevRow?.raw_data?.recipient_address as Record<string, unknown> | undefined
+      if (!addressOpen && prevRcpt && !masked(prevRcpt.full_address)) {
+        od.recipient_address = prevRcpt
+        addressOpen = true
+      }
+      if (!cpfOpen && prevRow?.buyer_doc_number) {
+        od.buyer_cpf_id = prevRow.buyer_doc_number
+        cpfOpen = true
+      }
+    }
     if (addressOpen && cpfOpen) return  // nada a capturar
+
     const pkg = od?.package_list?.[0]?.package_number
     if (!pkg) return
     try {
@@ -282,7 +305,18 @@ export class ShopeeOrdersIngestionService {
       }
       if (!addressOpen && open.recipient && !masked(open.recipient.full_address ?? open.recipient.address)) {
         od.recipient_address = { ...(r ?? {}), ...open.recipient }
-        this.logger.log(`[shopee.orders] endereço capturado via etiqueta: ${od.order_sn}`)
+        addressOpen = true
+        this.logger.log(`[shopee.orders] endereço capturado via etiqueta (data_info): ${od.order_sn}`)
+      }
+      // Fallback final: o PDF da etiqueta carrega NOME+ENDEREÇO abertos com
+      // camada de texto (recipient_address_info da API vem null no SPX BR).
+      if (!addressOpen) {
+        const pdf = await this.adapter.downloadShippingDocumentPdf(conn, String(od.order_sn), String(pkg))
+        const rec = pdf ? await parseShopeeLabelRecipient(pdf, String(od.order_sn)) : null
+        if (rec) {
+          od.recipient_address = { ...(r ?? {}), ...rec }
+          this.logger.log(`[shopee.orders] nome+endereço capturados via PDF da etiqueta: ${od.order_sn}`)
+        }
       }
     } catch (e: unknown) {
       // fora da janela (não organizado/já despachado) — esperado na maioria
