@@ -234,14 +234,20 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return this.fetchDetailBatch(conn, sns)
   }
 
-  /** Endereço do destinatário via DOCUMENTO DE ENVIO (etiqueta). A Shopee
-   *  mascara o recipient_address do get_order_detail, mas a etiqueta carrega
-   *  o endereço completo — disponível SÓ na janela entre "Organizar Envio"
-   *  (ship_order) e o despacho. Cria o documento (mesmo AWB que o Seller
-   *  Center imprime; criar de novo não quebra nada) e lê os dados. Lança
-   *  fora da janela — caller trata como skip silencioso. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async fetchShippingDocumentRecipient(conn: MpConnection, orderSn: string, packageNumber: string): Promise<Record<string, any> | null> {
+  /** Dados ABERTOS do comprador via DOCUMENTO DE ENVIO (etiqueta) — janela
+   *  entre "Organizar Envio" e o despacho.
+   *
+   *  ⚠️ A etiqueta é a ÚNICA fonte do CPF pra loja pessoa-física: validado
+   *  ao vivo 2026-07-06 na Tudo em Casa (get_order_detail mascara buyer_cpf_id
+   *  MESMO na janela, mas shipping_document_info.buyer_cpf_id vem aberto —
+   *  a SPX precisa do CPF impresso). recipient_address_info segue null no
+   *  SPX BR (endereço aberto só no PDF) — capturado se um dia popular.
+   *  Lança fora da janela — caller trata como skip silencioso. */
+  async fetchShippingDocumentRecipient(conn: MpConnection, orderSn: string, packageNumber: string): Promise<{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recipient: Record<string, any> | null
+    buyer_cpf_id: string | null
+  }> {
     const { accessToken, shopId } = this.requireShop(conn)
     const { partnerId } = this.partnerEnv()
     const post = async (apiPath: string, body: Record<string, unknown>) => {
@@ -274,15 +280,19 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       ?? resp?.recipient_address
       ?? null
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pickCpf = (resp: any): string | null => {
+      const raw = String(resp?.shipping_document_info?.buyer_cpf_id ?? '').replace(/\D/g, '')
+      return raw.length >= 11 ? raw : null
+    }
+
     let info = await readInfo()
     if (info?.error) throw new Error(`Shopee get_shipping_document_data_info ${info.error}: ${info.message}`)
     let rcpt = pickRecipient(info?.response)
+    let cpf  = pickCpf(info?.response)
 
-    // 2) sem recipient ainda → cria o documento (com tracking) e relê.
-    //    ⚠️ SPX BR hoje devolve recipient_address_info=null mesmo com o
-    //    documento criado (endereço aberto só existe no PDF da etiqueta) —
-    //    o caminho fica pronto caso a Shopee passe a popular o campo.
-    if (!rcpt) {
+    // 2) sem recipient nem CPF ainda → cria o documento (com tracking) e relê.
+    if (!rcpt && !cpf) {
       const tracking = info?.response?.shipping_document_info?.shopee_tracking_number
         ?? info?.response?.shipping_document_info?.tracking_number
       await post('/api/v2/logistics/create_shipping_document', {
@@ -294,9 +304,10 @@ export class ShopeeAdapter extends MarketplaceAdapter {
       }).catch(() => null)
       info = await readInfo()
       rcpt = pickRecipient(info?.response)
+      cpf  = pickCpf(info?.response)
     }
-    this.logger.log(`[shopee.shippingDoc] ${orderSn} recipient=${JSON.stringify(rcpt) ?? 'null'}`)
-    return rcpt as Record<string, unknown> | null
+    this.logger.log(`[shopee.shippingDoc] ${orderSn} cpf=${cpf ? 'aberto' : 'n/d'} recipient=${rcpt ? 'aberto' : 'null'}`)
+    return { recipient: rcpt as Record<string, unknown> | null, buyer_cpf_id: cpf }
   }
 
   /** Repasse REAL (escrow) de 1 pedido concluído — a fonte da verdade das

@@ -255,23 +255,33 @@ export class ShopeeOrdersIngestionService {
     this.logger.log(`[shopee.new-sale] sinal emitido pedido=${orderSn} total=R$${total} margem=${margemPct}%`)
   }
 
-  /** Captura o endereço ABERTO do destinatário via documento de envio
-   *  (etiqueta) quando o get_order_detail veio mascarado. Só tenta em pedido
+  /** Captura dados ABERTOS do comprador via documento de envio (etiqueta)
+   *  quando o get_order_detail veio mascarado. Só tenta em pedido
    *  ready_to_ship com pacote; falha fora da janela = skip silencioso.
-   *  Sucesso = enxerta od.recipient_address aberto (o mirror persiste e o
-   *  preserve impede re-sync mascarado de sobrescrever). */
+   *
+   *  CPF: pra loja pessoa-física (ex.: Tudo em Casa) o detail mascara o
+   *  buyer_cpf_id MESMO na janela — a etiqueta é a ÚNICA fonte aberta
+   *  (validado ao vivo 2026-07-06). Enxerta em od.buyer_cpf_id → o mirror
+   *  grava buyer_doc_number e o preserve impede re-sync mascarado de
+   *  sobrescrever (fica gravado pro enriquecimento/clientes unificados). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async captureOpenRecipient(conn: MpConnection, od: any): Promise<void> {
     const masked = (v: unknown) => typeof v !== 'string' || !v.trim() || /^\*+$/.test(v.trim())
     if (this.mapShippingStatus(od?.order_status) !== 'ready_to_ship') return
     const r = od?.recipient_address
-    if (r && !masked(r.full_address)) return  // já veio aberto
+    const addressOpen = Boolean(r && !masked(r.full_address))
+    const cpfOpen = !masked(od?.buyer_cpf_id)
+    if (addressOpen && cpfOpen) return  // nada a capturar
     const pkg = od?.package_list?.[0]?.package_number
     if (!pkg) return
     try {
       const open = await this.adapter.fetchShippingDocumentRecipient(conn, String(od.order_sn), String(pkg))
-      if (open && !masked(open.full_address ?? open.address)) {
-        od.recipient_address = { ...(r ?? {}), ...open }
+      if (!cpfOpen && open.buyer_cpf_id) {
+        od.buyer_cpf_id = open.buyer_cpf_id
+        this.logger.log(`[shopee.orders] CPF capturado via etiqueta: ${od.order_sn}`)
+      }
+      if (!addressOpen && open.recipient && !masked(open.recipient.full_address ?? open.recipient.address)) {
+        od.recipient_address = { ...(r ?? {}), ...open.recipient }
         this.logger.log(`[shopee.orders] endereço capturado via etiqueta: ${od.order_sn}`)
       }
     } catch (e: unknown) {
