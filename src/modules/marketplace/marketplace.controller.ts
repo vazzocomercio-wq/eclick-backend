@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Body, UseGuards, HttpCode, HttpStatus,
+  Controller, Get, Post, Delete, Param, Body, UseGuards, HttpCode, HttpStatus,
   BadRequestException, InternalServerErrorException, Logger,
 } from '@nestjs/common'
 import axios from 'axios'
@@ -29,6 +29,41 @@ export class MarketplaceController {
   private readonly logger = new Logger(MarketplaceController.name)
 
   constructor(private readonly mp: MarketplaceService) {}
+
+  // ── Connections (listar/desconectar) ────────────────────────────────────
+
+  /** Lista connections ativas da org — shape sanitizado, sem tokens nem
+   * config. Frontend usa pra renderizar cards de conta em Integrações. */
+  @Get('connections')
+  async listConnections(@ReqUser() user: ReqUserPayload) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const conns = await this.mp.listConnections(user.orgId)
+    return conns.map(c => ({
+      id:         c.id,
+      platform:   c.platform,
+      shop_id:    c.shop_id    ?? null,
+      seller_id:  c.seller_id  ?? null,
+      nickname:   c.nickname   ?? null,
+      status:     c.status     ?? null,
+      expires_at: c.expires_at ?? null,
+      created_at: c.created_at ?? null,
+    }))
+  }
+
+  /** Desconecta uma connection da org. Soft — marca status=disconnected,
+   * preservando config_encrypted pra reconexão sem reentrar secrets. */
+  @Delete('connections/:id')
+  async disconnectConnection(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const conns = await this.mp.listConnections(user.orgId)
+    const conn = conns.find(c => c.id === id)
+    if (!conn) throw new BadRequestException('Conexão não encontrada')
+    await this.mp.markDisconnected(conn.id, 'user_disconnect')
+    return { ok: true }
+  }
 
   // ── Shopee ──────────────────────────────────────────────────────────────
 

@@ -24,6 +24,7 @@ export interface MpConnection {
   config?:          Record<string, unknown> | null
   nickname?:        string | null
   status?:          string | null
+  created_at?:      string | null
 }
 
 export interface AddressShape {

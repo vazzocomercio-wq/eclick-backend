@@ -146,6 +146,7 @@ export class MarketplaceService {
       config,
       nickname:        row.nickname       ?? null,
       status:          row.status         ?? null,
+      created_at:      row.created_at     ?? null,
     }
   }
 
@@ -177,5 +178,5 @@ interface DbRow {
   marketplace_id?: string | null; external_id?: string | null
   access_token?: string | null; refresh_token?: string | null; expires_at?: string | null
   config_encrypted?: string | null; nickname?: string | null; status?: string | null
-  updated_at?: string | null
+  updated_at?: string | null; created_at?: string | null
 }
