@@ -772,7 +772,7 @@ export class FarmService {
     const buf = Buffer.from(imageBase64, 'base64')
     if (buf.length < 100) return { ok: false, reason: 'imagem vazia' }
     const { error } = await supabaseAdmin.storage.from('product-os')
-      .upload(`cam/${printerId}.jpg`, buf, { contentType: 'image/jpeg', upsert: true })
+      .upload(`cam/${printerId}.jpg`, buf, { contentType: 'image/jpeg', upsert: true, cacheControl: '0' })
     if (error) { this.logger.warn(`[farm.camera] upload falhou: ${error.message}`); return { ok: false, reason: error.message } }
     await supabaseAdmin.from('printer_status').update({ camera_at: new Date().toISOString() }).eq('printer_id', printerId)
     return { ok: true }
