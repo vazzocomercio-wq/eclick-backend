@@ -81,6 +81,15 @@ export interface MultiplierCandidate {
   thumbnail:   string | null
   /** canais onde o produto JÁ tem anúncio ativo (platform:account). */
   covered:     string[]
+  /** anúncios ativos do produto — candidatos a REFERÊNCIA da cópia (o
+   *  usuário escolhe de qual anúncio os dados serão copiados). */
+  sources:     Array<{
+    platform:   string
+    account_id: string | null
+    listing_id: string
+    title:      string | null
+    price:      number | null
+  }>
   /** pendências que impedem/atrapalham publicar no destino (PT-BR). */
   warnings:    string[]
 }

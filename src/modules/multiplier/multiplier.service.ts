@@ -263,7 +263,8 @@ export class MultiplierService {
 
     const items: MultiplierCandidate[] = page.map(p => {
       const photos = this.collectImageUrls(p)
-      const covered = (byProduct.get(p.id) ?? []).map(l =>
+      const listingsOfProduct = byProduct.get(p.id) ?? []
+      const covered = listingsOfProduct.map(l =>
         l.account_id ? `${l.platform}:${l.account_id}` : l.platform,
       )
       return {
@@ -275,6 +276,14 @@ export class MultiplierService {
         photo_count: photos.length,
         thumbnail:   photos[0] ?? null,
         covered:     [...new Set(covered)],
+        // anúncios candidatos a REFERÊNCIA da cópia (usuário escolhe na UI)
+        sources:     listingsOfProduct.map(l => ({
+          platform:   l.platform,
+          account_id: l.account_id,
+          listing_id: l.listing_id,
+          title:      l.listing_title,
+          price:      l.listing_price,
+        })),
         warnings:    this.publishWarnings(opts.target, p, photos),
       }
     })
@@ -365,6 +374,30 @@ export class MultiplierService {
       String((d as { target_account_id: string | null }).target_account_id ?? '') === String(accountId ?? ''))
     if (sameAccount) {
       const existing = sameAccount as unknown as MultiplierDraft
+      // usuário escolheu OUTRA referência → re-monta a proposta a partir do
+      // anúncio escolhido (senão a idempotência devolveria o rascunho antigo
+      // ignorando a escolha)
+      if (body.source_listing_id && body.source_listing_id !== existing.source_listing_id) {
+        const src = listings.find(l => l.listing_id === body.source_listing_id) ?? null
+        if (!src) throw new BadRequestException('source_listing_id não é um anúncio ativo deste produto.')
+        const payload = await this.buildPayload(orgId, body.target_platform, product, src)
+        const { data, error } = await supabaseAdmin
+          .from('multiplier_drafts')
+          .update({
+            payload,
+            source_platform:   src.platform,
+            source_listing_id: src.listing_id,
+            status:            'draft',
+            error_message:     null,
+            updated_at:        new Date().toISOString(),
+          })
+          .eq('organization_id', orgId)
+          .eq('id', existing.id)
+          .select('*')
+          .single()
+        if (error) throw new BadRequestException(`createDraft: ${error.message}`)
+        return data as unknown as MultiplierDraft
+      }
       // veio um grupo de variações novo → mescla no rascunho aberto (senão a
       // idempotência devolveria o antigo ignorando o pedido)
       if (body.variations?.length) {
