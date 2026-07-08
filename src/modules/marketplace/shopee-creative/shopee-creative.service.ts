@@ -232,9 +232,18 @@ export class ShopeeCreativePublisherService {
     const description = composeListingDescription(baseDescription, draft.bullets, draft.faq)
     if (baseDescription.length < 20) throw new BadRequestException('Descrição muito curta (mín. 20 caracteres na Shopee)')
 
-    // 4) categoria (do rascunho ou recomendada pelo nome)
-    const categoryId = await this.step('categoria (category_recommend)', () => adapter.recommendCategory(conn, name))
-    if (!categoryId) throw new BadRequestException('Não foi possível recomendar uma categoria Shopee para este produto. Informe a categoria manualmente.')
+    // 4) categoria: a escolhida no rascunho (draft.category_id) tem prioridade;
+    //    sem ela, recomendação automática pelo nome (category_recommend).
+    const manualCategory = Number(draft.category_id)
+    const categoryId = Number.isFinite(manualCategory) && manualCategory > 0
+      ? manualCategory
+      : await this.step('categoria (category_recommend)', () => adapter.recommendCategory(conn, name))
+    if (!categoryId) {
+      throw new BadRequestException(
+        'Não foi possível recomendar uma categoria Shopee para este produto. ' +
+        'Informe o id da categoria no campo "Categoria Shopee (id)" do rascunho e publique de novo.',
+      )
+    }
 
     // 5) imagens: image_urls (AI Criativo) OU photo_urls/images (catálogo) → upload → image_id (máx 9)
     const rawPhotos: unknown[] =
@@ -361,8 +370,13 @@ export class ShopeeCreativePublisherService {
     // 10) vínculo anúncio↔produto de catálogo (`products.id`). Vem do fluxo
     // catálogo (prod) OU do AI Criativo via product_id/SKU resolvido no front
     // (draft.catalog_product_id). Sem catálogo (anúncio standalone) → não há
-    // estoque/ledger a vincular.
-    const catalogProductId = prod?.id ?? (draft.catalog_product_id ? String(draft.catalog_product_id) : null)
+    // estoque/ledger a vincular. catalog_product_id=null EXPLÍCITO = caller
+    // pede pra NÃO vincular aqui (Multiplicador com variações: o vínculo é
+    // por model, feito depois) — sem isso o item ficava com vínculo duplo
+    // (item-level '' + por variação) e o motor de estoque conflitava.
+    const catalogProductId = draft.catalog_product_id !== undefined
+      ? (draft.catalog_product_id ? String(draft.catalog_product_id) : null)
+      : (prod?.id ?? null)
     let virtualStock: number | undefined
     let stockPaused: boolean | undefined
     if (catalogProductId) {
@@ -449,6 +463,32 @@ export class ShopeeCreativePublisherService {
     return conns
       .filter(c => c.shop_id != null)
       .map(c => ({ shop_id: c.shop_id as number, nickname: c.nickname ?? null }))
+  }
+
+  /** Conteúdo AO VIVO de um item desta loja (get_item_base_info): título,
+   *  descrição, marca e TODAS as fotos. O Multiplicador usa pra copiar o
+   *  ANÚNCIO de origem — o produto do catálogo é só vínculo/estoque. */
+  async getItemContent(orgId: string, shopId: number | null, itemId: number): Promise<{
+    title: string | null
+    description: string | null
+    brand: string | null
+    images: string[]
+  }> {
+    const { conn, adapter } = await this.resolveConnForShop(orgId, shopId)
+    const info = await adapter.getItemForEdit(conn, itemId)
+    const raw = info.raw as {
+      image?: { image_url_list?: unknown[] }
+      brand?: { original_brand_name?: string | null }
+    } | null
+    const brandName = raw?.brand?.original_brand_name?.trim() || null
+    return {
+      title:       info.item_name,
+      description: info.description,
+      // 'No Brand' / 'NoBrand' é o placeholder da Shopee — não é marca real
+      brand:       brandName && !/^no\s*brand$/i.test(brandName) ? brandName : null,
+      images:      (raw?.image?.image_url_list ?? [])
+        .filter((u): u is string => typeof u === 'string' && u.startsWith('http')),
+    }
   }
 
   /** Multiplicador — inicializa variações (tier + models) num item recém-criado

@@ -263,7 +263,8 @@ export class MultiplierService {
 
     const items: MultiplierCandidate[] = page.map(p => {
       const photos = this.collectImageUrls(p)
-      const covered = (byProduct.get(p.id) ?? []).map(l =>
+      const listingsOfProduct = byProduct.get(p.id) ?? []
+      const covered = listingsOfProduct.map(l =>
         l.account_id ? `${l.platform}:${l.account_id}` : l.platform,
       )
       return {
@@ -275,6 +276,14 @@ export class MultiplierService {
         photo_count: photos.length,
         thumbnail:   photos[0] ?? null,
         covered:     [...new Set(covered)],
+        // anúncios candidatos a REFERÊNCIA da cópia (usuário escolhe na UI)
+        sources:     listingsOfProduct.map(l => ({
+          platform:   l.platform,
+          account_id: l.account_id,
+          listing_id: l.listing_id,
+          title:      l.listing_title,
+          price:      l.listing_price,
+        })),
         warnings:    this.publishWarnings(opts.target, p, photos),
       }
     })
@@ -365,6 +374,30 @@ export class MultiplierService {
       String((d as { target_account_id: string | null }).target_account_id ?? '') === String(accountId ?? ''))
     if (sameAccount) {
       const existing = sameAccount as unknown as MultiplierDraft
+      // usuário escolheu OUTRA referência → re-monta a proposta a partir do
+      // anúncio escolhido (senão a idempotência devolveria o rascunho antigo
+      // ignorando a escolha)
+      if (body.source_listing_id && body.source_listing_id !== existing.source_listing_id) {
+        const src = listings.find(l => l.listing_id === body.source_listing_id) ?? null
+        if (!src) throw new BadRequestException('source_listing_id não é um anúncio ativo deste produto.')
+        const payload = await this.buildPayload(orgId, body.target_platform, product, src)
+        const { data, error } = await supabaseAdmin
+          .from('multiplier_drafts')
+          .update({
+            payload,
+            source_platform:   src.platform,
+            source_listing_id: src.listing_id,
+            status:            'draft',
+            error_message:     null,
+            updated_at:        new Date().toISOString(),
+          })
+          .eq('organization_id', orgId)
+          .eq('id', existing.id)
+          .select('*')
+          .single()
+        if (error) throw new BadRequestException(`createDraft: ${error.message}`)
+        return data as unknown as MultiplierDraft
+      }
       // veio um grupo de variações novo → mescla no rascunho aberto (senão a
       // idempotência devolveria o antigo ignorando o pedido)
       if (body.variations?.length) {
@@ -447,6 +480,14 @@ export class MultiplierService {
     }
     if (merged.title) {
       merged.title = merged.title.trim().slice(0, CHANNEL_TITLE_LIMITS[draft.target_platform as ChannelPlatform] ?? 255)
+    }
+    // categoria Shopee é id NUMÉRICO — valida na edição pro erro aparecer aqui
+    // (acionável) e não só no publish
+    if (draft.target_platform === 'shopee' && merged.category_id != null && String(merged.category_id).trim() !== '') {
+      if (!/^\d+$/.test(String(merged.category_id).trim())) {
+        throw new BadRequestException('Categoria Shopee: informe o id numérico da categoria (ex.: 101178) — ou deixe vazio pra usar a recomendação automática.')
+      }
+      merged.category_id = String(merged.category_id).trim()
     }
     // edição do grupo de variações passa pelas MESMAS validações da criação
     if (patch.variations !== undefined) {
@@ -577,6 +618,11 @@ export class MultiplierService {
       package_width_cm:   p.package_dimensions_cm?.width ?? null,
       package_height_cm:  p.package_dimensions_cm?.height ?? null,
       brand:              p.brand,
+      // categoria escolhida no rascunho (id numérico) — sem ela o publisher
+      // usa a recomendação automática
+      category_id:        /^\d+$/.test(String(p.category_id ?? '').trim())
+        ? Number(String(p.category_id).trim())
+        : null,
     }
     const res = await this.shopeePublisher.publish(orgId, shopeeDraft)
     if (!res.ok || !res.item_id) {
@@ -722,6 +768,11 @@ export class MultiplierService {
     const ttImages = await this.resolveImagesForPublish(orgId, draft)
     if (!ttImages.length) throw new BadRequestException('Produto sem foto válida — adicione imagens antes de publicar no TikTok.')
 
+    // ficha técnica obrigatória da categoria: determinístico + IA (nunca
+    // inventa) — mesmo padrão do buildMlAttributes. Sem isso, categorias com
+    // atributos obrigatórios rejeitavam a publicação.
+    const productAttributes = await this.buildTikTokAttributes(orgId, draft, categoryId)
+
     const res = await this.tiktok.publishProduct(orgId, {
       title:                 p.title,
       description:           p.description ?? undefined,
@@ -733,9 +784,116 @@ export class MultiplierService {
       package_weight_kg:     p.weight_kg ?? undefined,
       package_dimensions_cm: p.package_dimensions_cm ?? undefined,
       brand_name:            p.brand ?? undefined,
+      product_attributes:    productAttributes.length ? productAttributes : undefined,
     })
     if (!res.product_id) throw new BadRequestException('TikTok não retornou product_id.')
     return String(res.product_id)
+  }
+
+  /** Atributos TikTok: determinísticos (marca) + IA pros obrigatórios da
+   *  categoria — espelho do buildMlAttributes. A IA nunca inventa: sem
+   *  confiança, omite (o erro do TikTok aponta o que faltou, acionável no
+   *  draft). NÃO-FATAL: qualquer falha aqui segue sem atributos. */
+  private async buildTikTokAttributes(
+    orgId: string,
+    draft: MultiplierDraft,
+    categoryId: string,
+  ): Promise<Array<{ id: string; values: Array<{ id?: string; name: string }> }>> {
+    const p = draft.payload
+    type TtAttr = { id: string; name: string; required: boolean; type: string; values: Array<{ id: string; name: string }> }
+    let all: TtAttr[] = []
+    try {
+      all = await this.tiktok.getCategoryAttributes(orgId, categoryId)
+    } catch (e) {
+      this.logger.warn(`[multiplier.tt] atributos da categoria ${categoryId} falharam (segue sem): ${(e as Error)?.message}`)
+      return []
+    }
+    const required = all.filter(a => a.required)
+    if (!required.length) return []
+
+    const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+    const out: Array<{ id: string; values: Array<{ id?: string; name: string }> }> = []
+    const done = new Set<string>()
+    const push = (attr: TtAttr, value: { id?: string; name: string }) => {
+      if (done.has(attr.id)) return
+      done.add(attr.id)
+      out.push({ id: attr.id, values: [value] })
+    }
+
+    // determinístico: atributo "marca" da categoria ← marca do produto
+    const pending: TtAttr[] = []
+    for (const a of required) {
+      const brand = p.brand?.trim()
+      if (brand && /(marca|brand)/.test(norm(a.name))) {
+        const opt = a.values.find(v => norm(v.name) === norm(brand))
+        if (opt) { push(a, { id: opt.id, name: opt.name }); continue }
+        if (!a.values.length) { push(a, { name: brand.slice(0, 100) }); continue }
+      }
+      pending.push(a)
+    }
+
+    // obrigatórios restantes → IA (opção exata em lista fechada; texto curto
+    // em campo livre; sem confiança = omite)
+    if (pending.length) {
+      try {
+        const attrLines = pending.map(a => {
+          const opts = a.values.map(v => v.name).filter(Boolean)
+          const spec = opts.length
+            ? `escolha UMA opção exata: ${opts.slice(0, 60).join(' | ')}`
+            : 'texto curto'
+          return `- ${a.id} ("${a.name}") — ${spec}`
+        }).join('\n')
+
+        const outLlm = await this.llm.generateText({
+          orgId,
+          feature:    'creative_listing',
+          userPrompt: [
+            'Você preenche a ficha técnica de um anúncio do TikTok Shop.',
+            '',
+            'PRODUTO:',
+            `- Título: ${p.title}`,
+            `- Marca: ${p.brand ?? '—'}`,
+            `- Descrição: ${(p.description ?? '').slice(0, 2000)}`,
+            '',
+            'ATRIBUTOS OBRIGATÓRIOS A PREENCHER:',
+            attrLines,
+            '',
+            'REGRAS:',
+            '- Preencha apenas o que der pra deduzir COM CONFIANÇA dos dados acima.',
+            '- Para atributos com opções, use EXATAMENTE uma das opções listadas.',
+            '- Se não der pra determinar, omita o atributo.',
+            '- NUNCA invente valores.',
+            '',
+            'Responda só JSON: {"attributes":[{"id":"X","value":"Y"}]}',
+          ].join('\n'),
+          jsonMode:  true,
+          maxTokens: 1500,
+        })
+        // o modelo às vezes embrulha em cerca markdown (```json … ```)
+        const cleaned = outLlm.text.trim()
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```\s*$/, '')
+        const parsed = JSON.parse(cleaned) as { attributes?: Array<{ id?: string; value?: string }> }
+        const byId = new Map(pending.map(a => [a.id, a]))
+        for (const it of parsed?.attributes ?? []) {
+          const attr = byId.get(String(it?.id ?? '').trim())
+          const raw = String(it?.value ?? '').trim()
+          if (!attr || !raw) continue
+          if (attr.values.length) {
+            const opt = attr.values.find(v => norm(v.name) === norm(raw))
+            if (opt) push(attr, { id: opt.id, name: opt.name })
+            // lista fechada sem match exato → não força valor inválido
+          } else {
+            push(attr, { name: raw.slice(0, 100) })
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`[multiplier.tt] IA de atributos falhou (segue sem): ${(e as Error)?.message}`)
+      }
+    }
+
+    this.logger.log(`[multiplier.tt] atributos obrigatórios da categoria ${categoryId}: ${required.length}, preenchidos: ${out.length}`)
+    return out
   }
 
   /** Publica no Mercado Livre direto do produto canônico (POST /items).
@@ -1097,21 +1255,40 @@ export class MultiplierService {
     const channelTitle = key ? product.channel_titles?.[key] : null
     const channelDesc  = key ? product.channel_descriptions?.[key] : null
 
+    // REGRA DE NEGÓCIO: quem multiplica é o ANÚNCIO de origem — título,
+    // descrição, marca, GTIN e fotos vêm dele. O produto do catálogo entra
+    // como fallback e pro que é dele mesmo (SKU, estoque, peso/dimensões).
+    // Best-effort: se a leitura do anúncio falhar, segue com produto (antigo).
+    let src: { title: string | null; description: string | null; brand: string | null; gtin: string | null; images: string[] } | null = null
+    if (source) {
+      try {
+        src = await this.fetchSourceListing(orgId, source.platform, source.listing_id, source.account_id)
+      } catch (e) {
+        this.logger.warn(`[multiplier] conteúdo do anúncio origem ${source.platform}/${source.listing_id} falhou (usando produto): ${(e as Error)?.message}`)
+      }
+    }
+
     const rawTitle =
-      channelTitle?.trim() ||
+      src?.title?.trim() ||
       source?.listing_title?.trim() ||
+      channelTitle?.trim() ||
       product.ml_title?.trim() ||
       product.name?.trim() || ''
     const title = rawTitle.slice(0, CHANNEL_TITLE_LIMITS[target as ChannelPlatform] ?? 255)
 
     const description =
+      src?.description?.trim() ||
       channelDesc?.trim() ||
       product.ai_long_description?.trim() ||
       product.description?.trim() ||
       product.ai_short_description?.trim() || null
 
     const price = source?.listing_price ?? product.price ?? null
-    const images = this.collectImageUrls(product).slice(0, 9)
+
+    // FOTOS: as do anúncio de origem primeiro; as do produto completam.
+    let images = this.collectImageUrls(product)
+    if (src?.images.length) images = this.normalizeImageUrls([...src.images, ...images])
+    images = images.slice(0, 9)
 
     const dims = (product.length_cm && product.width_cm && product.height_cm)
       ? { length: product.length_cm, width: product.width_cm, height: product.height_cm }
@@ -1123,8 +1300,8 @@ export class MultiplierService {
       price: price != null ? Math.round(Number(price) * 100) / 100 : null,
       image_urls: images,
       sku: product.sku,
-      brand: product.brand,
-      gtin: product.gtin,
+      brand: src?.brand ?? product.brand,
+      gtin: src?.gtin ?? product.gtin,
       weight_kg: product.weight_kg,
       package_dimensions_cm: dims,
       stock: product.stock,
@@ -1167,6 +1344,7 @@ export class MultiplierService {
     if (target === 'shopee') {
       const desc = p.channel_descriptions?.['shopee'] ?? p.ai_long_description ?? p.description ?? ''
       if ((desc ?? '').trim().length < 20) w.push('descrição curta (<20 chars)')
+      if (!p.weight_kg) w.push('sem peso (publica com 0,5 kg padrão — frete pode sair errado)')
     }
     if (target === 'mercadolivre') {
       if (!p.brand?.trim()) w.push('sem marca (muitas categorias ML exigem)')
@@ -1275,6 +1453,113 @@ export class MultiplierService {
     return out
   }
 
+  /** Conteúdo do ANÚNCIO de origem — a fonte de verdade do multiplicador:
+   *  quem multiplica é o ANÚNCIO (título/descrição/marca/GTIN/fotos); o
+   *  produto do catálogo entra só como vínculo/estoque/logística. Cobre as
+   *  3 origens:
+   *  - ML: item + descrição AO VIVO via API com o token da conta DONA (o
+   *    vínculo sabe; token de outra conta dá 403 no PolicyAgent);
+   *  - Shopee: get_item_base_info da loja dona (via publicador);
+   *  - TikTok: raw sincronizado em tiktok_shop_products (listing_id do
+   *    vínculo é o sku_id — resolve pelo produto que contém esse sku). */
+  private async fetchSourceListing(
+    orgId: string,
+    platform: string,
+    listingId: string,
+    accountId?: string | null,
+  ): Promise<{ title: string | null; description: string | null; brand: string | null; gtin: string | null; images: string[] }> {
+    const empty = { title: null, description: null, brand: null, gtin: null, images: [] as string[] }
+
+    // conta dona do anúncio (quando o caller não sabe, o vínculo sabe)
+    let owner = accountId ?? null
+    if (!owner && (platform === 'mercadolivre' || platform === 'shopee')) {
+      const { data: link } = await supabaseAdmin
+        .from('product_listings')
+        .select('account_id')
+        .eq('platform', platform)
+        .eq('listing_id', listingId)
+        .not('account_id', 'is', null)
+        .limit(1)
+        .maybeSingle<{ account_id: string | null }>()
+      owner = link?.account_id ?? null
+    }
+
+    if (platform === 'mercadolivre') {
+      const ownerId = owner ? Number(owner) : undefined
+      const { token } = await this.mercadolivre.getTokenForOrg(
+        orgId, Number.isFinite(ownerId) && (ownerId as number) > 0 ? ownerId : undefined,
+      )
+      const cfg = { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 }
+      const [itemRes, descRes] = await Promise.allSettled([
+        axios.get<{
+          title?: string
+          pictures?: Array<{ secure_url?: string; url?: string }>
+          attributes?: Array<{ id: string; value_name?: string | null }>
+        }>(`https://api.mercadolibre.com/items/${listingId}?include_attributes=all`, cfg),
+        axios.get<{ plain_text?: string }>(`https://api.mercadolibre.com/items/${listingId}/description`, cfg),
+      ])
+      if (itemRes.status === 'rejected') throw itemRes.reason
+      const item = itemRes.value.data
+      const attr = (id: string) => item.attributes?.find(a => a.id === id)?.value_name?.trim() || null
+      const pics = (item.pictures ?? []).map(p => p.secure_url ?? p.url).filter(Boolean) as string[]
+      return {
+        title:       item.title?.trim() || null,
+        description: descRes.status === 'fulfilled' ? (descRes.value.data?.plain_text?.trim() || null) : null,
+        brand:       attr('BRAND'),
+        gtin:        attr('GTIN'),
+        images:      this.normalizeImageUrls(pics),
+      }
+    }
+
+    if (platform === 'shopee') {
+      const shopId = owner ? Number(owner) : null
+      const c = await this.shopeePublisher.getItemContent(
+        orgId, Number.isFinite(shopId as number) && (shopId as number) > 0 ? (shopId as number) : null, Number(listingId),
+      )
+      return {
+        title:       c.title?.trim() || null,
+        description: c.description?.trim() || null,
+        brand:       c.brand,
+        gtin:        null,
+        images:      this.normalizeImageUrls(c.images),
+      }
+    }
+
+    if (platform === 'tiktok_shop') {
+      // listing_id do vínculo TikTok = sku_id (product_id só como fallback)
+      const { data } = await supabaseAdmin
+        .from('tiktok_shop_products')
+        .select('tts_product_id, title, raw')
+        .eq('organization_id', orgId)
+        .limit(500)
+      type TtRaw = {
+        skus?: Array<{ id?: string | number }>
+        main_images?: Array<{ urls?: string[] }>
+        description?: string
+      }
+      const rows = (data ?? []) as Array<{ tts_product_id: string; title: string | null; raw: TtRaw | null }>
+      const hit = rows.find(r =>
+        r.tts_product_id === listingId ||
+        (r.raw?.skus ?? []).some(s => String(s?.id ?? '') === listingId),
+      )
+      if (!hit) return empty
+      const urls = (hit.raw?.main_images ?? []).map(m => m.urls?.[0]).filter(Boolean) as string[]
+      // descrição do TikTok vem em HTML — vira texto puro pros outros canais
+      const desc = (hit.raw?.description ?? '')
+        .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').trim() || null
+      return {
+        title:       hit.title?.trim() || null,
+        description: desc,
+        brand:       null,
+        gtin:        null,
+        images:      this.normalizeImageUrls(urls),
+      }
+    }
+
+    return empty
+  }
+
   /** Fotos pro publish: payload normalizado; se ficar vazio (ex.: origem tinha
    *  só placeholder "processando"), re-coleta FRESCO do produto — as fotos
    *  podem ter terminado de processar depois que o rascunho foi criado. */
@@ -1288,30 +1573,12 @@ export class MultiplierService {
       if (fromProduct.length > 0) return fromProduct
     } catch { /* segue pro fallback do anúncio de origem */ }
 
-    // último recurso: fotos AO VIVO do anúncio ML de origem (o catálogo pode
-    // ter sincronizado só o placeholder, mas o anúncio já tem as fotos prontas).
-    // ⚠️ multi-conta: usar o token da conta DONA do anúncio (o vínculo sabe);
-    // token de outra conta dá 403 no PolicyAgent.
-    if (draft.source_platform === 'mercadolivre' && draft.source_listing_id) {
+    // último recurso: fotos AO VIVO do anúncio de origem (o catálogo pode ter
+    // sincronizado só o placeholder, mas o anúncio já tem as fotos prontas).
+    if (draft.source_platform && draft.source_listing_id) {
       try {
-        const { data: link } = await supabaseAdmin
-          .from('product_listings')
-          .select('account_id')
-          .eq('platform', 'mercadolivre')
-          .eq('listing_id', draft.source_listing_id)
-          .not('account_id', 'is', null)
-          .limit(1)
-          .maybeSingle<{ account_id: string | null }>()
-        const ownerId = link?.account_id ? Number(link.account_id) : undefined
-        const { token } = await this.mercadolivre.getTokenForOrg(
-          orgId, Number.isFinite(ownerId) && (ownerId as number) > 0 ? ownerId : undefined,
-        )
-        const { data } = await axios.get<{ pictures?: Array<{ secure_url?: string; url?: string }> }>(
-          `https://api.mercadolibre.com/items/${draft.source_listing_id}?attributes=pictures`,
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 15_000 },
-        )
-        const pics = (data?.pictures ?? []).map(p => p.secure_url ?? p.url).filter(Boolean) as string[]
-        return this.normalizeImageUrls(pics).slice(0, 9)
+        const src = await this.fetchSourceListing(orgId, draft.source_platform, draft.source_listing_id)
+        return src.images.slice(0, 9)
       } catch (e) {
         this.logger.warn(`[multiplier] fotos do anúncio origem ${draft.source_listing_id} falharam: ${(e as Error)?.message}`)
       }
