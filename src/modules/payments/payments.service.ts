@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common'
+import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadoPagoService } from './mercado-pago.service'
 import { StripeService } from './stripe.service'
@@ -550,6 +551,76 @@ export class PaymentsService {
     return { orderId: order.id, initPoint: result.initPoint }
   }
 
+  // ─── Vendedora IA (e-Click Active) — checkout WhatsApp ────────────────
+
+  /**
+   * POST /internal/wa-checkout — chamado pelo e-Click Active quando a
+   * vendedora IA fecha uma venda no WhatsApp e precisa gerar a cobrança.
+   *
+   * Cria uma Stripe Checkout Session usando a credencial STRIPE_SECRET_KEY
+   * da org DESTE backend (saas_org_id). A metadata da Session carrega
+   * `source='active_whatsapp'` + os ids do Active pro webhook fazer o
+   * callback de confirmação.
+   *
+   * Preço vem em BRL e é convertido pra centavos no StripeService (nunca
+   * confia em string). Devolve { url, session_id }.
+   */
+  async createWaCheckout(body: {
+    saas_org_id?:    string
+    items?:          Array<{ name?: string; price?: number; qty?: number; image_url?: string }>
+    customer_email?: string
+    metadata?: {
+      active_wa_order_id?:      string
+      active_conversation_id?:  string
+      active_org_id?:           string
+    }
+  }): Promise<{ url: string; session_id: string }> {
+    const orgId = (body.saas_org_id ?? '').trim()
+    if (!orgId) throw new BadRequestException('saas_org_id obrigatório')
+
+    const rawItems = Array.isArray(body.items) ? body.items : []
+    if (rawItems.length === 0) throw new BadRequestException('items obrigatório (carrinho vazio)')
+
+    const meta = body.metadata ?? {}
+    const waOrderId = (meta.active_wa_order_id ?? '').trim()
+    if (!waOrderId) throw new BadRequestException('metadata.active_wa_order_id obrigatório')
+
+    const items = rawItems.map((it, i) => {
+      const name  = String(it.name ?? '').trim()
+      const price = Number(it.price)
+      const qty   = Math.max(1, Math.floor(Number(it.qty) || 1))
+      if (!name)                                   throw new BadRequestException(`Item ${i + 1}: nome obrigatório`)
+      if (!Number.isFinite(price) || price <= 0)   throw new BadRequestException(`Item ${i + 1}: preço inválido`)
+      return { name, price, qty, image_url: it.image_url }
+    })
+
+    const apiBase = process.env.PUBLIC_API_BASE_URL
+                 ?? 'https://eclick-backend-production-2a87.up.railway.app'
+
+    const result = await this.stripe.createCheckoutGeneric(orgId, {
+      items,
+      customerEmail: (body.customer_email ?? '').trim() || undefined,
+      metadata: {
+        source:                  'active_whatsapp',
+        active_wa_order_id:      waOrderId,
+        active_conversation_id:  (meta.active_conversation_id ?? '').trim(),
+        active_org_id:           (meta.active_org_id ?? '').trim(),
+        // saas_org_id fica na metadata pro webhook resolver a credencial de
+        // verificação da assinatura por org (não faz parte do contrato do Active,
+        // mas o Stripe aceita chaves extras sem problema).
+        saas_org_id:             orgId,
+      },
+      urls: {
+        success: `${apiBase}/storefront/pay/ok`,
+        cancel:  `${apiBase}/storefront/pay/cancel`,
+      },
+      logRef: `wa_order=${waOrderId}`,
+    })
+
+    this.logger.log(`[wa-checkout] org=${orgId} wa_order=${waOrderId} session=${result.sessionId}`)
+    return { url: result.url, session_id: result.sessionId }
+  }
+
   // ─── Webhooks ────────────────────────────────────────────────────────
 
   /** Mercado Pago webhook. Payload exemplo: `?topic=payment&id=12345`. */
@@ -707,6 +778,20 @@ export class PaymentsService {
 
     const obj = event.data?.object ?? {}
     const meta = (obj.metadata as Record<string, string>) ?? {}
+
+    // ── Ramo Vendedora IA (e-Click Active) ────────────────────────────
+    // Sessions criadas via /internal/wa-checkout carregam source='active_whatsapp'.
+    // Não têm storefront_order_id — tratamos aqui e retornamos (caminho storefront
+    // intacto abaixo). NUNCA derruba o webhook por causa do callback ao Active.
+    if (meta.source === 'active_whatsapp' && meta.active_wa_order_id) {
+      try {
+        await this.handleActiveWhatsappWebhook(event, obj, meta, rawBody, signature)
+      } catch (e) {
+        this.logger.error(`[stripe.webhook→active] erro inesperado: ${(e as Error).message}`)
+      }
+      return
+    }
+
     const orgId   = meta.organization_id
     const orderId = meta.storefront_order_id
 
@@ -772,6 +857,86 @@ export class PaymentsService {
         .eq('id', orderId)
         .eq('organization_id', orgId)
       this.logger.log(`[stripe.webhook] order=${orderId} event=${event.type} -> ${status}`)
+    }
+  }
+
+  /**
+   * Ramo do webhook Stripe pra sessions da vendedora IA (source='active_whatsapp').
+   * Quando o pagamento é confirmado, avisa o e-Click Active via callback interno.
+   * Idempotência é garantida do lado do Active.
+   */
+  private async handleActiveWhatsappWebhook(
+    event: { type: string },
+    obj: Record<string, unknown>,
+    meta: Record<string, string>,
+    rawBody: string,
+    signature: string,
+  ): Promise<void> {
+    // Só nos interessa pagamento concluído.
+    const paid =
+      (event.type === 'checkout.session.completed' && (obj.payment_status as string) === 'paid') ||
+      event.type === 'payment_intent.succeeded'
+    if (!paid) {
+      this.logger.log(`[stripe.webhook→active] evento ${event.type} ignorado (não concluído)`)
+      return
+    }
+
+    // Verifica assinatura usando a org DESTE backend (saas_org_id na metadata,
+    // fallback pro secret global via getWebhookSecret).
+    const saasOrgId = (meta.saas_org_id || meta.active_org_id || '').trim()
+    const ok = await this.stripe.verifyWebhookSignature(saasOrgId, rawBody, signature)
+    if (!ok) {
+      this.logger.warn(`[stripe.webhook→active] assinatura inválida wa_order=${meta.active_wa_order_id}`)
+      return
+    }
+
+    const amountTotal = Number(obj.amount_total ?? obj.amount ?? 0)
+    await this.postActivePaymentConfirmed({
+      active_wa_order_id: meta.active_wa_order_id,
+      session_id:         String(obj.id ?? ''),
+      amount_brl:         amountTotal / 100,
+      active_org_id:      meta.active_org_id ?? '',
+    })
+  }
+
+  /**
+   * POST fire-and-forget pro e-Click Active confirmando o pagamento.
+   * Retry simples (até 3 tentativas, backoff) em erro de rede/5xx.
+   * NUNCA lança — se ACTIVE_INTERNAL_URL/KEY faltarem, apenas loga e segue.
+   */
+  private async postActivePaymentConfirmed(payload: {
+    active_wa_order_id: string
+    session_id:         string
+    amount_brl:         number
+    active_org_id:      string
+  }): Promise<void> {
+    const baseUrl = process.env.ACTIVE_INTERNAL_URL
+    const key     = process.env.ACTIVE_INTERNAL_KEY
+    if (!baseUrl || !key) {
+      this.logger.warn('[stripe.webhook→active] ACTIVE_INTERNAL_URL/ACTIVE_INTERNAL_KEY não configurados — callback ignorado')
+      return
+    }
+    const endpoint = `${baseUrl.replace(/\/+$/, '')}/internal/wa-payment-confirmed`
+    const maxAttempts = 3
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await axios.post(endpoint, payload, {
+          headers: { 'X-Internal-Key': key, 'Content-Type': 'application/json' },
+          timeout: 10_000,
+        })
+        this.logger.log(`[stripe.webhook→active] confirmado wa_order=${payload.active_wa_order_id} session=${payload.session_id} amount=${payload.amount_brl}`)
+        return
+      } catch (e) {
+        const status = axios.isAxiosError(e) ? e.response?.status : undefined
+        const retryable = status === undefined || status >= 500 // rede ou 5xx
+        this.logger.warn(`[stripe.webhook→active] tentativa ${attempt}/${maxAttempts} falhou (status=${status ?? 'rede'}): ${(e as Error).message}`)
+        if (!retryable || attempt === maxAttempts) {
+          this.logger.error(`[stripe.webhook→active] callback não entregue wa_order=${payload.active_wa_order_id} (idempotência garantida no Active)`)
+          return
+        }
+        await new Promise(r => setTimeout(r, attempt * 1_000))
+      }
     }
   }
 

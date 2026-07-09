@@ -59,24 +59,66 @@ export class StripeService {
     order: StorefrontOrder,
     urls: { success: string; cancel: string },
   ): Promise<GatewayCheckoutResult> {
+    const result = await this.createCheckoutGeneric(orgId, {
+      items: order.items.map(it => ({
+        name:      it.name,
+        price:     it.price,
+        qty:       it.qty,
+        image_url: it.imageUrl,
+      })),
+      customerEmail: order.customer.email,
+      metadata: {
+        storefront_order_id: order.id,
+        organization_id:     order.organization_id,
+        store_slug:          order.store_slug,
+      },
+      urls: {
+        // Loja Própria injeta ?session_id={CHECKOUT_SESSION_ID} pro retorno /sucesso ler a session
+        success: `${urls.success}?session_id={CHECKOUT_SESSION_ID}`,
+        cancel:  urls.cancel,
+      },
+      logRef: `order=${order.id}`,
+    })
+    return { sessionId: result.sessionId, initPoint: result.url }
+  }
+
+  /**
+   * Cria uma Checkout Session genérica (sem acoplar ao StorefrontOrder).
+   * Usado tanto pela Loja Própria (via createCheckout) quanto pelo endpoint
+   * interno /internal/wa-checkout (vendedora IA do e-Click Active).
+   *
+   * `metadata` é copiada 1:1 pra metadata da Session Stripe (chave→valor).
+   * `price` vem em BRL (ex 31.41) e é convertido pra centavos em código
+   * (Math.round(price*100)) — nunca confie em string.
+   */
+  async createCheckoutGeneric(
+    orgId: string,
+    input: {
+      items:          Array<{ name: string; price: number; qty: number; image_url?: string }>
+      customerEmail?: string
+      metadata:       Record<string, string>
+      urls:           { success: string; cancel: string }
+      logRef?:        string
+    },
+  ): Promise<{ sessionId: string; url: string }> {
     const key = await this.getSecretKey(orgId)
 
     // Stripe usa form-urlencoded com keys "nested" tipo line_items[0][price_data][...]
     const form = new URLSearchParams()
     form.append('mode', 'payment')
-    form.append('success_url', `${urls.success}?session_id={CHECKOUT_SESSION_ID}`)
-    form.append('cancel_url',  urls.cancel)
-    form.append('metadata[storefront_order_id]', order.id)
-    form.append('metadata[organization_id]',     order.organization_id)
-    form.append('metadata[store_slug]',          order.store_slug)
-    if (order.customer.email) form.append('customer_email', order.customer.email)
+    form.append('success_url', input.urls.success)
+    form.append('cancel_url',  input.urls.cancel)
+    for (const [k, v] of Object.entries(input.metadata)) {
+      form.append(`metadata[${k}]`, String(v ?? ''))
+    }
+    if (input.customerEmail) form.append('customer_email', input.customerEmail)
 
-    order.items.forEach((it, i) => {
-      const cents = Math.round(it.price * 100)
+    input.items.forEach((it, i) => {
+      const cents = Math.round(Number(it.price) * 100)
       form.append(`line_items[${i}][price_data][currency]`,            'brl')
       form.append(`line_items[${i}][price_data][unit_amount]`,         String(cents))
       form.append(`line_items[${i}][price_data][product_data][name]`,  it.name)
-      if (it.imageUrl) form.append(`line_items[${i}][price_data][product_data][images][0]`, it.imageUrl)
+      if (it.image_url) form.append(`line_items[${i}][price_data][product_data][images][0]`, it.image_url)
       form.append(`line_items[${i}][quantity]`,                        String(it.qty))
     })
 
@@ -92,12 +134,12 @@ export class StripeService {
           timeout: 15_000,
         },
       )
-      return { sessionId: res.data.id, initPoint: res.data.url }
+      return { sessionId: res.data.id, url: res.data.url }
     } catch (e) {
       const msg = axios.isAxiosError(e)
         ? `HTTP ${e.response?.status} ${JSON.stringify(e.response?.data).slice(0, 200)}`
         : (e as Error).message
-      this.logger.error(`[stripe.checkout] org=${orgId} order=${order.id}: ${msg}`)
+      this.logger.error(`[stripe.checkout] org=${orgId} ${input.logRef ?? ''}: ${msg}`)
       throw new BadRequestException('Não foi possível criar a cobrança no Stripe. Tente de novo.')
     }
   }
