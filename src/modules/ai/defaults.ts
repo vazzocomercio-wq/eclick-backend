@@ -461,6 +461,21 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
     fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
   },
+  // Prod3d — Custos de Produção 3D: classifica um custo fixo mensal na
+  // categoria certa a partir do nome ("Seguro do galpão" → servicos).
+  prod3d_categoria: {
+    label:       'Categoria de custo fixo (Produção 3D)',
+    description: 'Classifica automaticamente um custo fixo mensal em aluguel/impostos/pessoal/servicos/insumos/outros pelo nome',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
+  // Prod3d — parágrafo executivo do custo de produção pra investidor/sócio.
+  prod3d_explicar: {
+    label:       'Explicação de custos p/ investidor (Produção 3D)',
+    description: 'Gera um resumo executivo em linguagem de investidor a partir dos KPIs de custo de produção (R$/g, composição, capacidade, pendências)',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
 } as const
 
 export type FeatureKey = keyof typeof FEATURE_REGISTRY
