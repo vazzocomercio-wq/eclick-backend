@@ -87,6 +87,7 @@ import { MlWebhookModule } from './modules/ml-webhook/ml-webhook.module'
 import { MlVerticalModule } from './modules/ml-vertical/ml-vertical.module'
 import { DropshipModule } from './modules/dropship/dropship.module'
 import { FinanceiroModule } from './modules/financeiro/financeiro.module'
+import { Prod3dModule } from './modules/prod3d/prod3d.module'
 import { MlListingModule } from './modules/ml-listing/ml-listing.module'
 import { ExecutiveDashboardModule } from './modules/executive-dashboard/executive-dashboard.module'
 import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/visits-scanner.module'
@@ -193,6 +194,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     MlWebhookModule,
     DropshipModule,
     FinanceiroModule,
+    Prod3dModule,
     MlListingModule,
     ExecutiveDashboardModule,
     VisitsScannerModule,
