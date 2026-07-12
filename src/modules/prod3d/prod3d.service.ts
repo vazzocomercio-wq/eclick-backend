@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException, UnauthorizedException, OnModul
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
 import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
+import { BaileysProvider } from '../channels/providers/baileys.provider'
 
 /**
  * Custos de Produção 3D — custeio por absorção (R$/g).
@@ -67,6 +68,7 @@ export class Prod3dService implements OnModuleInit {
   constructor(
     private readonly llm: LlmService,
     private readonly whatsapp: WhatsAppSender,
+    private readonly baileys: BaileysProvider,
   ) {}
 
   onModuleInit() {
@@ -503,13 +505,34 @@ export class Prod3dService implements OnModuleInit {
     if (!cfg.alerta_whatsapp)
       return { ok: false, error: 'Nenhum número de WhatsApp configurado em Custos de Produção.' }
     const texto = `🖨️ ${b.impressora?.trim() || 'Impressora'}${b.evento ? ` [${b.evento}]` : ''}\n${b.mensagem.trim()}`.slice(0, 1500)
-    const r = await this.whatsapp.sendTextMessage({ phone: cfg.alerta_whatsapp, message: texto })
+    const r = await this.enviarWhatsapp(orgId, cfg.alerta_whatsapp as string, texto)
     await this.auditar(orgId, null, 'alerta.impressora', {
       evento: b.evento ?? null, impressora: b.impressora ?? null,
-      enviado: r.success, erro: r.error ?? null,
+      enviado: r.success, via: r.via, erro: r.error ?? null,
     })
-    if (!r.success) this.logger.warn(`[prod3d.alerta] WhatsApp falhou: ${r.error}`)
-    return { ok: r.success, error: r.error }
+    if (!r.success) this.logger.warn(`[prod3d.alerta] WhatsApp falhou (${r.via}): ${r.error}`)
+    return { ok: r.success, via: r.via, error: r.error }
+  }
+
+  /** Envia WhatsApp preferindo o canal GRATUITO da org (Baileys/WhatsApp Web
+   * conectado em Canais); se não houver canal conectado, cai pro gateway
+   * (Z-API/Meta) do WhatsAppSender. */
+  private async enviarWhatsapp(orgId: string, phone: string, message: string):
+      Promise<{ success: boolean; via: string; error?: string }> {
+    const { data: canal } = await supabaseAdmin.from('channels')
+      .select('id, status').eq('organization_id', orgId)
+      .eq('status', 'connected').order('updated_at', { ascending: false })
+      .limit(1).maybeSingle()
+    if (canal) {
+      try {
+        await this.baileys.sendMessage(canal.id as string, phone, 'text', { body: message })
+        return { success: true, via: 'canal-gratuito' }
+      } catch (e: unknown) {
+        this.logger.warn(`[prod3d.alerta] canal gratuito falhou, tentando gateway: ${(e as Error).message}`)
+      }
+    }
+    const r = await this.whatsapp.sendTextMessage({ phone, message })
+    return { success: r.success, via: canal ? 'gateway-fallback' : 'gateway', error: r.error }
   }
 
   /** Botão "Enviar teste" da tela — valida o canal fim-a-fim. */
