@@ -70,6 +70,56 @@ export class ShopeeListingLinkController {
     return this.link.unlink(user.orgId, id)
   }
 
+  /** Variações (models) do item DIRETO da Shopee + vínculo/sugestão por SKU de
+   *  variação do catálogo. Alimenta o painel "Variações" do drawer. */
+  @Get(':itemId/models')
+  @RequirePermission('products.view')
+  async itemModels(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    return this.link.getItemModels(user.orgId, id)
+  }
+
+  /** Vincula models do item a produtos/variações do catálogo.
+   *  Body: { links: [{ model_id, product_id, product_variation_sku? }] } */
+  @Post(':itemId/models/link')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async linkModels(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    @Body() body: { links?: Array<{ model_id: number; product_id: string; product_variation_sku?: string | null }> },
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id = Number(itemId)
+    if (!Number.isFinite(id)) throw new BadRequestException('itemId inválido')
+    if (!Array.isArray(body?.links) || !body.links.length) {
+      throw new BadRequestException('links ausente — informe ao menos um model')
+    }
+    return this.link.linkModels(user.orgId, id, body.links)
+  }
+
+  /** Desvincula UM model específico do item. */
+  @Post(':itemId/models/:modelId/unlink')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('products.view')
+  async unlinkModel(
+    @ReqUser() user: ReqUserPayload,
+    @Param('itemId') itemId: string,
+    @Param('modelId') modelId: string,
+  ) {
+    if (!user.orgId) throw new BadRequestException('orgId ausente')
+    const id  = Number(itemId)
+    const mid = Number(modelId)
+    if (!Number.isFinite(id))  throw new BadRequestException('itemId inválido')
+    if (!Number.isFinite(mid)) throw new BadRequestException('modelId inválido')
+    return this.link.unlinkModel(user.orgId, id, mid)
+  }
+
   /** F18 Fase C — AUDITORIA read-only do estoque cru de 1 item (pré-mapeamento). */
   @Get(':itemId/stock-inspect')
   @RequirePermission('products.view')

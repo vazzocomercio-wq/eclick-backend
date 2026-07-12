@@ -22,6 +22,8 @@ export interface CreateVinculoDto {
   quantity_per_unit?:   number
   variation_id?:        string | null
   variation_attributes?: Record<string, unknown> | null
+  /** SKU da variação do CATÁLOGO (products.variations[].sku) — vínculo por variação. */
+  product_variation_sku?: string | null
   account_id?:          string | null
   listing_title?:       string | null
   listing_price?:       number | null
@@ -580,6 +582,7 @@ export class ProductsService {
         quantity_per_unit:    dto.quantity_per_unit ?? 1,
         variation_id:         dto.variation_id      ?? null,
         variation_attributes: dto.variation_attributes ?? null,
+        product_variation_sku: dto.product_variation_sku ?? null,
         account_id:           dto.account_id        ?? null,
         listing_title:        dto.listing_title     ?? null,
         listing_price:        dto.listing_price     ?? null,
@@ -661,6 +664,7 @@ export class ProductsService {
         quantity_per_unit:    Number(it?.quantity_per_unit ?? 1),
         variation_id:         it?.variation_id      ?? null,
         variation_attributes: it?.variation_attributes ?? null,
+        product_variation_sku: it?.product_variation_sku ?? null,
         // account_id armazena o seller_id ML como text — chave de multi-conta
         account_id:           it?.account_id        ?? null,
         listing_title:        it?.listing_title     ?? null,

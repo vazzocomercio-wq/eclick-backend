@@ -327,6 +327,16 @@ export class MercadolivreController {
     return this.ml.getItemDetail(user.orgId!, mlbId)
   }
 
+  // GET /ml/items/:mlbId/variations — variações do anúncio + SELLER_SKU por variação
+  @Get('items/:mlbId/variations')
+  @RequirePermission('products.view')
+  getItemVariations(
+    @ReqUser() user: ReqUserPayload,
+    @Param('mlbId') mlbId: string,
+  ) {
+    return this.ml.getItemVariations(user.orgId!, mlbId)
+  }
+
   // GET /ml/items/:mlbId/visits
   @Get('items/:mlbId/visits')
   @RequirePermission('products.view')

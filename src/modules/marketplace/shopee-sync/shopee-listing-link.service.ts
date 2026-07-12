@@ -18,8 +18,12 @@ import { ChannelSettingsService, estimateSaleFee } from '../../channel-settings/
  *  product_id). Aqui `account_id = shop_id` (escopo por loja, multi-conta-safe).
  *
  *  Auto-link: o SKU da Shopee vive na VARIAÇÃO (model_sku) — `getItemSkus`
- *  busca via get_model_list, e casamos model_sku → products.sku (org-scoped).
- *  Fallback humano: manualLink/unlink pros que não casam por SKU.
+ *  busca via get_model_list, e casamos em 2 níveis (org-scoped):
+ *   1. model_sku → products.sku            (vínculo nível-PRODUTO)
+ *   2. model_sku → products.variations[].sku (vínculo nível-VARIAÇÃO — o SKU da
+ *      variação do catálogo, ex VZ-10010501-54=Creme, gravado em
+ *      product_listings.product_variation_sku; product_id = produto pai)
+ *  Fallback humano: manualLink/unlink (item inteiro) e linkModels (por variação).
  *
  *  NÃO mexe em `algo_score_breakdown.product_id` (é INSERT-only, sobrescrito no
  *  próximo sync) — a fonte da verdade do vínculo é SEMPRE product_listings, e
@@ -73,6 +77,7 @@ export class ShopeeListingLinkService {
     products_matched: number
     listings_linked:  number
     items_linked:     number
+    variation_links:  number
     unmatched_items:  Array<{ item_id: number; title: string | null }>
   }> {
     const resolvedAll = await this.mp.resolveAll(orgId, 'shopee')
@@ -104,7 +109,8 @@ export class ShopeeListingLinkService {
     if (!itemIds.length) {
       return {
         shop_id: shopId, items: 0, items_with_sku: 0, skus_distinct: 0,
-        products_matched: 0, listings_linked: 0, items_linked: 0, unmatched_items: [],
+        products_matched: 0, listings_linked: 0, items_linked: 0,
+        variation_links: 0, unmatched_items: [],
       }
     }
 
@@ -148,34 +154,46 @@ export class ShopeeListingLinkService {
       }
     }
 
-    // 4) monta linhas de product_listings (1 por model casado)
+    // 3b) casa SKU → VARIAÇÃO do catálogo (products.variations JSONB). O SKU da
+    //     variação (VZ-XXXX-54 etc) não vive em products.sku — vive dentro do
+    //     array. Índice completo da org (paginado) porque JSONB não filtra por
+    //     .in() no PostgREST.
+    const varBySku = await this.catalogVariationIndex(orgId)
+
+    // 4) monta linhas de product_listings (1 por model casado). Prioridade:
+    //    products.sku (nível-produto) > variação do catálogo (nível-variação).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const plRows: any[] = []
     const linkedItems = new Set<number>()
     const seen = new Set<string>()
+    let variationLinks = 0
     for (const itemId of itemIds) {
       const pairs = skuMap.get(itemId) ?? []
       const snap  = snapById.get(itemId) ?? {}
       const itemShop = shopByItem.get(itemId) ?? shopId   // loja DONA do item
       for (const { model_id, sku } of pairs) {
-        const prod = prodBySku.get(sku)
-        if (!prod) continue
+        const prod   = prodBySku.get(sku)
+        const catVar = prod ? null : varBySku.get(sku)
+        const productId = prod?.id ?? catVar?.productId
+        if (!productId) continue
         const variationId = String(model_id ?? '')
-        const key = `${itemShop}|${itemId}|${variationId}|${prod.id}`
+        const key = `${itemShop}|${itemId}|${variationId}|${productId}`
         if (seen.has(key)) continue
         seen.add(key)
         plRows.push({
-          platform:          'shopee',
-          account_id:        String(itemShop),
-          listing_id:        String(itemId),
-          variation_id:      variationId,
-          product_id:        prod.id,
-          listing_title:     snap.title          ?? null,
-          listing_price:     snap.price          ?? null,
-          listing_thumbnail: snap.main_image_url ?? null,
-          is_active:         true,
+          platform:              'shopee',
+          account_id:            String(itemShop),
+          listing_id:            String(itemId),
+          variation_id:          variationId,
+          product_id:            productId,
+          product_variation_sku: catVar ? sku : null,
+          listing_title:         snap.title          ?? null,
+          listing_price:         snap.price          ?? null,
+          listing_thumbnail:     snap.main_image_url ?? null,
+          is_active:             true,
         })
         linkedItems.add(itemId)
+        if (catVar) variationLinks++
       }
     }
 
@@ -202,6 +220,7 @@ export class ShopeeListingLinkService {
       products_matched: prodBySku.size,
       listings_linked:  linked,
       items_linked:     linkedItems.size,
+      variation_links:  variationLinks,
       unmatched_items:  unmatched.slice(0, 50),
     }
     this.logger.log(`[shopee.link] org=${orgId} ${JSON.stringify({ ...out, unmatched_items: unmatched.length })}`)
@@ -231,17 +250,24 @@ export class ShopeeListingLinkService {
 
     const { data: pls, error: plErr } = await supabaseAdmin
       .from('product_listings')
-      .select('listing_id, variation_id, product_id')
+      .select('listing_id, variation_id, product_id, product_variation_sku')
       .eq('platform', 'shopee')
       .in('account_id', shopIds.map(String))   // anúncios de TODAS as lojas
     if (plErr) throw new Error(`product_listings: ${plErr.message}`)
 
     const linkByItem = new Map<string, string>()
     const productIds = new Set<string>()
+    // vínculos nível-VARIAÇÃO por item (variation_id = model_id Shopee)
+    const varLinksByItem = new Map<string, Array<{ variation_id: string; product_variation_sku: string | null }>>()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const pl of (pls ?? []) as any[]) {
       if (!linkByItem.has(String(pl.listing_id))) linkByItem.set(String(pl.listing_id), pl.product_id)
       if (pl.product_id) productIds.add(pl.product_id)
+      if (pl.variation_id) {
+        const arr = varLinksByItem.get(String(pl.listing_id)) ?? []
+        arr.push({ variation_id: String(pl.variation_id), product_variation_sku: pl.product_variation_sku ?? null })
+        varLinksByItem.set(String(pl.listing_id), arr)
+      }
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -304,6 +330,7 @@ export class ShopeeListingLinkService {
         }
       }
 
+      const varLinks = varLinksByItem.get(String(r.item_id)) ?? []
       return {
         item_id:    Number(r.item_id),
         shop_id:    r.shop_id != null ? Number(r.shop_id) : null,
@@ -312,6 +339,9 @@ export class ShopeeListingLinkService {
         price,
         algo_score: r.algo_score        ?? null,
         linked:     !!prod,
+        // vínculos por variação (model ↔ variação do catálogo por SKU)
+        variation_links:      varLinks.length,
+        variation_skus:       varLinks.map(v => v.product_variation_sku).filter(Boolean),
         product:    prod ? {
           id:             prod.id,
           sku:            prod.sku,
@@ -394,6 +424,271 @@ export class ShopeeListingLinkService {
       .eq('platform', 'shopee')
       .in('account_id', shopIds.map(String))
       .eq('listing_id', String(itemId))
+      .select('id')
+    if (error) throw new Error(`product_listings delete: ${error.message}`)
+    return { ok: true, removed: (data ?? []).length }
+  }
+
+  // ── Vínculo por VARIAÇÃO (model Shopee ↔ variação do catálogo) ────────────
+
+  /** Índice SKU-de-variação → produto pai, varrendo products.variations (JSONB)
+   *  da org. Primeiro SKU vence em caso de duplicata (loga warn). */
+  private async catalogVariationIndex(orgId: string): Promise<Map<string, {
+    productId: string; productName: string | null; productSku: string | null
+    sku: string; value: string | null; type: string | null
+  }>> {
+    const out = new Map<string, {
+      productId: string; productName: string | null; productSku: string | null
+      sku: string; value: string | null; type: string | null
+    }>()
+    const PAGE = 1000
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseAdmin
+        .from('products')
+        .select('id, name, sku, variations')
+        .eq('organization_id', orgId)
+        .not('variations', 'is', null)
+        .range(from, from + PAGE - 1)
+      if (error) throw new Error(`products.variations: ${error.message}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const batch = (data ?? []) as any[]
+      for (const p of batch) {
+        const vars = Array.isArray(p.variations) ? p.variations : []
+        for (const v of vars) {
+          const sku = (v?.sku ?? '').toString().trim()
+          if (!sku) continue
+          if (out.has(sku)) {
+            this.logger.warn(`[shopee.link] SKU de variação duplicado na org: ${sku} (produtos ${out.get(sku)!.productId} e ${p.id})`)
+            continue
+          }
+          out.set(sku, {
+            productId:   p.id,
+            productName: p.name ?? null,
+            productSku:  p.sku  ?? null,
+            sku,
+            value: (v?.value ?? null) as string | null,
+            type:  (v?.type  ?? null) as string | null,
+          })
+        }
+      }
+      if (batch.length < PAGE) break
+    }
+    return out
+  }
+
+  /** Conn (token fresco) da loja DONA de um item — via product_listings, senão
+   *  v_latest_algo_score, senão primeira conta da org. */
+  private async connForItem(orgId: string, itemId: number): Promise<{ conn: MpConnection; adapter: ShopeeAdapter; shopId: number }> {
+    const resolvedAll = await this.mp.resolveAll(orgId, 'shopee')
+    if (!resolvedAll.length) throw new NotFoundException('Loja Shopee não conectada nesta organização')
+    const shopIds = resolvedAll.map(r => r.conn.shop_id).filter((n): n is number => !!n)
+
+    const { data: pl } = await supabaseAdmin
+      .from('product_listings')
+      .select('account_id')
+      .eq('platform', 'shopee')
+      .eq('listing_id', String(itemId))
+      .limit(1)
+      .maybeSingle<{ account_id: string }>()
+    const shopId = pl?.account_id
+      ? Number(pl.account_id)
+      : await this.shopOfItem(orgId, itemId, shopIds)
+
+    const match = resolvedAll.find(r => r.conn.shop_id === shopId) ?? resolvedAll[0]
+    const conn = await this.productSync.ensureFreshToken(match.conn)
+    return { conn, adapter: match.adapter as ShopeeAdapter, shopId: conn.shop_id! }
+  }
+
+  /** Models (variações) de um item DIRETO da Shopee + estado de vínculo de cada
+   *  um + sugestão por SKU (variação do catálogo com o mesmo SKU). Alimenta o
+   *  painel "Variações" do drawer no Listing Center. */
+  async getItemModels(orgId: string, itemId: number): Promise<{
+    item_id: number
+    shop_id: number
+    models: Array<{
+      model_id:  number
+      model_sku: string
+      name:      string
+      price:     number | null
+      stock:     number | null
+      link: {
+        product_id: string; product_name: string | null; product_sku: string | null
+        product_variation_sku: string | null; variation_value: string | null
+      } | null
+      suggestion: {
+        product_id: string; product_name: string | null; product_sku: string | null
+        product_variation_sku: string; variation_value: string | null
+      } | null
+    }>
+  }> {
+    const { conn, adapter, shopId } = await this.connForItem(orgId, itemId)
+    const models = await adapter.getItemModels(conn, itemId)
+
+    // vínculos atuais do item (nível-variação e nível-item)
+    const { data: pls, error: plErr } = await supabaseAdmin
+      .from('product_listings')
+      .select('variation_id, product_id, product_variation_sku')
+      .eq('platform', 'shopee')
+      .eq('account_id', String(shopId))
+      .eq('listing_id', String(itemId))
+    if (plErr) throw new Error(`product_listings: ${plErr.message}`)
+    const linkByModel = new Map<string, { product_id: string; product_variation_sku: string | null }>()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const pl of (pls ?? []) as any[]) {
+      if (pl.variation_id) linkByModel.set(String(pl.variation_id), {
+        product_id: pl.product_id, product_variation_sku: pl.product_variation_sku ?? null,
+      })
+    }
+
+    const varIndex = await this.catalogVariationIndex(orgId)
+
+    // nomes dos produtos vinculados (pra exibição)
+    const pids = [...new Set([...linkByModel.values()].map(l => l.product_id).filter(Boolean))]
+    const prodById = new Map<string, { name: string | null; sku: string | null }>()
+    if (pids.length) {
+      const { data: prods } = await supabaseAdmin
+        .from('products')
+        .select('id, name, sku')
+        .in('id', pids)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const p of (prods ?? []) as any[]) prodById.set(p.id, { name: p.name ?? null, sku: p.sku ?? null })
+    }
+
+    return {
+      item_id: itemId,
+      shop_id: shopId,
+      models: models.map(m => {
+        const link = linkByModel.get(String(m.model_id)) ?? null
+        const linkedVar = link?.product_variation_sku ? varIndex.get(link.product_variation_sku) : null
+        const sug = !link && m.model_sku ? varIndex.get(m.model_sku) : null
+        return {
+          model_id:  m.model_id,
+          model_sku: m.model_sku,
+          name:      m.name,
+          price:     m.price,
+          stock:     m.stock,
+          link: link ? {
+            product_id:            link.product_id,
+            product_name:          prodById.get(link.product_id)?.name ?? linkedVar?.productName ?? null,
+            product_sku:           prodById.get(link.product_id)?.sku  ?? linkedVar?.productSku  ?? null,
+            product_variation_sku: link.product_variation_sku,
+            variation_value:       linkedVar?.value ?? null,
+          } : null,
+          suggestion: sug ? {
+            product_id:            sug.productId,
+            product_name:          sug.productName,
+            product_sku:           sug.productSku,
+            product_variation_sku: sug.sku,
+            variation_value:       sug.value,
+          } : null,
+        }
+      }),
+    }
+  }
+
+  /** Vincula models de um item a produtos/variações do catálogo. Cada entrada:
+   *  { model_id, product_id, product_variation_sku? }. Substitui o vínculo
+   *  anterior DAQUELES models (não mexe nos demais nem no nível-item). */
+  async linkModels(
+    orgId:  string,
+    itemId: number,
+    links:  Array<{ model_id: number; product_id: string; product_variation_sku?: string | null }>,
+  ): Promise<{ ok: true; linked: number }> {
+    if (!Array.isArray(links) || !links.length) {
+      throw new BadRequestException('links vazio — informe ao menos um model')
+    }
+    // só escrita no DB — resolve a loja SEM depender de token Shopee
+    const shopIds = await this.resolveShopIds(orgId)
+    const { data: plShop } = await supabaseAdmin
+      .from('product_listings')
+      .select('account_id')
+      .eq('platform', 'shopee')
+      .eq('listing_id', String(itemId))
+      .limit(1)
+      .maybeSingle<{ account_id: string }>()
+    const shopId = plShop?.account_id
+      ? Number(plShop.account_id)
+      : await this.shopOfItem(orgId, itemId, shopIds)
+
+    // valida produtos da org
+    const pids = [...new Set(links.map(l => l.product_id).filter(Boolean))]
+    const { data: prods, error: pErr } = await supabaseAdmin
+      .from('products')
+      .select('id, variations')
+      .eq('organization_id', orgId)
+      .in('id', pids)
+    if (pErr) throw new Error(`products: ${pErr.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prodMap = new Map<string, any>(((prods ?? []) as any[]).map(p => [p.id, p]))
+    for (const l of links) {
+      if (!prodMap.has(l.product_id)) {
+        throw new BadRequestException(`Produto ${l.product_id} não encontrado nesta organização`)
+      }
+      // se veio SKU de variação, confere que existe no produto (proteção contra typo)
+      if (l.product_variation_sku) {
+        const vars = prodMap.get(l.product_id)?.variations
+        const ok = Array.isArray(vars) && vars.some(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (v: any) => (v?.sku ?? '').toString().trim() === l.product_variation_sku,
+        )
+        if (!ok) {
+          throw new BadRequestException(
+            `Variação ${l.product_variation_sku} não existe no produto — confira o SKU da variação no cadastro`)
+        }
+      }
+    }
+
+    // snapshot do anúncio (título/preço/foto) pro card do vínculo
+    const { data: snapRow } = await supabaseAdmin
+      .schema('shopee')
+      .from('v_latest_algo_score')
+      .select('input_snapshot')
+      .eq('organization_id', orgId)
+      .eq('item_id', itemId)
+      .maybeSingle()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const snap = (snapRow?.input_snapshot ?? {}) as any
+
+    // substitui os vínculos DESSES models
+    const modelIds = [...new Set(links.map(l => String(l.model_id)))]
+    await supabaseAdmin
+      .from('product_listings')
+      .delete()
+      .eq('platform', 'shopee')
+      .eq('account_id', String(shopId))
+      .eq('listing_id', String(itemId))
+      .in('variation_id', modelIds)
+
+    const rows = links.map(l => ({
+      platform:              'shopee',
+      account_id:            String(shopId),
+      listing_id:            String(itemId),
+      variation_id:          String(l.model_id),
+      product_id:            l.product_id,
+      product_variation_sku: l.product_variation_sku ?? null,
+      listing_title:         snap.title          ?? null,
+      listing_price:         snap.price          ?? null,
+      listing_thumbnail:     snap.main_image_url ?? null,
+      is_active:             true,
+    }))
+    const { error: upErr } = await supabaseAdmin
+      .from('product_listings')
+      .upsert(rows, { onConflict: 'platform,account_id,listing_id,variation_id,product_id' })
+    if (upErr) throw new Error(`product_listings upsert: ${upErr.message}`)
+
+    return { ok: true, linked: rows.length }
+  }
+
+  /** Remove o vínculo de UM model específico do item. */
+  async unlinkModel(orgId: string, itemId: number, modelId: number): Promise<{ ok: true; removed: number }> {
+    const shopIds = await this.resolveShopIds(orgId)
+    const { data, error } = await supabaseAdmin
+      .from('product_listings')
+      .delete()
+      .eq('platform', 'shopee')
+      .in('account_id', shopIds.map(String))
+      .eq('listing_id', String(itemId))
+      .eq('variation_id', String(modelId))
       .select('id')
     if (error) throw new Error(`product_listings delete: ${error.message}`)
     return { ok: true, removed: (data ?? []).length }

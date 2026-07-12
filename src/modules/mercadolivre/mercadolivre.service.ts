@@ -908,6 +908,47 @@ export class MercadolivreService {
     }
   }
 
+  /** Variações de um anúncio ML com o SKU do vendedor por variação — pra tela
+   *  de vínculo por variação (casa com products.variations[].sku do catálogo).
+   *  O SKU vive no atributo SELLER_SKU da variação (fallback:
+   *  seller_custom_field, campo legado). */
+  async getItemVariations(orgId: string, mlbId: string) {
+    const { token } = await this.getTokenForOrg(orgId)
+    const { data: item } = await axios.get(`${ML_BASE}/items/${mlbId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      params:  { include_attributes: 'all' },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }).catch((err: any) => {
+      throw new HttpException(err.response?.data?.message ?? `ML ${err.response?.status ?? 500}`, err.response?.status ?? 500)
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const variations = Array.isArray(item.variations) ? item.variations as any[] : []
+    return {
+      id:             item.id,
+      title:          item.title,
+      has_variations: variations.length > 0,
+      variations: variations.map(v => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const attrs = Array.isArray(v.attributes) ? v.attributes as any[] : []
+        const sellerSku = attrs.find(a => a?.id === 'SELLER_SKU')?.value_name
+          ?? v.seller_custom_field ?? null
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const combos = Array.isArray(v.attribute_combinations) ? v.attribute_combinations as any[] : []
+        const label = combos.map(c => c?.value_name).filter(Boolean).join(' / ')
+        return {
+          variation_id:       String(v.id),
+          seller_sku:         sellerSku ? String(sellerSku).trim() : null,
+          label:              label || null,
+          price:              v.price ?? null,
+          available_quantity: v.available_quantity ?? null,
+          attribute_combinations: combos.map(c => ({
+            name: c?.name ?? null, value_name: c?.value_name ?? null,
+          })),
+        }
+      }),
+    }
+  }
+
   async getItemVisits(orgId: string, mlbId: string) {
     const { token } = await this.getTokenForOrg(orgId)
     const { data: body } = await axios.get(`${ML_BASE}/items/${mlbId}/visits/time_window`, {

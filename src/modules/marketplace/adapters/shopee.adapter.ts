@@ -972,6 +972,60 @@ export class ShopeeAdapter extends MarketplaceAdapter {
     return out
   }
 
+  /** Models (variações) de 1 item com nome LEGÍVEL (opções de tier, ex "Creme"),
+   *  SKU, preço e estoque — alimenta o painel de vínculo por variação. O nome
+   *  vem de tier_variation[ti].option_list[oi].option resolvido pelo tier_index
+   *  do model. Item sem variação → []. */
+  async getItemModels(conn: MpConnection, itemId: number): Promise<Array<{
+    model_id:  number
+    model_sku: string
+    name:      string
+    price:     number | null
+    stock:     number | null
+  }>> {
+    const { accessToken, shopId } = this.requireShop(conn)
+    const { partnerId } = this.partnerEnv()
+    const path = '/api/v2/product/get_model_list'
+    const ts   = Math.floor(Date.now() / 1000)
+    const sign = this.signShop(path, ts, accessToken, shopId)
+    const qs = new URLSearchParams({
+      partner_id: partnerId, timestamp: String(ts),
+      access_token: accessToken, shop_id: String(shopId), sign,
+      item_id: String(itemId),
+    })
+    const { data } = await this.callShopee({
+      key:  `shop:${shopId}`, tag: 'shopee.getItemModels',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      exec: () => axios.get<any>(`${SHOPEE_BASE}${path}?${qs.toString()}`),
+    })
+    if (data?.error) throw new Error(`Shopee ${data.error}: ${data.message}`)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tiers:  any[] = data?.response?.tier_variation ?? []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const models: any[] = data?.response?.model ?? []
+    return models.map(m => {
+      const idx: number[] = Array.isArray(m?.tier_index) ? m.tier_index : []
+      const name = idx
+        .map((oi, ti) => tiers[ti]?.option_list?.[oi]?.option ?? '')
+        .filter(Boolean)
+        .join(' / ')
+      const priceRaw = m?.price_info?.[0]?.current_price
+      const sv2 = m?.stock_info_v2
+      const stockRaw = sv2?.summary_info?.total_available_stock
+        ?? (Array.isArray(sv2?.seller_stock)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ? sv2.seller_stock.reduce((s: number, r: any) => s + Number(r?.stock ?? 0), 0)
+          : null)
+      return {
+        model_id:  Number(m?.model_id ?? 0),
+        model_sku: (m?.model_sku ?? '').toString().trim(),
+        name:      name || `Variação ${m?.model_id ?? ''}`.trim(),
+        price:     priceRaw != null ? Number(priceRaw) : null,
+        stock:     stockRaw != null ? Number(stockRaw) : null,
+      }
+    })
+  }
+
   /** F18 Fase C — AUDITORIA read-only do estoque de 1 item: devolve o
    *  `stock_info_v2` cru do get_item_base_info + os models do get_model_list
    *  (com stock_info por model). Usado pra CONFIRMAR a estrutura real
