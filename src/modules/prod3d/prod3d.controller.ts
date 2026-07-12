@@ -1,6 +1,7 @@
-import { Controller, Get, Post, Patch, Put, Delete, Body, Param, Query, UseGuards, BadRequestException } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Put, Delete, Body, Param, Query, Headers, UseGuards, BadRequestException } from '@nestjs/common'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
+import { Public } from '../../common/decorators/public.decorator'
 import { RequirePermission, RequirePermissionGuard } from '../rbac'
 import { Prod3dService } from './prod3d.service'
 
@@ -42,6 +43,31 @@ export class Prod3dController {
     const d = await this.svc.loadAll(this.org(u))
     if (!(b?.gramas > 0) || !(b?.horas > 0)) throw new BadRequestException('Informe gramas e horas (> 0).')
     return this.svc.custoPeca(d, b.gramas, b.horas, (b.material ?? 'PLA').toUpperCase(), b.minutos_mo)
+  }
+
+  /** VIGIA local da impressora (sem login — autentica pela watchdog_key no
+   * header). Repassa no WhatsApp a mensagem que a impressora deu. */
+  @Public()
+  @Post('alerta-impressora')
+  alertaImpressora(
+    @Headers('x-watchdog-key') key: string,
+    @Body() b: { impressora?: string; evento?: string; mensagem: string },
+  ) {
+    return this.svc.alertaImpressora(key, b)
+  }
+
+  /** Configura o número que recebe os alertas (DDI+DDD+número). */
+  @Patch('alerta')
+  @RequirePermission('financeiro.update_margin')
+  setAlerta(@ReqUser() u: ReqUserPayload, @Body() b: { whatsapp: string }) {
+    return this.svc.setAlertaWhatsapp(this.org(u), u.id, b?.whatsapp ?? '')
+  }
+
+  /** Envia um alerta de teste pro número configurado. */
+  @Post('alerta-teste')
+  @RequirePermission('financeiro.view')
+  alertaTeste(@ReqUser() u: ReqUserPayload) {
+    return this.svc.alertaTeste(this.org(u))
   }
 
   /** IA: parágrafo executivo do custo de produção pra investidor/sócio. */

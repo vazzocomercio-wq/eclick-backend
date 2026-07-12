@@ -1,6 +1,7 @@
-import { Injectable, Logger, BadRequestException, OnModuleInit } from '@nestjs/common'
+import { Injectable, Logger, BadRequestException, UnauthorizedException, OnModuleInit } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { LlmService } from '../ai/llm.service'
+import { WhatsAppSender } from '../whatsapp/whatsapp.sender'
 
 /**
  * Custos de Produção 3D — custeio por absorção (R$/g).
@@ -24,6 +25,7 @@ export interface Prod3dConfig {
   manutencao_hora: number;          manutencao_estimado: boolean
   mo_custo_hora: number;            mo_minutos_padrao: number
   horas_mes_por_impressora: number; g_por_hora_fallback: number;  producao_estimado: boolean
+  alerta_whatsapp: string | null;   watchdog_key: string
 }
 export interface Impressora {
   id: string; modelo: string; quantidade: number; valor_pago: number
@@ -62,7 +64,10 @@ const CONFIG_CAMPOS: Record<string, { col: keyof Prod3dConfig; flag?: keyof Prod
 export class Prod3dService implements OnModuleInit {
   private readonly logger = new Logger(Prod3dService.name)
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    private readonly whatsapp: WhatsAppSender,
+  ) {}
 
   onModuleInit() {
     try {
@@ -473,6 +478,52 @@ export class Prod3dService implements OnModuleInit {
     return { texto: r.text }
   }
 
+  // ── Alerta de impressora (WhatsApp) ─────────────────────────────────────────
+
+  async setAlertaWhatsapp(orgId: string, userId: string | null, numero: string) {
+    const limpo = (numero ?? '').replace(/\D/g, '')
+    if (limpo && (limpo.length < 12 || limpo.length > 13))
+      throw new BadRequestException('Número inválido — use DDI+DDD+número (ex.: 5511999998888).')
+    const { error } = await supabaseAdmin.from('prod3d_config')
+      .update({ alerta_whatsapp: limpo || null }).eq('organization_id', orgId)
+    if (error) throw new BadRequestException(error.message)
+    await this.auditar(orgId, userId, 'alerta.whatsapp.set', { numero: limpo || null })
+    return { ok: true }
+  }
+
+  /** Chamado pelo VIGIA local (sem login — autentica pela watchdog_key).
+   * Repassa no WhatsApp a mensagem que a impressora deu. */
+  async alertaImpressora(watchdogKey: string, b: { impressora?: string; evento?: string; mensagem: string }) {
+    if (!watchdogKey) throw new UnauthorizedException('watchdog_key ausente.')
+    const { data: cfg } = await supabaseAdmin.from('prod3d_config')
+      .select('organization_id, alerta_whatsapp').eq('watchdog_key', watchdogKey).maybeSingle()
+    if (!cfg) throw new UnauthorizedException('watchdog_key inválida.')
+    const orgId = cfg.organization_id as string
+    if (!b?.mensagem?.trim()) throw new BadRequestException('mensagem obrigatória.')
+    if (!cfg.alerta_whatsapp)
+      return { ok: false, error: 'Nenhum número de WhatsApp configurado em Custos de Produção.' }
+    const texto = `🖨️ ${b.impressora?.trim() || 'Impressora'}${b.evento ? ` [${b.evento}]` : ''}\n${b.mensagem.trim()}`.slice(0, 1500)
+    const r = await this.whatsapp.sendTextMessage({ phone: cfg.alerta_whatsapp, message: texto })
+    await this.auditar(orgId, null, 'alerta.impressora', {
+      evento: b.evento ?? null, impressora: b.impressora ?? null,
+      enviado: r.success, erro: r.error ?? null,
+    })
+    if (!r.success) this.logger.warn(`[prod3d.alerta] WhatsApp falhou: ${r.error}`)
+    return { ok: r.success, error: r.error }
+  }
+
+  /** Botão "Enviar teste" da tela — valida o canal fim-a-fim. */
+  async alertaTeste(orgId: string) {
+    const { data: cfg } = await supabaseAdmin.from('prod3d_config')
+      .select('watchdog_key, alerta_whatsapp').eq('organization_id', orgId).maybeSingle()
+    if (!cfg?.alerta_whatsapp)
+      throw new BadRequestException('Configure o número de WhatsApp antes de testar.')
+    return this.alertaImpressora(cfg.watchdog_key as string, {
+      impressora: 'Teste', evento: 'teste',
+      mensagem: 'Alerta de impressora funcionando — este é um teste enviado pela tela de Custos de Produção.',
+    })
+  }
+
   async historico(orgId: string, limit = 50) {
     const { data } = await supabaseAdmin.from('prod3d_historico')
       .select('acao, detalhe, created_at').eq('organization_id', orgId)
@@ -489,6 +540,7 @@ export class Prod3dService implements OnModuleInit {
         manutencao_hora: 0.2, manutencao_estimado: false,
         mo_custo_hora: 0, mo_minutos_padrao: 0,
         horas_mes_por_impressora: 300, g_por_hora_fallback: 15, producao_estimado: false,
+        alerta_whatsapp: null, watchdog_key: 'selftest',
       },
       impressoras: [{ id: 'i1', modelo: 'T', quantidade: 1, valor_pago: 6000, vida_util_horas: 6000, potencia_ams_w: 0, estimado: false, is_active: true }],
       potencias: [
