@@ -333,12 +333,21 @@ export class ProductOsController {
   @RequirePermission('products.view')
   listPartVersions(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string) { return this.parts.listPartVersions(this.org(u), pid) }
 
+  // ── bandejas de impressão (versões com composição) ────────────────
+  @Get('plates')
+  @RequirePermission('products.view')
+  listPlates(@ReqUser() u: ReqUserPayload, @Query('product_dev_id') devId: string) {
+    if (!devId) throw new BadRequestException('product_dev_id é obrigatório')
+    return this.parts.listPlates(this.org(u), devId)
+  }
+
   @Post('parts/:pid/versions')
   @RequirePermission('products.update')
   async addPartVersion(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
     filaments?: Array<{ index: number; material: string | null; color: string | null; weight_g: number }> | null
+    plate_composition?: Array<{ part_id: string; units: number }> | null
   }) {
     // blindagem: se veio .3mf mas sem peso/cores (corrida no upload), lê do arquivo no servidor
     if (body.file_url && /\.3mf($|\?)/i.test(body.file_url) && (body.weight_g == null || !body.filaments?.length)) {

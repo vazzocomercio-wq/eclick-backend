@@ -187,10 +187,20 @@ export class ProductPartService {
     return data ?? []
   }
 
+  /** Normaliza a composição da bandeja: [{part_id, units int ≥1}] ou null. */
+  private normalizeComposition(raw: unknown): Array<{ part_id: string; units: number }> | null {
+    if (!Array.isArray(raw)) return null
+    const comp = (raw as Array<{ part_id?: string; units?: number }>)
+      .filter(c => c && typeof c.part_id === 'string' && Number(c.units) > 0)
+      .map(c => ({ part_id: c.part_id as string, units: Math.max(1, Math.round(Number(c.units))) }))
+    return comp.length ? comp : null
+  }
+
   async addPartVersion(orgId: string, partId: string, userId: string | null, body: {
     changelog?: string; file_url?: string; file_type?: string; material?: string
     weight_g?: number; print_time_minutes?: number; volume_cm3?: number; prototype_photo_urls?: string[]; notes?: string
     filaments?: Array<{ index: number; material: string | null; color: string | null; weight_g: number }> | null
+    plate_composition?: Array<{ part_id: string; units: number }> | null
   }) {
     const part = await this.getPart(orgId, partId)
     const existing = await this.listPartVersions(orgId, partId) as Array<{ version_number: number }>
@@ -201,10 +211,45 @@ export class ProductPartService {
       material: body.material ?? null, weight_g: body.weight_g ?? null, print_time_minutes: body.print_time_minutes ?? null,
       volume_cm3: body.volume_cm3 ?? null, prototype_photo_urls: body.prototype_photo_urls ?? [], status: 'rascunho',
       filaments: body.filaments && body.filaments.length ? body.filaments : null,
+      plate_composition: this.normalizeComposition(body.plate_composition),
       notes: body.notes ?? null, created_by: userId,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar versão da peça: ${error?.message ?? 'sem dados'}`)
     return data
+  }
+
+  /** BANDEJAS do produto: versões (de qualquer peça) com composição — 1
+   *  bandeja = 1 arquivo fatiado que rende N unidades de ≥1 peça por
+   *  impressão. Peso/tempo da versão valem PELA BANDEJA inteira. */
+  async listPlates(orgId: string, devId: string) {
+    const parts = await this.listParts(orgId, devId) as unknown as Array<PartRef & { code: string | null }>
+    const byId = new Map(parts.map(p => [p.id, p]))
+    const { data, error } = await supabaseAdmin.from('product_dev_version').select('*')
+      .eq('organization_id', orgId).eq('product_dev_id', devId)
+      .not('part_id', 'is', null).not('plate_composition', 'is', null)
+      .order('created_at', { ascending: false })
+    if (error) throw new BadRequestException(`Erro: ${error.message}`)
+    const plates = []
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const comp = this.normalizeComposition(row.plate_composition) ?? []
+      if (!comp.length) continue
+      const named = comp.map(c => ({
+        ...c, name: byId.get(c.part_id)?.name ?? '(peça removida)',
+        code: (byId.get(c.part_id) as { code?: string | null } | undefined)?.code ?? null,
+      }))
+      plates.push({
+        version_id: row.id, part_id: row.part_id,   // peça âncora (dona da versão)
+        anchor_name: byId.get(row.part_id as string)?.name ?? '(peça removida)',
+        version_number: row.version_number, changelog: row.changelog ?? null,
+        material: row.material ?? null, weight_g: row.weight_g ?? null,
+        print_time_minutes: row.print_time_minutes ?? null,
+        file_url: row.file_url ?? null, sliced_file_url: row.sliced_file_url ?? null,
+        approved: row.approved === true, filaments: row.filaments ?? null,
+        composition: named, units_total: named.reduce((s, c) => s + c.units, 0),
+        created_at: row.created_at,
+      })
+    }
+    return plates
   }
 
   /** Métricas de fabricação da peça: versão aprovada > última. */
