@@ -252,13 +252,29 @@ export class ProductPartService {
     return plates
   }
 
-  /** Métricas de fabricação da peça: versão aprovada > última. */
+  /** Métricas de fabricação da peça: versão aprovada > última. Peça SEM
+   *  versão própria mas presente numa BANDEJA de outra peça (ex: plaqueta
+   *  que imprime junto das pernas) herda os números da bandeja. */
   private async resolvePartMetrics(orgId: string, partId: string): Promise<PartVersionMetrics> {
     const versions = await this.listPartVersions(orgId, partId) as Array<{ approved: boolean; weight_g: number | null; print_time_minutes: number | null; material: string | null; plate_composition: Array<{ part_id?: string; units?: number }> | null }>
-    const ref = versions.find(v => v.approved) ?? versions[0]
-    // prato com composição: peso/tempo da versão valem POR PRATO — divide pelo
-    // total de unidades pra virar custo POR PEÇA (aproximação: rateio uniforme
-    // entre as peças do prato; suficiente pro custo, que fecha no produto)
+    let ref = versions.find(v => v.approved) ?? versions[0]
+    if (!ref) {
+      // sem versão própria: procura a bandeja (versão de OUTRA peça deste
+      // produto) que contém esta peça na composição — aprovada > mais recente
+      const part = await this.getPart(orgId, partId)
+      const { data } = await supabaseAdmin.from('product_dev_version')
+        .select('approved, weight_g, print_time_minutes, material, plate_composition')
+        .eq('organization_id', orgId).eq('product_dev_id', part.product_dev_id)
+        .not('plate_composition', 'is', null).order('created_at', { ascending: false })
+      const hosts = ((data ?? []) as typeof versions).filter(v =>
+        Array.isArray(v.plate_composition) &&
+        v.plate_composition.some(c => c?.part_id === partId && Number(c?.units) > 0))
+      ref = hosts.find(v => v.approved) ?? hosts[0]
+    }
+    // bandeja com composição: peso/tempo da versão valem PELA BANDEJA — divide
+    // pelo total de unidades pra virar custo POR PEÇA (aproximação: rateio
+    // uniforme entre as peças da bandeja; suficiente pro custo, que fecha no
+    // produto porque a soma das partes reconstrói a bandeja inteira)
     const comp = Array.isArray(ref?.plate_composition) ? ref!.plate_composition!.filter(c => c && Number(c.units) > 0) : []
     const totalUnits = comp.reduce((s, c) => s + Math.max(1, Math.round(Number(c.units) || 1)), 0)
     const div = totalUnits > 1 ? totalUnits : 1

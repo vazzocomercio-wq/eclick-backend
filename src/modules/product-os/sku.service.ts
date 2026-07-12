@@ -281,10 +281,30 @@ export class SkuService {
     if (!carac || carac.kind !== 'caracteristica' || carac.parent_id !== linha.id) throw new BadRequestException('Característica não pertence à linha')
 
     const base = this.buildBase(marca, categoria, sub, linha, carac)
+    const { data: devRow } = await supabaseAdmin.from('product_dev').select('code').eq('id', devId).eq('organization_id', orgId).maybeSingle()
+    const oldCode = (devRow as { code: string | null } | null)?.code ?? null
     const { error } = await supabaseAdmin.from('product_dev').update({
       sku_marca_id: marca.id, sku_categoria_id: categoria.id, sku_sub_id: sub.id, sku_linha_id: linha.id, sku_caracteristica_id: carac.id, sku_base: base,
+      code: base,   // código interno do produto = sku_base (as peças herdam)
     }).eq('id', devId).eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Erro ao salvar: ${error.message}`)
+
+    // sub-códigos AUTO-GERADOS das peças acompanham o novo base (peça criada
+    // antes da classificação ficava com código derivado do NOME do produto).
+    // Código customizado pelo usuário (não começa com o code antigo) é mantido.
+    if (oldCode !== base) {
+      const { data: parts } = await supabaseAdmin.from('product_dev_part').select('id, code')
+        .eq('organization_id', orgId).eq('product_dev_id', devId).order('sort_order', { ascending: true })
+      let seq = 0
+      for (const p of (parts ?? []) as Array<{ id: string; code: string | null }>) {
+        seq++
+        const cur = p.code
+        const auto = !cur || (oldCode != null && cur.startsWith(`${oldCode}-`))
+        if (!auto) continue
+        const suffix = cur?.match(/-(\d+)$/)?.[1] ?? String(seq).padStart(2, '0')
+        await supabaseAdmin.from('product_dev_part').update({ code: `${base}-${suffix}` }).eq('id', p.id)
+      }
+    }
 
     // base mudou → regenera o SKU de cada variante de cor existente
     const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
