@@ -382,9 +382,9 @@ export class ProductOsController {
   @Post('assemblies/preview')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.view')
-  previewAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number }) {
+  previewAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number; sku_variant_id?: string | null }) {
     if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
-    return this.parts.previewAssembly(this.org(u), body.product_dev_id, body.quantity)
+    return this.parts.previewAssembly(this.org(u), body.product_dev_id, body.quantity, body.sku_variant_id)
   }
 
   @Get('assemblies')
@@ -395,9 +395,9 @@ export class ProductOsController {
 
   @Post('assemblies')
   @RequirePermission('products.update')
-  createAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number }) {
+  createAssembly(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; quantity: number; sku_variant_id?: string | null }) {
     if (!body?.product_dev_id) throw new BadRequestException('product_dev_id é obrigatório')
-    return this.parts.createAssembly(this.org(u), body.product_dev_id, u.id, body.quantity)
+    return this.parts.createAssembly(this.org(u), body.product_dev_id, u.id, body.quantity, body.sku_variant_id)
   }
 
   @Get('assemblies/:aid')

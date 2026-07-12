@@ -111,10 +111,26 @@ export class ProductPartService {
     const { data, error } = await supabaseAdmin.from('product_dev_part').select('*')
       .eq('organization_id', orgId).eq('product_dev_id', devId).order('sort_order', { ascending: true })
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
-    return (data ?? []).map(p => {
-      const r = p as PartRef & { is_optional: boolean; width_mm: number | null; depth_mm: number | null; height_mm: number | null }
-      return { ...r, available: this.round2(Number(r.stock_qty) - Number(r.reserved_qty)) }
-    })
+    const rows = (data ?? []) as Array<PartRef & { is_optional: boolean; width_mm: number | null; depth_mm: number | null; height_mm: number | null }>
+    // baldes de cor (com rótulo) — só entram no payload os não-zerados
+    const ids = rows.map(r => r.id)
+    const byPart = new Map<string, Array<{ cor_id: string | null; code: string | null; label: string | null; stock_qty: number; reserved_qty: number; available: number }>>()
+    if (ids.length) {
+      const { data: buckets } = await supabaseAdmin.from('product_dev_part_color_stock')
+        .select('part_id, cor_id, stock_qty, reserved_qty, cor:cor_id(code, label)').in('part_id', ids)
+      for (const b of (buckets ?? []) as Array<Record<string, unknown>>) {
+        const stock = Number(b.stock_qty) || 0, res = Number(b.reserved_qty) || 0
+        if (stock === 0 && res === 0) continue
+        const cor = (Array.isArray(b.cor) ? b.cor[0] : b.cor) as { code?: string; label?: string } | null
+        const list = byPart.get(b.part_id as string) ?? []
+        list.push({ cor_id: (b.cor_id as string | null) ?? null, code: cor?.code ?? null, label: cor?.label ?? null, stock_qty: stock, reserved_qty: res, available: this.round2(stock - res) })
+        byPart.set(b.part_id as string, list)
+      }
+    }
+    return rows.map(r => ({
+      ...r, available: this.round2(Number(r.stock_qty) - Number(r.reserved_qty)),
+      color_stock: byPart.get(r.id) ?? [],
+    }))
   }
 
   async createPart(orgId: string, devId: string, userId: string | null, dto: { name: string; qty_per_product?: number; is_optional?: boolean; sort_order?: number; notes?: string; width_mm?: number | null; depth_mm?: number | null; height_mm?: number | null }) {
@@ -285,6 +301,78 @@ export class ProductPartService {
     return { weight_g: per(ref?.weight_g), print_time_minutes: per(ref?.print_time_minutes), material: ref?.material ?? null }
   }
 
+  // ══ Baldes de COR do estoque de peças ══════════════════════════════
+  // A peça é a GEOMETRIA (sem cor); a cor nasce na OP (colorway/variante).
+  // Totais canônicos ficam em product_dev_part; os baldes por cor são a
+  // dimensão adicional (cor NULL = "sem cor definida", legado/avulso).
+
+  /** Cor da variante de SKU (colorway) — null se variante não informada. */
+  private async corFromVariant(orgId: string, variantId: string | null | undefined): Promise<string | null> {
+    if (!variantId) return null
+    const { data } = await supabaseAdmin.from('product_dev_sku_variant').select('cor_id')
+      .eq('id', variantId).eq('organization_id', orgId).maybeSingle()
+    return (data as { cor_id: string | null } | null)?.cor_id ?? null
+  }
+
+  /** Soma dStock/dReserved no balde (part, cor) — upsert manual (o índice
+   *  único parcial de cor NULL não funciona com onConflict). */
+  private async bumpColor(orgId: string, partId: string, corId: string | null, dStock: number, dReserved: number): Promise<void> {
+    let q = supabaseAdmin.from('product_dev_part_color_stock').select('id, stock_qty, reserved_qty').eq('part_id', partId)
+    q = corId ? q.eq('cor_id', corId) : q.is('cor_id', null)
+    const { data } = await q.maybeSingle()
+    if (data) {
+      const b = data as { id: string; stock_qty: number; reserved_qty: number }
+      await supabaseAdmin.from('product_dev_part_color_stock').update({
+        stock_qty: Math.max(0, this.round2(Number(b.stock_qty) + dStock)),
+        reserved_qty: Math.max(0, this.round2(Number(b.reserved_qty) + dReserved)),
+        updated_at: new Date().toISOString(),
+      }).eq('id', b.id)
+    } else {
+      await supabaseAdmin.from('product_dev_part_color_stock').insert({
+        organization_id: orgId, part_id: partId, cor_id: corId,
+        stock_qty: Math.max(0, this.round2(dStock)), reserved_qty: Math.max(0, this.round2(dReserved)),
+      })
+    }
+  }
+
+  private async colorBuckets(partId: string): Promise<Array<{ cor_id: string | null; stock_qty: number; reserved_qty: number; available: number }>> {
+    const { data } = await supabaseAdmin.from('product_dev_part_color_stock')
+      .select('cor_id, stock_qty, reserved_qty').eq('part_id', partId)
+    return ((data ?? []) as Array<{ cor_id: string | null; stock_qty: number; reserved_qty: number }>)
+      .map(b => ({ ...b, available: this.round2(Number(b.stock_qty) - Number(b.reserved_qty)) }))
+  }
+
+  /** Divide qty entre os baldes: cor pedida → balde SEM cor → (se cor não
+   *  pedida) demais baldes por disponibilidade. Sobra vai no balde
+   *  preferido (contabilidade por cor é best-effort; quem trava é o total). */
+  private async allocateBuckets(partId: string, corId: string | null, qty: number): Promise<Array<{ cor_id: string | null; qty: number }>> {
+    const buckets = await this.colorBuckets(partId)
+    const pick = (id: string | null) => buckets.find(b => (b.cor_id ?? null) === id)
+    const order: Array<{ cor_id: string | null; available: number }> = []
+    if (corId) {
+      order.push({ cor_id: corId, available: pick(corId)?.available ?? 0 })
+      order.push({ cor_id: null, available: pick(null)?.available ?? 0 })
+    } else {
+      order.push({ cor_id: null, available: pick(null)?.available ?? 0 })
+      for (const b of buckets.filter(b => b.cor_id != null).sort((a, b2) => b2.available - a.available)) {
+        order.push({ cor_id: b.cor_id, available: b.available })
+      }
+    }
+    const out: Array<{ cor_id: string | null; qty: number }> = []
+    let rest = this.round2(qty)
+    for (const o of order) {
+      if (rest <= 0) break
+      const take = Math.min(rest, Math.max(0, o.available))
+      if (take > 0) { out.push({ cor_id: o.cor_id, qty: this.round2(take) }); rest = this.round2(rest - take) }
+    }
+    if (rest > 0) {
+      const pref = out.find(o => (o.cor_id ?? null) === (corId ?? null))
+      if (pref) pref.qty = this.round2(pref.qty + rest)
+      else out.push({ cor_id: corId ?? null, qty: rest })
+    }
+    return out
+  }
+
   // ══ Estoque de peças prontas (ledger) ══════════════════════════════
   async listPartMovements(orgId: string, partId: string) {
     const { data, error } = await supabaseAdmin.from('product_dev_part_movement').select('*')
@@ -293,24 +381,31 @@ export class ProductPartService {
     return data ?? []
   }
 
-  /** Crédito de peças prontas ao concluir a OP da peça. Idempotente por OP. */
+  /** Crédito de peças prontas ao concluir a OP da peça. Idempotente por OP.
+   *  A COR vem do colorway da OP (sku_variant_id → cor da variante); sem
+   *  colorway declarado, cai no balde "sem cor definida". */
   async creditFromOrder(orgId: string, partId: string, qty: number, orderId: string, userId: string | null): Promise<void> {
     const q = Math.max(0, Number(qty) || 0)
     if (q <= 0) return
     const { data: done } = await supabaseAdmin.from('product_dev_part_movement').select('id')
-      .eq('part_id', partId).eq('reference_type', 'production_order').eq('reference_id', orderId).eq('movement_type', 'produced').maybeSingle()
-    if (done) return
+      .eq('part_id', partId).eq('reference_type', 'production_order').eq('reference_id', orderId).eq('movement_type', 'produced').limit(1)
+    if (done?.length) return
+    const { data: ord } = await supabaseAdmin.from('production_order').select('sku_variant_id')
+      .eq('id', orderId).eq('organization_id', orgId).maybeSingle()
+    const corId = await this.corFromVariant(orgId, (ord as { sku_variant_id: string | null } | null)?.sku_variant_id)
     const part = await this.getPart(orgId, partId)
     const novo = this.round2(Number(part.stock_qty) + q)
     await supabaseAdmin.from('product_dev_part').update({ stock_qty: novo, updated_at: new Date().toISOString() }).eq('id', partId)
     await supabaseAdmin.from('product_dev_part_movement').insert({
-      organization_id: orgId, part_id: partId, movement_type: 'produced', quantity: q, balance_after: novo,
+      organization_id: orgId, part_id: partId, movement_type: 'produced', quantity: q, balance_after: novo, cor_id: corId,
       reference_type: 'production_order', reference_id: orderId, notes: 'Peças prontas (conclusão da OP)', created_by: userId,
     })
-    this.logger.log(`[peca] +${q} prontas em ${partId.slice(0, 8)} (estoque=${novo})`)
+    await this.bumpColor(orgId, partId, corId, q, 0)
+    this.logger.log(`[peca] +${q} prontas em ${partId.slice(0, 8)} (estoque=${novo}${corId ? `, cor ${corId.slice(0, 8)}` : ''})`)
   }
 
-  /** Saída de peças prontas pra SAC/reposição/uso avulso (baixa N do estoque com motivo). */
+  /** Saída de peças prontas pra SAC/reposição/uso avulso (baixa N do estoque
+   *  com motivo). Baixa dos baldes: sem-cor primeiro, depois maiores saldos. */
   async partStockOut(orgId: string, partId: string, qty: number, reason: string, userId: string | null) {
     const q = Math.max(0, Number(qty) || 0)
     if (q <= 0) throw new BadRequestException('Quantidade inválida')
@@ -319,66 +414,83 @@ export class ProductPartService {
     if (q > disponivel) throw new BadRequestException(`Só há ${disponivel} peça(s) disponível(is) (fora as reservadas).`)
     const novo = this.round2(Number(part.stock_qty) - q)
     await supabaseAdmin.from('product_dev_part').update({ stock_qty: novo, updated_at: new Date().toISOString() }).eq('id', partId).eq('organization_id', orgId)
-    await supabaseAdmin.from('product_dev_part_movement').insert({
-      organization_id: orgId, part_id: partId, movement_type: 'consume', quantity: q, balance_after: novo,
-      reference_type: 'sac', reference_id: null, notes: reason?.trim() || 'Saída p/ reposição/SAC', created_by: userId,
-    })
+    for (const a of await this.allocateBuckets(partId, null, q)) {
+      await supabaseAdmin.from('product_dev_part_movement').insert({
+        organization_id: orgId, part_id: partId, movement_type: 'consume', quantity: a.qty, balance_after: novo, cor_id: a.cor_id,
+        reference_type: 'sac', reference_id: null, notes: reason?.trim() || 'Saída p/ reposição/SAC', created_by: userId,
+      })
+      await this.bumpColor(orgId, partId, a.cor_id, -a.qty, 0)
+    }
     this.logger.log(`[peca] -${q} saída SAC/reposição em ${partId.slice(0, 8)} (estoque=${novo})`)
     return { ...part, stock_qty: novo }
   }
 
-  /** Ajuste manual do estoque de peças (define o valor absoluto). */
+  /** Ajuste manual do estoque de peças (define o valor absoluto).
+   *  ⚠️ Zera a separação por COR: o saldo inteiro cai no balde "sem cor"
+   *  (o ajuste é um número só — não dá pra saber a cor do que foi contado). */
   async adjustStock(orgId: string, partId: string, newQty: number, userId: string | null) {
     const part = await this.getPart(orgId, partId)
     const novo = Math.max(0, Number(newQty) || 0)
     await supabaseAdmin.from('product_dev_part').update({ stock_qty: novo, updated_at: new Date().toISOString() }).eq('id', partId).eq('organization_id', orgId)
     await supabaseAdmin.from('product_dev_part_movement').insert({
       organization_id: orgId, part_id: partId, movement_type: 'adjust', quantity: novo, balance_after: novo,
-      reference_type: 'manual', reference_id: null, notes: 'Ajuste manual de estoque', created_by: userId,
+      reference_type: 'manual', reference_id: null, notes: 'Ajuste manual de estoque (separação por cor zerada)', created_by: userId,
     })
+    await supabaseAdmin.from('product_dev_part_color_stock').delete().eq('part_id', partId).eq('organization_id', orgId)
+    await this.bumpColor(orgId, partId, null, novo, Number(part.reserved_qty) || 0)
     return { ...part, stock_qty: novo }
   }
 
-  private async reservePart(orgId: string, partId: string, qty: number, refType: string, refId: string): Promise<boolean> {
+  /** Reserva com COR: divide entre os baldes (cor pedida → sem-cor) e grava
+   *  1 movimento de reserva POR BALDE — release/consume espelham por cor. */
+  private async reservePart(orgId: string, partId: string, qty: number, refType: string, refId: string, corId: string | null = null): Promise<boolean> {
     const q = Math.max(0, Number(qty) || 0)
     if (q <= 0) return false
     const { data: existing } = await supabaseAdmin.from('product_dev_part_movement').select('id')
-      .eq('part_id', partId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').maybeSingle()
-    if (existing) return true
+      .eq('part_id', partId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve').limit(1)
+    if (existing?.length) return true
     const part = await this.getPart(orgId, partId)
     await supabaseAdmin.from('product_dev_part').update({ reserved_qty: this.round2(Number(part.reserved_qty) + q), updated_at: new Date().toISOString() }).eq('id', partId)
-    await supabaseAdmin.from('product_dev_part_movement').insert({
-      organization_id: orgId, part_id: partId, movement_type: 'reserve', quantity: q,
-      reference_type: refType, reference_id: refId, notes: 'Reserva p/ montagem',
-    })
+    for (const a of await this.allocateBuckets(partId, corId, q)) {
+      await supabaseAdmin.from('product_dev_part_movement').insert({
+        organization_id: orgId, part_id: partId, movement_type: 'reserve', quantity: a.qty, cor_id: a.cor_id,
+        reference_type: refType, reference_id: refId, notes: 'Reserva p/ montagem',
+      })
+      await this.bumpColor(orgId, partId, a.cor_id, 0, a.qty)
+    }
     return true
   }
 
   private async releaseParts(orgId: string, refType: string, refId: string): Promise<void> {
-    const { data: reserves } = await supabaseAdmin.from('product_dev_part_movement').select('part_id, quantity')
+    const { data: reserves } = await supabaseAdmin.from('product_dev_part_movement').select('part_id, quantity, cor_id')
       .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve')
-    for (const rm of (reserves ?? []) as Array<{ part_id: string; quantity: number }>) {
-      const { data: released } = await supabaseAdmin.from('product_dev_part_movement').select('id')
-        .eq('part_id', rm.part_id).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'release').maybeSingle()
-      if (released) continue
+    for (const rm of (reserves ?? []) as Array<{ part_id: string; quantity: number; cor_id: string | null }>) {
+      let done = supabaseAdmin.from('product_dev_part_movement').select('id')
+        .eq('part_id', rm.part_id).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'release')
+      done = rm.cor_id ? done.eq('cor_id', rm.cor_id) : done.is('cor_id', null)
+      const { data: released } = await done.limit(1)
+      if (released?.length) continue
       const { data: part } = await supabaseAdmin.from('product_dev_part').select('reserved_qty').eq('id', rm.part_id).maybeSingle()
       if (!part) continue
       const novaRes = Math.max(0, this.round2(Number((part as { reserved_qty: number }).reserved_qty) - Number(rm.quantity)))
       await supabaseAdmin.from('product_dev_part').update({ reserved_qty: novaRes, updated_at: new Date().toISOString() }).eq('id', rm.part_id)
       await supabaseAdmin.from('product_dev_part_movement').insert({
-        organization_id: orgId, part_id: rm.part_id, movement_type: 'release', quantity: Number(rm.quantity),
+        organization_id: orgId, part_id: rm.part_id, movement_type: 'release', quantity: Number(rm.quantity), cor_id: rm.cor_id,
         reference_type: refType, reference_id: refId, notes: 'Liberação de reserva (cancelamento)',
       })
+      await this.bumpColor(orgId, rm.part_id, rm.cor_id, 0, -Number(rm.quantity))
     }
   }
 
   private async consumeParts(orgId: string, refType: string, refId: string): Promise<void> {
-    const { data: reserves } = await supabaseAdmin.from('product_dev_part_movement').select('part_id, quantity')
+    const { data: reserves } = await supabaseAdmin.from('product_dev_part_movement').select('part_id, quantity, cor_id')
       .eq('organization_id', orgId).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'reserve')
-    for (const rm of (reserves ?? []) as Array<{ part_id: string; quantity: number }>) {
-      const { data: consumed } = await supabaseAdmin.from('product_dev_part_movement').select('id')
-        .eq('part_id', rm.part_id).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'consume').maybeSingle()
-      if (consumed) continue
+    for (const rm of (reserves ?? []) as Array<{ part_id: string; quantity: number; cor_id: string | null }>) {
+      let done = supabaseAdmin.from('product_dev_part_movement').select('id')
+        .eq('part_id', rm.part_id).eq('reference_type', refType).eq('reference_id', refId).eq('movement_type', 'consume')
+      done = rm.cor_id ? done.eq('cor_id', rm.cor_id) : done.is('cor_id', null)
+      const { data: consumed } = await done.limit(1)
+      if (consumed?.length) continue
       const { data: part } = await supabaseAdmin.from('product_dev_part').select('stock_qty, reserved_qty').eq('id', rm.part_id).maybeSingle()
       if (!part) continue
       const reserved = Number(rm.quantity)
@@ -386,9 +498,10 @@ export class ProductPartService {
       const novaRes = Math.max(0, this.round2(Number((part as { reserved_qty: number }).reserved_qty) - reserved))
       await supabaseAdmin.from('product_dev_part').update({ stock_qty: novaQtd, reserved_qty: novaRes, updated_at: new Date().toISOString() }).eq('id', rm.part_id)
       await supabaseAdmin.from('product_dev_part_movement').insert({
-        organization_id: orgId, part_id: rm.part_id, movement_type: 'consume', quantity: reserved, balance_after: novaQtd,
+        organization_id: orgId, part_id: rm.part_id, movement_type: 'consume', quantity: reserved, balance_after: novaQtd, cor_id: rm.cor_id,
         reference_type: refType, reference_id: refId, notes: 'Consumo na montagem',
       })
+      await this.bumpColor(orgId, rm.part_id, rm.cor_id, -reserved, -reserved)
     }
   }
 
@@ -420,15 +533,26 @@ export class ProductPartService {
   }
 
   // ══ Montagem (assembly) ════════════════════════════════════════════
-  /** Prévia: o que montar X produtos consome de peças + insumos, com faltas. */
-  async previewAssembly(orgId: string, devId: string, quantity: number) {
+  /** Prévia: o que montar X produtos consome de peças + insumos, com faltas.
+   *  Com COLORWAY (sku_variant_id): a suficiência considera só o balde da
+   *  cor + o balde "sem cor" (não rouba peça de outra cor). */
+  async previewAssembly(orgId: string, devId: string, quantity: number, skuVariantId?: string | null) {
     const qty = Math.max(1, Math.floor(Number(quantity) || 0))
-    const parts = await this.listParts(orgId, devId) as Array<PartRef & { available: number; is_optional: boolean }>
+    const parts = await this.listParts(orgId, devId) as Array<PartRef & { available: number; is_optional: boolean; color_stock: Array<{ cor_id: string | null; available: number }> }>
     if (!parts.length) throw new BadRequestException('Este produto não tem peças cadastradas. Cadastre as peças primeiro.')
+    const corId = await this.corFromVariant(orgId, skuVariantId)
     const reservedBy = await this.activeReservations(parts.filter(p => Number(p.reserved_qty) > 0).map(p => p.id))
     const partLines = parts.map(p => {
       const needed = this.round2(Number(p.qty_per_product) * qty)
-      return { type: 'peca', part_id: p.id, name: p.name, needed, available: p.available, unit: 'un', is_optional: p.is_optional, sufficient: p.available >= needed, missing: Math.max(0, this.round2(needed - p.available)), reserved: this.round2(Number(p.reserved_qty)), reserved_by: reservedBy.get(p.id) ?? [] }
+      // disponível pro colorway: balde da cor + balde sem-cor (baldes só
+      // existem se algum movimento já foi cor-aware; sem baldes = total)
+      let avail = p.available
+      if (corId && (p.color_stock?.length ?? 0) > 0) {
+        const bCor = p.color_stock.find(b => b.cor_id === corId)?.available ?? 0
+        const bNull = p.color_stock.find(b => b.cor_id === null)?.available ?? 0
+        avail = this.round2(Math.min(p.available, bCor + bNull))
+      }
+      return { type: 'peca', part_id: p.id, name: p.name, needed, available: avail, available_total: p.available, unit: 'un', is_optional: p.is_optional, sufficient: avail >= needed, missing: Math.max(0, this.round2(needed - avail)), reserved: this.round2(Number(p.reserved_qty)), reserved_by: reservedBy.get(p.id) ?? [] }
     })
     // insumos de montagem: linhas de BOM do produto que NÃO são filamento (embalagem/etiqueta/mão de obra)
     const { data: bom } = await supabaseAdmin.from('product_dev_bom').select('input_id, kind, description, quantity, waste_pct')
@@ -474,9 +598,9 @@ export class ProductPartService {
   }
 
   /** Cria a montagem: exige peças/insumos suficientes (senão erro com a falta) e reserva tudo. */
-  async createAssembly(orgId: string, devId: string, userId: string | null, quantity: number) {
+  async createAssembly(orgId: string, devId: string, userId: string | null, quantity: number, skuVariantId?: string | null) {
     const qty = Math.max(1, Math.floor(Number(quantity) || 0))
-    const preview = await this.previewAssembly(orgId, devId, qty)
+    const preview = await this.previewAssembly(orgId, devId, qty, skuVariantId)
     if (!preview.all_sufficient) {
       const faltas = [
         ...preview.parts.filter(l => !l.is_optional && !l.sufficient).map(l => `${l.name} (faltam ${l.missing}${l.reserved_by.length ? `; ${l.reserved} já reservada(s) p/ ${l.reserved_by.map(r => `Montagem #${r.order_number ?? '?'}`).join(', ')}` : ''})`),
@@ -484,11 +608,13 @@ export class ProductPartService {
       ].join(', ')
       throw new BadRequestException(`Estoque insuficiente p/ montar ${qty}: ${faltas}. Gere as OPs de impressão das peças que faltam ou reponha os insumos.`)
     }
+    const corId = await this.corFromVariant(orgId, skuVariantId)
     const { data: seq } = await supabaseAdmin.from('assembly_order').select('order_number')
       .eq('organization_id', orgId).order('order_number', { ascending: false }).limit(1).maybeSingle()
     const nextNumber = seq ? Number((seq as { order_number: number }).order_number) + 1 : 1
     const { data, error } = await supabaseAdmin.from('assembly_order').insert({
       organization_id: orgId, product_dev_id: devId, order_number: nextNumber, quantity: qty, created_by: userId,
+      sku_variant_id: skuVariantId ?? null,
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar montagem: ${error?.message ?? 'sem dados'}`)
     const asm = data as { id: string }
@@ -497,7 +623,7 @@ export class ProductPartService {
     // deixaria reserved_qty > stock_qty no ledger de peças).
     for (const l of preview.parts) {
       if (l.is_optional && !l.sufficient) continue
-      await this.reservePart(orgId, l.part_id, l.needed, 'assembly_order', asm.id)
+      await this.reservePart(orgId, l.part_id, l.needed, 'assembly_order', asm.id, corId)
     }
     for (const l of preview.insumos) await this.inputs.reserveInput(orgId, l.input_id, l.needed, 'assembly_order', asm.id)
     await this.emit(orgId, devId, 'assembly_created' as string, { assembly_order_id: asm.id, qty }, userId)
@@ -545,14 +671,33 @@ export class ProductPartService {
 
   /** Credita os produtos montados no ESTOQUE UNIFICADO via StockService
    *  (applyProductionRestock): cria a linha mestre se faltar, grava movimento
-   *  idempotente por montagem e propaga products.stock/canais. */
-  private async creditProductStock(orgId: string, asm: { id: string; product_dev_id: string; quantity: number; stock_movement_done: boolean }) {
+   *  idempotente por montagem e propaga products.stock/canais. Montagem com
+   *  COLORWAY também soma na variação certa do produto (match por SKU). */
+  private async creditProductStock(orgId: string, asm: { id: string; product_dev_id: string; quantity: number; stock_movement_done: boolean; sku_variant_id?: string | null }) {
     if (asm.stock_movement_done === true) return
     const { data: dev } = await supabaseAdmin.from('product_dev').select('product_id').eq('id', asm.product_dev_id).eq('organization_id', orgId).maybeSingle()
     const productId = (dev as { product_id: string | null } | null)?.product_id
     await supabaseAdmin.from('assembly_order').update({ stock_movement_done: true }).eq('id', asm.id)
     if (!productId) { this.logger.log(`[montagem] ${asm.id.slice(0, 8)} concluída sem produto cadastrado — sem crédito de estoque vendável`); return }
     const qty = Number(asm.quantity) || 0
+    const variantId = asm.sku_variant_id ?? null
+    if (variantId) {
+      const { data: prod } = await supabaseAdmin.from('products').select('has_variations, variations').eq('id', productId).eq('organization_id', orgId).maybeSingle()
+      const p = prod as { has_variations: boolean | null; variations: Array<Record<string, unknown>> | null } | null
+      if (p?.has_variations) {
+        const { data: variant } = await supabaseAdmin.from('product_dev_sku_variant').select('sku').eq('id', variantId).eq('organization_id', orgId).maybeSingle()
+        const vsku = (variant as { sku: string } | null)?.sku
+        const variations = (p.variations ?? []) as Array<{ sku?: string; stock?: number } & Record<string, unknown>>
+        let matched = false
+        const updated = variations.map(v => (vsku && v.sku === vsku) ? (matched = true, { ...v, stock: (Number(v.stock) || 0) + qty }) : v)
+        if (matched) {
+          await supabaseAdmin.from('products').update({ variations: updated, updated_at: new Date().toISOString() }).eq('id', productId).eq('organization_id', orgId)
+          this.logger.log(`[montagem] +${qty} un na cor ${vsku} p/ ${productId.slice(0, 8)}`)
+        } else {
+          this.logger.warn(`[montagem] variante ${variantId.slice(0, 8)} não casa nenhuma variação do produto ${productId.slice(0, 8)} — crédito cai no total`)
+        }
+      }
+    }
     const res = await this.stock.applyProductionRestock({
       productId, quantity: qty, refId: `assembly:${asm.id}`,
       note: 'Montagem concluída — Product OS',
