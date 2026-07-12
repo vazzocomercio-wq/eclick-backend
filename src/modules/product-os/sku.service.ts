@@ -291,6 +291,7 @@ export class SkuService {
 
     // sub-códigos AUTO-GERADOS das peças acompanham o novo base (peça criada
     // antes da classificação ficava com código derivado do NOME do produto).
+    // Formato -P01 (P de peça — separa do namespace das cores das variantes).
     // Código customizado pelo usuário (não começa com o code antigo) é mantido.
     if (oldCode !== base) {
       const { data: parts } = await supabaseAdmin.from('product_dev_part').select('id, code')
@@ -301,8 +302,8 @@ export class SkuService {
         const cur = p.code
         const auto = !cur || (oldCode != null && cur.startsWith(`${oldCode}-`))
         if (!auto) continue
-        const suffix = cur?.match(/-(\d+)$/)?.[1] ?? String(seq).padStart(2, '0')
-        await supabaseAdmin.from('product_dev_part').update({ code: `${base}-${suffix}` }).eq('id', p.id)
+        const suffix = cur?.match(/-P?(\d+)$/)?.[1] ?? String(seq).padStart(2, '0')
+        await supabaseAdmin.from('product_dev_part').update({ code: `${base}-P${suffix}` }).eq('id', p.id)
       }
     }
 

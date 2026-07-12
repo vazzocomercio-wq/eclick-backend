@@ -80,16 +80,19 @@ export class ProductPartService {
     return code
   }
 
-  /** Próximo sub-SKU sequencial (-01, -02…) pro produto. */
+  /** Próximo sub-SKU sequencial (-P01, -P02…) pro produto. O "P" separa o
+   *  namespace de PEÇA do de variante de COR (VZ-xxxx-01 podia ser tanto a
+   *  peça 1 quanto a cor 01 PRETO — colisão real). Aceita códigos legados
+   *  sem o P na hora de achar o próximo número. */
   private async nextPartCode(orgId: string, devId: string): Promise<string> {
     const base = await this.ensureDevCode(orgId, devId)
     const { data } = await supabaseAdmin.from('product_dev_part').select('code').eq('organization_id', orgId).eq('product_dev_id', devId)
     let max = 0
     for (const r of (data ?? [])) {
-      const m = (r as { code: string | null }).code?.match(/-(\d+)$/)
+      const m = (r as { code: string | null }).code?.match(/-P?(\d+)$/)
       if (m) max = Math.max(max, parseInt(m[1], 10))
     }
-    return `${base}-${String(max + 1).padStart(2, '0')}`
+    return `${base}-P${String(max + 1).padStart(2, '0')}`
   }
 
   /** Garante o sub-SKU da peça (gera se faltar). Usado por OPs antigas/backfill. */
