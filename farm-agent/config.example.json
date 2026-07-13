@@ -2,6 +2,7 @@
   "backend_url": "https://eclick-backend-production-2a87.up.railway.app",
   "agent_token": "COLE_AQUI_O_TOKEN_GERADO_NO_ECLICK",
   "push_interval_sec": 5,
+  "bed_type": "Textured PEI Plate",
   "printers": [
     {
       "name": "Bambu A1 #1",

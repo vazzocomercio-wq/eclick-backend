@@ -14,7 +14,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.4.1'
+const AGENT_VERSION = '1.4.3'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -141,14 +141,17 @@ async function dispatchPrint(serial, payload) {
     await ftp.uploadFrom(tmp, name)
   } finally { ftp.close(); try { fs.unlinkSync(tmp) } catch { /* */ } }
   const amsMap = Array.isArray(payload.ams_mapping) && payload.ams_mapping.length > 0 ? payload.ams_mapping : null
+  // impressora sem AMS (rolo externo): o backend manda use_ams=false — repassar
+  // true pra ela deixaria a máquina parada pedindo filamento do AMS que não existe
+  const useAms = payload.use_ams !== false
   publishCmd(serial, {
     print: {
       // arquivo do auto-slicing pode ser de outro prato (projeto multi-peça)
       sequence_id: '0', command: 'project_file', param: payload.gcode_param || 'Metadata/plate_1.gcode',
       subtask_name: name.replace(/\.(gcode\.)?3mf$/i, ''), url: `file:///mnt/sdcard/${name}`, md5,
       bed_type: 'auto', timelapse: false, bed_leveling: true, flow_cali: false,
-      vibration_cali: false, layer_inspect: false, use_ams: true,
-      ...(amsMap ? { ams_mapping: amsMap } : {}),   // imprime no slot/cor escolhido
+      vibration_cali: false, layer_inspect: false, use_ams: useAms,
+      ...(useAms && amsMap ? { ams_mapping: amsMap } : {}),   // imprime no slot/cor escolhido
       profile_id: '0', project_id: '0', subtask_id: '0', task_id: '0',
     },
   })
@@ -157,6 +160,10 @@ async function dispatchPrint(serial, payload) {
 // ── fatiamento automático (Bambu Studio CLI instalado no PC da farm) ─
 const STUDIO_EXE = cfg.bambu_studio_exe || 'C:\\Program Files\\Bambu Studio\\bambu-studio.exe'
 const PROFILES_DIR = cfg.bambu_profiles_dir || path.join(path.dirname(STUDIO_EXE), 'resources', 'profiles', 'BBL')
+// Sem isso o CLI assume "Cool Plate" e o G-code sai com mesa 35°C (M190 S35) —
+// PLA descola da PEI texturizada da A1, que precisa das temps "textured" do
+// perfil do filamento (65°C PLA). A flag escolhe a coluna certa pra QUALQUER material.
+const BED_TYPE = cfg.bed_type || 'Textured PEI Plate'
 let slicing = false
 
 // Os perfis oficiais usam herança ("inherits") que o CLI NÃO resolve sozinho —
@@ -202,7 +209,8 @@ async function runSlice(job) {
       fs.writeFileSync(path.join(dir, 'process.json'), JSON.stringify(flattenProfile('process', job.process_profile)))
       fs.writeFileSync(path.join(dir, 'filament.json'), JSON.stringify(flattenProfile('filament', job.filament_profile)))
       args.push('--load-settings', `${path.join(dir, 'machine.json')};${path.join(dir, 'process.json')}`,
-        '--load-filaments', path.join(dir, 'filament.json'), '--orient', '1', '--arrange', '1')
+        '--load-filaments', path.join(dir, 'filament.json'), '--orient', '1', '--arrange', '1',
+        '--curr-bed-type', BED_TYPE)
     }
     // projeto .3mf: fatia com as configurações embutidas (o designer já preparou)
     args.push('--slice', String(job.plate || 1), '--export-3mf', 'out.gcode.3mf', '--outputdir', dir, src)
@@ -280,6 +288,7 @@ function grabFrame(p) {
 }
 
 let camTick = 0
+const camFail = {}   // serial -> nº de falhas seguidas de captura (pra não spammar o log)
 async function pushCamera() {
   camTick++
   for (const p of (cfg.printers || [])) {
@@ -288,13 +297,21 @@ async function pushCamera() {
     const every = st === 'printing' ? 1 : 10   // imprimindo: ~3s; senão: ~30s
     if (camTick % every !== 0) continue
     const frame = await grabFrame(p)
-    if (!frame || frame.length < 1000) continue
+    if (!frame || frame.length < 1000) {
+      // câmera não devolveu frame (porta 6000). Antes isso era silencioso → ficava
+      // congelado sem ninguém perceber. Loga na 1ª falha e a cada ~30 tentativas.
+      const n = (camFail[p.serial] = (camFail[p.serial] || 0) + 1)
+      if (n === 1 || n % 30 === 0) console.log(`[cam] ${p.name}: sem frame da porta 6000 (${n}x seguidas) — verifique o LAN Live View / câmera da impressora`)
+      continue
+    }
+    if (camFail[p.serial]) { console.log(`[cam] ${p.name}: câmera voltou (após ${camFail[p.serial]} falhas)`); camFail[p.serial] = 0 }
     try {
-      await fetch(`${BACKEND}/product-os/farm/camera`, {
+      const r = await fetch(`${BACKEND}/product-os/farm/camera`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-farm-agent-token': TOKEN },
         body: JSON.stringify({ serial: p.serial, image_base64: frame.toString('base64') }),
       })
-    } catch { /* rede instável, tenta no próximo ciclo */ }
+      if (!r.ok) console.log(`[cam] ${p.name}: backend recusou o frame (HTTP ${r.status})`)
+    } catch (e) { console.log(`[cam] ${p.name}: falha ao enviar frame — ${e.message}`) }
   }
 }
 
