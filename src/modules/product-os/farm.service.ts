@@ -250,6 +250,20 @@ export class FarmService {
     // só manda job pra máquina a partir da fila/reimpressão — fora disso seria imprimir DE NOVO uma ordem em andamento/pronta
     if (!['fila', 'reimpressao'].includes(o.status)) throw new BadRequestException(`Esta OP está em '${o.status}' — enviar agora imprimiria o job de novo. Só ordens na Fila ou em Reimpressão podem ser enviadas.`)
     if (!o.printer_id) throw new BadRequestException('A ordem não tem impressora definida.')
+    // GUARD: só envia pra impressora OCIOSA. Sem isso, mandar um job pra uma máquina
+    // que já está imprimindo/pausada/em erro atropela o trabalho em curso. (O
+    // auto-dispatch já filtra idle; aqui protege o envio MANUAL.) Só bloqueia o
+    // 'print' — pausar/parar/luz precisam funcionar com a máquina ocupada.
+    const { data: ps } = await supabaseAdmin.from('printer_status')
+      .select('state, online, updated_at, progress_pct').eq('printer_id', o.printer_id).maybeSingle()
+    const st = ps as { state: string | null; online: boolean | null; updated_at: string | null; progress_pct: number | null } | null
+    const liveState = !st ? 'sem_dados' : !this.isFresh(st.updated_at) ? 'offline' : (st.state ?? 'idle')
+    if (liveState !== 'idle') {
+      if (liveState === 'printing') throw new BadRequestException(`A impressora já está imprimindo${st?.progress_pct != null ? ` (${Math.round(Number(st.progress_pct))}%)` : ''} — só dá pra enviar pra uma impressora OCIOSA. Espere terminar ou escolha outra máquina.`)
+      if (liveState === 'paused') throw new BadRequestException('A impressora está com uma impressão PAUSADA — retome ou pare esse job antes de enviar outro.')
+      if (liveState === 'error') throw new BadRequestException('A impressora está em ERRO — limpe o erro na tela dela (Cancelar/OK) antes de enviar um novo job.')
+      throw new BadRequestException('A impressora está offline / sem telemetria — não dá pra confirmar que está ociosa. Veja se ela está ligada e o agente rodando.')
+    }
     // arquivo fatiado (auto-slicing) tem prioridade sobre o modelo original
     let fileUrl: string | null = null, fileName = 'job.3mf', slicedVersionId: string | null = null
     if (o.version_id) {
