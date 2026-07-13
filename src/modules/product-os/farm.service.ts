@@ -301,6 +301,21 @@ export class FarmService {
     if (!fileUrl) throw new BadRequestException('A versão não tem arquivo (.3mf) para enviar à impressora. Suba o modelo e fatie (botão Fatiar) ou suba o .3mf já fatiado.')
     // só .3mf imprime via FTP — STL não serve pra impressora
     if (!/\.3mf/i.test(fileUrl)) throw new BadRequestException('O arquivo da versão ainda não está fatiado — use o botão Fatiar (automático) na versão, ou suba o .3mf fatiado do Bambu Studio.')
+    // .3mf de PROJETO (salvo no Studio) não tem G-code dentro — a impressora
+    // aceita o upload e depois para com "unable to parse the file" [0500-4003]
+    // (aconteceu nas OP-0079/0080). Confere no zip se existe Metadata/plate_N.gcode
+    // (os nomes de entrada ficam legíveis no central directory, sem descompactar).
+    if (!slicedVersionId && !/\.gcode\.3mf/i.test(fileUrl)) {
+      let temGcode = false
+      try {
+        const res = await fetch(fileUrl)
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer())
+          temGcode = /Metadata\/plate_\d+\.gcode/.test(buf.toString('latin1'))
+        } else temGcode = true          // storage indisponível: não travar a farm
+      } catch { temGcode = true }
+      if (!temGcode) throw new BadRequestException('Este .3mf é um PROJETO salvo (sem G-code embutido) — a impressora recusaria com "unable to parse the file" [0500-4003]. Use o botão FATIAR na versão (auto-slice da farm) e envie de novo quando concluir.')
+    }
     // descobre o slot do AMS de cada cor → manda imprimir no(s) rolo(s) certo(s)
     let amsMapping: number[] | undefined
     const { data: loaded } = await supabaseAdmin.from('printer_loaded_filament')
