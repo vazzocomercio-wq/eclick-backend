@@ -14,7 +14,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.4.4'
+const AGENT_VERSION = '1.4.5'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -306,31 +306,43 @@ function grabFrame(p) {
 }
 
 let camTick = 0
+let camBusy = false  // captura em andamento — o setInterval de 3s NÃO pode sobrepor
 const camFail = {}   // serial -> nº de falhas seguidas de captura (pra não spammar o log)
 async function pushCamera() {
-  camTick++
-  for (const p of (cfg.printers || [])) {
-    if (!connected[p.serial]) continue
-    const st = STATE_MAP[(state[p.serial] || {}).gcode_state] || 'idle'
-    const every = st === 'printing' ? 1 : 10   // imprimindo: ~3s; senão: ~30s
-    if (camTick % every !== 0) continue
-    const frame = await grabFrame(p)
-    if (!frame || frame.length < 1000) {
-      // câmera não devolveu frame (porta 6000). Antes isso era silencioso → ficava
-      // congelado sem ninguém perceber. Loga na 1ª falha e a cada ~30 tentativas.
-      const n = (camFail[p.serial] = (camFail[p.serial] || 0) + 1)
-      if (n === 1 || n % 30 === 0) console.log(`[cam] ${p.name}: sem frame da porta 6000 (${n}x seguidas) — verifique o LAN Live View / câmera da impressora`)
-      continue
+  // Sem o guard, invocações sobrepostas (grabFrame leva até 7s/impressora) abriam
+  // liveviews concorrentes E incrementavam camTick no MEIO do laço de outra invocação
+  // → o `camTick % 10` das impressoras do fim da lista quase nunca batia (a 03 ficou
+  // sem câmera pra sempre, sem nenhum erro). Snapshot do tick + reentrância resolvem.
+  if (camBusy) return
+  camBusy = true
+  const tick = ++camTick
+  try {
+    for (const p of (cfg.printers || [])) {
+      if (!connected[p.serial]) continue
+      const st = STATE_MAP[(state[p.serial] || {}).gcode_state] || 'idle'
+      const every = st === 'printing' ? 1 : 10   // imprimindo: ~3s; senão: ~30s
+      if (tick % every !== 0) continue
+      const frame = await grabFrame(p)
+      if (!frame || frame.length < 1000) {
+        // câmera não devolveu frame (porta 6000). Antes isso era silencioso → ficava
+        // congelado sem ninguém perceber. Loga na 1ª falha e a cada ~30 tentativas.
+        const n = (camFail[p.serial] = (camFail[p.serial] || 0) + 1)
+        if (n === 1 || n % 30 === 0) console.log(`[cam] ${p.name}: sem frame da porta 6000 (${n}x seguidas) — verifique o LAN Live View / câmera da impressora`)
+        continue
+      }
+      if (camFail[p.serial]) { console.log(`[cam] ${p.name}: câmera voltou (após ${camFail[p.serial]} falhas)`); camFail[p.serial] = 0 }
+      try {
+        const r = await fetch(`${BACKEND}/product-os/farm/camera`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-farm-agent-token': TOKEN },
+          body: JSON.stringify({ serial: p.serial, image_base64: frame.toString('base64') }),
+        })
+        if (!r.ok) { console.log(`[cam] ${p.name}: backend recusou o frame (HTTP ${r.status})`); continue }
+        // o backend responde 200 mesmo quando NÃO grava ({ok:false, reason}) — ler o corpo
+        const j = await r.json().catch(() => null)
+        if (j && j.ok === false) console.log(`[cam] ${p.name}: backend não gravou o frame — ${j.reason || 'sem motivo'}`)
+      } catch (e) { console.log(`[cam] ${p.name}: falha ao enviar frame — ${e.message}`) }
     }
-    if (camFail[p.serial]) { console.log(`[cam] ${p.name}: câmera voltou (após ${camFail[p.serial]} falhas)`); camFail[p.serial] = 0 }
-    try {
-      const r = await fetch(`${BACKEND}/product-os/farm/camera`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-farm-agent-token': TOKEN },
-        body: JSON.stringify({ serial: p.serial, image_base64: frame.toString('base64') }),
-      })
-      if (!r.ok) console.log(`[cam] ${p.name}: backend recusou o frame (HTTP ${r.status})`)
-    } catch (e) { console.log(`[cam] ${p.name}: falha ao enviar frame — ${e.message}`) }
-  }
+  } finally { camBusy = false }
 }
 
 console.log(`e-Click Farm Agent v${AGENT_VERSION} — ${(cfg.printers || []).length} impressora(s) → ${BACKEND}`)
