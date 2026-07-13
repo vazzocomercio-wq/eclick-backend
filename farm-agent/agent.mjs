@@ -14,7 +14,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.4.5'
+const AGENT_VERSION = '1.4.6'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -104,7 +104,13 @@ async function runCommand(cmd) {
     else if (command_type === 'stop') publishCmd(serial, { print: { sequence_id: '0', command: 'stop' } })
     else if (command_type === 'light_on') publishCmd(serial, { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: 'on' } })
     else if (command_type === 'light_off') publishCmd(serial, { system: { sequence_id: '0', command: 'ledctrl', led_node: 'chamber_light', led_mode: 'off' } })
-    else if (command_type === 'print') { await dispatchPrint(serial, payload); }
+    else if (command_type === 'print') {
+      // última linha de defesa contra envio duplo: se a máquina já está
+      // rodando/pausada (telemetria MQTT local), recusa em vez de atropelar
+      const st = STATE_MAP[(state[serial] || {}).gcode_state] || 'idle'
+      if (st === 'printing' || st === 'paused') throw new Error(`impressora ocupada (${st}) — print duplicado bloqueado no agente`)
+      await dispatchPrint(serial, payload)
+    }
     else throw new Error(`comando desconhecido: ${command_type}`)
     acks.push({ id, ok: true, result: 'ok' })
     console.log(`[cmd ${command_type}] ${serial} → ok`)
@@ -112,6 +118,28 @@ async function runCommand(cmd) {
     acks.push({ id, ok: false, result: e.message })
     console.log(`[cmd ${command_type}] ${serial} → falhou: ${e.message}`)
   }
+}
+
+// fila de comandos FORA do ciclo de telemetria: um print (download+FTP demorado)
+// não pode atrasar o push nem sobrepor ciclos (era o gatilho da entrega dupla).
+// Dedupe por id segura redelivery de corrida antiga no backend.
+const cmdQueue = []
+const cmdSeen = new Set()
+let cmdBusy = false
+function enqueueCmds(cmds) {
+  for (const c of cmds || []) {
+    if (!c?.id || cmdSeen.has(c.id)) continue
+    cmdSeen.add(c.id)
+    if (cmdSeen.size > 500) cmdSeen.delete(cmdSeen.values().next().value)
+    cmdQueue.push(c)
+  }
+  void drainCmds()
+}
+async function drainCmds() {
+  if (cmdBusy) return
+  cmdBusy = true
+  try { while (cmdQueue.length) await runCommand(cmdQueue.shift()) }
+  finally { cmdBusy = false }
 }
 
 // EXPERIMENTAL: baixa o .3mf, sobe via FTP pra impressora e manda imprimir.
@@ -273,7 +301,7 @@ async function push() {
     const data = await r.json().catch(() => ({}))
     // backend manda a config de vigilância por impressora → aplica se mudou
     for (const [serial, dc] of Object.entries(data.detection_config || {})) { detectionCfg[serial] = dc; applyDetection(serial) }
-    for (const cmd of (data.commands || [])) await runCommand(cmd)
+    enqueueCmds(data.commands)
     // fatiamento: 1 por vez (CPU pesada); roda em paralelo ao loop de telemetria
     for (const job of (data.slice_jobs || [])) {
       if (slicing) break

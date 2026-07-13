@@ -217,13 +217,19 @@ export class FarmService {
     const serialByPid = new Map((mine ?? []).map(p => [(p as { id: string }).id, (p as { serial_number: string }).serial_number]))
     const pids = [...serialByPid.keys()]
     if (!pids.length) return []
+    // dequeue ATÔMICO: UPDATE..RETURNING num statement só. O select-depois-update
+    // antigo tinha corrida: dois pushes de telemetria sobrepostos (FTP longo
+    // atrasa o ciclo do agente) recebiam o MESMO comando duas vezes → print
+    // duplicado. Com o UPDATE condicionado a status='pending', o segundo
+    // concorrente não encontra linhas (row lock + recheck do WHERE).
     const { data: pend } = await supabaseAdmin.from('farm_command')
-      .select('id, printer_id, command_type, payload').eq('status', 'pending').in('printer_id', pids)
+      .update({ status: 'sent', sent_at: new Date().toISOString() })
+      .eq('status', 'pending').in('printer_id', pids)
+      .select('id, printer_id, command_type, payload')
     const out: FarmCommandOut[] = (pend ?? []).map(c => {
       const cmd = c as { id: string; printer_id: string; command_type: string; payload: Record<string, unknown> | null }
       return { id: cmd.id, serial: serialByPid.get(cmd.printer_id) ?? '', command_type: cmd.command_type, payload: cmd.payload ?? {} }
     })
-    if (out.length) await supabaseAdmin.from('farm_command').update({ status: 'sent', sent_at: new Date().toISOString() }).in('id', out.map(c => c.id))
     return out
   }
 
