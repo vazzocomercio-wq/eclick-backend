@@ -14,7 +14,7 @@ const cfg = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url)
 const BACKEND = String(cfg.backend_url || '').replace(/\/+$/, '')
 const TOKEN = cfg.agent_token
 const PUSH_MS = (Number(cfg.push_interval_sec) || 5) * 1000
-const AGENT_VERSION = '1.4.3'
+const AGENT_VERSION = '1.4.4'
 
 if (!BACKEND || !TOKEN) { console.error('Falta backend_url ou agent_token no config.json'); process.exit(1) }
 
@@ -168,6 +168,14 @@ let slicing = false
 
 // Os perfis oficiais usam herança ("inherits") que o CLI NÃO resolve sozinho —
 // sem achatar, densidade/temperatura saem genéricas (bico 200 em vez de 220).
+// E o start/end/troca-de-filamento gcode NÃO mora no inherits: mora em arquivos-
+// irmãos apontados por "include" (que o CLI também não resolve num JSON avulso).
+// Sem eles o machine_start_gcode cai no genérico do fdm_machine_common (estilo
+// Ender: prime line em X10.1, bico 205) — SEM o `M620 S0A` que carrega o AMS →
+// a A1 imprime A SECO e dá HMS 50336000 (parece falha física, é o arquivo).
+// Resolver o include traz o start REAL da A1 (M620 M enable-remap + M620 S0A
+// carga do AMS + preheat 25→220°C). O leaf entra por último, então o gcode dele
+// vence o genérico herdado.
 function flattenProfile(kind, name) {
   const chain = []; const seen = new Set(); let n = name
   while (n && !seen.has(n)) {
@@ -177,9 +185,19 @@ function flattenProfile(kind, name) {
     const j = JSON.parse(fs.readFileSync(f)); chain.push(j); n = j.inherits || null
   }
   if (!chain.length) throw new Error(`perfil não encontrado: ${kind}/${name}`)
+  const readInclude = inc => {
+    const f = path.join(PROFILES_DIR, kind, inc + '.json')
+    if (!fs.existsSync(f)) throw new Error(`include não encontrado: ${kind}/${inc}`)
+    const ij = JSON.parse(fs.readFileSync(f))
+    for (const k of ['name', 'type', 'instantiation', 'from']) delete ij[k]  // são do template, não do perfil
+    return ij
+  }
   let merged = {}
-  for (const j of chain.reverse()) merged = { ...merged, ...j }
-  delete merged.inherits
+  for (const j of chain.reverse()) {
+    merged = { ...merged, ...j }
+    for (const inc of (j.include || [])) merged = { ...merged, ...readInclude(inc) }
+  }
+  delete merged.inherits; delete merged.include
   return merged
 }
 
