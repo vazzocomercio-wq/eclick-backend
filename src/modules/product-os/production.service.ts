@@ -140,7 +140,7 @@ export class ProductionService {
 
   /** Prévia do que uma OP vai CONSUMIR do estoque (BOM × qtd × (1+perda)), por insumo,
    *  com disponibilidade. NÃO grava nada. Fallback = filamento por peso se não há BOM. */
-  async previewOrderConsumption(orgId: string, body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null }) {
+  async previewOrderConsumption(orgId: string, body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null; printer_id?: string | null; loaded_input_id?: string | null }) {
     const qty = Math.max(1, Math.floor(Number(body.quantity) || 0))
     const partId = body.part_id ?? null
     const metrics = await this.resolveVersionMetrics(orgId, body.product_dev_id, body.version_id, partId)
@@ -170,16 +170,31 @@ export class ProductionService {
       return { source: 'bom', quantity: qty, lines, total_cost: this.round2(lines.reduce((s, l) => s + l.line_cost, 0)), all_sufficient: lines.every(l => l.sufficient) }
     }
 
-    // sem BOM → fallback do filamento principal por peso
+    // sem BOM → fallback do filamento principal por peso. Espelha a CASCATA do
+    // createOrder: rolo escolhido (se montado na impressora) → rolo MONTADO que
+    // casa o material → maior rolo do estoque pelo material. Antes o preview
+    // ignorava a impressora e mostrava um rolo que não era o que ia rodar.
     const estFilament = metrics.weight_g != null ? this.round2(metrics.weight_g * qty) : 0
     if (estFilament > 0) {
-      let q = supabaseAdmin.from('production_input').select('id, name, unit, quantity, reserved_quantity, cost_per_unit')
-        .eq('organization_id', orgId).eq('kind', 'filamento').eq('is_active', true).order('quantity', { ascending: false }).limit(1)
-      if (metrics.material) q = q.eq('material', metrics.material.toUpperCase())
-      const { data } = await q
-      const i = (data ?? [])[0] as PrevInput | undefined
-      const line = buildLine(i?.id ?? null, i?.name ?? `Filamento ${metrics.material ?? ''}`.trim(), i?.unit ?? 'g', estFilament, i)
-      return { source: 'filament', quantity: qty, material: metrics.material, lines: [line], total_cost: line.line_cost, all_sufficient: line.sufficient }
+      let picked: PrevInput | undefined
+      let fromPrinter = false
+      let candidate: string | null = null
+      if (body.loaded_input_id && body.printer_id && await this.inputs.isLoadedOnPrinter(orgId, body.printer_id, body.loaded_input_id)) candidate = body.loaded_input_id
+      if (!candidate && body.printer_id) candidate = await this.inputs.loadedInputId(orgId, body.printer_id, metrics.material)
+      if (candidate) {
+        const { data } = await supabaseAdmin.from('production_input').select('id, name, unit, quantity, reserved_quantity, cost_per_unit')
+          .eq('organization_id', orgId).eq('id', candidate).maybeSingle()
+        if (data) { picked = data as PrevInput; fromPrinter = true }
+      }
+      if (!picked) {
+        let q = supabaseAdmin.from('production_input').select('id, name, unit, quantity, reserved_quantity, cost_per_unit')
+          .eq('organization_id', orgId).eq('kind', 'filamento').eq('is_active', true).order('quantity', { ascending: false }).limit(1)
+        if (metrics.material) q = q.eq('material', metrics.material.toUpperCase())
+        const { data } = await q
+        picked = (data ?? [])[0] as PrevInput | undefined
+      }
+      const line = buildLine(picked?.id ?? null, picked?.name ?? `Filamento ${metrics.material ?? ''}`.trim(), picked?.unit ?? 'g', estFilament, picked)
+      return { source: fromPrinter ? 'printer' : 'filament', quantity: qty, material: metrics.material, lines: [line], total_cost: line.line_cost, all_sufficient: line.sufficient }
     }
     return { source: 'none', quantity: qty, lines: [], total_cost: 0, all_sufficient: true }
   }

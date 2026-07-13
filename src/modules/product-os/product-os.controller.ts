@@ -203,7 +203,7 @@ export class ProductOsController {
   @Post('production-orders/preview')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.view')
-  previewOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null }) {
+  previewOrder(@ReqUser() u: ReqUserPayload, @Body() body: { product_dev_id: string; version_id?: string; quantity: number; part_id?: string | null; printer_id?: string | null; loaded_input_id?: string | null }) {
     return this.production.previewOrderConsumption(this.org(u), body)
   }
 
