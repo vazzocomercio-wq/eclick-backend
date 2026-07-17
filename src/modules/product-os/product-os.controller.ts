@@ -775,6 +775,14 @@ export class ProductOsController {
     version_id?: string; weight_g?: number; print_time_minutes?: number; material?: string; target_margin_pct?: number
   } = {}) { return this.svc.computeCost(id, this.org(u), body) }
 
+  /** Custo + preço sugerido POR variante (usa o peso próprio de cada tamanho).
+   *  Preview pra tela de publicação — não persiste nada. */
+  @Get(':id/variant-costs')
+  @RequirePermission('products.view')
+  variantCosts(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Query('margin') margin?: string) {
+    return this.svc.variantCosts(this.org(u), id, { target_margin_pct: margin != null ? Number(margin) : undefined })
+  }
+
   @Get(':id/versions')
   @RequirePermission('products.view')
   listVersions(@ReqUser() u: ReqUserPayload, @Param('id') id: string) { return this.svc.listVersions(id, this.org(u)) }
