@@ -1045,13 +1045,13 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const skuBase = (skuRow as { sku_base: string | null } | null)?.sku_base ?? null
     const baseEan = (skuRow as { ean: string | null } | null)?.ean ?? null
     const { data: varRows } = await supabaseAdmin.from('product_dev_sku_variant')
-      .select('id, sku, ean, cor:cor_id(label), tamanho:tamanho_id(label)').eq('product_dev_id', id).order('sku')
+      .select('id, sku, ean, weight_g, cor:cor_id(label), tamanho:tamanho_id(label)').eq('product_dev_id', id).order('sku')
     const variants = (varRows ?? []).map(v => {
-      const r = v as { id: string; sku: string; ean: string | null; cor: { label?: string } | Array<{ label?: string }> | null; tamanho: { label?: string } | Array<{ label?: string }> | null }
+      const r = v as { id: string; sku: string; ean: string | null; weight_g: number | null; cor: { label?: string } | Array<{ label?: string }> | null; tamanho: { label?: string } | Array<{ label?: string }> | null }
       const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
       const tamanho = Array.isArray(r.tamanho) ? r.tamanho[0] : r.tamanho
       const axes = { corLabel: cor?.label ?? '', tamanhoLabel: tamanho?.label ?? null }
-      return { id: r.id, sku: r.sku, ean: r.ean, axes, label: variationValue(axes) }
+      return { id: r.id, sku: r.sku, ean: r.ean, axes, label: variationValue(axes), hasOwnWeight: r.weight_g != null }
     })
     // modo: variante cadastrada ⇒ SEMPRE variável (cada combinação = 1 SKU
     // vendável). Publicar "único" com cor criada perdia a variação — produto
@@ -1071,6 +1071,18 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     // `attributes` é aditivo e é a fonte de verdade ESTRUTURADA: "Creme / G" não
     // decompõe, {Cor:'Creme',Tamanho:'G'} sim — é o que um publish futuro no ML vai
     // precisar pra montar attribute_combinations.
+    // preço POR VARIANTE: quem tem peso próprio (tamanho) custa diferente e tem
+    // que ser precificado no próprio peso. Sem isto o Gota G (321g) e o M (97g)
+    // sairiam com o mesmo preço, num produto onde o custo varia ~3x.
+    // Precedência: preço digitado pelo usuário > calculado do peso próprio > preço do projeto.
+    const priceByVariant = new Map<string, number>()
+    if (mode === 'variable' && variants.some(v => v.hasOwnWeight)) {
+      try {
+        const vc = await this.variantCosts(orgId, id, { target_margin_pct: body.target_margin_pct })
+        for (const v of vc.variants) if (!v.fallback && v.price != null) priceByVariant.set(v.id, v.price)
+      } catch { /* sem preço por variante → cai no preço do projeto */ }
+    }
+
     const ovById = new Map((body.variants ?? []).map(v => [v.id, v]))
     const axisType = variationType(variants.map(v => v.axes))
     const variationsJson = mode === 'variable' ? variants.map(v => {
@@ -1078,7 +1090,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       return {
         id: v.id, type: axisType, value: v.label,
         attributes: variationAttributes(v.axes),
-        price: ov?.price != null ? Number(ov.price) : (price ?? 0),
+        price: ov?.price != null ? Number(ov.price) : (priceByVariant.get(v.id) ?? price ?? 0),
         // publish "único" curado p/ variável: com 1 variante, a quantidade produzida vira o estoque dela
         stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : (variants.length === 1 ? singleQty : 0),
         sku: v.sku, ean: v.ean,
@@ -1461,9 +1473,36 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
         material = material ?? (ref.material ?? undefined)
       }
     }
-    const w = Math.max(0, Number(weight) || 0)
-    const min = Math.max(0, Number(minutes) || 0)
-    const mat = (material || 'PLA').toUpperCase()
+    const result = await this.costFor(orgId, settings, {
+      weight_g: weight, print_time_minutes: minutes, material, target_margin_pct: body.target_margin_pct,
+    })
+    // cacheia o custo (total) + o detalhamento completo no projeto (persiste na tela)
+    await supabaseAdmin.from('product_dev')
+      .update({ estimated_cost: result.cost.total, cost_breakdown: { ...result, computed_at: new Date().toISOString() } })
+      .eq('id', productDevId).eq('organization_id', orgId)
+
+    return result
+  }
+
+  /**
+   * Custo de UM conjunto peso/tempo/material — SEM persistir nada.
+   *
+   * Existe separado do `computeCost` porque ele grava `estimated_cost` no
+   * product_dev: chamá-lo por variante deixaria o custo do PROJETO valendo o da
+   * última variante calculada, em silêncio. Aqui é cálculo puro, seguro de
+   * rodar N vezes (1 por tamanho).
+   */
+  private async costFor(orgId: string, settings: Awaited<ReturnType<ProductOsService['getSettings']>>, body: {
+    weight_g?: number | null; print_time_minutes?: number | null; material?: string | null; target_margin_pct?: number
+  }): Promise<{
+    cost: { filament: number; energy: number; labor: number; packaging: number; waste: number; total: number }
+    inputs: { weight_g: number; print_time_minutes: number; material: string; cost_per_kg: number }
+    target_margin_pct: number
+    suggested_prices: Array<{ channel: string; fee_pct: number; price: number; margin_pct: number }>
+  }> {
+    const w = Math.max(0, Number(body.weight_g) || 0)
+    const min = Math.max(0, Number(body.print_time_minutes) || 0)
+    const mat = (body.material || 'PLA').toUpperCase()
     let costPerKg = Number(settings.filament_cost_per_kg?.[mat] ?? settings.filament_cost_per_kg?.PLA ?? 0)
     // prefere o custo médio ponderado (WAC) do insumo de filamento, se cadastrado
     const { data: inp } = await supabaseAdmin.from('production_input')
@@ -1494,18 +1533,67 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       return { channel, fee_pct: fee, price, margin_pct: marginPct }
     })
 
-    const result = {
+    return {
       cost: { filament, energy, labor, packaging, waste, total },
       inputs: { weight_g: w, print_time_minutes: min, material: mat, cost_per_kg: costPerKg },
       target_margin_pct: targetMargin,
       suggested_prices: suggested,
     }
-    // cacheia o custo (total) + o detalhamento completo no projeto (persiste na tela)
-    await supabaseAdmin.from('product_dev')
-      .update({ estimated_cost: total, cost_breakdown: { ...result, computed_at: new Date().toISOString() } })
-      .eq('id', productDevId).eq('organization_id', orgId)
+  }
 
-    return result
+  /**
+   * Custo e preço sugerido de CADA variante, usando o peso/tempo próprios dela.
+   *
+   * É o que faz o eixo de tamanho valer: Pendente Gota G (321g/25h) e M
+   * (97g/8,4h) custam ~3x diferente. Sem isto, os dois sairiam com o MESMO
+   * preço — o do projeto.
+   *
+   * Variante sem peso próprio cai no peso da versão de referência do projeto
+   * (`fallback: true`), que é o comportamento de antes.
+   */
+  async variantCosts(orgId: string, devId: string, body: { target_margin_pct?: number } = {}): Promise<{
+    channel: string
+    variants: Array<{
+      id: string; sku: string; cor: string | null; tamanho: string | null
+      weight_g: number | null; print_time_minutes: number | null
+      fallback: boolean; cost_total: number; price: number | null
+    }>
+  }> {
+    const pd = await this.get(devId, orgId)
+    const settings = await this.getSettings(orgId)
+    const channel = (pd.target_marketplaces ?? [])[0] ?? 'mercado_livre'
+
+    // peso/tempo do projeto (versão aprovada > última) = fallback de quem não tem o próprio
+    const versions = await this.listVersions(devId, orgId)
+    const ref = versions.find(v => v.approved) ?? versions[0]
+
+    const { data: rows } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id, sku, weight_g, print_time_minutes, cor:cor_id(label), tamanho:tamanho_id(label)')
+      .eq('product_dev_id', devId).eq('organization_id', orgId).order('sku')
+
+    const out = []
+    for (const r of (rows ?? []) as Array<Record<string, unknown>>) {
+      const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
+      const tam = Array.isArray(r.tamanho) ? r.tamanho[0] : r.tamanho
+      const ownW = r.weight_g != null ? Number(r.weight_g) : null
+      const ownT = r.print_time_minutes != null ? Number(r.print_time_minutes) : null
+      const fallback = ownW == null
+      const c = await this.costFor(orgId, settings, {
+        weight_g: ownW ?? ref?.weight_g ?? null,
+        print_time_minutes: ownT ?? ref?.print_time_minutes ?? null,
+        material: ref?.material ?? null,
+        target_margin_pct: body.target_margin_pct,
+      })
+      out.push({
+        id: String(r.id), sku: String(r.sku),
+        cor: (cor as { label?: string } | null)?.label ?? null,
+        tamanho: (tam as { label?: string } | null)?.label ?? null,
+        weight_g: ownW, print_time_minutes: ownT, fallback,
+        cost_total: c.cost.total,
+        price: c.suggested_prices.find(s => s.channel === channel)?.price ?? c.suggested_prices[0]?.price ?? null,
+      })
+    }
+    return { channel, variants: out }
   }
 
   // ─────────────────────────────────────────────────────────────────
