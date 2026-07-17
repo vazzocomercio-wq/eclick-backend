@@ -1,30 +1,29 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
+import {
+  ALPHA_KINDS, KINDS, PARENT_KIND, buildBase, buildVariantSku, deriveAlphaCode, normLabel, sanitizeAlphaCode,
+  type SkuKind,
+} from './sku.pure'
 
 /**
  * Product OS — Gerador de SKU inteligível.
  *
- * SKU = MARCA + "-" + CATEGORIA SUB LINHA CARACTERISTICA + "-" + COR
+ * SKU = MARCA + "-" + CATEGORIA SUB LINHA CARACTERISTICA + "-" + COR [+ "-" + TAMANHO]
  * Ex: VZ-07010202-47 (marca VZ · miolo de 4 blocos de 2 dígitos · cor 47).
+ *     VZ-07010202-47-G (o mesmo modelo, cor 47, tamanho G).
  * Categoria→Sub e Linha→Característica são hierárquicos (código sequencial de
  * 2 dígitos dentro do pai, máx. 99 por nível); a Característica é o
- * discriminador do modelo na linha. Cor é o eixo de variação: 1 modelo → N SKUs
- * (base-cor). Só p/ produtos do Product OS.
+ * discriminador do modelo na linha.
+ *
+ * EIXOS DE VARIAÇÃO: cor × tamanho → 1 modelo, N SKUs. Tamanho é OPCIONAL: sem
+ * ele o SKU sai `base-cor`, exatamente como sempre saiu. Ver mig 20260775.
+ * Só p/ produtos do Product OS.
  *
  * REGRA MASTER SKU: depois que o produto é publicado no catálogo, o SKU é
  * PERMANENTE — histórico de pedidos, anúncios e analytics penduram nele.
  */
 
-export type SkuKind = 'marca' | 'categoria' | 'sub' | 'linha' | 'caracteristica' | 'cor'
-const KINDS: SkuKind[] = ['marca', 'categoria', 'sub', 'linha', 'caracteristica', 'cor']
-// pai esperado de cada kind (null = topo). Define a hierarquia.
-// Linha é COLEÇÃO TRANSVERSAL (topo, independente de categoria) — reúne produtos
-// de qualquer categoria sob a mesma linha de lançamento. Característica continua
-// DENTRO da linha (única por linha). Ver mig 20260766.
-const PARENT_KIND: Record<SkuKind, SkuKind | null> = {
-  marca: null, categoria: null, cor: null, linha: null, sub: 'categoria', caracteristica: 'linha',
-}
-const ZERO = '00000000-0000-0000-0000-000000000000'
+export type { SkuKind }
 
 export interface TaxRow { id: string; organization_id: string; kind: string; code: string; label: string; parent_id: string | null; sort_order: number }
 
@@ -35,12 +34,6 @@ export class SkuService {
   private assertKind(kind: string): SkuKind {
     if (!KINDS.includes(kind as SkuKind)) throw new BadRequestException(`Dimensão inválida: ${kind}`)
     return kind as SkuKind
-  }
-
-  /** Normaliza rótulo p/ comparação: sem acento, sem espaço duplo, minúsculo.
-   *  É o que impede "Giratório" e "Giratorio" virarem dois códigos. */
-  private normLabel(s: string): string {
-    return String(s ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').replace(/\s+/g, ' ').trim().toLowerCase()
   }
 
   /** Próximo código sequencial (2 díg.) dentro do escopo (org, kind, pai).
@@ -84,10 +77,13 @@ export class SkuService {
     const dup = await this.findByLabel(orgId, k, parentId, label)
     if (dup) return { id: dup.id, kind: dup.kind, code: dup.code, label: dup.label, parent_id: dup.parent_id }
 
-    // marca = código alfanumérico do usuário (VZ); demais = sequencial numérico
+    // marca/tamanho = código alfanumérico (VZ, G, GG); demais = sequencial numérico.
+    // Tamanho aceita derivar do rótulo ("Grande"→G) pra IA e "criar pelo nome"
+    // funcionarem sem exigir código; marca continua obrigando o usuário a dizer.
     let code: string
-    if (k === 'marca') {
-      code = (body.code ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (ALPHA_KINDS.includes(k)) {
+      code = sanitizeAlphaCode(body.code ?? '')
+      if (!code && k === 'tamanho') code = deriveAlphaCode(label)
       if (!code) throw new BadRequestException('Marca exige um código (ex: VZ)')
     } else {
       code = (body.code ?? '').trim() || await this.nextNumericCode(orgId, k, parentId)
@@ -105,6 +101,10 @@ export class SkuService {
       if (error && /duplicate|unique/i.test(error.message)) {
         if (/ux_skutax_label/.test(error.message)) throw new BadRequestException(`Já existe "${label}" nesse nível`)
         if (k === 'marca') throw new BadRequestException(`Código de marca "${code}" já existe`)
+        // Tamanho colide de verdade ("Grande" e "Gigante" derivam os dois p/ G).
+        // Cair no sequencial numérico aqui daria um "-01" mudo no SKU — melhor
+        // pedir o código explícito do que gravar um tamanho ilegível.
+        if (k === 'tamanho') throw new BadRequestException(`O código "${code}" já está em uso por outro tamanho — informe um código diferente (ex: GG, XL).`)
         code = await this.nextNumericCode(orgId, k, parentId)   // corrida → tenta o próximo
         continue
       }
@@ -138,6 +138,8 @@ export class SkuService {
     }
     const { count: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id', { count: 'exact', head: true }).eq('cor_id', id)
     if ((vars ?? 0) > 0) throw new BadRequestException('Cor em uso por variantes — não dá pra apagar')
+    const { count: tams } = await supabaseAdmin.from('product_dev_sku_variant').select('id', { count: 'exact', head: true }).eq('tamanho_id', id)
+    if ((tams ?? 0) > 0) throw new BadRequestException('Tamanho em uso por variantes — não dá pra apagar')
     const { error } = await supabaseAdmin.from('sku_taxonomy').delete().eq('id', id).eq('organization_id', orgId)
     if (error) throw new BadRequestException(`Erro: ${error.message}`)
     return { ok: true }
@@ -162,8 +164,14 @@ export class SkuService {
       this.loadRow(orgId, d.sku_linha_id), this.loadRow(orgId, d.sku_caracteristica_id),
     ])
     const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant')
-      .select('id, cor_id, sku, ean, product_id, cor:cor_id(id, code, label)').eq('product_dev_id', devId).order('sku')
-    const variants = (vars ?? []).map(v => { const r = v as Record<string, unknown> & { cor?: unknown }; const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor; return { id: r.id, sku: r.sku, ean: r.ean, product_id: r.product_id, cor } })
+      .select('id, cor_id, tamanho_id, sku, ean, product_id, weight_g, print_time_minutes, cor:cor_id(id, code, label), tamanho:tamanho_id(id, code, label)')
+      .eq('product_dev_id', devId).order('sku')
+    const variants = (vars ?? []).map(v => {
+      const r = v as Record<string, unknown> & { cor?: unknown; tamanho?: unknown }
+      const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
+      const tamanho = Array.isArray(r.tamanho) ? r.tamanho[0] : r.tamanho
+      return { id: r.id, sku: r.sku, ean: r.ean, product_id: r.product_id, cor, tamanho: tamanho ?? null, weight_g: r.weight_g ?? null, print_time_minutes: r.print_time_minutes ?? null }
+    })
     return { classification: { marca, categoria, sub, linha, caracteristica }, base: d.sku_base, ean: d.ean, variants }
   }
 
@@ -255,7 +263,21 @@ export class SkuService {
 
   /** Monta o sku_base no formato MARCA-MIOLO (ex: VZ-07010202). */
   private buildBase(marca: TaxRow, categoria: TaxRow, sub: TaxRow, linha: TaxRow, carac: TaxRow): string {
-    return `${marca.code}-${categoria.code}${sub.code}${linha.code}${carac.code}`
+    return buildBase(marca.code, categoria.code, sub.code, linha.code, carac.code)
+  }
+
+  /** Regrava o SKU de TODAS as variantes do modelo a partir do base atual.
+   *  Chamado sempre que o base muda — se ficar de fora, a variante mantém o SKU
+   *  do base velho e o produto passa a ter dois SKUs conflitantes. */
+  private async regenVariantSkus(orgId: string, devId: string, base: string): Promise<void> {
+    const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id, cor_id, tamanho_id').eq('product_dev_id', devId)
+    for (const v of (vars ?? []) as Array<{ id: string; cor_id: string; tamanho_id: string | null }>) {
+      const [cor, tam] = await Promise.all([this.loadRow(orgId, v.cor_id), this.loadRow(orgId, v.tamanho_id)])
+      if (!cor) continue
+      await supabaseAdmin.from('product_dev_sku_variant')
+        .update({ sku: buildVariantSku(base, cor.code, tam?.code) }).eq('id', v.id)
+    }
   }
 
   /** Master SKU é permanente: produto publicado no catálogo não reclassifica
@@ -307,12 +329,8 @@ export class SkuService {
       }
     }
 
-    // base mudou → regenera o SKU de cada variante de cor existente
-    const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
-    for (const v of (vars ?? []) as Array<{ id: string; cor_id: string }>) {
-      const cor = await this.loadRow(orgId, v.cor_id)
-      if (cor) await supabaseAdmin.from('product_dev_sku_variant').update({ sku: `${base}-${cor.code}` }).eq('id', v.id)
-    }
+    // base mudou → regenera o SKU de cada variante (cor × tamanho) existente
+    await this.regenVariantSkus(orgId, devId, base)
     return this.getSku(orgId, devId)
   }
 
@@ -321,14 +339,14 @@ export class SkuService {
    *  JS sobre os rótulos do nível (a taxonomia é pequena) — `ilike` não ignora
    *  acento e foi o que deixou duplicatas passarem. */
   private async findByLabel(orgId: string, kind: SkuKind, parentId: string | null, label: string): Promise<TaxRow | null> {
-    const l = this.normLabel(label)
+    const l = normLabel(label)
     if (!l) return null
     let q = supabaseAdmin.from('sku_taxonomy').select('id, organization_id, kind, code, label, parent_id, sort_order')
       .eq('organization_id', orgId).eq('kind', kind)
     q = parentId ? q.eq('parent_id', parentId) : q.is('parent_id', null)
     const { data } = await q
     const rows = (data ?? []) as TaxRow[]
-    return rows.find(r => this.normLabel(r.label) === l) ?? null
+    return rows.find(r => normLabel(r.label) === l) ?? null
   }
 
   /** Acha OU cria um nó (idempotente por rótulo). marca aceita código alfa. */
@@ -405,11 +423,7 @@ export class SkuService {
     if (!(m && c && s && l && ch)) return
     const base = this.buildBase(m, c, s, l, ch)
     await supabaseAdmin.from('product_dev').update({ sku_base: base }).eq('id', devId).eq('organization_id', orgId)
-    const { data: vars } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id').eq('product_dev_id', devId)
-    for (const v of (vars ?? []) as Array<{ id: string; cor_id: string }>) {
-      const cor = await this.loadRow(orgId, v.cor_id)
-      if (cor) await supabaseAdmin.from('product_dev_sku_variant').update({ sku: `${base}-${cor.code}` }).eq('id', v.id)
-    }
+    await this.regenVariantSkus(orgId, devId, base)
   }
 
   /**
@@ -456,36 +470,88 @@ export class SkuService {
     return this.getSku(orgId, devId)
   }
 
-  /** Define as cores do modelo → 1 SKU (base-cor) por cor. */
-  async setColors(orgId: string, devId: string, corIds: string[]) {
+  /** Chave de identidade de uma variante = a COMBINAÇÃO dos eixos. */
+  private static comboKey(corId: string, tamanhoId?: string | null): string {
+    return `${corId}|${tamanhoId ?? ''}`
+  }
+
+  /**
+   * Define as variantes do modelo → 1 SKU por combinação cor × tamanho.
+   * `tamanho_id` é opcional: sem ele a combinação é só a cor e o SKU sai
+   * `base-cor` (o comportamento de sempre).
+   *
+   * Substitutiva: o que não vier na lista é REMOVIDO — menos o que já foi
+   * publicado no catálogo (apagar variante publicada quebraria o vínculo com o
+   * anúncio e o histórico de pedidos).
+   */
+  async setVariants(orgId: string, devId: string, combos: Array<{
+    cor_id: string; tamanho_id?: string | null; weight_g?: number | null; print_time_minutes?: number | null
+  }>) {
     const { data: dev } = await supabaseAdmin.from('product_dev').select('sku_base').eq('id', devId).eq('organization_id', orgId).maybeSingle()
     const base = (dev as { sku_base: string | null } | null)?.sku_base
-    if (!base) throw new BadRequestException('Defina a classificação (base do SKU) antes das cores')
-    const wanted = [...new Set((corIds ?? []).filter(Boolean))]
+    if (!base) throw new BadRequestException('Defina a classificação (base do SKU) antes das variantes')
 
-    const { data: existing } = await supabaseAdmin.from('product_dev_sku_variant').select('id, cor_id, sku, product_id').eq('product_dev_id', devId).eq('organization_id', orgId)
-    const rows = (existing ?? []) as Array<{ id: string; cor_id: string; sku: string; product_id: string | null }>
-    const existingByCor = new Map(rows.map(r => [r.cor_id, r]))
-
-    // remove as cores desmarcadas — MENOS as já publicadas no catálogo
-    // (apagar variante publicada quebraria o vínculo com o anúncio/pedidos)
-    const toRemove = [...existingByCor.keys()].filter(c => !wanted.includes(c))
-    const publicadas = toRemove.map(c => existingByCor.get(c)!).filter(r => r.product_id)
-    if (publicadas.length) {
-      throw new BadRequestException(`Não dá pra remover cor já publicada no catálogo: ${publicadas.map(r => r.sku).join(', ')}. Pause/ajuste a variação no catálogo em vez de removê-la aqui.`)
+    // dedupa por combinação (o último ganha — traz peso/tempo mais recentes)
+    const wantedByKey = new Map<string, { cor_id: string; tamanho_id: string | null; weight_g: number | null; print_time_minutes: number | null }>()
+    for (const c of combos ?? []) {
+      if (!c?.cor_id) continue
+      const tamanho_id = c.tamanho_id || null
+      wantedByKey.set(SkuService.comboKey(c.cor_id, tamanho_id), {
+        cor_id: c.cor_id, tamanho_id,
+        weight_g: c.weight_g != null && Number.isFinite(Number(c.weight_g)) ? Number(c.weight_g) : null,
+        print_time_minutes: c.print_time_minutes != null && Number.isFinite(Number(c.print_time_minutes)) ? Math.round(Number(c.print_time_minutes)) : null,
+      })
     }
-    for (const c of toRemove) await supabaseAdmin.from('product_dev_sku_variant').delete().eq('id', existingByCor.get(c)!.id).eq('organization_id', orgId)
 
-    // adiciona as novas
-    for (const corId of wanted) {
-      if (existingByCor.has(corId)) continue
-      const cor = await this.loadRow(orgId, corId)
+    const { data: existing } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id, cor_id, tamanho_id, sku, product_id').eq('product_dev_id', devId).eq('organization_id', orgId)
+    const rows = (existing ?? []) as Array<{ id: string; cor_id: string; tamanho_id: string | null; sku: string; product_id: string | null }>
+    const existingByKey = new Map(rows.map(r => [SkuService.comboKey(r.cor_id, r.tamanho_id), r]))
+
+    // remove as combinações desmarcadas — MENOS as já publicadas no catálogo
+    const toRemove = [...existingByKey.keys()].filter(k => !wantedByKey.has(k))
+    const publicadas = toRemove.map(k => existingByKey.get(k)!).filter(r => r.product_id)
+    if (publicadas.length) {
+      throw new BadRequestException(`Não dá pra remover variante já publicada no catálogo: ${publicadas.map(r => r.sku).join(', ')}. Pause/ajuste a variação no catálogo em vez de removê-la aqui.`)
+    }
+    for (const k of toRemove) await supabaseAdmin.from('product_dev_sku_variant').delete().eq('id', existingByKey.get(k)!.id).eq('organization_id', orgId)
+
+    for (const [key, w] of wantedByKey) {
+      const cur = existingByKey.get(key)
+      if (cur) {
+        // já existe: só atualiza as métricas próprias (o SKU é permanente)
+        await supabaseAdmin.from('product_dev_sku_variant')
+          .update({ weight_g: w.weight_g, print_time_minutes: w.print_time_minutes })
+          .eq('id', cur.id).eq('organization_id', orgId)
+        continue
+      }
+      const [cor, tam] = await Promise.all([this.loadRow(orgId, w.cor_id), this.loadRow(orgId, w.tamanho_id)])
       if (!cor || cor.kind !== 'cor') throw new BadRequestException('Cor inválida')
+      if (w.tamanho_id && (!tam || tam.kind !== 'tamanho')) throw new BadRequestException('Tamanho inválido')
       const { error } = await supabaseAdmin.from('product_dev_sku_variant').insert({
-        organization_id: orgId, product_dev_id: devId, cor_id: corId, sku: `${base}-${cor.code}`,
+        organization_id: orgId, product_dev_id: devId, cor_id: w.cor_id, tamanho_id: w.tamanho_id,
+        sku: buildVariantSku(base, cor.code, tam?.code), weight_g: w.weight_g, print_time_minutes: w.print_time_minutes,
       })
       if (error && !/duplicate|unique/i.test(error.message)) throw new BadRequestException(`Erro ao gerar variante: ${error.message}`)
     }
     return this.getSku(orgId, devId)
+  }
+
+  /**
+   * Define as cores do modelo → 1 SKU (base-cor) por cor. Atalho de 1 eixo,
+   * mantido porque é o que a UI e as integrações chamam hoje.
+   *
+   * RECUSA se o modelo já variar por tamanho: a lista de cores não carrega os
+   * tamanhos, e como `setVariants` é substitutiva, passar por aqui APAGARIA
+   * silenciosamente todas as combinações com tamanho.
+   */
+  async setColors(orgId: string, devId: string, corIds: string[]) {
+    const { data: existing } = await supabaseAdmin.from('product_dev_sku_variant')
+      .select('id').eq('product_dev_id', devId).eq('organization_id', orgId).not('tamanho_id', 'is', null).limit(1)
+    if ((existing ?? []).length) {
+      throw new BadRequestException('Este produto varia por cor E tamanho — edite as variantes (cor × tamanho) em vez de só as cores.')
+    }
+    const wanted = [...new Set((corIds ?? []).filter(Boolean))]
+    return this.setVariants(orgId, devId, wanted.map(cor_id => ({ cor_id })))
   }
 }

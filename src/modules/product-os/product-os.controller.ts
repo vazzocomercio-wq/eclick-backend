@@ -733,6 +733,16 @@ export class ProductOsController {
     return this.sku.setColors(this.org(u), id, body?.cor_ids ?? [])
   }
 
+  /** Variantes por COMBINAÇÃO cor × tamanho (1 SKU por combinação).
+   *  `/sku/colors` continua servindo o caso de 1 eixo (só cor). */
+  @Put(':id/sku/variants')
+  @RequirePermission('products.update')
+  setSkuVariants(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Body() body: {
+    variants: Array<{ cor_id: string; tamanho_id?: string | null; weight_g?: number | null; print_time_minutes?: number | null }>
+  }) {
+    return this.sku.setVariants(this.org(u), id, body?.variants ?? [])
+  }
+
   @Post(':id/sku/generate-ean')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
