@@ -9,6 +9,7 @@ import { ProductionService } from './production.service'
 import { ProductOsActiveService } from './product-os-active.service'
 import { MakerworldService } from './makerworld.service'
 import { SkuService } from './sku.service'
+import { variationAttributes, variationType, variationValue } from './sku.pure'
 import { ModelSourceRegistry } from './model-sources/model-source.registry'
 import { type SourceModel, type LicenseVerdict } from './model-sources/source.types'
 
@@ -1044,29 +1045,41 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const skuBase = (skuRow as { sku_base: string | null } | null)?.sku_base ?? null
     const baseEan = (skuRow as { ean: string | null } | null)?.ean ?? null
     const { data: varRows } = await supabaseAdmin.from('product_dev_sku_variant')
-      .select('id, sku, ean, cor:cor_id(label)').eq('product_dev_id', id).order('sku')
+      .select('id, sku, ean, cor:cor_id(label), tamanho:tamanho_id(label)').eq('product_dev_id', id).order('sku')
     const variants = (varRows ?? []).map(v => {
-      const r = v as { id: string; sku: string; ean: string | null; cor: { label?: string } | Array<{ label?: string }> | null }
+      const r = v as { id: string; sku: string; ean: string | null; cor: { label?: string } | Array<{ label?: string }> | null; tamanho: { label?: string } | Array<{ label?: string }> | null }
       const cor = Array.isArray(r.cor) ? r.cor[0] : r.cor
-      return { id: r.id, sku: r.sku, ean: r.ean, label: cor?.label ?? '' }
+      const tamanho = Array.isArray(r.tamanho) ? r.tamanho[0] : r.tamanho
+      const axes = { corLabel: cor?.label ?? '', tamanhoLabel: tamanho?.label ?? null }
+      return { id: r.id, sku: r.sku, ean: r.ean, axes, label: variationValue(axes) }
     })
-    // modo: cor cadastrada ⇒ SEMPRE variável (cada cor = 1 SKU vendável). Publicar
-    // "único" com cor criada perdia a variação — produto nascia só com o SKU base.
+    // modo: variante cadastrada ⇒ SEMPRE variável (cada combinação = 1 SKU
+    // vendável). Publicar "único" com cor criada perdia a variação — produto
+    // nascia só com o SKU base.
     const mode: 'single' | 'variable' = variants.length === 0 ? 'single' : 'variable'
     const singleQty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
     if (variants.length > 1 && body.variation_mode === 'single' && singleQty > 0) {
-      throw new BadRequestException('Este produto tem mais de uma cor — informe o estoque por cor (modo variações) em vez de uma quantidade única.')
+      throw new BadRequestException('Este produto tem mais de uma variante — informe o estoque por variante (modo variações) em vez de uma quantidade única.')
     }
 
-    // produto variável = 1 produto com variations[] jsonb (1 linha/cor), como a aba "Variações"
-    // do catálogo (System 1, consumido pelo ML). EAN por cor estende a linha (aditivo no jsonb).
+    // produto variável = 1 produto com variations[] jsonb (1 linha por combinação
+    // cor × tamanho), como a aba "Variações" do catálogo (System 1, consumido pelo ML).
+    //
+    // `type`/`value` são o contrato ANTIGO (string opaca que a UI exibe e a Shopee
+    // usa de tier). Com 1 eixo eles saem IDÊNTICOS ao que sempre saíram — é o que
+    // garante zero regressão em tudo que já está publicado.
+    // `attributes` é aditivo e é a fonte de verdade ESTRUTURADA: "Creme / G" não
+    // decompõe, {Cor:'Creme',Tamanho:'G'} sim — é o que um publish futuro no ML vai
+    // precisar pra montar attribute_combinations.
     const ovById = new Map((body.variants ?? []).map(v => [v.id, v]))
+    const axisType = variationType(variants.map(v => v.axes))
     const variationsJson = mode === 'variable' ? variants.map(v => {
       const ov = ovById.get(v.id)
       return {
-        id: v.id, type: 'Cor', value: v.label,
+        id: v.id, type: axisType, value: v.label,
+        attributes: variationAttributes(v.axes),
         price: ov?.price != null ? Number(ov.price) : (price ?? 0),
-        // publish "único" curado p/ variável: com 1 cor, a quantidade produzida vira o estoque dela
+        // publish "único" curado p/ variável: com 1 variante, a quantidade produzida vira o estoque dela
         stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : (variants.length === 1 ? singleQty : 0),
         sku: v.sku, ean: v.ean,
       }
