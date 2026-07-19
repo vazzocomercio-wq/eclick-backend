@@ -224,6 +224,35 @@ export class CreativeService {
   // PRODUCTS
   // ════════════════════════════════════════════════════════════════════════
 
+  /** Melhor EAN/GTIN de um produto do catálogo. Produto simples guarda o código
+   *  em `gtin`/`ean` (nível de produto); produto VARIÁVEL (cor × tamanho) guarda
+   *  o EAN POR VARIAÇÃO em `variations[].ean` e deixa as colunas de nível de
+   *  produto vazias — por isso a busca só por `gtin` perdia o EAN nesses casos.
+   *  Retorna o 1º EAN não-vazio: gtin → ean → primeira variação com EAN. */
+  private resolveCatalogEan(row: {
+    gtin?: string | null; ean?: string | null; variations?: unknown
+  }): string | null {
+    const head = ((row.gtin ?? row.ean) ?? '').trim()
+    if (head) return head
+    const vars = Array.isArray(row.variations) ? row.variations : []
+    for (const v of vars) {
+      const e = (v as { ean?: string | null } | null)?.ean
+      if (typeof e === 'string' && e.trim()) return e.trim()
+    }
+    return null
+  }
+
+  /** Atributos ML universais preenchíveis direto do produto, sem depender da
+   *  categoria: GTIN (do EAN) e BRAND (da marca). A tela de publicação lê
+   *  `ml_attributes` — sem semear aqui, o GTIN/EAN sai vazio no anúncio mesmo o
+   *  produto tendo o código. Os demais atributos seguem via IA "sugerir". */
+  private baseMlAttributes(product: CreativeProduct): Array<{ id: string; value_id?: string; value_name?: string }> {
+    const attrs: Array<{ id: string; value_id?: string; value_name?: string }> = []
+    if (product.ean?.trim())   attrs.push({ id: 'GTIN',  value_name: product.ean.trim() })
+    if (product.brand?.trim()) attrs.push({ id: 'BRAND', value_name: product.brand.trim() })
+    return attrs
+  }
+
   async createProduct(orgId: string, userId: string, dto: CreateProductDto): Promise<CreativeProduct> {
     if (!dto.name?.trim()) throw new BadRequestException('name obrigatório')
     if (!dto.category?.trim()) throw new BadRequestException('category obrigatório')
@@ -416,7 +445,7 @@ export class CreativeService {
     await this.assertCatalogProductInOrg(orgId, catalogProductId)
     const { data: cat, error } = await supabaseAdmin
       .from('products')
-      .select('id, name, category, brand, photo_urls, sku, gtin, attributes, weight_kg, width_cm, length_cm, height_cm, cost_price, tax_percentage, tax_on_freight, ai_target_audience, differentials, preferred_supplier_id')
+      .select('id, name, category, brand, photo_urls, sku, gtin, ean, variations, attributes, weight_kg, width_cm, length_cm, height_cm, cost_price, tax_percentage, tax_on_freight, ai_target_audience, differentials, preferred_supplier_id')
       .eq('id', catalogProductId)
       .eq('organization_id', orgId)
       .maybeSingle()
@@ -425,7 +454,7 @@ export class CreativeService {
 
     const c = cat as {
       id: string; name: string; category: string | null; brand: string | null; photo_urls: string[] | null
-      sku: string | null; gtin: string | null; attributes: Record<string, unknown> | null
+      sku: string | null; gtin: string | null; ean: string | null; variations: unknown; attributes: Record<string, unknown> | null
       weight_kg: number | null; width_cm: number | null; length_cm: number | null; height_cm: number | null
       cost_price: number | null; tax_percentage: number | null; tax_on_freight: boolean | null
       ai_target_audience: string | null; differentials: unknown
@@ -490,7 +519,7 @@ export class CreativeService {
         brand:           c.brand,
         photo_urls:      c.photo_urls ?? [],
         sku:             c.sku,
-        ean:             c.gtin,
+        ean:             this.resolveCatalogEan(c),
         color:           asStr(attrs.color),
         material:        asStr(attrs.material),
         width:           dim(c.width_cm,  'cm'),
@@ -795,6 +824,7 @@ export class CreativeService {
         description:              '',
         bullets:                  [],
         technical_sheet:          {},
+        ml_attributes:            this.baseMlAttributes(product),
         keywords:                 [],
         search_tags:              [],
         suggested_category:       product.category,
@@ -848,13 +878,6 @@ export class CreativeService {
 
     const mlPred = await this.predictMlCategory(title, briefing.target_marketplace)
 
-    // Atributos ML preenchíveis direto do produto (universais, sem depender da
-    // categoria): GTIN (do EAN) e BRAND (da marca). A tela de publicação lê
-    // `ml_attributes` — sem isso o GTIN/EAN sai vazio mesmo o produto tendo.
-    const mlAttributes: Array<{ id: string; value_id?: string; value_name?: string }> = []
-    if (product.ean?.trim())   mlAttributes.push({ id: 'GTIN',  value_name: product.ean.trim() })
-    if (product.brand?.trim()) mlAttributes.push({ id: 'BRAND', value_name: product.brand.trim() })
-
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
       .insert({
@@ -866,7 +889,7 @@ export class CreativeService {
         description,
         bullets:                  product.differentials ?? [],
         technical_sheet:          technicalSheet,
-        ml_attributes:            mlAttributes,
+        ml_attributes:            this.baseMlAttributes(product),
         keywords:                 [],
         search_tags:              [],
         suggested_category:       product.category,
@@ -902,14 +925,14 @@ export class CreativeService {
     // Pega catalog product (já valida tenant)
     const { data: catalog, error } = await supabaseAdmin
       .from('products')
-      .select('id, organization_id, name, brand, category, sku, gtin, weight_kg, width_cm, length_cm, height_cm, attributes, description, photo_urls')
+      .select('id, organization_id, name, brand, category, sku, gtin, ean, variations, weight_kg, width_cm, length_cm, height_cm, attributes, description, photo_urls')
       .eq('id', catalogProductId)
       .maybeSingle()
     if (error) throw new BadRequestException(`fetchCatalog: ${error.message}`)
     if (!catalog) throw new NotFoundException('produto do catálogo não encontrado')
     const cat = catalog as {
       id: string; organization_id: string | null; name: string; brand: string | null;
-      category: string | null; sku: string | null; gtin: string | null;
+      category: string | null; sku: string | null; gtin: string | null; ean: string | null; variations: unknown;
       weight_kg: number | null; width_cm: number | null; length_cm: number | null;
       height_cm: number | null; attributes: Record<string, unknown> | null;
       description: string | null; photo_urls: string[] | null;
@@ -933,7 +956,7 @@ export class CreativeService {
       main_image_storage_path: upload.main_image_storage_path,
       dimensions:              Object.keys(dimensions).length > 0 ? dimensions : undefined,
       sku:                     cat.sku ?? undefined,
-      ean:                     cat.gtin ?? undefined,
+      ean:                     this.resolveCatalogEan(cat) ?? undefined,
       reference_images:        cat.photo_urls ?? undefined,
       product_id:              cat.id,
     })
@@ -1495,6 +1518,7 @@ export class CreativeService {
         description:              fields.description,
         bullets:                  fields.bullets,
         technical_sheet:          fields.technical_sheet,
+        ml_attributes:            this.baseMlAttributes(product),
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
@@ -1722,6 +1746,12 @@ export class CreativeService {
     const mlPred = await this.predictMlCategory(fields.title, briefing.target_marketplace)
     const finalCategoryMlId = mlPred.category_ml_id ?? categoryMlId
 
+    // Preserva os atributos ML que o usuário já preencheu (regenerar mexe só no
+    // texto) e garante GTIN/BRAND se estiverem faltando.
+    const prevAttrs = Array.isArray(previous.ml_attributes) ? previous.ml_attributes : []
+    const prevIds = new Set(prevAttrs.map(a => a.id))
+    const mergedMlAttributes = [...prevAttrs, ...this.baseMlAttributes(product).filter(a => !prevIds.has(a.id))]
+
     const { data, error } = await supabaseAdmin
       .from('creative_listings')
       .insert({
@@ -1733,6 +1763,7 @@ export class CreativeService {
         description:              fields.description,
         bullets:                  fields.bullets,
         technical_sheet:          fields.technical_sheet,
+        ml_attributes:            mergedMlAttributes,
         keywords:                 fields.keywords,
         search_tags:              fields.search_tags,
         suggested_category:       fields.suggested_category,
