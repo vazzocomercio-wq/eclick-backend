@@ -50,6 +50,15 @@ export interface PublishContext {
   }>
   /** Sugestão de match em products.sku se houver. */
   sku_suggestion: { product_id: string; sku: string; price: number | null; stock: number | null } | null
+  /** Variações do produto do catálogo (cor × tamanho) — cada uma é 1 unidade
+   *  vendável com SKU e EAN próprios. Vazio = produto simples (1 item só). */
+  catalog_variations: Array<{
+    sku:        string | null
+    ean:        string | null
+    price:      number | null
+    stock:      number | null
+    attributes: Record<string, string>
+  }>
 }
 
 export interface PreviewBuildOpts {
@@ -286,6 +295,36 @@ export class CreativeMlPublisherService {
       }
     }
 
+    // Variações do catálogo (cor × tamanho): cada combinação é 1 unidade
+    // vendável com SKU/EAN próprios — vira 1 `variation` no anúncio do ML.
+    let catalogVariations: PublishContext['catalog_variations'] = []
+    if (product.product_id) {
+      const { data: prodVar } = await supabaseAdmin
+        .from('products')
+        .select('has_variations, variations')
+        .eq('id', product.product_id)
+        .eq('organization_id', orgId)
+        .maybeSingle()
+      const pv = prodVar as { has_variations: boolean | null; variations: unknown } | null
+      if (pv?.has_variations && Array.isArray(pv.variations)) {
+        catalogVariations = pv.variations.map(v => {
+          const r = (v ?? {}) as Record<string, unknown>
+          const attrs = (r.attributes && typeof r.attributes === 'object' ? r.attributes : {}) as Record<string, unknown>
+          const attributes: Record<string, string> = {}
+          for (const [k, val] of Object.entries(attrs)) {
+            if (typeof val === 'string' && val.trim()) attributes[k] = val.trim()
+          }
+          return {
+            sku:   typeof r.sku === 'string' && r.sku.trim() ? r.sku.trim() : null,
+            ean:   typeof r.ean === 'string' && r.ean.trim() ? r.ean.trim() : null,
+            price: r.price != null && Number.isFinite(Number(r.price)) ? Number(r.price) : null,
+            stock: r.stock != null && Number.isFinite(Number(r.stock)) ? Math.max(0, Math.floor(Number(r.stock))) : null,
+            attributes,
+          }
+        })
+      }
+    }
+
     return {
       listing,
       product,
@@ -293,6 +332,7 @@ export class CreativeMlPublisherService {
       approved_images: approvedImages,
       approved_videos: approvedVideos,
       sku_suggestion:  skuSuggestion,
+      catalog_variations: catalogVariations,
     }
   }
 
@@ -365,7 +405,7 @@ export class CreativeMlPublisherService {
 
   async buildPreview(orgId: string, listingId: string, opts: PreviewBuildOpts): Promise<PreviewResponse> {
     const ctx = await this.getPublishContext(orgId, listingId)
-    const { listing, product, approved_images, approved_videos } = ctx
+    const { listing, product, approved_images, approved_videos, catalog_variations } = ctx
 
     const warnings: string[] = []
 
@@ -588,6 +628,42 @@ export class CreativeMlPublisherService {
       // Placeholder no preview — caller deve saber que o video_id real
       // será atribuído após upload pro ML em publishToMl.
       mlPayload.video_id = `<será atribuído após upload — creative_video=${videoIntent.internal_id}>`
+    }
+
+    // Anúncio VARIÁVEL: produto do catálogo com variações (cor × tamanho) → cada
+    // combinação vira uma `variation` no ML com SKU e GTIN próprios (o ML exige
+    // o código de barras POR variação num anúncio variável, não no item).
+    // Só ativa quando TODAS as variações têm SKU + EAN + atributos — senão mantém
+    // o item único de hoje (zero regressão) e loga o motivo.
+    if (catalog_variations.length > 0) {
+      const complete = catalog_variations.every(
+        v => v.sku && v.ean && Object.keys(v.attributes).length > 0,
+      )
+      if (complete) {
+        mlPayload.variations = catalog_variations.map(v => ({
+          // Cor/Tamanho como combinação livre (name/value_name) — o ML aceita em
+          // categorias que permitem variação; não força mapear pra COLOR/SIZE.
+          attribute_combinations: Object.entries(v.attributes).map(([name, value]) => ({ name, value_name: value })),
+          // SKU e GTIN da unidade vendável.
+          attributes: [
+            { id: 'SELLER_SKU', value_name: v.sku as string },
+            { id: 'GTIN',       value_name: v.ean as string },
+          ],
+          available_quantity: v.stock ?? 0,
+          price:              v.price ?? Number(opts.price ?? 0),
+        }))
+        // Com variações, estoque/SKU/GTIN vivem POR variação: o ML rejeita
+        // available_quantity no item e o SKU/GTIN únicos conflitam com os das
+        // variações → removidos do nível do item.
+        delete (mlPayload as { available_quantity?: unknown }).available_quantity
+        const rootAttrs = (mlPayload.attributes as Array<{ id: string }>) ?? []
+        mlPayload.attributes = rootAttrs.filter(a => a.id !== 'SELLER_SKU' && a.id !== 'GTIN')
+        // Imagens: as variações herdam a galeria do anúncio (não há mapeamento
+        // imagem↔cor). Informativo — NÃO bloqueia o publish.
+        this.logger.log(`[creative.ml.build] anúncio variável: ${(mlPayload.variations as unknown[]).length} variações com SKU+GTIN próprios (imagens compartilhadas)`)
+      } else {
+        this.logger.warn('[creative.ml.build] produto tem variações mas falta SKU/EAN/atributos em alguma — publicando como item único (gere os EANs/SKUs no ciclo de vida)')
+      }
     }
 
     const ready = warnings.length === 0
