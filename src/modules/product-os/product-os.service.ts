@@ -1053,10 +1053,17 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       const axes = { corLabel: cor?.label ?? '', tamanhoLabel: tamanho?.label ?? null }
       return { id: r.id, sku: r.sku, ean: r.ean, axes, label: variationValue(axes), hasOwnWeight: r.weight_g != null }
     })
-    // modo: variante cadastrada ⇒ SEMPRE variável (cada combinação = 1 SKU
-    // vendável). Publicar "único" com cor criada perdia a variação — produto
-    // nascia só com o SKU base.
-    const mode: 'single' | 'variable' = variants.length === 0 ? 'single' : 'variable'
+    // modo: só é VARIÁVEL com 2+ combinações vendáveis. Publicar "único" com
+    // várias cores criadas perdia as variações (produto nascia só com o SKU
+    // base) — mas o inverso também quebra: a aba SKU EXIGE uma cor pra fechar o
+    // código, então todo produto chega aqui com ≥1 variante e o limiar em 1
+    // fazia produto de cor única nascer `has_variations=true` com uma "variação"
+    // só. No ML isso vira anúncio variável inválido (`variations` conflita com
+    // `family_name` e o estoque some do nível do item) e o EAN fica preso dentro
+    // do array, com `products.ean` nulo. Uma cor = produto único.
+    const mode: 'single' | 'variable' = variants.length >= 2 ? 'variable' : 'single'
+    // Cor única: o SKU/EAN daquela variante SÃO os do produto (não há outro).
+    const soleVariant = mode === 'single' && variants.length === 1 ? variants[0] : null
     const singleQty = Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
     if (variants.length > 1 && body.variation_mode === 'single' && singleQty > 0) {
       throw new BadRequestException('Este produto tem mais de uma variante — informe o estoque por variante (modo variações) em vez de uma quantidade única.')
@@ -1091,12 +1098,20 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
         id: v.id, type: axisType, value: v.label,
         attributes: variationAttributes(v.axes),
         price: ov?.price != null ? Number(ov.price) : (priceByVariant.get(v.id) ?? price ?? 0),
-        // publish "único" curado p/ variável: com 1 variante, a quantidade produzida vira o estoque dela
-        stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : (variants.length === 1 ? singleQty : 0),
+        stock: ov?.stock != null ? Math.max(0, Math.floor(Number(ov.stock))) : 0,
         sku: v.sku, ean: v.ean,
       }
     }) : []
     const variableStock = variationsJson.reduce((s, r) => s + (Number(r.stock) || 0), 0)
+
+    // Cor única: a tela continua mostrando a linha da variante, então preço e
+    // estoque podem ter sido digitados LÁ em vez de no campo único. Aproveita os
+    // dois em vez de perder o que o usuário preencheu.
+    const soleOv = soleVariant ? ovById.get(soleVariant.id) : undefined
+    if (soleOv?.price != null) price = Number(soleOv.price)
+    const singleStock = soleOv?.stock != null
+      ? Math.max(0, Math.floor(Number(soleOv.stock)))
+      : singleQty
 
     // FICHA de catálogo (transição pronta p/ IA Criativo): usa os campos validados
     // quando existem, senão cai no nome/descrição crus. Preenche as colunas que o
@@ -1128,8 +1143,10 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       cost_price: costPrice,
       price,
       sku: skuBase,
-      ean: baseEan,
-      gtin: baseEan,
+      // cor única: o EAN vendável é o da variante — sem isto ele ficava só
+      // dentro de variations[] e o produto ia pro ML sem código de barras.
+      ean: soleVariant?.ean ?? baseEan,
+      gtin: soleVariant?.ean ?? baseEan,
       attributes: attrs,
       tags,
       weight_kg: weightKg,
@@ -1162,7 +1179,7 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     // Make-to-Order e o crédito de produção viravam no-op silencioso) e lança o
     // estoque semeado como movimento idempotente, propagando products.stock/canais.
     let stockSeeded = 0
-    const qty = mode === 'variable' ? variableStock : Math.max(0, Math.floor(Number(body.produced_quantity) || 0))
+    const qty = mode === 'variable' ? variableStock : singleStock
     const { data: master } = await supabaseAdmin.from('product_stock').select('id').eq('product_id', productId).is('platform', null).maybeSingle()
     if (!master) await supabaseAdmin.from('product_stock').insert({ product_id: productId, platform: null, quantity: 0 })
     if (qty > 0) {

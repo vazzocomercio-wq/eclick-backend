@@ -635,7 +635,12 @@ export class CreativeMlPublisherService {
     // o código de barras POR variação num anúncio variável, não no item).
     // Só ativa quando TODAS as variações têm SKU + EAN + atributos — senão mantém
     // o item único de hoje (zero regressão) e loga o motivo.
-    if (catalog_variations.length > 0) {
+    // Uma combinação só NÃO é anúncio variável — é um produto de cor única (a
+    // aba SKU exige uma cor, então todo produto do Product OS tem ≥1). Publicar
+    // com `variations` de 1 item quebra o anúncio e esconde o EAN da variação
+    // dentro do array; como item único o `resolveCatalogEan` já traz esse EAN
+    // pro GTIN do nível do item.
+    if (catalog_variations.length >= 2) {
       const complete = catalog_variations.every(
         v => v.sku && v.ean && Object.keys(v.attributes).length > 0,
       )
@@ -656,6 +661,14 @@ export class CreativeMlPublisherService {
         // available_quantity no item e o SKU/GTIN únicos conflitam com os das
         // variações → removidos do nível do item.
         delete (mlPayload as { available_quantity?: unknown }).available_quantity
+        // `family_name` (item de FAMÍLIA) é mutuamente exclusivo com `variations`
+        // no ML: mandar os dois derruba o POST /items com
+        //   cause 374 "The field variations is invalid with family name"
+        // e, em cascata, cause 369 "[available_quantity]" — porque o ML invalida
+        // as variações e volta a exigir o estoque no nível do item, que acabou
+        // de sair daqui. Família é pra categoria de catálogo (iluminação); num
+        // anúncio variável ela não se aplica.
+        delete (mlPayload as { family_name?: unknown }).family_name
         const rootAttrs = (mlPayload.attributes as Array<{ id: string }>) ?? []
         mlPayload.attributes = rootAttrs.filter(a => a.id !== 'SELLER_SKU' && a.id !== 'GTIN')
         // Imagens: as variações herdam a galeria do anúncio (não há mapeamento
@@ -908,7 +921,10 @@ export class CreativeMlPublisherService {
       const res = await axios.post(`${ML_BASE}/items`, mlBody, cfg)
       return res.data
     } catch (e: unknown) {
-      if (isTitleFieldRejected(e) && 'title' in mlBody) {
+      // Só reenvia sem `title` quando há `family_name` pra carregar o título —
+      // num anúncio variável ele foi removido, e mandar o corpo sem nenhum dos
+      // dois deixaria o anúncio sem título nenhum.
+      if (isTitleFieldRejected(e) && 'title' in mlBody && 'family_name' in mlBody) {
         this.logger.log('[creative.ml.publish] categoria gera o título — reenviando sem `title`')
         const retry: Record<string, unknown> = { ...mlBody }
         delete retry.title
