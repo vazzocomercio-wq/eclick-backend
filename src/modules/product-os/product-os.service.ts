@@ -1122,6 +1122,20 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     const fichaBrand = (pd.catalog_brand ?? '').trim() || null
     const attrs: Record<string, string> = { ...(pd.catalog_attributes ?? {}) }
     const tags = Array.isArray(pd.catalog_tags) ? pd.catalog_tags : []
+    // BULLETS/benefícios da ficha → gravados em DUAS colunas, de propósito:
+    //   products.bullets       — campo oficial do catálogo (a vitrine da Loja tem
+    //                            seção própria e o ML os junta na descrição via
+    //                            composeListingDescription).
+    //   products.differentials — é o que a IA CRIATIVO lê. O prefill do catálogo
+    //                            (creative.service.getCatalogPrefill) devolve
+    //                            `differentials`, e a tela de novo criativo faz
+    //                            `cat.differentials.length ? cat.differentials : …`
+    //                            → viram `commercial_differentials` nos prompts e
+    //                            a linha "- Diferenciais:" no publisher do ML.
+    // Sem isto os bullets digitados na ficha MORRIAM no product_dev: o insert
+    // gravava attributes/tags/description e simplesmente ignorava os bullets.
+    const fichaBullets = (Array.isArray(pd.catalog_bullets) ? pd.catalog_bullets : [])
+      .map(b => String(b).trim()).filter(Boolean)
     // peso/dimensões do PRODUTO FINAL (montado, soma das peças) → cadastro logístico do ML
     const meas = await this.computeMeasures(orgId, pd)
     const weightKg = meas.weight_g != null ? Math.round((meas.weight_g / 1000) * 1000) / 1000 : null
@@ -1149,6 +1163,8 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
       gtin: soleVariant?.ean ?? baseEan,
       attributes: attrs,
       tags,
+      bullets: fichaBullets,
+      differentials: fichaBullets,
       weight_kg: weightKg,
       width_cm: cm(meas.width_mm),
       length_cm: cm(meas.depth_mm),
