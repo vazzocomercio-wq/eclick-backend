@@ -414,6 +414,17 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Radar de Encaixe — mineração de dores nas avaliações do produto
+  // hospedeiro. Lê reviews reais (2-4★) e agrupa queixas recorrentes que um
+  // acessório 3D resolve, com citação LITERAL validada por substring (dor
+  // sem ≥3 citações vira hipótese). Sonnet: precisão de extração > custo,
+  // roda 1x por hospedeiro (não em lote).
+  opportunity_pain_mining: {
+    label:       'Mineração de dores (Radar de Encaixe)',
+    description: 'Lê avaliações reais do produto hospedeiro e agrupa queixas recorrentes que um acessório impresso em 3D resolveria, com citações literais',
+    primary:     { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-mini' },
+  },
   // Product OS — Briefing técnico de produto físico. Transforma ideia +
   // referência num briefing DFM estruturado (módulos, paredes, orientação,
   // originalidade) que alimenta o modelador 3D. Sonnet pra qualidade de
