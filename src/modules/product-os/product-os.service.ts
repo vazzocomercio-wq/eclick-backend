@@ -43,6 +43,9 @@ export interface ProductDev {
   status:              ProductDevStatus
   production_profile:  ProductionProfile
   reference_images:    ReferenceImage[]
+  /** URLs de fotos que o lojista tirou do anúncio (ficam no produto, fora do
+   *  anúncio). Persistido no × do modal de publicar. */
+  hidden_photo_urls:   string[]
   inspiration_url:     string | null
   briefing:            Record<string, unknown> | null
   briefing_text:       string | null
@@ -550,7 +553,7 @@ export class ProductOsService {
   async update(id: string, orgId: string, patch: Partial<ProductDev>): Promise<ProductDev> {
     const allowed: (keyof ProductDev)[] = [
       'name', 'category', 'description', 'production_profile',
-      'inspiration_url', 'reference_images', 'target_marketplaces',
+      'inspiration_url', 'reference_images', 'hidden_photo_urls', 'target_marketplaces',
       'target_price', 'estimated_cost',
       'final_weight_g', 'final_width_mm', 'final_depth_mm', 'final_height_mm',
     ]
@@ -1021,7 +1024,9 @@ Características: ${vocab.caracteristica.join(' | ') || '—'}
     // combina fotos do protótipo aprovado + reference_images (que inclui as
     // IMAGENS GERADAS pela IA e as importadas do MakerWorld), dedupada.
     const approvedV = pd.versions.find(v => v.approved)
-    const defaultPhotos = [...(approvedV?.prototype_photo_urls ?? []), ...(pd.reference_images ?? []).map(r => r.url)].filter(Boolean)
+    const hidden = new Set(pd.hidden_photo_urls ?? [])
+    const defaultPhotos = [...(approvedV?.prototype_photo_urls ?? []), ...(pd.reference_images ?? []).map(r => r.url)]
+      .filter(Boolean).filter(u => !hidden.has(u as string))
     const photos = (body.photo_urls && body.photo_urls.length ? body.photo_urls : [...new Set(defaultPhotos)]).filter(Boolean)
 
     // preço: target_price > sugerido do canal primário
