@@ -1254,9 +1254,16 @@ export class CreativeMlPublisherService {
       return
     }
 
+    // ⚠️ Logo após publicar, o ML AINDA está processando as imagens e devolve
+    // o placeholder "processing-image/…/O-PT.jpg" em pictures[]. Se gravássemos
+    // isso no catálogo, sobrescreveríamos as fotos boas (Canva/renders) do
+    // produto pelo placeholder cinza. Então descartamos os placeholders — e se
+    // sobrar 0 foto real, NÃO tocamos em photo_urls (o catálogo é a fonte das
+    // imagens; elas fluem catálogo→ML, não o contrário).
     const photoUrls = (mlItem.pictures ?? [])
       .map(p => p.secure_url ?? p.url)
       .filter((u): u is string => !!u)
+      .filter(u => !u.includes('/processing-image/'))
 
     const patch: Record<string, unknown> = {
       ml_title:   listing.title,
