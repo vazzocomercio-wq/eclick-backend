@@ -796,7 +796,17 @@ export class ProductsService {
       .single()
     if (error) throw new Error(error.message)
 
-    if (current && (dto.quantity !== undefined || dto.virtual_quantity !== undefined)) {
+    // Re-propaga em QUALQUER campo que mude o que vai pros canais. Antes só
+    // quantity/virtual_quantity disparavam sync: mudar o estoque mínimo ou
+    // ligar/desligar a pausa automática salvava no banco e não mexia em
+    // anúncio nenhum até o próximo cron — parecia que a tela não funcionava.
+    const mexeNosCanais =
+      dto.quantity           !== undefined ||
+      dto.virtual_quantity   !== undefined ||
+      dto.min_stock_to_pause !== undefined ||
+      dto.auto_pause_enabled !== undefined
+
+    if (current && mexeNosCanais) {
       this.stock.recalcAndPropagate(current.product_id, 'manual_update')
         .catch((e: Error) => console.error('[stock-sync] updateStock sync falhou:', e.message))
     }

@@ -392,6 +392,13 @@ export class MercadolivreService {
    * pra qualquer cron de hora-em-hora também. */
   private static readonly REFRESH_THRESHOLD_MS = 30 * 60 * 1000
 
+  /** Refreshes EM VOO por conta. O ML **rotaciona o refresh_token a cada uso**:
+   *  se N chamadas renovam a mesma conta ao mesmo tempo (a reconciliação das
+   *  04:00 dispara centenas de pushes de uma vez), a primeira consome o token
+   *  e as demais levam 400 invalid_grant — derrubando o push E a pausa do
+   *  anúncio. Aqui a 1ª chamada renova e as outras esperam o MESMO resultado. */
+  private static readonly refreshInFlight = new Map<number, Promise<string>>()
+
   private async refreshIfNeeded(
     conn: Pick<MlConnection, 'seller_id' | 'access_token' | 'refresh_token' | 'expires_at'>,
   ): Promise<string> {
@@ -401,15 +408,46 @@ export class MercadolivreService {
 
     if (!isExpired) return conn.access_token
 
+    const pending = MercadolivreService.refreshInFlight.get(conn.seller_id)
+    if (pending) return pending
+
+    const job = this.doRefresh(conn).finally(() => {
+      MercadolivreService.refreshInFlight.delete(conn.seller_id)
+    })
+    MercadolivreService.refreshInFlight.set(conn.seller_id, job)
+    return job
+  }
+
+  private async doRefresh(
+    conn: Pick<MlConnection, 'seller_id' | 'access_token' | 'refresh_token' | 'expires_at'>,
+  ): Promise<string> {
+    // Re-lê do banco antes de queimar o refresh_token: outra instância (ou um
+    // turno anterior) pode já ter renovado. Sem isso, mandaríamos pro ML um
+    // token já rotacionado — que volta 400 e invalida a conta inteira.
+    const { data: fresh } = await supabaseAdmin
+      .from('ml_connections')
+      .select('organization_id, seller_id, access_token, refresh_token, expires_at')
+      .eq('seller_id', conn.seller_id)
+      .maybeSingle()
+    const current = (fresh as MlConnection | null) ?? null
+
+    if (current && new Date(current.expires_at).getTime() - Date.now() >= MercadolivreService.REFRESH_THRESHOLD_MS) {
+      console.log(`[ml-token.refresh] seller=${conn.seller_id} — já renovado por outra chamada, reaproveitando`)
+      return current.access_token
+    }
+
+    const refreshToken = current?.refresh_token ?? conn.refresh_token
+    const orgId        = current?.organization_id ?? null
+
     console.log(
       `[ml-token.refresh] seller=${conn.seller_id} expires_at=${conn.expires_at} ` +
-      `(${Math.round(msUntil / 60000)}min restantes) — disparando refresh…`,
+      `(${Math.round((new Date(conn.expires_at).getTime() - Date.now()) / 60000)}min restantes) — disparando refresh…`,
     )
 
     try {
       const params = new URLSearchParams({
         grant_type: 'refresh_token',
-        refresh_token: conn.refresh_token,
+        refresh_token: refreshToken,
         client_id: process.env.ML_CLIENT_ID!,
         client_secret: process.env.ML_CLIENT_SECRET!,
       })
@@ -422,25 +460,26 @@ export class MercadolivreService {
       const newExpiresAt = new Date(Date.now() + expires_in * 1000).toISOString()
       console.log(`[ml-token.refresh] seller=${conn.seller_id} OK — novo expires_at=${newExpiresAt}`)
 
-      // Update wherever the token lives: ml_connections (legacy), api_credentials,
-      // or both. Both updates are idempotent so running both is safe.
+      // api_credentials guarda o token em linhas soltas (provider+key_name).
+      // SEM filtro de organização isso sobrescrevia a credencial de TODAS as
+      // orgs e de todas as contas ML — vazamento multi-tenant + corrupção de
+      // token entre as contas da mesma org. Escopo obrigatório por org.
+      const scopedCred = (keyName: string, value: string) => {
+        const q = supabaseAdmin
+          .from('api_credentials')
+          .update({ key_value: value, updated_at: new Date().toISOString() })
+          .eq('provider', 'mercadolivre').eq('key_name', keyName).eq('is_active', true)
+        return orgId ? q.eq('organization_id', orgId) : q.is('organization_id', null)
+      }
+
       await Promise.all([
         supabaseAdmin
           .from('ml_connections')
           .update({ access_token, refresh_token, expires_at: newExpiresAt })
           .eq('seller_id', conn.seller_id),
-        supabaseAdmin
-          .from('api_credentials')
-          .update({ key_value: access_token, updated_at: new Date().toISOString() })
-          .eq('provider', 'mercadolivre').eq('key_name', 'access_token').eq('is_active', true),
-        supabaseAdmin
-          .from('api_credentials')
-          .update({ key_value: refresh_token, updated_at: new Date().toISOString() })
-          .eq('provider', 'mercadolivre').eq('key_name', 'refresh_token').eq('is_active', true),
-        supabaseAdmin
-          .from('api_credentials')
-          .update({ key_value: newExpiresAt, updated_at: new Date().toISOString() })
-          .eq('provider', 'mercadolivre').eq('key_name', 'expires_at').eq('is_active', true),
+        scopedCred('access_token',  access_token),
+        scopedCred('refresh_token', refresh_token),
+        scopedCred('expires_at',    newExpiresAt),
       ])
 
       return access_token
@@ -522,11 +561,15 @@ export class MercadolivreService {
   async getAllTokensForOrg(orgId: string): Promise<Array<{ token: string; sellerId: number }>> {
     const conns = await this.getConnections(orgId)
     if (conns.length === 0) throw new UnauthorizedException('ML não conectado para esta organização')
-    const tokens = await Promise.all(
+    // allSettled, NÃO all: uma conta com refresh quebrado não pode cegar as
+    // outras. Com Promise.all, qualquer conta ruim derrubava a chamada inteira
+    // e nenhum anúncio de dono desconhecido (account_id nulo) era atualizado
+    // nem PAUSADO — mesmo com as demais contas saudáveis.
+    const settled = await Promise.allSettled(
       conns.map(async c => {
         const { data } = await supabaseAdmin
           .from('ml_connections')
-          .select('seller_id, access_token, refresh_token, expires_at')
+          .select('organization_id, seller_id, access_token, refresh_token, expires_at')
           .eq('organization_id', orgId)
           .eq('seller_id', c.seller_id)
           .maybeSingle()
@@ -535,7 +578,24 @@ export class MercadolivreService {
         return { token, sellerId: c.seller_id as number }
       }),
     )
-    return tokens.filter((t): t is { token: string; sellerId: number } => t !== null)
+
+    const tokens: Array<{ token: string; sellerId: number }> = []
+    const falhas: string[] = []
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') { if (r.value) tokens.push(r.value); return }
+      const sid = conns[i]?.seller_id
+      falhas.push(`${sid}: ${r.reason?.message ?? r.reason}`)
+    })
+    if (falhas.length) {
+      console.warn(`[ml-token] org=${orgId} ${falhas.length}/${conns.length} conta(s) indisponível(is) — ${falhas.join(' | ')}`)
+    }
+    // Só falha de vez se NENHUMA conta respondeu — aí não há o que tentar.
+    if (tokens.length === 0) {
+      throw new UnauthorizedException(
+        `Nenhuma conta ML da organização está com token válido${falhas.length ? ` (${falhas.join(' | ')})` : ''}`,
+      )
+    }
+    return tokens
   }
 
   // ── Item info (for competitor lookup) ────────────────────────────────────
@@ -1114,13 +1174,22 @@ export class MercadolivreService {
     newQuantity: number,
     orgId: string,
     knownSellerId?: number,
-  ): Promise<{ sellerId: number }> {
-    const put = async (token: string): Promise<void> => {
-      await axios.put(
+  ): Promise<{ sellerId: number; confirmedQuantity: number | null; listingStatus: string | null }> {
+    // O PUT do ML devolve o item ATUALIZADO no corpo da resposta. Usamos esse
+    // corpo como confirmação REAL (available_quantity que ficou lá), em vez de
+    // ecoar o que mandamos — antes o log dizia "confirmado" sem nunca ter
+    // conferido, e um PUT aceito-mas-não-aplicado passava batido.
+    const put = async (token: string): Promise<{ confirmedQuantity: number | null; listingStatus: string | null }> => {
+      const res = await axios.put<{ available_quantity?: number; status?: string }>(
         `${ML_BASE}/items/${listingId}`,
         { available_quantity: newQuantity },
         { headers: { Authorization: `Bearer ${token}` } },
       )
+      const q = res.data?.available_quantity
+      return {
+        confirmedQuantity: typeof q === 'number' ? q : null,
+        listingStatus:     res.data?.status ?? null,
+      }
     }
     // erro de "conta errada" (token não é dono do item) → tenta outra conta;
     // qualquer outro status é erro real e deve propagar.
@@ -1133,12 +1202,12 @@ export class MercadolivreService {
     if (knownSellerId != null) {
       try {
         const { token } = await this.getTokenForOrg(orgId, knownSellerId)
-        await put(token)
-        return { sellerId: knownSellerId }
+        const r = await put(token)
+        return { sellerId: knownSellerId, ...r }
       } catch (e: any) {
         if (!isWrongAccount(e)) {
           console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data?.message ?? e.message)
-          throw e
+          throw this.withMlDetail(e)
         }
         // conta conhecida não funcionou → cai pro fan-out abaixo
       }
@@ -1150,18 +1219,69 @@ export class MercadolivreService {
     for (const { token, sellerId } of tokens) {
       if (sellerId === knownSellerId) continue // já tentei essa
       try {
-        await put(token)
-        return { sellerId }
+        const r = await put(token)
+        return { sellerId, ...r }
       } catch (e: any) {
         lastErr = e
         if (!isWrongAccount(e)) {
           console.error(`[stock-sync] erro em ${listingId}:`, e.response?.data?.message ?? e.message)
-          throw e
+          throw this.withMlDetail(e)
         }
       }
     }
-    console.error(`[stock-sync] nenhuma conta ML aceitou ${listingId}`)
-    throw lastErr ?? new Error('Nenhuma conta ML conseguiu atualizar o anúncio')
+    // Nenhuma conta CONECTADA da org é dona do anúncio (todas devolveram
+    // 401/403/404). Não é falha transitória: ou o anúncio é de uma conta ML
+    // que não está integrada, ou já não existe. Marca com código próprio pra
+    // o caller registrar como "ignorado com motivo" em vez de erro genérico
+    // que se repete pra sempre no log.
+    console.error(`[stock-sync] nenhuma conta ML conectada é dona de ${listingId}`)
+    const err: any = this.withMlDetail(lastErr) ?? new Error('Nenhuma conta ML conseguiu atualizar o anúncio')
+    err.code = 'ML_NO_OWNER_ACCOUNT'
+    throw err
+  }
+
+  /** Anexa a mensagem REAL do ML ao erro do axios. Sem isso o log gravava só
+   *  "Request failed with status code 400" e ficava impossível diagnosticar. */
+  private withMlDetail(e: any): any {
+    if (!e) return e
+    const d = e?.response?.data
+    if (!d) return e
+    const partes = [d.message, d.error, Array.isArray(d.cause) ? d.cause.map((c: any) => c?.message ?? c?.code).filter(Boolean).join('; ') : null]
+      .filter(Boolean)
+    if (partes.length) e.message = `${e.message} — ML: ${partes.join(' | ')}`
+    return e
+  }
+
+  /** Lê status/sub_status/estoque de um anúncio. Usado pelo sync de estoque
+   *  pra distinguir "o ML recusou porque o anúncio está sob revisão/encerrado"
+   *  (nada a fazer) de "falhou de verdade" (precisa de atenção). */
+  async getListingSnapshot(
+    listingId: string,
+    orgId: string,
+    knownSellerId?: number,
+  ): Promise<{ status: string; sub_status: string[]; available_quantity: number | null } | null> {
+    const read = async (token: string) => {
+      const res = await axios.get<{ status?: string; sub_status?: string[]; available_quantity?: number }>(
+        `${ML_BASE}/items/${listingId}?attributes=id,status,sub_status,available_quantity`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      return {
+        status:             res.data?.status ?? 'unknown',
+        sub_status:         res.data?.sub_status ?? [],
+        available_quantity: typeof res.data?.available_quantity === 'number' ? res.data.available_quantity : null,
+      }
+    }
+    try {
+      if (knownSellerId != null) {
+        const { token } = await this.getTokenForOrg(orgId, knownSellerId)
+        return await read(token)
+      }
+      const tokens = await this.getAllTokensForOrg(orgId)
+      for (const { token } of tokens) {
+        try { return await read(token) } catch { /* conta errada — tenta a próxima */ }
+      }
+    } catch { /* sem token utilizável */ }
+    return null
   }
 
   /**

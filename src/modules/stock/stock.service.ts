@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
 import { TikTokShopService } from '../tiktok-shop/tiktok-shop.service'
 import { ShopeeStockSyncService } from '../marketplace/shopee-sync/shopee-stock-sync.service'
+import { normalizeMinStock, applyVirtualStockRule } from './stock.rules'
 
 @Injectable()
 export class StockService {
@@ -137,7 +138,7 @@ export class StockService {
       physical, virtual: virtual_, reserved, safety, available, total_platform,
       stock_id: stock.id,
       safety_mode: mode, safety_percentage: safetyPct, safety_quantity: safetyFix,
-      min_stock_to_pause: Number(stock.min_stock_to_pause || 0),
+      min_stock_to_pause: normalizeMinStock(stock.min_stock_to_pause, virtual_),
       auto_pause_enabled: !!stock.auto_pause_enabled,
     }
   }
@@ -803,15 +804,24 @@ export class StockService {
 
       // ── REGRA CENTRAL DE ESTOQUE VIRTUAL (opt-in por produto via
       //    auto_pause_enabled) — vale pra TODOS os canais (ML/TikTok/Shopee).
-      //    Quando ativa: o canal reflete FÍSICO + VIRTUAL (sem descontar
-      //    segurança) e PAUSA quando (físico+virtual) ≤ min_stock_to_pause
-      //    (com min = virtual ⇒ pausa quando o físico zera). Quando inativa:
-      //    comportamento clássico (disponível c/ segurança + distribuição). ──
+      //    Quando ativa: o canal reflete FÍSICO LIVRE + VIRTUAL (sem descontar
+      //    estoque de segurança — num produto de vitrine virtual a segurança
+      //    percentual não faz sentido) e PAUSA quando o FÍSICO LIVRE
+      //    (físico − reservado) ≤ min_stock_to_pause. Mínimo 0 = pausa quando
+      //    o físico zera. Quando inativa: comportamento clássico
+      //    (disponível c/ segurança + distribuição por canal). ──
+      // O mínimo é comparado contra o FÍSICO LIVRE, não contra físico+virtual.
+      // Antes era `total_platform <= min`: num produto com virtual 10.000,
+      // digitar "pausar em 3" virava `10.003 <= 3` e NUNCA pausava — o campo
+      // da tela aceitava o valor e não fazia nada. Regra única em stock.rules,
+      // compartilhada com o push da Shopee (paridade entre canais).
       const ruleActive = calc.auto_pause_enabled
-      const ruleQty    = Math.max(0, Math.round(calc.total_platform)) // físico + virtual
-      const rulePause  = ruleActive && calc.total_platform <= calc.min_stock_to_pause
-      // valor que vai pros canais sob a regra (0 = pausado/esgotado)
-      const ruleChannelQty = rulePause ? 0 : ruleQty
+      const regra      = applyVirtualStockRule({
+        physical: calc.physical, virtual: calc.virtual, reserved: calc.reserved,
+        minStock: calc.min_stock_to_pause, autoPause: calc.auto_pause_enabled,
+      })
+      const rulePause      = regra.pause
+      const ruleChannelQty = regra.effectiveQty // 0 = pausado/esgotado
 
       // products.stock = espelho — catálogo/loja/margem leem essa coluna.
       // Sob a regra, espelha físico+virtual (ou 0 pausado); senão, o disponível.
@@ -866,14 +876,20 @@ export class StockService {
 
   /** Regra CENTRAL de estoque virtual (todos os canais). Aplica a TODOS os
    *  produtos com anúncio vinculado (qualquer canal) da org: virtual_quantity =
-   *  N, min_stock_to_pause = N (⇒ pausa quando o físico zera), auto_pause = true.
+   *  N, min_stock_to_pause = `minFisico` (default 0 ⇒ pausa quando o físico
+   *  zera), auto_pause = true.
    *  clear=true zera a regra (virtual 0, min 0, auto off → volta ao clássico).
-   *  Re-propaga em background. Retorna quantos produtos foram afetados. */
-  async applyVirtualRule(orgId: string, opts: { virtualUnits: number; clear?: boolean }): Promise<{
+   *  Re-propaga em background. Retorna quantos produtos foram afetados.
+   *
+   *  ⚠️ O mínimo é em unidades de estoque FÍSICO. Antes gravava min = N (mesmo
+   *  valor do virtual) porque a comparação era contra físico+virtual; com a
+   *  comparação corrigida (contra o físico livre), o equivalente é 0. */
+  async applyVirtualRule(orgId: string, opts: { virtualUnits: number; clear?: boolean; minFisico?: number }): Promise<{
     affected: number; products: number; rule: { virtual_quantity: number; min_stock_to_pause: number; auto_pause_enabled: boolean }
   }> {
-    const N = opts.clear ? 0 : Math.max(0, Math.round(Number(opts.virtualUnits) || 0))
-    const rule = { virtual_quantity: N, min_stock_to_pause: N, auto_pause_enabled: !opts.clear, updated_at: new Date().toISOString() }
+    const N   = opts.clear ? 0 : Math.max(0, Math.round(Number(opts.virtualUnits) || 0))
+    const min = opts.clear ? 0 : Math.max(0, Math.round(Number(opts.minFisico) || 0))
+    const rule = { virtual_quantity: N, min_stock_to_pause: min, auto_pause_enabled: !opts.clear, updated_at: new Date().toISOString() }
 
     // produtos da org com pelo menos 1 anúncio vinculado ATIVO (qualquer canal).
     // cast p/ any: o embed products!inner estoura o type-checker (TS2589).
@@ -909,10 +925,10 @@ export class StockService {
         await this.recalcAndPropagate(pid, opts.clear ? 'virtual_rule_clear' : 'virtual_rule_apply')
           .catch(e => this.logger.warn(`[stock.vrule] recalc ${pid}: ${e?.message}`))
       }
-      this.logger.log(`[stock.vrule] org=${orgId} re-propagado ${productIds.length} produtos (N=${N}, clear=${!!opts.clear})`)
+      this.logger.log(`[stock.vrule] org=${orgId} re-propagado ${productIds.length} produtos (N=${N}, min=${min} clear=${!!opts.clear})`)
     })()
 
-    this.logger.log(`[stock.vrule] org=${orgId} regra aplicada: N=${N} clear=${!!opts.clear} produtos=${productIds.length} stock_rows=${affected}`)
+    this.logger.log(`[stock.vrule] org=${orgId} regra aplicada: N=${N} min=${min} clear=${!!opts.clear} produtos=${productIds.length} stock_rows=${affected}`)
     return { affected, products: productIds.length, rule }
   }
 
@@ -979,6 +995,10 @@ export class StockService {
         return
       }
 
+      // Quantidade que REALMENTE vai pro ML. Antes o log gravava `qty` cru,
+      // então uma pausa aparecia no histórico com o número pré-pausa.
+      const sentQty = shouldPause ? 0 : qty
+
       for (const v of vinculos) {
         const startTime = Date.now()
         let status: string = 'pending'
@@ -992,13 +1012,23 @@ export class StockService {
           // as contas da org — devolvemos o sellerId pra persistir.
           const result = await this.mlService.updateListingStock(
             v.listing_id,
-            shouldPause ? 0 : qty,
+            sentQty,
             orgId,
             v.account_id ? Number(v.account_id) : undefined,
           )
-          confirmedQty = shouldPause ? 0 : qty
-          status       = 'success'
-          httpStatus   = 200
+          httpStatus = 200
+          // Confirmação REAL: o corpo do PUT traz o available_quantity que
+          // ficou no anúncio. Se divergir do que mandamos, o ML aceitou mas
+          // não aplicou (acontece em anúncio de catálogo) — marcamos
+          // 'divergent' em vez de cantar sucesso.
+          confirmedQty = result?.confirmedQuantity ?? null
+          if (confirmedQty != null && confirmedQty !== sentQty) {
+            status   = 'divergent'
+            errorMsg = `ML aceitou mas manteve ${confirmedQty} (enviado ${sentQty})`
+            this.logger.warn(`[stock.ml] ${v.listing_id} DIVERGENTE: enviado=${sentQty} ficou=${confirmedQty}`)
+          } else {
+            status = 'success'
+          }
 
           // Backfill do dono do anúncio quando ainda não estava registrado.
           if (!v.account_id && result?.sellerId) {
@@ -1008,17 +1038,39 @@ export class StockService {
               .eq('id', v.id)
           }
         } catch (e: any) {
-          status     = 'error'
           errorMsg   = e?.message ?? 'erro desconhecido'
           httpStatus = e?.response?.status ?? 500
-          console.error(`[stock.ml] ${v.listing_id}: ${errorMsg}`)
+          status     = 'error'
+
+          // Anúncio que nenhuma conta ML conectada enxerga: ou é de uma conta
+          // não integrada, ou não existe mais. Repetir todo ciclo não resolve —
+          // depende de ação humana (conectar a conta ou desvincular).
+          if (e?.code === 'ML_NO_OWNER_ACCOUNT') {
+            status   = 'ignored'
+            errorMsg = 'Anúncio não pertence a nenhuma conta ML conectada — conecte a conta dona ou desvincule o anúncio'
+          }
+
+          // O ML recusa update de estoque em anúncio que não está vendendo
+          // (under_review / closed / inactive). Isso não é falha do sync e não
+          // tem risco de venda — classificar como 'ignored' tira o ruído
+          // permanente que escondia as falhas de verdade.
+          if (status === 'error' && httpStatus === 400) {
+            const snap = await this.mlService
+              .getListingSnapshot(v.listing_id, orgId, v.account_id ? Number(v.account_id) : undefined)
+              .catch(() => null)
+            if (snap && snap.status !== 'active' && snap.status !== 'paused') {
+              status   = 'ignored'
+              errorMsg = `Anúncio ${snap.status}${snap.sub_status.length ? ` (${snap.sub_status.join(', ')})` : ''} — o ML não aceita alterar estoque`
+            }
+          }
+          if (status === 'error') console.error(`[stock.ml] ${v.listing_id}: ${errorMsg}`)
         }
 
         await supabaseAdmin.from('stock_sync_logs').insert({
           product_id:         productId,
           channel:            'mercadolivre',
           listing_id:         v.listing_id,
-          sent_quantity:      qty,
+          sent_quantity:      sentQty,
           confirmed_quantity: confirmedQty,
           status,
           error_message:      errorMsg,
@@ -1030,7 +1082,7 @@ export class StockService {
         if (status === 'success' && distributionId) {
           await supabaseAdmin
             .from('channel_stock_distribution')
-            .update({ last_published_qty: qty, last_synced_at: new Date().toISOString() })
+            .update({ last_published_qty: sentQty, last_synced_at: new Date().toISOString() })
             .eq('id', distributionId)
         }
       }

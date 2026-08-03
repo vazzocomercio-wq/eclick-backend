@@ -4,6 +4,7 @@ import { MarketplaceService } from '../marketplace.service'
 import { MpConnection } from '../adapters/base'
 import { ShopeeAdapter } from '../adapters/shopee.adapter'
 import { ShopeeProductSyncService } from './shopee-product-sync.service'
+import { applyVirtualStockRule } from '../../stock/stock.rules'
 
 /** F18 Fase C — Propagação de ESTOQUE do ledger unificado → anúncio Shopee.
  *
@@ -33,28 +34,41 @@ export class ShopeeStockSyncService {
     private readonly productSync: ShopeeProductSyncService,
   ) {}
 
-  /** Estoque VIRTUAL a refletir na Shopee = físico + virtual_quantity (ledger
-   *  product_stock platform=null). Null se não há registro de estoque (→ pula,
-   *  não zera o anúncio). NÃO desconta segurança/reservado (regra Vazzo).
+  /** Estoque VIRTUAL a refletir na Shopee = físico livre + virtual_quantity
+   *  (ledger product_stock platform=null). Null se não há registro de estoque
+   *  (→ pula, não zera o anúncio). NÃO desconta estoque de segurança — num
+   *  produto com vitrine virtual a segurança percentual não faz sentido.
    *
-   *  PAUSA (paridade c/ ML): se `auto_pause_enabled` e (físico+virtual) ≤
-   *  `min_stock_to_pause`, o anúncio é pausado (empurra 0 = esgotado). Ex
-   *  (tooltip da tela): físico 5, virtual 1.000, mínimo 1.000 → pausa quando o
-   *  físico zera (total cai de 1.005 p/ 1.000 ≤ 1.000). */
-  private rowToStock(r: { quantity: number | null; virtual_quantity: number | null; min_stock_to_pause: number | null; auto_pause_enabled: boolean | null }): { qty: number; pause: boolean } {
-    const qty = Math.max(0, Math.round(Number(r.quantity || 0) + Number(r.virtual_quantity || 0)))
-    const min = Math.max(0, Math.round(Number(r.min_stock_to_pause || 0)))
-    const pause = !!r.auto_pause_enabled && qty <= min
-    return { qty, pause }
+   *  PAUSA (paridade c/ ML): se `auto_pause_enabled` e o **físico livre**
+   *  (físico − reservado) ≤ `min_stock_to_pause`, o anúncio é pausado
+   *  (empurra 0 = esgotado). O mínimo é comparado contra o estoque REAL, não
+   *  contra físico+virtual — senão, num produto com virtual 10.000, digitar
+   *  "pausar em 3" viraria `10.003 ≤ 3` e nunca pausava. Mínimo 0 = pausa
+   *  quando o físico zera (comportamento da regra de vitrine virtual). */
+  private rowToStock(r: {
+    quantity: number | null; virtual_quantity: number | null
+    reserved_quantity?: number | null
+    min_stock_to_pause: number | null; auto_pause_enabled: boolean | null
+  }): { qty: number; pause: boolean } {
+    // Mesma função que o ML e o TikTok usam — paridade entre canais é requisito,
+    // e a regra viver em UM lugar é o que garante isso.
+    const r2 = applyVirtualStockRule({
+      physical:  Number(r.quantity || 0),
+      virtual:   Number(r.virtual_quantity || 0),
+      reserved:  Number(r.reserved_quantity || 0),
+      minStock:  r.min_stock_to_pause,
+      autoPause: !!r.auto_pause_enabled,
+    })
+    return { qty: r2.qty, pause: r2.pause }
   }
 
   private async virtualStockFor(productId: string): Promise<{ qty: number; pause: boolean } | null> {
     const { data } = await supabaseAdmin
       .from('product_stock')
-      .select('quantity, virtual_quantity, min_stock_to_pause, auto_pause_enabled')
+      .select('quantity, virtual_quantity, reserved_quantity, min_stock_to_pause, auto_pause_enabled')
       .eq('product_id', productId)
       .is('platform', null)
-      .maybeSingle<{ quantity: number | null; virtual_quantity: number | null; min_stock_to_pause: number | null; auto_pause_enabled: boolean | null }>()
+      .maybeSingle<{ quantity: number | null; virtual_quantity: number | null; reserved_quantity: number | null; min_stock_to_pause: number | null; auto_pause_enabled: boolean | null }>()
     if (!data) return null
     return this.rowToStock(data)
   }
@@ -66,7 +80,7 @@ export class ShopeeStockSyncService {
       const chunk = productIds.slice(i, i + 200)
       const { data } = await supabaseAdmin
         .from('product_stock')
-        .select('product_id, quantity, virtual_quantity, min_stock_to_pause, auto_pause_enabled')
+        .select('product_id, quantity, virtual_quantity, reserved_quantity, min_stock_to_pause, auto_pause_enabled')
         .in('product_id', chunk)
         .is('platform', null)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
