@@ -166,20 +166,29 @@ export class StockController {
 
   /** Regra CENTRAL de estoque virtual (todos os canais). Aplica a todos os
    *  produtos com anúncio vinculado da org: físico + N virtual, pausa quando o
-   *  físico zera. body { virtual_units } ou { clear:true } pra remover a regra. */
+   *  físico chega no mínimo. body { virtual_units, min_fisico? } ou
+   *  { clear:true } pra remover a regra. min_fisico é em unidades de estoque
+   *  REAL (default 0 = pausa quando o físico zera). */
   @Post('virtual-rule')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('stock.adjust')
   async applyVirtualRule(
     @ReqUser() user: ReqUserPayload,
-    @Body() body: { virtual_units?: number; clear?: boolean },
+    @Body() body: { virtual_units?: number; clear?: boolean; min_fisico?: number },
   ) {
     if (!user.orgId) throw new HttpException('orgId ausente', 400)
     if (!body?.clear && (body?.virtual_units == null || !Number.isFinite(Number(body.virtual_units)) || Number(body.virtual_units) < 0)) {
       throw new HttpException('virtual_units inválido', 400)
     }
+    if (body?.min_fisico != null && (!Number.isFinite(Number(body.min_fisico)) || Number(body.min_fisico) < 0)) {
+      throw new HttpException('min_fisico inválido', 400)
+    }
     try {
-      return await this.svc.applyVirtualRule(user.orgId, { virtualUnits: Number(body.virtual_units), clear: body.clear })
+      return await this.svc.applyVirtualRule(user.orgId, {
+        virtualUnits: Number(body.virtual_units),
+        clear:        body.clear,
+        minFisico:    body.min_fisico != null ? Number(body.min_fisico) : 0,
+      })
     } catch (e: any) {
       throw new HttpException(e?.message ?? 'Erro ao aplicar regra', 400)
     }
