@@ -106,8 +106,8 @@ export class ExecutiveReputationService {
 
   /**
    * Sincroniza reputação de 1 (org, seller). Idempotente: pode ser chamado
-   * repetidamente. Cria snapshot novo (mesmo se idênticos — pra histórico)
-   * + UPSERT em current.
+   * repetidamente. Faz UPSERT do snapshot do dia (1 linha por dia) + UPSERT
+   * em current.
    */
   async syncReputation(orgId: string, sellerId: number): Promise<ReputationSnapshot> {
     // 1. Token DA conta específica
@@ -177,10 +177,12 @@ export class ExecutiveReputationService {
       raw:                    sr,
     }
 
-    // 6. INSERT snapshot
+    // 6. UPSERT snapshot — a tabela tem UNIQUE (org, seller, snapshot_date):
+    //    com INSERT só o 1º sync do dia gravava e os outros 23 falhavam
+    //    (duplicate key), deixando `current` parado o dia inteiro.
     const { error: snapErr } = await supabaseAdmin
       .from('ml_seller_reputation_snapshots')
-      .insert(snapshotPayload)
+      .upsert(snapshotPayload, { onConflict: 'organization_id,seller_id,snapshot_date' })
     if (snapErr) throw new Error(`snapshot insert: ${snapErr.message}`)
 
     // 7. UPSERT current

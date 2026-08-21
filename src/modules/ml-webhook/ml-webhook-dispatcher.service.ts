@@ -5,6 +5,7 @@ import { MlQuestionsAiService } from '../mercadolivre/ml-questions-ai.service'
 import { MlClaimsService } from '../ml-vertical/services/ml-claims.service'
 import { EventsGateway } from '../events/events.gateway'
 import { OrdersIngestionService } from '../sales-aggregator/services/orders-ingestion.service'
+import { MlReputationService } from '../ml-reputation/ml-reputation.service'
 import type { MlWebhookPayload } from './ml-webhook.types'
 
 /**
@@ -23,6 +24,7 @@ export class MlWebhookDispatcherService {
     private readonly claims:    MlClaimsService,
     private readonly events:    EventsGateway,
     private readonly ingestion: OrdersIngestionService,
+    private readonly reputation: MlReputationService,
   ) {}
 
   async dispatch(payload: MlWebhookPayload): Promise<void> {
@@ -59,6 +61,8 @@ export class MlWebhookDispatcherService {
         case 'claims': {
           // resource: /post-purchase/v1/claims/{id} ou /claims/{id}
           await this.claims.handleClaimWebhook(orgId, payload.user_id, payload.resource)
+          // Reclamação nova/alterada mexe no indicador de reclamações → recalcula (debounce).
+          this.reputation.scheduleRecalc(orgId, payload.user_id, 'claims')
           break
         }
         case 'orders_v2':
@@ -101,6 +105,8 @@ export class MlWebhookDispatcherService {
             received_at:       new Date().toISOString(),
           })
           this.logger.log(`[ml-webhook] ${payload.topic} emit pra org=${orgId} id=${externalId} upserted=${upserted}`)
+          // Venda nova, cancelamento ou mudança de envio alteram janela/denominador → recalcula (debounce 20s).
+          this.reputation.scheduleRecalc(orgId, payload.user_id, payload.topic)
           break
         }
         default:

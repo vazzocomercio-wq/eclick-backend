@@ -28,6 +28,15 @@ export interface MlOrder {
   paid_amount: number
   status: string
   status_detail: string | null
+  /** Presente em pedidos cancelados: quem pediu (group / requested_by) e o motivo. */
+  cancel_detail?: {
+    group?:          string | null
+    code?:           string | null
+    description?:    string | null
+    requested_by?:   string | null
+    date?:           string | null
+    application_id?: number | null
+  } | null
   buyer: {
     id: number
     nickname: string
