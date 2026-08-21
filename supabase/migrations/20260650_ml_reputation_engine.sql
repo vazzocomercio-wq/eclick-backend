@@ -193,12 +193,27 @@ STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
-WITH claim_refs AS (
-  SELECT DISTINCT c.ml_resource_id::text AS ref
+WITH claims_counted AS (
+  -- Reclamações que pesam contra o seller (estimativa): exclui pedidos de
+  -- cancelamento, reclamações resolvidas a favor do vendedor (benefited
+  -- contém 'respondent') e as retiradas pelo comprador (closed_by =
+  -- complainant sem beneficiado). resource pode ser 'order' ou 'shipment'.
+  SELECT c.ml_resource_id::text AS ref, COALESCE(c.raw->>'resource', 'order') AS resource
   FROM public.ml_claims c
   WHERE c.organization_id = p_org
     AND c.ml_resource_id IS NOT NULL
     AND COALESCE(c.type, '') NOT IN ('cancel_purchase', 'cancel_sale')
+    AND NOT COALESCE(c.raw->'resolution'->'benefited' ? 'respondent', false)
+    AND NOT (
+      c.raw->'resolution'->>'closed_by' = 'complainant'
+      AND jsonb_array_length(COALESCE(c.raw->'resolution'->'benefited', '[]'::jsonb)) = 0
+    )
+),
+claim_refs AS (
+  SELECT DISTINCT ref FROM claims_counted WHERE resource <> 'shipment'
+),
+claim_ship_refs AS (
+  SELECT DISTINCT ref FROM claims_counted WHERE resource = 'shipment'
 ),
 delay_orders AS (
   SELECT DISTINCT d.ml_order_id AS ref
@@ -248,7 +263,8 @@ flagged AS (
     (b.is_cancelled AND b.cancelled_paid > 0 AND b.cancelled_by_seller) AS seller_cancelled,
     (b.sold_at >= p_now - make_interval(days => p_short_days))  AS in_short,
     (b.external_order_id IN (SELECT ref FROM claim_refs)
-      OR (b.pack_id IS NOT NULL AND b.pack_id IN (SELECT ref FROM claim_refs)))      AS has_claim,
+      OR (b.pack_id IS NOT NULL AND b.pack_id IN (SELECT ref FROM claim_refs))
+      OR (b.shipping_id IS NOT NULL AND b.shipping_id IN (SELECT ref FROM claim_ship_refs))) AS has_claim,
     (NOT b.is_full AND (
       b.external_order_id IN (SELECT ref FROM delay_orders)
       OR (b.shipping_id IS NOT NULL AND b.shipping_id IN (SELECT ref FROM delay_ships)))) AS has_shipping_issue
@@ -346,6 +362,39 @@ BEGIN
 END;
 $$;
 
+-- 6b. Mesmo backfill em LOTE: p_items = [{"id": "2000001", "detail": {...}}, …]
+-- (1 chamada por página de 50 pedidos em vez de 1 por pedido — conta com
+-- 1.000 cancelados passa de ~2 min pra segundos). Retorna linhas atualizadas.
+CREATE OR REPLACE FUNCTION public.ml_reputation_set_cancel_details(
+  p_org    UUID,
+  p_seller BIGINT,
+  p_items  JSONB
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  n INTEGER;
+BEGIN
+  UPDATE public.orders o
+     SET raw_data   = COALESCE(o.raw_data, '{}'::jsonb) || jsonb_build_object('cancel_detail', i.detail),
+         updated_at = now()
+    FROM (
+      SELECT x->>'id' AS id, x->'detail' AS detail
+      FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) AS x
+      WHERE x ? 'id' AND x ? 'detail'
+    ) i
+   WHERE o.organization_id   = p_org
+     AND o.seller_id         = p_seller
+     AND o.platform          = 'mercadolivre'
+     AND o.external_order_id = i.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END;
+$$;
+
 -- 7. RLS + GRANTs ─────────────────────────────────────────────────────────
 -- Tabelas criadas via _admin_exec_sql NÃO recebem default privileges:
 -- GRANT explícito obrigatório (senão "permission denied" mesmo com policy).
@@ -390,6 +439,8 @@ REVOKE ALL ON FUNCTION public.ml_reputation_account_counts(UUID, BIGINT, TIMESTA
 GRANT EXECUTE ON FUNCTION public.ml_reputation_account_counts(UUID, BIGINT, TIMESTAMPTZ, INTEGER, INTEGER) TO service_role;
 REVOKE ALL ON FUNCTION public.ml_reputation_set_cancel_detail(UUID, BIGINT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.ml_reputation_set_cancel_detail(UUID, BIGINT, TEXT, JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.ml_reputation_set_cancel_details(UUID, BIGINT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.ml_reputation_set_cancel_details(UUID, BIGINT, JSONB) TO service_role;
 
 COMMENT ON TABLE public.ml_reputation_rule_sets IS
   'Regras de reputação ML versionadas por vigência (período 60/365, limiar de vendas, faixas por métrica, níveis de risco). Editar aqui muda o cálculo sem deploy.';
@@ -401,6 +452,7 @@ COMMENT ON TABLE public.ml_reputation_events IS
   'Mudanças relevantes de reputação (faixa, período, risco). dedupe_key + created_at sustentam o cooldown dos alertas.';
 
 -- ROLLBACK (manual):
+--   DROP FUNCTION IF EXISTS public.ml_reputation_set_cancel_details(UUID, BIGINT, JSONB);
 --   DROP FUNCTION IF EXISTS public.ml_reputation_set_cancel_detail(UUID, BIGINT, TEXT, JSONB);
 --   DROP FUNCTION IF EXISTS public.ml_reputation_account_counts(UUID, BIGINT, TIMESTAMPTZ, INTEGER, INTEGER);
 --   DROP TABLE IF EXISTS public.ml_reputation_events;

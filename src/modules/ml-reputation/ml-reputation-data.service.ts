@@ -183,19 +183,18 @@ export class MlReputationDataService {
       if (total === null) total = data?.paging?.total ?? 0
       fetched += results.length
 
-      for (const o of results) {
-        if (!o?.id || !o.cancel_detail) continue
-        const { data: n, error } = await supabaseAdmin.rpc('ml_reputation_set_cancel_detail', {
-          p_org:               orgId,
-          p_seller:            sellerId,
-          p_external_order_id: String(o.id),
-          p_detail:            o.cancel_detail,
+      // 1 chamada por página (UPDATE … FROM jsonb_array_elements) em vez de 1 por pedido.
+      const items = results
+        .filter(o => o?.id && o.cancel_detail)
+        .map(o => ({ id: String(o.id), detail: o.cancel_detail }))
+      if (items.length > 0) {
+        const { data: n, error } = await supabaseAdmin.rpc('ml_reputation_set_cancel_details', {
+          p_org:    orgId,
+          p_seller: sellerId,
+          p_items:  items,
         })
-        if (error) {
-          this.logger.warn(`[backfill] order=${o.id}: ${error.message}`)
-          continue
-        }
-        updated += Number(n ?? 0) > 0 ? 1 : 0
+        if (error) this.logger.warn(`[backfill] página offset=${offset}: ${error.message}`)
+        else updated += Number(n ?? 0)
       }
 
       offset += BACKFILL_PAGE
@@ -221,7 +220,10 @@ export class MlReputationDataService {
   async backfillClaims(orgId: string, sellerId: number, days: number): Promise<{ fetched: number; upserted: number; truncated: boolean }> {
     const { token } = await this.ml.getTokenForOrg(orgId, sellerId)
     const since = Date.now() - days * 24 * 60 * 60 * 1000
-    const PAGE = 30
+    // A API exige o par player_role + player_user_id (só player_role dá 400
+    // "Invalid parameters"); limit 50 é aceito; sort=date_created:desc permite
+    // parar quando sair da janela.
+    const PAGE = 50
     let offset = 0
     let total: number | null = null
     let fetched = 0
@@ -243,7 +245,7 @@ export class MlReputationDataService {
 
     do {
       const url =
-        `${ML_BASE}/post-purchase/v1/claims/search?player_role=respondent&limit=${PAGE}&offset=${offset}&sort=date_created:desc`
+        `${ML_BASE}/post-purchase/v1/claims/search?player_role=respondent&player_user_id=${sellerId}&limit=${PAGE}&offset=${offset}&sort=date_created:desc`
       const { data } = await axios.get<{ paging?: { total?: number }; data?: MlClaimSearchItem[]; results?: MlClaimSearchItem[] }>(
         url, { headers: { Authorization: `Bearer ${token}` }, timeout: 20_000 },
       )
