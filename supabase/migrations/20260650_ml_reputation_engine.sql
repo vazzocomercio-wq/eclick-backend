@@ -168,14 +168,17 @@ CREATE INDEX IF NOT EXISTS idx_ml_reputation_events_dedupe
 -- `orders` guarda 1 linha por ITEM do pedido → agrupa por external_order_id
 -- antes de contar. Janelas móveis: [p_now - N dias, p_now].
 --   completed  = venda concluída (status paid/partially_refunded, não cancelada)
---   counted    = venda concretizada (concluída OU cancelada depois de paga)
+--   counted    = venda concretizada (concluída, OU cancelada depois de paga
+--                [pagamento refunded/approved], OU cancelada pelo seller)
 --                → denominador dos indicadores
 --   seller_cancelled = cancelada com cancel_detail.group/requested_by = seller
+--                (independe de pagamento: paid_amount vem zerado no cancelado)
 --   claims     = pedidos com reclamação (ml_claims, exceto pedidos de
 --                cancelamento) — amarrados por order_id OU pack_id
 --   shipping_issues = pedidos com atraso de manuseio (ml_shipment_delays
 --                handling_delayed, affects_reputation), EXCETO Full
---                (logistic_type = fulfillment: manuseio é do ML, não do seller)
+--                (logistic_type = fulfillment: manuseio é do ML) e pedidos
+--                cancelados. Ainda sai ACIMA do oficial (~2×): estimativa.
 -- Performance: JSON só é lido nas linhas canceladas (paid_amount, cancel_detail);
 -- reclamações/atrasos entram por `IN (subquery)` (hashed subplan, 1 passada),
 -- não por EXISTS correlacionado — em conta com 10k+ pedidos isso é a diferença
@@ -194,19 +197,25 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 WITH claims_counted AS (
-  -- Reclamações que pesam contra o seller (estimativa): exclui pedidos de
-  -- cancelamento, reclamações resolvidas a favor do vendedor (benefited
-  -- contém 'respondent') e as retiradas pelo comprador (closed_by =
-  -- complainant sem beneficiado). resource pode ser 'order' ou 'shipment'.
+  -- Reclamações que pesam no indicador oficial "Reclamações" (calibrado nos
+  -- dados reais: 29/29 na conta VAZZO_ em 21/08/2026): só MEDIAÇÕES que
+  -- chegaram à etapa de disputa (ML interveio) e foram resolvidas contra o
+  -- vendedor (benefited = comprador, sem o vendedor), ou ainda abertas.
+  -- Devoluções, pedidos de cancelamento e reclamações fechadas a favor do
+  -- vendedor / retiradas pelo comprador NÃO entram. resource pode ser
+  -- 'order' ou 'shipment'.
   SELECT c.ml_resource_id::text AS ref, COALESCE(c.raw->>'resource', 'order') AS resource
   FROM public.ml_claims c
   WHERE c.organization_id = p_org
     AND c.ml_resource_id IS NOT NULL
-    AND COALESCE(c.type, '') NOT IN ('cancel_purchase', 'cancel_sale')
-    AND NOT COALESCE(c.raw->'resolution'->'benefited' ? 'respondent', false)
-    AND NOT (
-      c.raw->'resolution'->>'closed_by' = 'complainant'
-      AND jsonb_array_length(COALESCE(c.raw->'resolution'->'benefited', '[]'::jsonb)) = 0
+    AND c.type  = 'mediations'
+    AND c.stage = 'dispute'
+    AND (
+      COALESCE(c.status, '') <> 'closed'
+      OR (
+        COALESCE(c.raw->'resolution'->'benefited' ? 'complainant', false)
+        AND NOT COALESCE(c.raw->'resolution'->'benefited' ? 'respondent', false)
+      )
     )
 ),
 claim_refs AS (
@@ -235,9 +244,12 @@ base AS (
     min(o.sold_at)                                              AS sold_at,
     bool_or(o.status = 'cancelled')                             AS is_cancelled,
     bool_or(o.status IN ('paid', 'partially_refunded'))         AS is_paid,
-    max(CASE WHEN o.status = 'cancelled'
-             THEN COALESCE(NULLIF(o.raw_data->>'paid_amount', '')::numeric, 0)
-             ELSE 0 END)                                        AS cancelled_paid,
+    -- paid_amount vem ZERADO em pedido cancelado (ML estorna) — o sinal de
+    -- "foi pago antes de cancelar" é um pagamento refunded/approved.
+    bool_or(o.status = 'cancelled' AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements(COALESCE(o.raw_data->'payments', '[]'::jsonb)) pay
+      WHERE pay->>'status' IN ('refunded', 'approved', 'in_mediation', 'charged_back', 'partially_refunded')
+    ))                                                          AS cancelled_was_paid,
     bool_or(o.status = 'cancelled' AND (
       (o.raw_data->'cancel_detail'->>'group') = 'seller'
       OR (o.raw_data->'cancel_detail'->>'requested_by') = 'seller'
@@ -259,13 +271,13 @@ flagged AS (
   SELECT
     b.*,
     (b.is_paid AND NOT b.is_cancelled)                          AS completed,
-    (b.is_paid OR (b.is_cancelled AND b.cancelled_paid > 0))    AS counted,
-    (b.is_cancelled AND b.cancelled_paid > 0 AND b.cancelled_by_seller) AS seller_cancelled,
+    (b.is_paid OR (b.is_cancelled AND (b.cancelled_was_paid OR b.cancelled_by_seller))) AS counted,
+    (b.is_cancelled AND b.cancelled_by_seller)                  AS seller_cancelled,
     (b.sold_at >= p_now - make_interval(days => p_short_days))  AS in_short,
     (b.external_order_id IN (SELECT ref FROM claim_refs)
       OR (b.pack_id IS NOT NULL AND b.pack_id IN (SELECT ref FROM claim_refs))
       OR (b.shipping_id IS NOT NULL AND b.shipping_id IN (SELECT ref FROM claim_ship_refs))) AS has_claim,
-    (NOT b.is_full AND (
+    (NOT b.is_full AND NOT b.is_cancelled AND (
       b.external_order_id IN (SELECT ref FROM delay_orders)
       OR (b.shipping_id IS NOT NULL AND b.shipping_id IN (SELECT ref FROM delay_ships)))) AS has_shipping_issue
   FROM base b
