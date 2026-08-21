@@ -248,11 +248,28 @@ export class MlReputationService {
       }
     } catch (err) {
       const msg = (err as Error).message
-      await supabaseAdmin
+      // Registra o erro na linha da conta. No PRIMEIRO cálculo a linha ainda não
+      // existe: cria uma "vazia" com o erro, senão a UI ficaria em "Calculando…"
+      // pra sempre sem explicar (NotFound de conta fora da org não cria nada).
+      const { data: existing } = await supabaseAdmin
         .from('ml_reputation_current')
-        .update({ last_error: msg.slice(0, 500), dirty_since: null, updated_at: new Date().toISOString() })
+        .select('id')
         .eq('organization_id', orgId)
         .eq('seller_id', sellerId)
+        .maybeSingle()
+      const isNotFound = (err as { status?: number }).status === 404
+      if (existing || !isNotFound) {
+        await supabaseAdmin
+          .from('ml_reputation_current')
+          .upsert({
+            organization_id: orgId,
+            seller_id:       sellerId,
+            ...(existing ? {} : { result: { active: null, upcoming: null, counts: null } as unknown as StoredResult }),
+            last_error:      msg.slice(0, 500),
+            dirty_since:     null,
+            updated_at:      new Date().toISOString(),
+          }, { onConflict: 'organization_id,seller_id' })
+      }
       throw err
     } finally {
       this.inflight.delete(key)
