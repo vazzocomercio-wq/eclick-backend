@@ -77,9 +77,14 @@ export class MlReputationService {
         const snap = await this.snapshotForOrg(conn.organization_id, conn.seller_id)
         if (snap) {
           snapshotted++
-          const previous = await this.findPreviousSnapshot(conn.organization_id, conn.seller_id, snap.snapshot_date)
-          const wasAlerted = await this.compareAndEmit(snap, previous)
-          if (wasAlerted) alerted++
+          // Alertas deste worker usam limites antigos e duplicariam os do módulo
+          // ml-reputation (regras versionadas, dedupe/cooldown). Ficam desligados
+          // por padrão; ML_REPUTATION_LEGACY_ALERTS=true religa.
+          if (process.env.ML_REPUTATION_LEGACY_ALERTS === 'true') {
+            const previous = await this.findPreviousSnapshot(conn.organization_id, conn.seller_id, snap.snapshot_date)
+            const wasAlerted = await this.compareAndEmit(snap, previous)
+            if (wasAlerted) alerted++
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)

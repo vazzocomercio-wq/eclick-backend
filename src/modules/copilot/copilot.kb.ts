@@ -2295,41 +2295,29 @@ Cards futuros (E2-E4, próximas camadas — placeholders nullable hoje):
     tags: ['executive-dashboard', 'home', 'kpis', 'agregacao', 'realtime', 'multi-conta'],
   },
   {
-    routes:   ['/dashboard/executive/reputation'],
+    routes:   ['/dashboard/executive/reputation', '/dashboard/executive/reputation/[sellerId]'],
     category: 'executive-dashboard',
-    title:    'Reputação Mercado Livre — gauge + métricas + histórico',
-    content:  `**F11 E2 — Reputação** mostra o estado da reputação do seller no ML em tempo quase real (sync 1×/hora). Dados vêm de \`GET /users/{id}\` → \`seller_reputation\`.
+    title:    'Reputação Mercado Livre — central de prevenção (período 60/365, faixas, margem, alertas)',
+    content:  `**Reputação ML** é a central de prevenção: o lojista descobre o problema ANTES de perder reputação. Mostra cada conta ML conectada com **período de medição**, **vendas 60d/365d**, os 3 indicadores (**Canceladas por você**, **Envios incorretos**, **Reclamações**) com faixa (Verde/Amarelo/Laranja/Vermelho — sempre escrita, não só cor), limite da faixa, margem em p.p., quantas ocorrências ainda cabem e quantas vendas limpas diluem o índice.
 
-**Componentes:**
-- **Level badge gigante** com cor do \`level_id\` (5_green=Platinum, 4_light_green=Gold, 3_yellow=Mercado Líder, 2_orange=sem nível, 1_red/0_red=vermelho)
-- **3 cards de métrica** (Reclamações / Cancelamentos / Atrasos de envio) cada com:
-  - Taxa atual em % (rate ML é fração 0-1, multiplicada por 100 só na UI)
-  - Limite Mercado Líder MLB (1% / 0.5% / 6%)
-  - Status verde/amarelo/vermelho conforme thresholds amber (0.8% / 0.4% / 5%)
-  - Barra de progresso até o limite
-  - Trend ↑ improving / → stable / ↓ degrading (comparando snapshot anterior)
-- **Risk alert amber** se alguma métrica ≥ threshold amber. Lista quais critérios bateram (\`risk_reasons[]\`).
-- **3 sparklines** dos últimos até 90 dias (SVG inline sem chart lib).
-- **Ratings dos compradores** (positivas / neutras / negativas).
-- **Seletor de conta** quando org tem >1 seller ML conectado.
-- **Botão "Sincronizar agora"** dispara \`POST /executive/reputation/sync\` (manual além do cron horário).
+**Período de medição (regra de 10/09/2026):** 68 ou mais vendas concluídas nos últimos 60 dias → avaliação em **60 dias**; menos de 68 → **365 dias**. Janelas MÓVEIS (agora − 60d / − 365d), recalculadas a cada venda, cancelamento, reclamação, envio e 1×/hora. A tela mostra "Faltam X vendas para entrar na avaliação de 60 dias" (barra X/68) e, quando uma conta em 60d tem vendas saindo da janela, "pode voltar para 365 dias em ~N dias se não vender".
 
-**Gotchas importantes (vide \`reference_ml_api_shapes_f11\`):**
-- API ML usa \`claims\` (NÃO \`complaints\`). Schema da tabela e UI usam \`claims_rate\`/\`claims_count\`.
-- \`period\` é string \`"60 days"\` com espaço — não \`"60d"\`.
-- Limites e thresholds calibrados pra MLB. Outros sites podem ter limites diferentes.
+**Faixas (10/09/2026):**
+- Canceladas por você — 60d: verde ≤1,5% · amarelo ≤3,5% · laranja ≤4% · vermelho >4% | 365d: ≤2,5% · ≤5,5% · ≤6,5% · >6,5%
+- Envios incorretos — 60d: ≤10% · ≤18% · ≤22% · >22% | 365d: ≤13% · ≤23,5% · ≤28,5% · >28,5%
+- Reclamações (igual nos 2 períodos): ≤2% · ≤4,5% · ≤8% · >8%
+Antes de 10/09/2026 vale a regra anterior (limiar 60 vendas, faixas de 365d nos dois períodos). As regras ficam em \`ml_reputation_rule_sets\` com vigência — dá pra mudar limite/data sem deploy. Antes da vigência a tela oferece o toggle **"Simulação das regras de 10/09/2026"**.
 
-**Endpoints (backend):**
-- \`GET /executive/reputation\` — current de todas as contas da org
-- \`GET /executive/reputation/history?seller_id=X&days=90\` — série temporal
-- \`POST /executive/reputation/sync\` — manual (todas as contas) ou \`?seller_id=X\`
+**Oficial × calculado (SaaS):** o badge de nível (Mercado Líder etc.) e as taxas oficiais vêm da API do ML (\`GET /users/{id}\`, sync 1×/h). Os indicadores do SaaS são calculados dos pedidos/reclamações/atrasos sincronizados e aparecem como "monitoramento interno" — NUNCA como reputação oficial. Divergência relevante (≥0,5 p.p. e ≥25%) é sinalizada e logada. Cobertura parcial (ex.: reclamações só desde que o webhook foi ligado) aparece como aviso.
 
-**Tabelas:**
-- \`ml_seller_reputation_snapshots\` (histórico, reutilizada do ml-vertical com colunas estendidas)
-- \`ml_seller_reputation_current\` (cache do mais recente + trend)
+**Risco preventivo:** Seguro / Atenção (≥70% da margem da faixa) / Alto (≥85%) / Crítico (≥95% ou já ultrapassou). A **Central de atenção** ordena: vermelho → laranja → amarelo → verde perto do limite. Filtros por faixa, período, "próximas de 68", com alertas; ordenação por risco, vendas, cada índice; busca por nickname/ID.
 
-Trend = \`unknown\` na primeira sync; vira \`improving\`/\`stable\`/\`degrading\` quando há snapshot anterior pra comparar.`,
-    tags: ['executive-dashboard', 'reputation', 'mercado-lider', 'risk', 'trend'],
+**Simulador (página da conta):** "+N cancelamentos / envios / reclamações" e "+N vendas sem problema" → percentual projetado, nova faixa, margem. Só visual.
+
+**Alertas (Intelligence Hub, analyzer \`ml\`):** troca de faixa (piora → warning/critical), aproximação do limite, troca de período (info). Dedupe por evento + cooldown (24h faixa/período, 72h aproximação). Eventos em \`ml_reputation_events\`; histórico diário em \`ml_reputation_snapshots\` (1 linha/dia, último cálculo vence).
+
+**Endpoints:** \`GET /ml-reputation/dashboard\` · \`GET /ml-reputation/accounts/:sellerId\` · \`…/history?days=\` · \`POST …/recalculate\` · \`POST …/simulate\` · \`GET /ml-reputation/rules\` · \`GET /ml-reputation/events\`. Realtime: Socket.IO \`reputation:updated\`.`,
+    tags: ['executive-dashboard', 'reputation', 'mercado-lider', 'risk', 'trend', 'periodo-60-365', 'regras-versionadas', 'alertas', 'simulador'],
   },
   {
     routes:   ['/dashboard/executive/logistics'],

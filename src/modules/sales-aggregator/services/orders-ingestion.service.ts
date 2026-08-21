@@ -898,6 +898,9 @@ export class OrdersIngestionService {
             date_closed:   order.date_closed,
             status:        order.status,
             status_detail: order.status_detail ?? null,
+            // Quem cancelou (group/requested_by = seller|buyer|…) — base do indicador
+            // "canceladas por você" do módulo de reputação.
+            cancel_detail: order.cancel_detail ?? null,
             total_amount:  order.total_amount,
             paid_amount:   order.paid_amount ?? null,
             pack_id:       (order as unknown as Record<string, unknown>).pack_id ?? null,

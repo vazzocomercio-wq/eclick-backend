@@ -91,6 +91,7 @@ import { FinanceiroModule } from './modules/financeiro/financeiro.module'
 import { Prod3dModule } from './modules/prod3d/prod3d.module'
 import { MlListingModule } from './modules/ml-listing/ml-listing.module'
 import { ExecutiveDashboardModule } from './modules/executive-dashboard/executive-dashboard.module'
+import { MlReputationModule } from './modules/ml-reputation/ml-reputation.module'
 import { VisitsScannerModule } from './modules/ml-intelligence/visits-scanner/visits-scanner.module'
 import { EOtimizerModule } from './modules/e-otimizer/e-otimizer.module'
 import { IcarusIntegrationModule } from './modules/icarus-integration/icarus-integration.module'
@@ -199,6 +200,7 @@ import { RbacModule } from './modules/rbac/rbac.module'
     Prod3dModule,
     MlListingModule,
     ExecutiveDashboardModule,
+    MlReputationModule,
     VisitsScannerModule,
     EOtimizerModule,
     IcarusIntegrationModule,
