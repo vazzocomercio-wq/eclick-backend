@@ -149,6 +149,20 @@ export class MlReputationService {
     this.timers.set(key, t)
   }
 
+  /**
+   * Primeiro cálculo de uma conta (tela abriu e não há linha): dispara JÁ,
+   * sem debounce, e não reinicia nada se já estiver rodando ou agendado.
+   * (Antes usava scheduleRecalc: a tela re-consulta a cada 15 s enquanto há
+   * conta pendente e cada consulta reiniciava o timer de 20 s — o cálculo
+   * nunca disparava com a tela aberta.)
+   */
+  ensureCalculated(orgId: string, sellerId: number): void {
+    const key = `${orgId}:${sellerId}`
+    if (this.inflight.has(key) || this.timers.has(key)) return
+    this.recalculate(orgId, sellerId, { reason: 'first_load' }).catch(err =>
+      this.logger.warn(`[recalc:first_load] ${key}: ${(err as Error).message}`))
+  }
+
   async recalculate(
     orgId: string,
     sellerId: number,
@@ -310,7 +324,7 @@ export class MlReputationService {
       const row = byId.get(c.seller_id)
       if (!row) {
         // Nunca calculado: dispara em background e devolve "pendente".
-        this.scheduleRecalc(orgId, c.seller_id, 'first_load')
+        this.ensureCalculated(orgId, c.seller_id)
         return { seller_id: c.seller_id, nickname: c.nickname, status: 'pending', calculated_at: null, cancel_backfilled_at: null, last_error: null, active: null, upcoming: null }
       }
       return this.rowToView(row, c.nickname)
@@ -341,7 +355,7 @@ export class MlReputationService {
     const conn = await this.data.assertAccountInOrg(orgId, sellerId)
     const row = await this.fetchCurrentRow(orgId, sellerId)
     if (!row) {
-      this.scheduleRecalc(orgId, sellerId, 'first_load')
+      this.ensureCalculated(orgId, sellerId)
       return { seller_id: sellerId, nickname: conn.nickname, status: 'pending', calculated_at: null, cancel_backfilled_at: null, last_error: null, active: null, upcoming: null }
     }
     return this.rowToView(row, conn.nickname)
