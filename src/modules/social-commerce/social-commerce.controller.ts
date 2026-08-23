@@ -180,6 +180,22 @@ export class SocialCommerceController {
     return this.svc.listInstagramMedia(u.orgId, after)
   }
 
+  /** POST /social-commerce/instagram/media/delete — apaga posts do feed.
+   *
+   *  IRREVERSIVEL: a Meta nao tem "desfazer". Exige o scope
+   *  instagram_manage_contents (reconectar o Meta se faltar). Devolve o
+   *  que apagou e o que falhou, item a item. */
+  @Post('instagram/media/delete')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('social.publish')
+  deleteIgMedia(
+    @ReqUser() u: ReqUserPayload,
+    @Body() body: { media_ids: string[] },
+  ) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.deleteInstagramMedia(u.orgId, body?.media_ids ?? [])
+  }
+
   /** GET /social-commerce/instagram/taggable-products?search= */
   @Get('instagram/taggable-products')
   @RequirePermission('social.view')

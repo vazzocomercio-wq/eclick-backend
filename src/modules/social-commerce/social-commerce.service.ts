@@ -152,6 +152,33 @@ export class SocialCommerceService {
   /** Lista posts/reels do IG, marcando quais já têm produtos tagueados
    *  (1 chamada extra de product_tags por mídia — só pros que são IMAGE/
    *  CAROUSEL, que aceitam tag). */
+  /** Apaga posts do feed. IRREVERSIVEL — nao ha "desfazer" na Meta.
+   *
+   *  Feito em lote porque o caso de uso e limpar o feed pra recomecar a
+   *  marca (Vazzo, 08/2026: 10 posts da linha antiga de iluminacao). Nao
+   *  para no primeiro erro: devolve o que apagou e o que falhou, pra tela
+   *  poder mostrar exatamente o que sobrou. */
+  async deleteInstagramMedia(orgId: string, mediaIds: string[]): Promise<{
+    deleted: string[]
+    failed:  Array<{ id: string; error: string }>
+  }> {
+    if (!mediaIds?.length) throw new BadRequestException('Nenhum post informado')
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+
+    const deleted: string[] = []
+    const failed:  Array<{ id: string; error: string }> = []
+    for (const id of mediaIds) {
+      try {
+        await this.meta.deleteInstagramMedia(ch.access_token!, id)
+        deleted.push(id)
+      } catch (e) {
+        failed.push({ id, error: (e as Error).message })
+      }
+    }
+    this.logger.log(`[social-commerce.deleteMedia] org=${orgId.slice(0,8)} apagados=${deleted.length} falhas=${failed.length}`)
+    return { deleted, failed }
+  }
+
   async listInstagramMedia(orgId: string, after?: string): Promise<{
     data: Array<{
       id: string; media_type: string; media_url?: string; thumbnail_url?: string

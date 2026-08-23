@@ -45,12 +45,21 @@ const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 //   API rejeita /{media_id}/insights e /{ig_user_id}/insights.
 // pages_show_list: necessario pro fluxo IG (listar Pages com IG vinculado)
 //
-// Frente 4 (DM no Active) — os tres ultimos scopes. Incluidos aqui de
-// proposito ANTES do modulo existir: o re-OAuth pra salvar o data access
-// (ver checkTokenHealth) so acontece de tempos em tempos, e sem eles o
-// lojista teria que autorizar DUAS vezes. pages_manage_metadata e o que
-// permite inscrever a Page no webhook (subscribed_apps) — sem ele o
-// Direct conecta mas nenhuma mensagem chega.
+// Frente 4 (DM no Active) — instagram_manage_messages, pages_messaging e
+// pages_manage_metadata. Incluidos ANTES do modulo existir de proposito: o
+// re-OAuth so acontece de tempos em tempos, e sem eles o lojista teria que
+// autorizar DUAS vezes. pages_manage_metadata e o que permite inscrever a
+// Page no webhook (subscribed_apps) — sem ele o Direct conecta e fica mudo.
+//
+// instagram_manage_contents: APAGAR post/reel/carrossel do feed
+// (DELETE /{ig-media-id}). Sem ele a Graph responde
+// "(#10) Insufficient permissions" — confirmado em 23/08/2026 tentando
+// com token de usuario E token de Page, nas v21 e v23.
+// Precisa quando o lojista quer limpar o feed pra recomecar a marca (caso
+// da Vazzo: 10 posts da linha antiga de iluminacao).
+// ⚠️ E Advanced Access: usuario comum so recebe apos App Review. Quem tem
+// CARGO no app (admin/dev/tester) recebe direto no dialogo — foi assim que
+// instagram_manage_messages e pages_manage_metadata entraram sem review.
 const META_SCOPES = [
   'catalog_management',
   'business_management',
@@ -65,6 +74,7 @@ const META_SCOPES = [
   'instagram_manage_messages',
   'pages_messaging',
   'pages_manage_metadata',
+  'instagram_manage_contents',
 ].join(',')
 
 /** Verdade sobre um token, direto do /debug_token da Meta. */
@@ -372,6 +382,31 @@ export class MetaCatalogService {
     }
     if (!res.ok) throw new BadRequestException(`Meta getInstagramAccount: ${body.error?.message ?? 'erro'}`)
     return body.instagram_business_account ?? null
+  }
+
+  /** APAGA um post/reel/carrossel do feed. IRREVERSIVEL.
+   *
+   *  Precisa do scope `instagram_manage_contents`. Sem ele a Graph responde
+   *  "(#10) Insufficient permissions" — e nada acontece.
+   *
+   *  Limites da Meta: nao apaga Stories nem live video; carrossel so sai
+   *  INTEIRO (passando o id do album, nao o do slide).
+   *
+   *  A mensagem de erro distingue o caso de permissao dos demais: sem isso
+   *  o lojista ve so "erro 400" e nao tem como saber que falta reconectar. */
+  async deleteInstagramMedia(accessToken: string, mediaId: string): Promise<void> {
+    const url = `${GRAPH_API_BASE}/${mediaId}?access_token=${encodeURIComponent(accessToken)}`
+    const res = await fetch(url, { method: 'DELETE' })
+    if (res.ok) return
+
+    const body = await res.json().catch(() => ({})) as { error?: { message?: string; code?: number } }
+    if (body.error?.code === 10 || body.error?.code === 200) {
+      throw new BadRequestException(
+        'A Meta recusou apagar: falta a permissao instagram_manage_contents. '
+        + 'Reconecte o Meta autorizando o acesso ao conteudo do Instagram.',
+      )
+    }
+    throw new BadRequestException(`Meta nao apagou o post: ${body.error?.message ?? `HTTP ${res.status}`}`)
   }
 
   /** Lista mídia (posts/reels) de um IG Business Account.
