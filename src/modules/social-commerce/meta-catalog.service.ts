@@ -45,8 +45,12 @@ const META_TOKEN_URL   = 'https://graph.facebook.com/v19.0/oauth/access_token'
 //   API rejeita /{media_id}/insights e /{ig_user_id}/insights.
 // pages_show_list: necessario pro fluxo IG (listar Pages com IG vinculado)
 //
-// Frente 4 (DM no Active) vai precisar de instagram_manage_messages +
-// instagram_manage_comments — adicionar quando construir (re-OAuth na epoca).
+// Frente 4 (DM no Active) — os tres ultimos scopes. Incluidos aqui de
+// proposito ANTES do modulo existir: o re-OAuth pra salvar o data access
+// (ver checkTokenHealth) so acontece de tempos em tempos, e sem eles o
+// lojista teria que autorizar DUAS vezes. pages_manage_metadata e o que
+// permite inscrever a Page no webhook (subscribed_apps) — sem ele o
+// Direct conecta mas nenhuma mensagem chega.
 const META_SCOPES = [
   'catalog_management',
   'business_management',
@@ -58,7 +62,24 @@ const META_SCOPES = [
   'instagram_shopping_tag_products',
   'instagram_content_publish',
   'instagram_manage_insights',
+  'instagram_manage_messages',
+  'pages_messaging',
+  'pages_manage_metadata',
 ].join(',')
+
+/** Verdade sobre um token, direto do /debug_token da Meta. */
+export interface MetaTokenHealth {
+  is_valid:               boolean
+  /** ISO, ou null quando o token nao expira (long-lived devolve 0). */
+  expires_at:             string | null
+  /** ISO. A data que REALMENTE derruba a integracao — a Meta corta o
+   *  acesso a dados 90 dias depois da ultima interacao do usuario com o
+   *  app, independente do token "nao expirar". */
+  data_access_expires_at: string | null
+  scopes:                 string[]
+  app_id:                 string | null
+  error:                  string | null
+}
 
 @Injectable()
 export class MetaCatalogService {
@@ -176,14 +197,20 @@ export class MetaCatalogService {
     }
 
     const accessToken = t2.access_token ?? t1.access_token
-    const expiresIn   = t2.expires_in   ?? t1.expires_in ?? 3600
-    const expiresAt   = new Date(Date.now() + expiresIn * 1000).toISOString()
+
+    // A validade REAL vem do /debug_token, nao do expires_in do OAuth.
+    // O long-lived devolve expires_in de ~60d mas o token nao expira
+    // (expires_at=0); quem derruba a integracao e o data_access_expires_at,
+    // que o expires_in nao menciona. Gravar o calculo antigo produzia uma
+    // data falsa na tela (ja vencida, com tudo funcionando).
+    const health      = await this.debugToken(accessToken)
+    const healthPatch = this.buildTokenHealthPatch(health)
 
     // Upsert na tabela de channels (Instagram Shop por padrão; user pode
     // depois selecionar Page+IG via /setup-catalog)
     const { data: existing } = await supabaseAdmin
       .from('social_commerce_channels')
-      .select('id, external_catalog_id, status')
+      .select('id, external_catalog_id, status, config')
       .eq('organization_id', stateRow.organization_id)
       .eq('channel', 'instagram_shop')
       .maybeSingle()
@@ -199,9 +226,10 @@ export class MetaCatalogService {
         .from('social_commerce_channels')
         .update({
           access_token:     accessToken,
-          token_expires_at: expiresAt,
+          token_expires_at: health.expires_at,
           status:           keepConnected ? 'connected' : 'connecting',
           last_error:       null,
+          config:           { ...((existing.config as Record<string, unknown>) ?? {}), ...healthPatch },
         })
         .eq('id', existing.id)
       if (updErr) throw new BadRequestException(`Erro ao atualizar canal: ${updErr.message}`)
@@ -213,8 +241,9 @@ export class MetaCatalogService {
           organization_id:  stateRow.organization_id,
           channel:          'instagram_shop',
           access_token:     accessToken,
-          token_expires_at: expiresAt,
+          token_expires_at: health.expires_at,
           status:           'connecting',
+          config:           healthPatch,
         })
         .select('id')
         .maybeSingle()
@@ -223,6 +252,94 @@ export class MetaCatalogService {
     }
 
     return { channelId, redirect_to: stateRow.redirect_to ?? null }
+  }
+
+  // ── Saude do token ───────────────────────────────────────────────────────
+
+  /** Dias de antecedencia com que o alerta de reconexao aparece na tela. */
+  static readonly TOKEN_ALERT_DAYS = 14
+
+  /** Pergunta a Meta o que ela REALMENTE sabe sobre o token.
+   *
+   *  `/debug_token` aceita o proprio token como credencial de leitura
+   *  quando ele pertence ao mesmo app — nao precisamos do app token.
+   *
+   *  Nunca lanca: e chamado no meio do OAuth e num cron. Falha de rede
+   *  vira `is_valid: false` + `error` preenchido, e o caller decide. */
+  async debugToken(accessToken: string): Promise<MetaTokenHealth> {
+    const empty: MetaTokenHealth = {
+      is_valid: false, expires_at: null, data_access_expires_at: null,
+      scopes: [], app_id: null, error: null,
+    }
+    try {
+      const url = `${GRAPH_API_BASE}/debug_token`
+        + `?input_token=${encodeURIComponent(accessToken)}`
+        + `&access_token=${encodeURIComponent(accessToken)}`
+      const res  = await fetch(url)
+      const body = await res.json() as {
+        data?: {
+          is_valid?:               boolean
+          expires_at?:             number
+          data_access_expires_at?: number
+          scopes?:                 string[]
+          app_id?:                 string
+        }
+        error?: { message?: string }
+      }
+      if (!res.ok || !body.data) {
+        return { ...empty, error: body.error?.message ?? `HTTP ${res.status}` }
+      }
+      const d = body.data
+      // expires_at / data_access_expires_at vem em SEGUNDOS epoch, e 0
+      // significa "nao expira" — nao e uma data em 1970.
+      const toIso = (s?: number): string | null =>
+        typeof s === 'number' && s > 0 ? new Date(s * 1000).toISOString() : null
+      return {
+        is_valid:               Boolean(d.is_valid),
+        expires_at:             toIso(d.expires_at),
+        data_access_expires_at: toIso(d.data_access_expires_at),
+        scopes:                 d.scopes ?? [],
+        app_id:                 d.app_id ?? null,
+        error:                  null,
+      }
+    } catch (e) {
+      return { ...empty, error: (e as Error).message }
+    }
+  }
+
+  /** Traduz a saude do token nos campos que gravamos em `config` e que a
+   *  tela le. `token_alert` vem em PT-BR pronto pra exibir — null quando
+   *  esta tudo bem. */
+  buildTokenHealthPatch(health: MetaTokenHealth): Record<string, unknown> {
+    return {
+      token_checked_at:             new Date().toISOString(),
+      token_valid:                  health.is_valid,
+      token_data_access_expires_at: health.data_access_expires_at,
+      token_scopes:                 health.scopes,
+      token_alert:                  this.buildTokenAlert(health),
+    }
+  }
+
+  /** Mensagem de alerta, ou null se nao ha o que avisar. */
+  private buildTokenAlert(health: MetaTokenHealth): string | null {
+    if (health.error)     return `Nao foi possivel verificar a conexao com a Meta: ${health.error}`
+    if (!health.is_valid) return 'A conexao com a Meta caiu. Reconecte pra voltar a sincronizar o catalogo.'
+
+    // A data que mata primeiro manda no alerta: normalmente e o data
+    // access, mas um token de vida curta pode vencer antes.
+    const candidates = [health.expires_at, health.data_access_expires_at]
+      .filter((d): d is string => !!d)
+      .map(d => new Date(d).getTime())
+    if (candidates.length === 0) return null
+
+    const soonest = Math.min(...candidates)
+    const days    = Math.floor((soonest - Date.now()) / 86_400_000)
+    if (days > MetaCatalogService.TOKEN_ALERT_DAYS) return null
+
+    const quando = new Date(soonest).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+    if (days < 0)  return `A conexao com a Meta venceu em ${quando}. Reconecte pra voltar a sincronizar o catalogo.`
+    if (days === 0) return `A conexao com a Meta vence HOJE (${quando}). Reconecte agora.`
+    return `A conexao com a Meta vence em ${days} dia(s), no dia ${quando}. Reconecte pra nao perder o catalogo do Instagram e do WhatsApp.`
   }
 
   // ── Graph API ────────────────────────────────────────────────────────────

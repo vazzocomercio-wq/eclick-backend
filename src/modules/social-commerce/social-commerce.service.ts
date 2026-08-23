@@ -64,6 +64,33 @@ export class SocialCommerceService {
     return (data as SocialCommerceChannelRow) ?? null
   }
 
+  /** Verifica a saude do token AGORA (sem esperar o cron das 06:00) e
+   *  persiste o resultado. Usado pelo botao "Verificar conexao" da tela e
+   *  logo depois do re-OAuth, pra confirmar que a data nova pegou. */
+  async refreshTokenHealth(
+    orgId: string,
+    channel: SocialCommerceChannel = 'instagram_shop',
+  ): Promise<{ alert: string | null; valid: boolean; data_access_expires_at: string | null }> {
+    const ch = await this.getStatus(orgId, channel)
+    if (!ch?.access_token) throw new BadRequestException('Canal sem token — conecte o Meta primeiro')
+
+    const health = await this.meta.debugToken(ch.access_token)
+    const patch  = this.meta.buildTokenHealthPatch(health)
+    await supabaseAdmin
+      .from('social_commerce_channels')
+      .update({
+        config:           { ...(ch.config ?? {}), ...patch },
+        token_expires_at: health.expires_at,
+      })
+      .eq('id', ch.id)
+
+    return {
+      alert:                  patch.token_alert as string | null,
+      valid:                  health.is_valid,
+      data_access_expires_at: health.data_access_expires_at,
+    }
+  }
+
   async listAvailablePages(orgId: string): Promise<Array<{ id: string; name: string; instagram_business_account?: { id: string } }>> {
     const ch = await this.getStatus(orgId, 'instagram_shop')
     if (!ch?.access_token) throw new BadRequestException('Conecte o Meta primeiro')
@@ -932,5 +959,72 @@ export class SocialCommerceService {
       }
     }
     this.logger.log(`[daily-sync] concluido — synced=${totalSynced} failed=${totalFailed}`)
+  }
+
+  /** Saude do token Meta: 06:00 BRT, logo depois do sync diario.
+   *
+   *  Existe porque a conexao com a Meta morre SEM aviso. O token
+   *  long-lived nao expira, mas a Meta corta o acesso a dados 90 dias
+   *  depois da ultima interacao do lojista com o app — e nada no produto
+   *  olhava essa data. Resultado real (auditoria de 23/08/2026): o
+   *  `token_expires_at` na tela marcava 26/05, ja vencido, enquanto tudo
+   *  funcionava; e o data access de verdade venceria em 6 dias, sem
+   *  ninguem saber.
+   *
+   *  Roda `debug_token` em cada canal conectado, grava a verdade em
+   *  `config` e deixa `config.token_alert` pronto pra tela exibir.
+   *
+   *  O mesmo token serve instagram_shop E whatsapp_business (mesmo app
+   *  Meta), entao os dois canais sao verificados. */
+  @Cron('0 6 * * *', { name: 'checkMetaTokenHealth', timeZone: 'America/Sao_Paulo' })
+  async checkTokenHealth(): Promise<void> {
+    const { data: channels, error } = await supabaseAdmin
+      .from('social_commerce_channels')
+      .select('id, organization_id, channel, access_token, config, status')
+      .in('channel', ['instagram_shop', 'whatsapp_business'])
+      .in('status', ['connected', 'connecting'])
+
+    if (error) {
+      this.logger.error(`[token-health] select channels falhou: ${error.message}`)
+      return
+    }
+    if (!channels?.length) {
+      this.logger.log('[token-health] nenhum canal conectado — skip')
+      return
+    }
+
+    let alertas = 0, invalidos = 0
+    for (const ch of channels as Array<{
+      id: string; organization_id: string; channel: string
+      access_token: string | null; config: Record<string, unknown> | null; status: string
+    }>) {
+      if (!ch.access_token) continue
+      try {
+        const health = await this.meta.debugToken(ch.access_token)
+        const patch  = this.meta.buildTokenHealthPatch(health)
+
+        // Token invalido derruba o canal pra 'error': sem isso o sync
+        // segue tentando todo dia e falhando em silencio.
+        const update: Record<string, unknown> = {
+          config:           { ...(ch.config ?? {}), ...patch },
+          token_expires_at: health.expires_at,
+        }
+        if (!health.is_valid && !health.error) {
+          update.status     = 'error'
+          update.last_error = 'Conexao com a Meta expirada — reconecte em Configuracoes'
+          invalidos++
+        }
+        await supabaseAdmin.from('social_commerce_channels').update(update).eq('id', ch.id)
+
+        const alerta = patch.token_alert as string | null
+        if (alerta) {
+          alertas++
+          this.logger.warn(`[token-health] org=${ch.organization_id.slice(0,8)} ${ch.channel}: ${alerta}`)
+        }
+      } catch (e) {
+        this.logger.warn(`[token-health] org=${ch.organization_id.slice(0,8)} ${ch.channel} falhou: ${(e as Error).message}`)
+      }
+    }
+    this.logger.log(`[token-health] concluido — ${channels.length} canais, ${alertas} alerta(s), ${invalidos} invalido(s)`)
   }
 }

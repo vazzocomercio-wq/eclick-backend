@@ -119,6 +119,9 @@ export class SocialCommerceController {
         last_error:          ch.last_error,
         products_synced:     ch.products_synced,
         sync_errors:         ch.sync_errors,
+        // Validade REAL do token (do /debug_token, nao do expires_in do
+        // OAuth). O aviso pronto pra exibir vem em config.token_alert.
+        token_expires_at:    ch.token_expires_at,
       } : null,
     }
   }
@@ -282,13 +285,44 @@ export class SocialCommerceController {
 
   // ── WhatsApp Business Catalog ─────────────────────────────────────
 
-  /** GET /social-commerce/whatsapp/status — mesmo formato do instagram. */
+  /** GET /social-commerce/whatsapp/status — mesmo formato do instagram.
+   *
+   *  ATENCAO: nao devolver a row crua. `SocialCommerceChannelRow` carrega
+   *  `access_token` (token de usuario da Meta, em texto puro) — devolve-lo
+   *  entregava a credencial pra qualquer usuario autenticado da org, e ela
+   *  da acesso a catalogo, paginas, Instagram e WhatsApp. Lista explicita. */
   @Get('whatsapp/status')
   @RequirePermission('integrations.view')
   async whatsappStatus(@ReqUser() u: ReqUserPayload) {
     if (!u.orgId) throw new BadRequestException('orgId ausente')
     const ch = await this.svc.getStatus(u.orgId, 'whatsapp_business')
-    return ch ? { connected: ch.status === 'connected', channel: ch } : { connected: false, channel: null }
+    return ch ? {
+      connected: ch.status === 'connected',
+      channel: {
+        id:                  ch.id,
+        status:              ch.status,
+        external_account_id: ch.external_account_id,
+        external_catalog_id: ch.external_catalog_id,
+        config:              ch.config,
+        last_sync_at:        ch.last_sync_at,
+        last_sync_status:    ch.last_sync_status,
+        last_error:          ch.last_error,
+        products_synced:     ch.products_synced,
+        sync_errors:         ch.sync_errors,
+        token_expires_at:    ch.token_expires_at,
+      },
+    } : { connected: false, channel: null }
+  }
+
+  /** POST /social-commerce/meta/token-health — verifica a conexao com a
+   *  Meta agora e persiste. Botao "Verificar conexao" da tela; tambem
+   *  serve pra confirmar, logo depois do re-OAuth, que a data nova pegou. */
+  @Post('meta/token-health')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('integrations.view')
+  tokenHealth(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.refreshTokenHealth(u.orgId, 'instagram_shop')
   }
 
   /** GET /social-commerce/whatsapp/wabas — lista WABAs do user, reusando
