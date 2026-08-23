@@ -75,4 +75,18 @@ export interface MetaProductData {
   gtin?:                 string
   custom_label_0?:       string
   custom_label_1?:       string
+  /** 'published' aparece na sacolinha; 'staging' fica no catalogo mas
+   *  SOME da loja do Instagram/WhatsApp. Sempre mandar explicito: sem
+   *  isso, produto que voltou pra vitrine continuaria escondido. */
+  visibility?:           'published' | 'staging'
+}
+
+/** Item que saiu da vitrine mas continua publicado no catalogo da Meta. */
+export interface CatalogOrphan {
+  product_id:  string
+  retailer_id: string
+  name:        string
+  sku:         string | null
+  price:       number | null
+  stock:       number | null
 }

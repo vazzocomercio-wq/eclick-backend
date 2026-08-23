@@ -257,6 +257,16 @@ export class SocialCommerceController {
     return this.svc.listSyncedProducts(u.orgId, 'instagram_shop')
   }
 
+  /** GET /social-commerce/instagram/orphans — produtos que sairam da
+   *  vitrine mas continuam publicados no catalogo da Meta. Read-only: e o
+   *  preview do que o proximo sync vai esconder. */
+  @Get('instagram/orphans')
+  @RequirePermission('social.view')
+  listOrphans(@ReqUser() u: ReqUserPayload) {
+    if (!u.orgId) throw new BadRequestException('orgId ausente')
+    return this.svc.listCatalogOrphans(u.orgId)
+  }
+
   /** POST /social-commerce/instagram/products/add */
   @Post('instagram/products/add')
   @HttpCode(HttpStatus.OK)

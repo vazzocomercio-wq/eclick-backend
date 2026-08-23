@@ -8,6 +8,7 @@ import type {
   SocialCommerceProductRow,
   ProductSyncStatus,
   MetaProductData,
+  CatalogOrphan,
 } from './social-commerce.types'
 
 /** Força https:// em URLs de imagem. Meta rejeita/não-carrega image_link
@@ -528,6 +529,8 @@ export class SocialCommerceService {
     synced: number
     failed: number
     skipped: number
+    /** Quantos sairam do ar por nao estarem mais na vitrine. */
+    unpublished: number
   }> {
     const ch = await this.requireConnected(orgId, 'instagram_shop')
     const storeSlug = await this.fetchStoreSlug(orgId)
@@ -545,7 +548,11 @@ export class SocialCommerceService {
       .eq('storefront_visible', true)
       .limit(5000)
     if (error) throw new BadRequestException(`Erro ao listar: ${error.message}`)
-    if (!products?.length) return { synced: 0, failed: 0, skipped: 0 }
+    // Vitrine vazia nao e motivo pra pular a limpeza — pelo contrario: se
+    // TODO produto saiu da loja, todo item do catalogo virou orfao.
+    if (!products?.length) {
+      return { synced: 0, failed: 0, skipped: 0, unpublished: await this.unpublishOrphans(orgId, ch) }
+    }
 
     // 2) Constrói requests + pula inválidos
     type R = { method: 'UPDATE'; retailer_id: string; data: MetaProductData; product_id: string }
@@ -560,7 +567,9 @@ export class SocialCommerceService {
       const retailerId = p.sku || p.id
       requests.push({ method: 'UPDATE', retailer_id: retailerId, data: metaData, product_id: p.id })
     }
-    if (!requests.length) return { synced: 0, failed: 0, skipped }
+    if (!requests.length) {
+      return { synced: 0, failed: 0, skipped, unpublished: await this.unpublishOrphans(orgId, ch) }
+    }
 
     // 3) Envia em chunks de 1000 (margem do limite 5000 da Meta)
     const CHUNK_SIZE = 1000
@@ -638,7 +647,125 @@ export class SocialCommerceService {
       .eq('organization_id', orgId)
       .eq('external_catalog_id', ch.external_catalog_id!)
 
-    return { synced, failed, skipped }
+    // 5) Tira do ar quem saiu da vitrine. Ate aqui o syncAll so mandava
+    //    UPDATE dos visiveis e nunca desfazia nada — produto retirado da
+    //    loja continuava `published` no catalogo pra sempre, com preco e
+    //    estoque congelados no dia em que saiu (na Vazzo eram 265 itens
+    //    fantasma contra 46 reais, auditoria 23/08/2026).
+    const unpublished = await this.unpublishOrphans(orgId, ch)
+
+    return { synced, failed, skipped, unpublished }
+  }
+
+  /** Produtos que estao mapeados no catalogo da Meta mas ja NAO estao mais
+   *  visiveis na vitrine. Read-only — serve pro preview da tela e pro
+   *  unpublishOrphans. */
+  async listCatalogOrphans(orgId: string): Promise<CatalogOrphan[]> {
+    const ch = await this.requireConnected(orgId, 'instagram_shop')
+
+    const { data: mapped } = await supabaseAdmin
+      .from('social_commerce_products')
+      .select('product_id')
+      .eq('organization_id', orgId)
+      .eq('channel_id', ch.id)
+      .neq('sync_status', 'paused')
+    const mappedIds = ((mapped ?? []) as Array<{ product_id: string }>).map(r => r.product_id)
+    if (mappedIds.length === 0) return []
+
+    const { data: visible } = await supabaseAdmin
+      .from('products')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('storefront_visible', true)
+      .limit(5000)
+    const visibleIds = new Set(((visible ?? []) as Array<{ id: string }>).map(r => r.id))
+
+    const orphanIds = mappedIds.filter(id => !visibleIds.has(id))
+    if (orphanIds.length === 0) return []
+
+    // Busca em lotes: o `in.()` do PostgREST vai na URL e estoura com
+    // muitos UUIDs.
+    const out: CatalogOrphan[] = []
+    const LOTE = 100
+    for (let i = 0; i < orphanIds.length; i += LOTE) {
+      const { data } = await supabaseAdmin
+        .from('products')
+        .select('id, name, sku, price, stock')
+        .in('id', orphanIds.slice(i, i + LOTE))
+      for (const p of (data ?? []) as Array<{
+        id: string; name: string; sku: string | null; price: number | null; stock: number | null
+      }>) {
+        out.push({
+          product_id:  p.id,
+          // Mesma regra do sync: `sku || id`. Precisa bater, senao a Meta
+          // nao acha o item pra esconder.
+          retailer_id: p.sku || p.id,
+          name:        p.name,
+          sku:         p.sku,
+          price:       p.price,
+          stock:       p.stock,
+        })
+      }
+    }
+    return out
+  }
+
+  /** Manda os orfaos pra `visibility: staging` — somem da sacolinha do
+   *  Instagram e do catalogo do WhatsApp, mas continuam no catalogo.
+   *
+   *  Escondemos em vez de DELETE de proposito: e reversivel (voltou pra
+   *  vitrine, o mapToMetaFormat manda `published` de novo) e nao quebra a
+   *  tag de produto em post que ja foi publicado. */
+  private async unpublishOrphans(
+    orgId: string,
+    ch: SocialCommerceChannelRow,
+  ): Promise<number> {
+    let orphans: CatalogOrphan[]
+    try {
+      orphans = await this.listCatalogOrphans(orgId)
+    } catch (e) {
+      this.logger.warn(`[social-commerce.unpublish] listagem falhou: ${(e as Error).message}`)
+      return 0
+    }
+    if (orphans.length === 0) return 0
+
+    this.logger.log(`[social-commerce.unpublish] escondendo ${orphans.length} produto(s) fora da vitrine`)
+
+    const CHUNK_SIZE = 1000
+    let hidden = 0
+    for (let i = 0; i < orphans.length; i += CHUNK_SIZE) {
+      const chunk = orphans.slice(i, i + CHUNK_SIZE)
+      try {
+        const result = await this.meta.batchUpdateProducts(
+          ch.access_token!,
+          ch.external_catalog_id!,
+          chunk.map(o => ({
+            method:      'UPDATE' as const,
+            retailer_id: o.retailer_id,
+            // So os campos que mudam: a Meta faz merge no item existente.
+            data:        { visibility: 'staging' } as unknown as MetaProductData,
+          })),
+        )
+        if (result.errors && result.errors.length > 0) {
+          this.logger.warn(
+            `[social-commerce.unpublish] chunk ${i / CHUNK_SIZE}: ${result.errors.map(e => e.message).join('; ').slice(0, 300)}`,
+          )
+          continue
+        }
+        // 'paused' = fora do ar de proposito. Diferente de 'error', e o
+        // listCatalogOrphans ignora esses na proxima passada.
+        await supabaseAdmin
+          .from('social_commerce_products')
+          .update({ sync_status: 'paused', last_synced_at: new Date().toISOString(), last_error: null })
+          .eq('organization_id', orgId)
+          .eq('channel_id', ch.id)
+          .in('product_id', chunk.map(o => o.product_id))
+        hidden += chunk.length
+      } catch (e) {
+        this.logger.warn(`[social-commerce.unpublish] chunk ${i / CHUNK_SIZE} excecao: ${(e as Error).message}`)
+      }
+    }
+    return hidden
   }
 
   /** Worker — produtos com sync_status pending/error de canais conectados.
@@ -903,6 +1030,10 @@ export class SocialCommerceService {
       link:         productUrl,
       image_link:   imageUrl,
       brand:        p.brand ?? 'Sem marca',
+      // Explicito de proposito: produto que VOLTOU pra vitrine precisa
+      // sair do 'staging' que o unpublishOrphans pos nele. Omitir aqui
+      // deixaria ele escondido pra sempre.
+      visibility:   'published',
     }
     // item_type='PRODUCT_ITEM' vai no top-level do batch (em meta-catalog
     // batchUpdateProducts) — nao em cada item.data.
