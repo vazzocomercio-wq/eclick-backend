@@ -213,6 +213,45 @@ export class FulfillmentFiscalService {
   }
 
   // ── Dados fiscais por produto ────────────────────────────────────────────────
+  /** Dados fiscais RESOLVIDOS por produto pra emissão: product_fiscal (painel do
+   *  Faturador, canônico) com fallback em products.fiscal (jsonb do cadastro —
+   *  vem do import/NF de compra). Devolve só os produtos que têm ALGUM dado. */
+  async resolveProductFiscal(orgId: string, productIds: string[]): Promise<Map<string, {
+    ncm: string | null; cest: string | null; origem: string | null
+    cfop_sale: string | null; cst_csosn: string | null; unit: string; tax_rate: number | null
+  }>> {
+    const out = new Map<string, { ncm: string | null; cest: string | null; origem: string | null; cfop_sale: string | null; cst_csosn: string | null; unit: string; tax_rate: number | null }>()
+    const ids = [...new Set(productIds.filter(Boolean))]
+    if (ids.length === 0) return out
+    const { data: rows } = await supabaseAdmin
+      .from('product_fiscal').select('product_id, ncm, cest, origem, cfop_sale, cst_csosn, unit, tax_rate')
+      .eq('organization_id', orgId).in('product_id', ids)
+    for (const r of (rows ?? []) as Array<{ product_id: string; ncm: string | null; cest: string | null; origem: string | null; cfop_sale: string | null; cst_csosn: string | null; unit: string | null; tax_rate: number | null }>) {
+      out.set(r.product_id, { ncm: r.ncm, cest: r.cest, origem: r.origem, cfop_sale: r.cfop_sale, cst_csosn: r.cst_csosn, unit: r.unit || 'UN', tax_rate: r.tax_rate })
+    }
+    const missing = ids.filter((id) => !out.get(id)?.ncm)
+    if (missing.length > 0) {
+      const { data: prods } = await supabaseAdmin
+        .from('products').select('id, fiscal').eq('organization_id', orgId).in('id', missing)
+      for (const p of (prods ?? []) as Array<{ id: string; fiscal: Record<string, string> | null }>) {
+        if (!p.fiscal) continue
+        const cur = out.get(p.id)
+        const ncm = (p.fiscal.ncm ?? '').trim() || null
+        if (!ncm && !cur) continue
+        out.set(p.id, {
+          ncm:       cur?.ncm ?? ncm,
+          cest:      cur?.cest ?? ((p.fiscal.cest ?? '').trim() || null),
+          origem:    cur?.origem ?? ((p.fiscal.origem ?? '').trim() || null),
+          cfop_sale: cur?.cfop_sale ?? null,
+          cst_csosn: cur?.cst_csosn ?? null,
+          unit:      cur?.unit ?? 'UN',
+          tax_rate:  cur?.tax_rate ?? null,
+        })
+      }
+    }
+    return out
+  }
+
   async listProductFiscal(orgId: string) {
     const { data } = await supabaseAdmin
       .from('product_fiscal').select('*').eq('organization_id', orgId).order('updated_at', { ascending: false }).limit(500)
