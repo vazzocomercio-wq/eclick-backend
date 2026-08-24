@@ -131,7 +131,10 @@ export class FulfillmentSefazService {
 
       make.tagInfNFe({ versao: '4.00' })
       // indPres 2 = venda pela internet (e-commerce); indFinal 1 = consumidor final
-      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
+      // ⚠️ cDV vai AQUI (entre tpEmis e tpAmb): a lib escreve o <ide> na ordem das
+      // chaves do objeto e só ATUALIZA o valor do cDV ao calcular a chave — sem o
+      // placeholder na posição certa ele cai no fim do grupo e a SEFAZ rejeita (215).
+      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
       make.tagEmit({ CNPJ: cnpj, xNome: c?.name || 'EMITENTE TESTE', xFant: c?.name || 'EMITENTE', IE: (cfg!.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
       make.tagEnderEmit(ender)
       // Em homologação a SEFAZ EXIGE este xNome literal no destinatário (senão rejeita)
@@ -314,7 +317,8 @@ export class FulfillmentSefazService {
     const { Make } = await loadSpedNfe('node-sped-nfe')
     const make = new Make()
     make.tagInfNFe({ versao: '4.00' })
-    make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie, nNF, dhEmi: brtNow(), tpNF: 1, idDest: sameUf ? 1 : 2, cMunFG: eCMun, tpImp: 1, tpEmis: 1, tpAmb, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
+    // cDV entre tpEmis e tpAmb — ver comentário no emitTest (rejeição 215 sem isso)
+    make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie, nNF, dhEmi: brtNow(), tpNF: 1, idDest: sameUf ? 1 : 2, cMunFG: eCMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
     make.tagEmit({ CNPJ: emitCnpj, xNome: company?.name || 'EMITENTE', xFant: company?.name || 'EMITENTE', IE: (cfg.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
     make.tagEnderEmit(enderEmit)
     // homologação EXIGE este xNome literal; produção leva o nome real
