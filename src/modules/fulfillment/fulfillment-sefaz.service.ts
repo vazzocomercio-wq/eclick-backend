@@ -645,6 +645,129 @@ export class FulfillmentSefazService {
     return { pedidos, resumo }
   }
 
+  /** CONTROLE DE NOTAS — histórico completo, filtrável. Diferente da fila
+   *  (que é só a janela de hoje), aqui está tudo que já virou nota, por
+   *  plataforma/conta/período, com o caminho dos arquivos pra download. */
+  async listarNotas(orgId: string, f: {
+    plataforma?: string; conta?: string; status?: 'issued' | 'cancelled'
+    de?: string; ate?: string; busca?: string; limite?: number; offset?: number
+  } = {}): Promise<{
+    notas: Array<{
+      id: string; numero: string | null; serie: string | null; chave: string | null
+      status: string; emitidaEm: string; valor: number
+      pedido: string | null; comprador: string | null
+      plataforma: string | null; conta: string | null; contaLabel: string | null
+      noMarketplace: boolean; cancelavelAte: string | null
+      temXml: boolean; temPdf: boolean
+    }>
+    resumo: { quantidade: number; valorTotal: number; canceladas: number; pendentesMarketplace: number }
+    total: number
+  }> {
+    const limite = Math.min(Math.max(Number(f.limite) || 100, 1), 500)
+    const offset = Math.max(Number(f.offset) || 0, 0)
+
+    let q = supabaseAdmin
+      .from('fulfillment_invoices')
+      .select('id, number, series, access_key, status, created_at, items, fulfillment_order_id, marketplace_sent_at, xml_url, proc_xml_url', { count: 'exact' })
+      .eq('organization_id', orgId).eq('kind', 'venda')
+      .in('status', ['issued', 'cancelled'])
+    if (f.status) q = q.eq('status', f.status)
+    if (f.de) q = q.gte('created_at', f.de)
+    if (f.ate) q = q.lte('created_at', f.ate)
+    const { data, count } = await q.order('created_at', { ascending: false }).range(offset, offset + limite - 1)
+    const rows = (data ?? []) as Array<{
+      id: string; number: string | null; series: string | null; access_key: string | null; status: string
+      created_at: string; items: Array<{ qty: number; unit_value: number | null }>; fulfillment_order_id: string
+      marketplace_sent_at: string | null; xml_url: string | null; proc_xml_url: string | null
+    }>
+    if (rows.length === 0) return { notas: [], resumo: { quantidade: 0, valorTotal: 0, canceladas: 0, pendentesMarketplace: 0 }, total: count ?? 0 }
+
+    // pedido de origem → plataforma/conta/comprador
+    const { data: fos } = await supabaseAdmin
+      .from('fulfillment_orders').select('id, source_id, channel')
+      .eq('organization_id', orgId).in('id', rows.map((r) => r.fulfillment_order_id))
+    const foById = new Map((fos ?? []).map((o) => [(o as { id: string }).id, o as { source_id: string | null; channel: string | null }]))
+    const sns = [...new Set([...foById.values()].map((o) => o.source_id).filter((v): v is string => !!v))]
+    const { data: ords } = sns.length
+      ? await supabaseAdmin.from('orders').select('external_order_id, buyer_name, platform, channel_account_id')
+        .eq('organization_id', orgId).in('external_order_id', sns)
+      : { data: [] }
+    const ordBySn = new Map((ords ?? []).map((o) => [(o as { external_order_id: string }).external_order_id, o as { buyer_name: string | null; platform: string | null; channel_account_id: string | null }]))
+    const { data: accs } = await supabaseAdmin
+      .from('fulfillment_accounts').select('external_account_id, label, platform').eq('organization_id', orgId)
+    const labelByConta = new Map((accs ?? []).map((a) => [`${(a as { platform: string }).platform}:${(a as { external_account_id: string }).external_account_id}`, (a as { label: string | null }).label]))
+
+    let notas = rows.map((r) => {
+      const fo = foById.get(r.fulfillment_order_id)
+      const sn = fo?.source_id ?? null
+      const ord = sn ? ordBySn.get(sn) : undefined
+      const plataforma = ord?.platform ?? fo?.channel ?? null
+      const conta = ord?.channel_account_id ?? null
+      const valor = round2((r.items ?? []).reduce((s, i) => s + (Number(i.unit_value) || 0) * (Number(i.qty) || 0), 0))
+      const limite24h = new Date(new Date(r.created_at).getTime() + 24 * 3600_000)
+      return {
+        id: r.id, numero: r.number, serie: r.series, chave: r.access_key,
+        status: r.status, emitidaEm: r.created_at, valor,
+        pedido: sn, comprador: ord?.buyer_name ?? null,
+        plataforma, conta, contaLabel: plataforma && conta ? (labelByConta.get(`${plataforma}:${conta}`) ?? null) : null,
+        noMarketplace: !!r.marketplace_sent_at,
+        cancelavelAte: r.status === 'issued' && limite24h.getTime() > Date.now() ? limite24h.toISOString() : null,
+        temXml: !!(r.proc_xml_url || r.xml_url || r.access_key),
+        temPdf: !!r.access_key,   // gerado sob demanda a partir do XML
+      }
+    })
+
+    // filtros que dependem do join (plataforma/conta/busca) — aplicados aqui
+    if (f.plataforma) notas = notas.filter((n) => n.plataforma === f.plataforma)
+    if (f.conta) notas = notas.filter((n) => n.conta === f.conta)
+    if (f.busca) {
+      const t = f.busca.trim().toLowerCase()
+      notas = notas.filter((n) =>
+        (n.pedido ?? '').toLowerCase().includes(t) ||
+        (n.comprador ?? '').toLowerCase().includes(t) ||
+        (n.chave ?? '').includes(t.replace(/\D/g, '')) ||
+        (n.numero ?? '').includes(t))
+    }
+
+    const resumo = {
+      quantidade: notas.length,
+      valorTotal: round2(notas.filter((n) => n.status === 'issued').reduce((s, n) => s + n.valor, 0)),
+      canceladas: notas.filter((n) => n.status === 'cancelled').length,
+      pendentesMarketplace: notas.filter((n) => n.status === 'issued' && !n.noMarketplace).length,
+    }
+    return { notas, resumo, total: count ?? notas.length }
+  }
+
+  /** Contas (plataforma × loja) que já emitiram nota — alimenta os filtros. */
+  async contasComNota(orgId: string): Promise<Array<{ plataforma: string; conta: string; label: string | null }>> {
+    const { data } = await supabaseAdmin
+      .from('fulfillment_accounts').select('platform, external_account_id, label')
+      .eq('organization_id', orgId).eq('is_active', true)
+    return (data ?? []).map((a) => ({
+      plataforma: (a as { platform: string }).platform,
+      conta: (a as { external_account_id: string }).external_account_id,
+      label: (a as { label: string | null }).label,
+    }))
+  }
+
+  /** Link temporário pro arquivo da nota (xml = procNFe de distribuição). */
+  async arquivoDaNota(orgId: string, invoiceId: string, tipo: 'xml'): Promise<{ url: string; filename: string }> {
+    const { data } = await supabaseAdmin
+      .from('fulfillment_invoices').select('access_key, proc_xml_url, xml_url')
+      .eq('organization_id', orgId).eq('id', invoiceId).maybeSingle()
+    const inv = data as { access_key: string | null; proc_xml_url: string | null; xml_url: string | null } | null
+    if (!inv?.access_key) throw new NotFoundException('Nota não encontrada.')
+    if (tipo !== 'xml') throw new BadRequestException('Tipo de arquivo não suportado.')
+
+    // procNFe primeiro: é o que marketplace e contador aceitam
+    const candidatos = [inv.proc_xml_url, `${orgId}/invoices/${inv.access_key}-procNFe.xml`, inv.xml_url, `${orgId}/invoices/${inv.access_key}-nfe.xml`]
+    for (const p of candidatos.filter((v): v is string => !!v)) {
+      const { data: signed } = await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).createSignedUrl(p, 600)
+      if (signed?.signedUrl) return { url: signed.signedUrl, filename: `NFe-${inv.access_key}.xml` }
+    }
+    throw new NotFoundException('Arquivo XML desta nota não está no armazenamento.')
+  }
+
   /** Emite o LOTE de pedidos prontos. Sequencial de propósito: cada nota
    *  consome um número da série e bate na SEFAZ — paralelizar aqui só
    *  atrapalha. Um erro não derruba os demais. */
