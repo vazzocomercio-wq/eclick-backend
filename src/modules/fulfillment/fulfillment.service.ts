@@ -1121,6 +1121,23 @@ function matchCode(scanned: string, targets: Array<string | null | undefined>): 
 }
 
 // ── destinatário do faturamento (F2b-3) ─────────────────────────────────
+
+/** UF a partir da sigla OU do nome por extenso ("São Paulo" → "SP"). O Seller
+ *  Center escreve o estado por extenso na linha do endereço. */
+const UF_POR_NOME: Record<string, string> = {
+  acre: 'AC', alagoas: 'AL', amapa: 'AP', amazonas: 'AM', bahia: 'BA', ceara: 'CE',
+  'distrito federal': 'DF', 'espirito santo': 'ES', goias: 'GO', maranhao: 'MA',
+  'mato grosso': 'MT', 'mato grosso do sul': 'MS', 'minas gerais': 'MG', para: 'PA',
+  paraiba: 'PB', parana: 'PR', pernambuco: 'PE', piaui: 'PI', 'rio de janeiro': 'RJ',
+  'rio grande do norte': 'RN', 'rio grande do sul': 'RS', rondonia: 'RO', roraima: 'RR',
+  'santa catarina': 'SC', 'sao paulo': 'SP', sergipe: 'SE', tocantins: 'TO',
+}
+export function ufDeNomeOuSigla(v: string): string | null {
+  const raw = String(v ?? '').trim()
+  if (/^[A-Za-z]{2}$/.test(raw)) return raw.toUpperCase()
+  const key = raw.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+  return UF_POR_NOME[key] ?? null
+}
 /** Quebra o endereço de LINHA ÚNICA da Shopee (recipient_address.full_address —
  *  ela não separa logradouro/número) em logradouro / número / complemento.
  *  Heurística: primeiro segmento entre vírgulas que é um número puro vira o
@@ -1173,11 +1190,16 @@ export function marketplaceCustomer(r: { buyer_name: string | null; buyer_doc_nu
     // Rita do Sapucaí, Minas Gerais, CEP 37536-062") — tira do complemento os
     // pedaços que são cidade/UF/bairro, "CEP …", CEP solto e "N/A"; sobra só o
     // complemento de verdade (apto/bloco). xCpl da NF-e aceita no máx. 60 chars.
-    const dup = new Set([bairro, cidade, uf].filter(Boolean).map((s) => s!.toLowerCase()))
+    const semAcento = (s: string) => s.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').trim()
+    const dup = new Set([bairro, cidade, uf].filter(Boolean).map((s) => semAcento(s!)))
+    const ufAlvo = (uf ?? '').toUpperCase()
     const complemento = (parsed.complemento ?? '')
       .split(',').map((s) => s.trim())
       .filter((s) => s
-        && !dup.has(s.toLowerCase())
+        && !dup.has(semAcento(s))
+        // o estado vem POR EXTENSO na linha do Seller Center ("São Paulo") mas
+        // `uf` é a sigla ("SP") — sem isso o nome do estado vazava pro xCpl
+        && !(ufAlvo && ufDeNomeOuSigla(s) === ufAlvo)
         && !/^cep\b/i.test(s)
         && !/^\d{5}-?\d{3}$/.test(s)
         && !/^n\/?a$/i.test(s))
