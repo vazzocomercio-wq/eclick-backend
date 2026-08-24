@@ -181,7 +181,7 @@ export class FulfillmentSefazService {
    *
    *  `dryRun: true` monta e devolve o XML SEM reservar número, assinar ou
    *  enviar — validação ponta a ponta antes do certificado A1 existir. */
-  async emitForOrder(orgId: string, externalOrderId: string, opts?: { dryRun?: boolean }): Promise<{
+  async emitForOrder(orgId: string, externalOrderId: string, opts?: { dryRun?: boolean; dest?: DestOverride }): Promise<{
     authorized: boolean; dryRun?: boolean; cStat: string | null; xMotivo: string | null
     chave: string | null; protocolo: string | null; nNF: number | null; serie: number
     invoiceId?: string; xml?: string
@@ -233,16 +233,30 @@ export class FulfillmentSefazService {
     if (!eAddr.city || !eAddr.uf || !eAddr.cep) missing.push('Cidade/UF/CEP do emitente')
     if (missing.length) throw new BadRequestException(`Complete o painel fiscal da empresa: ${missing.join(', ')}.`)
 
-    // ── 4. destinatário (capturado na janela aberta) ───────────────────────
+    // ── 4. destinatário — capturado na janela aberta, com override manual ──
+    // A Shopee mascara o endereço na API até a etiqueta ser gerada (mas exige a
+    // NF pra deixar gerar). O `dest` deixa informar o que aparece no Seller
+    // Center; cada campo do override tem prioridade sobre o capturado.
     const cust = marketplaceCustomer(rows[0])
-    const doc = String(cust.doc ?? '').replace(/\D/g, '')
+    const ov = opts?.dest
+    const doc = String(ov?.doc ?? cust.doc ?? '').replace(/\D/g, '')
     if (doc.length !== 11 && doc.length !== 14) {
-      throw new BadRequestException('CPF/CNPJ do comprador ainda não capturado. Emita DURANTE a preparação do envio (janela em que a Shopee abre os dados) — acabei de tentar pela etiqueta e não veio.')
+      throw new BadRequestException('CPF/CNPJ do comprador ainda não capturado. Informe o CPF/CNPJ do destinatário (visível no detalhe do pedido na Shopee).')
     }
-    const dAddr = (cust.address ?? null) as { logradouro?: string | null; numero?: string | null; complemento?: string | null; bairro?: string | null; cidade?: string | null; uf?: string | null; cep?: string | null } | null
-    const dCep = String(dAddr?.cep ?? '').replace(/\D/g, '')
-    if (!dAddr?.logradouro || !dAddr.cidade || !dAddr.uf || dCep.length !== 8) {
-      throw new BadRequestException('Endereço do comprador incompleto (logradouro/cidade/UF/CEP). A janela da Shopee pode ter fechado — tente com o pedido em "A enviar".')
+    const capAddr = (cust.address ?? {}) as { logradouro?: string | null; numero?: string | null; complemento?: string | null; bairro?: string | null; cidade?: string | null; uf?: string | null; cep?: string | null }
+    const dAddr = {
+      logradouro: ov?.logradouro ?? capAddr.logradouro ?? null,
+      numero: ov?.numero ?? capAddr.numero ?? null,
+      complemento: ov?.complemento ?? capAddr.complemento ?? null,
+      bairro: ov?.bairro ?? capAddr.bairro ?? null,
+      cidade: ov?.cidade ?? capAddr.cidade ?? null,
+      uf: ov?.uf ?? capAddr.uf ?? null,
+      cep: ov?.cep ?? capAddr.cep ?? null,
+    }
+    const destName = ov?.name ?? (cust.name as string | undefined)
+    const dCep = String(dAddr.cep ?? '').replace(/\D/g, '')
+    if (!dAddr.logradouro || !dAddr.cidade || !dAddr.uf || dCep.length !== 8) {
+      throw new BadRequestException('ENDERECO_INCOMPLETO: A Shopee mascarou o endereço (ela só abre depois de organizar o envio). Informe o endereço do comprador — ele aparece no detalhe do pedido na Shopee.')
     }
     const dCMun = await this.resolveIbgeByCep(dCep)   // cMun do DESTINATÁRIO via ViaCEP
 
@@ -325,7 +339,7 @@ export class FulfillmentSefazService {
     make.tagEmit({ CNPJ: emitCnpj, xNome: company?.name || 'EMITENTE', xFant: company?.name || 'EMITENTE', IE: (cfg.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
     make.tagEnderEmit(enderEmit)
     // homologação EXIGE este xNome literal; produção leva o nome real
-    const destNome = tpAmb === 2 ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : String(cust.name ?? 'CONSUMIDOR').slice(0, 60)
+    const destNome = tpAmb === 2 ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : String(destName ?? 'CONSUMIDOR').slice(0, 60)
     make.tagDest({ ...(doc.length === 14 ? { CNPJ: doc } : { CPF: doc }), xNome: destNome, indIEDest: 9 })
     make.tagEnderDest(enderDest)
     // BA exige o grupo autXML (contador; sem contador = CNPJ da SEFAZ-BA) — rejeição 486
@@ -459,6 +473,15 @@ function brtNow(): string {
 // Venda intermediada por marketplace SEM o grupo infIntermed é rejeitada (ou
 // fica irregular). CNPJ por plataforma; idCadIntTran = identificação do
 // vendedor NO SITE do intermediador (username/id da loja).
+/** Override manual do destinatário — usado quando a plataforma mascara os dados
+ *  (Shopee: endereço só abre depois de organizar o envio, que por sua vez exige
+ *  a NF). Cada campo preenchido vence o capturado; os vazios caem no capturado. */
+export interface DestOverride {
+  name?: string | null; doc?: string | null
+  logradouro?: string | null; numero?: string | null; complemento?: string | null
+  bairro?: string | null; cidade?: string | null; uf?: string | null; cep?: string | null
+}
+
 export const INTERMEDIADORES: Record<string, { cnpj: string; nome: string }> = {
   // SHPS Tecnologia e Serviços Ltda (Shopee Brasil)
   shopee: { cnpj: '35635824000112', nome: 'Shopee' },

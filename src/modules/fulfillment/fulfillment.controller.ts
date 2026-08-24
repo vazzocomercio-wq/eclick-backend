@@ -10,7 +10,7 @@ import { FulfillmentAccountsService, type CompanyRole } from './fulfillment-acco
 import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type InvoiceItem } from './fulfillment-invoices.service'
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
-import { FulfillmentSefazService } from './fulfillment-sefaz.service'
+import { FulfillmentSefazService, type DestOverride } from './fulfillment-sefaz.service'
 import { FulfillmentLocationsService, type LocationType, type AddressScheme } from './fulfillment-locations.service'
 import { FulfillmentCartsService } from './fulfillment-carts.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
@@ -198,9 +198,9 @@ export class FulfillmentController {
   // Faturador F2b-3 — emite a NF-e REAL de um pedido de marketplace.
   // dryRun=true monta e devolve o XML sem assinar/enviar (não consome número).
   @Post('fiscal/emit')
-  emitOrder(@ReqUser() u: ReqUserPayload, @Body() body: { externalOrderId: string; dryRun?: boolean }) {
+  emitOrder(@ReqUser() u: ReqUserPayload, @Body() body: { externalOrderId: string; dryRun?: boolean; dest?: DestOverride }) {
     if (!body?.externalOrderId?.trim()) throw new BadRequestException('Informe externalOrderId (nº do pedido no marketplace).')
-    return this.sefaz.emitForOrder(this.org(u), body.externalOrderId.trim(), { dryRun: !!body.dryRun })
+    return this.sefaz.emitForOrder(this.org(u), body.externalOrderId.trim(), { dryRun: !!body.dryRun, dest: body.dest })
   }
 
   @Get('fiscal/products')
