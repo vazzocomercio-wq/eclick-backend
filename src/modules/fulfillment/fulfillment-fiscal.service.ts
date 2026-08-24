@@ -5,7 +5,7 @@ import { CredentialsService } from '../credentials/credentials.service'
 
 export type FiscalProvider = 'nfeio' | 'focusnfe' | 'plugnotas' | 'erp_externo'
 export type FiscalEnvironment = 'homologacao' | 'producao'
-export type RegimeTributario = 'simples' | 'presumido' | 'real'
+export type RegimeTributario = 'simples' | 'presumido' | 'real' | 'mei'
 
 export interface CompanyFiscalConfig {
   id: string
@@ -137,6 +137,28 @@ export class FulfillmentFiscalService {
     const raw = await this.credentials.getDecryptedKey(orgId, 'sefaz_a1', companyId)
     if (!raw) return null
     try { return JSON.parse(raw) as { pfxBase64: string; password: string } } catch { return null }
+  }
+
+  // ── Numeração + regime ──────────────────────────────────────────────────────
+  /** CRT do emitente na NF-e a partir do regime: MEI = 4 (NT 2023.001, vigente
+   *  desde set/2024), Simples = 1, Presumido/Real = 3 (regime normal). */
+  crtFor(regime: RegimeTributario | null | undefined): 1 | 3 | 4 {
+    if (regime === 'mei') return 4
+    if (regime === 'presumido' || regime === 'real') return 3
+    return 1
+  }
+
+  /** Reserva ATÔMICA do próximo nNF da série (RPC fiscal_next_number — INSERT
+   *  ON CONFLICT UPDATE num statement só). Numeração fiscal é sequencial e
+   *  irreversível: número pulado exige inutilização na SEFAZ; por isso NUNCA
+   *  gerar nNF por timestamp/MAX+1. Homologação e produção têm contadores
+   *  separados (mesma série pode existir nos dois ambientes). */
+  async nextInvoiceNumber(orgId: string, companyId: string, serie: number, ambiente: FiscalEnvironment): Promise<number> {
+    const { data, error } = await supabaseAdmin.rpc('fiscal_next_number', {
+      p_org: orgId, p_company: companyId, p_serie: serie, p_ambiente: ambiente,
+    })
+    if (error || data == null) throw new BadRequestException(`Não consegui reservar o número da NF-e: ${error?.message ?? 'RPC sem retorno'}`)
+    return Number(data)
   }
 
   /** O que falta pra empresa poder emitir (usado pela UI + trava futura). */

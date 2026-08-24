@@ -136,14 +136,16 @@ export class FulfillmentService {
       if (!externalId) throw new BadRequestException('Informe externalOrderId ou orderId do pedido de marketplace.')
       const { data: rows } = await supabaseAdmin
         .from('orders')
-        .select('id, sku, product_title, quantity, sale_price, buyer_name, platform, seller_id, channel_account_id')
+        .select('id, sku, product_title, quantity, sale_price, buyer_name, buyer_doc_number, buyer_phone, raw_data, platform, seller_id, channel_account_id')
         .eq('organization_id', orgId).eq('external_order_id', externalId)
-      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; platform: string | null; seller_id: number | null; channel_account_id: string | null }>
+      const orderRows = (rows ?? []) as Array<{ id: string; sku: string; product_title: string | null; quantity: number; sale_price: number | null; buyer_name: string | null; buyer_doc_number: string | null; buyer_phone: string | null; raw_data: Record<string, unknown> | null; platform: string | null; seller_id: number | null; channel_account_id: string | null }>
       if (orderRows.length === 0) throw new NotFoundException('Pedido de marketplace não encontrado.')
       sourceId = externalId
       reference = externalId
       channel = channel ?? orderRows[0].platform ?? 'mercadolivre'
-      customer = { name: orderRows[0].buyer_name ?? undefined }
+      // Snapshot COMPLETO do destinatário (F2b-3): CPF/fone capturados na janela
+      // aberta da plataforma + endereço de entrega do raw — a NF-e precisa disso.
+      customer = marketplaceCustomer(orderRows[0])
       sourceOrderIds = orderRows.map((r) => r.id)
       totalCents = Math.round(orderRows.reduce((s, r) => s + (Number(r.sale_price) || 0), 0) * 100) || null
       items = orderRows.map((r) => ({ sku: r.sku, title: r.product_title ?? undefined, qty: r.quantity || 1 }))
@@ -1116,6 +1118,80 @@ function matchCode(scanned: string, targets: Array<string | null | undefined>): 
   if (cands.length === 0) return false
   const norm = targets.filter((t): t is string => !!t).map(normalizeCode)
   return cands.some((c) => norm.includes(c))
+}
+
+// ── destinatário do faturamento (F2b-3) ─────────────────────────────────
+/** Quebra o endereço de LINHA ÚNICA da Shopee (recipient_address.full_address —
+ *  ela não separa logradouro/número) em logradouro / número / complemento.
+ *  Heurística: primeiro segmento entre vírgulas que é um número puro vira o
+ *  número; o que vem antes é logradouro, o que vem depois é complemento.
+ *  Sem número identificável → tudo em logradouro, numero null (emissão usa S/N). */
+export function parseShopeeFullAddress(full: string): { logradouro: string; numero: string | null; complemento: string | null } {
+  const parts = String(full ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  if (parts.length === 0) return { logradouro: String(full ?? '').trim(), numero: null, complemento: null }
+  for (let i = 1; i < parts.length; i++) {
+    const m = /^(?:n[ºo°.]?\s*)?(\d{1,6}[a-zA-Z]?)$/.exec(parts[i])
+    if (m) {
+      return {
+        logradouro: parts.slice(0, i).join(', '),
+        numero: m[1],
+        complemento: parts.slice(i + 1).join(', ') || null,
+      }
+    }
+  }
+  // "Rua X 123" sem vírgula separando o número: número no fim do 1º segmento
+  const tail = /^(.*?)[\s]+(?:n[ºo°.]?\s*)?(\d{1,6}[a-zA-Z]?)$/.exec(parts[0])
+  if (tail && tail[1].trim().length >= 3) {
+    return { logradouro: tail[1].trim(), numero: tail[2], complemento: parts.slice(1).join(', ') || null }
+  }
+  return { logradouro: parts.join(', '), numero: null, complemento: null }
+}
+
+/** Snapshot do destinatário a partir da linha de `orders`: nome + CPF/CNPJ +
+ *  fone (capturados pelo sync na janela aberta da plataforma) e endereço de
+ *  entrega do raw (Shopee: recipient_address). Valor mascarado ("****") nunca
+ *  entra. É o que a emissão da NF-e (F2b-3) vai ler de fulfillment_orders.customer. */
+function marketplaceCustomer(r: { buyer_name: string | null; buyer_doc_number: string | null; buyer_phone: string | null; raw_data: Record<string, unknown> | null }): Record<string, unknown> {
+  const open = (v: unknown): string | null => {
+    const s = typeof v === 'string' ? v.trim() : ''
+    return s && !/^\*+$/.test(s) ? s : null
+  }
+  const out: Record<string, unknown> = { name: r.buyer_name ?? undefined }
+  const doc = open(r.buyer_doc_number)?.replace(/\D/g, '')
+  if (doc) out.doc = doc
+  const phone = open(r.buyer_phone)?.replace(/\D/g, '')
+  if (phone) out.phone = phone
+  const rcpt = (r.raw_data as { recipient_address?: Record<string, unknown> } | null)?.recipient_address
+  const full = open(rcpt?.full_address)
+  if (rcpt && full) {
+    const parsed = parseShopeeFullAddress(full)
+    const bairro = open(rcpt.district)
+    const cidade = open(rcpt.city)
+    const uf = open(rcpt.state)
+    // O full_address da Shopee repete cidade/UF/bairro/CEP no fim (às vezes 2×:
+    // "..., N/A, Centro, Santa Rita do Sapucaí, Minas Gerais, 37536062, Santa
+    // Rita do Sapucaí, Minas Gerais, CEP 37536-062") — tira do complemento os
+    // pedaços que são cidade/UF/bairro, "CEP …", CEP solto e "N/A"; sobra só o
+    // complemento de verdade (apto/bloco). xCpl da NF-e aceita no máx. 60 chars.
+    const dup = new Set([bairro, cidade, uf].filter(Boolean).map((s) => s!.toLowerCase()))
+    const complemento = (parsed.complemento ?? '')
+      .split(',').map((s) => s.trim())
+      .filter((s) => s
+        && !dup.has(s.toLowerCase())
+        && !/^cep\b/i.test(s)
+        && !/^\d{5}-?\d{3}$/.test(s)
+        && !/^n\/?a$/i.test(s))
+      .join(', ').slice(0, 60) || null
+    out.address = {
+      logradouro: parsed.logradouro,
+      numero:     parsed.numero,
+      complemento,
+      bairro, cidade, uf,
+      // a Shopee ora manda `zipcode`, ora `zip_code` — e às vezes só um deles aberto
+      cep: (open(rcpt.zipcode) ?? open((rcpt as Record<string, unknown>).zip_code))?.replace(/\D/g, '') ?? null,
+    }
+  }
+  return out
 }
 
 // ── image decode (base64 data-url ou cru) ───────────────────────────────

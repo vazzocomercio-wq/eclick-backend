@@ -75,15 +75,18 @@ export class FulfillmentSefazService {
     }
   }
 
-  /** Emite uma NF-e de TESTE (sempre homologação) — Simples Nacional, 1 produto
-   *  genérico, destinatário de teste. Serve pra validar a emissão ponta a ponta.
-   *  Itera ao vivo contra as rejeições da SEFAZ até cStat 100 (autorizada).
+  /** Emite uma NF-e de TESTE (sempre homologação) — 1 produto genérico,
+   *  destinatário de teste, CRT conforme o REGIME da empresa (MEI = 4).
+   *  Numeração vem da fiscal_series (ambiente homologação tem contador
+   *  próprio). Serve pra validar a emissão ponta a ponta.
    *
    *  ⚠️ EMISSÃO REAL DE PEDIDO (F2b-3): antes de montar make.tagProd(), os
    *  itens da invoice DEVEM passar por CompositionService.explodeForInvoice
    *  (módulo composition/) — SKU com composição (kit) é faturado pelos
    *  COMPONENTES (quantidade = qty × qtd_no_kit, valor rateado pelo preço de
-   *  catálogo, total preservado), espelhando a baixa real de estoque. */
+   *  catálogo, total preservado), espelhando a baixa real de estoque. E venda
+   *  intermediada por marketplace DEVE levar o grupo infIntermed (helper
+   *  injectIntermed + INTERMEDIADORES abaixo) — NT 2020.006. */
   async emitTest(orgId: string, companyId: string): Promise<{ authorized: boolean; cStat: string | null; xMotivo: string | null; chave: string | null; protocolo: string | null }> {
     const cfg = await this.fiscal.getCompanyFiscal(orgId, companyId)
     const { data: company } = await supabaseAdmin
@@ -108,15 +111,19 @@ export class FulfillmentSefazService {
       const uf = addr.uf.toUpperCase()
       const cUF = Number(cMun.slice(0, 2))                    // 2 primeiros díg. do IBGE = código UF
       const cNF = String(Math.floor(Math.random() * 1e8)).padStart(8, '0')
-      const nNF = Number(String(Date.now()).slice(-8))         // número único pro teste (evita duplicidade)
+      // nNF sequencial da série (contador de HOMOLOGAÇÃO — separado do de produção)
+      const nNF = await this.fiscal.nextInvoiceNumber(orgId, companyId, 1, 'homologacao')
+      const crt = this.fiscal.crtFor(cfg?.regime_tributario)   // MEI=4 · Simples=1 · normal=3
       const dhEmi = new Date().toISOString().replace(/\.\d{3}Z$/, '-03:00')
       const ender = { xLgr: addr.logradouro, nro: addr.numero, xBairro: addr.bairro, cMun, xMun: addr.city, UF: uf, CEP: addr.cep.replace(/\D/g, ''), cPais: '1058', xPais: 'BRASIL' }
 
       make.tagInfNFe({ versao: '4.00' })
-      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 1, procEmi: 0, verProc: 'eClick-1.0' })
-      make.tagEmit({ CNPJ: cnpj, xNome: c?.name || 'EMITENTE TESTE', xFant: c?.name || 'EMITENTE', IE: (cfg!.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: 1 })
+      // indPres 2 = venda pela internet (e-commerce); indFinal 1 = consumidor final
+      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
+      make.tagEmit({ CNPJ: cnpj, xNome: c?.name || 'EMITENTE TESTE', xFant: c?.name || 'EMITENTE', IE: (cfg!.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
       make.tagEnderEmit(ender)
-      make.tagDest({ CPF: '11144477735', xNome: 'CONSUMIDOR TESTE', indIEDest: 9 })   // homolog sobrescreve o xNome
+      // Em homologação a SEFAZ EXIGE este xNome literal no destinatário (senão rejeita)
+      make.tagDest({ CPF: '11144477735', xNome: 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL', indIEDest: 9 })
       make.tagEnderDest(ender)
       await make.tagProd([{ cProd: 'TESTE001', cEAN: 'SEM GTIN', xProd: 'PRODUTO TESTE', NCM: '49011000', CFOP: '5102', uCom: 'UN', qCom: 1, vUnCom: 1.00, vProd: 1.00, cEANTrib: 'SEM GTIN', uTrib: 'UN', qTrib: 1, vUnTrib: 1.00, indTot: 1 }])
       make.tagProdICMSSN(0, { orig: '0', CSOSN: '102' })
@@ -124,7 +131,8 @@ export class FulfillmentSefazService {
       make.tagProdCOFINS(0, { CST: '49', vBC: '0.00', pCOFINS: '0.0000', vCOFINS: '0.00' })
       make.tagTotal({})          // {} = deixa a lib calcular os totais automaticamente
       make.tagTransp({ modFrete: '9' })
-      make.tagDetPag([{ indPag: '0', tPag: '90', vPag: '0.00' }])
+      // pagamento tem de BATER com o total da nota (tPag 90 + vPag 0 numa nota de R$1 = rejeição)
+      make.tagDetPag([{ indPag: '0', tPag: '01', vPag: '1.00' }])
       make.tagInfRespTec({ CNPJ: cnpj, xContato: c?.name || 'Vazzo', email: 'vazzocomercio@gmail.com', fone: '1140000000' })
 
       const xml = make.xml()
@@ -135,7 +143,7 @@ export class FulfillmentSefazService {
       const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(ret)?.[1] ?? null
       const chave = /<chNFe>(\d{44})<\/chNFe>/.exec(ret)?.[1] ?? null
       const protocolo = /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null
-      this.logger.log(`[emit-test] org=${orgId} company=${companyId} cStat=${cStat} ${xMotivo}`)
+      this.logger.log(`[emit-test] org=${orgId} company=${companyId} nNF=${nNF} cStat=${cStat} ${xMotivo}`)
       return { authorized: cStat === '100', cStat, xMotivo, chave, protocolo }
     } catch (e) {
       const msg = (e as Error).message || JSON.stringify(e)
@@ -145,4 +153,32 @@ export class FulfillmentSefazService {
       cleanup()
     }
   }
+}
+
+// ── Intermediador (marketplace) — NT 2020.006 ────────────────────────────────
+// Venda intermediada por marketplace SEM o grupo infIntermed é rejeitada (ou
+// fica irregular). CNPJ por plataforma; idCadIntTran = identificação do
+// vendedor NO SITE do intermediador (username/id da loja).
+export const INTERMEDIADORES: Record<string, { cnpj: string; nome: string }> = {
+  // SHPS Tecnologia e Serviços Ltda (Shopee Brasil)
+  shopee: { cnpj: '35635824000112', nome: 'Shopee' },
+}
+
+/** Injeta `indIntermed=1` no <ide> e o grupo <infIntermed> no XML da NF-e.
+ *  A node-sped-nfe 1.2.x NÃO implementa tagIntermed (lança "Não implementado!"),
+ *  então inserimos direto na string ANTES de assinar, nas posições do leiaute
+ *  4.00: indIntermed logo após indPres (ordem do XSD) e infIntermed logo após
+ *  </pag>. Lança se os pontos de ancoragem não existirem — XML inválido NÃO
+ *  pode seguir calado pra assinatura. */
+export function injectIntermed(xml: string, intermed: { cnpj: string; idCadIntTran: string }): string {
+  const cnpj = intermed.cnpj.replace(/\D/g, '')
+  if (cnpj.length !== 14) throw new Error(`CNPJ do intermediador inválido: "${intermed.cnpj}"`)
+  const idCad = intermed.idCadIntTran.trim().slice(0, 60)
+  if (!idCad) throw new Error('idCadIntTran (identificação do vendedor no marketplace) vazio.')
+  if (!xml.includes('</indPres>')) throw new Error('XML sem <indPres> — não dá pra ancorar indIntermed.')
+  if (!xml.includes('</pag>')) throw new Error('XML sem <pag> — não dá pra ancorar infIntermed.')
+  const esc = idCad.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return xml
+    .replace('</indPres>', '</indPres><indIntermed>1</indIntermed>')
+    .replace('</pag>', `</pag><infIntermed><CNPJ>${cnpj}</CNPJ><idCadIntTran>${esc}</idCadIntTran></infIntermed>`)
 }
