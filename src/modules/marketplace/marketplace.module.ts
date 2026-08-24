@@ -118,6 +118,7 @@ import { AiModule } from '../ai/ai.module'
     ShopeeQualityService,      // F1.3 — exporta pro Algorithm Score Pillar 3 reusar
     ShopeeStockSyncService,    // F18 Fase C — StockService chama no recalcAndPropagate
     ShopeeCreativePublisherService, // sync de confirmação — CreativeModule injeta
+    ShopeeProductSyncService,       // F2b-6 — ensureFreshToken pro upload da NF-e
     ShopeeOrdersIngestionService,   // F2b-3 — emissão de NF-e re-ingere o pedido AO VIVO (janela da etiqueta)
   ],
 })
