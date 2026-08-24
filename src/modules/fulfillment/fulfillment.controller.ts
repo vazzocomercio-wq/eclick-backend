@@ -1,6 +1,7 @@
 import {
-  Controller, Get, Post, Put, Patch, Delete, Body, Param, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Put, Patch, Delete, Body, Param, Query, UseGuards, BadRequestException, Res,
 } from '@nestjs/common'
+import type { Response } from 'express'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
 import { FulfillmentService } from './fulfillment.service'
@@ -11,6 +12,7 @@ import { FulfillmentInvoicesService, type InvoiceKind, type InvoiceStatus, type 
 import { FulfillmentPackagingService, type PackagingKind, type PackagingKitItem } from './fulfillment-packaging.service'
 import { FulfillmentFiscalService, type FiscalProvider, type FiscalEnvironment, type RegimeTributario } from './fulfillment-fiscal.service'
 import { FulfillmentSefazService, type DestOverride } from './fulfillment-sefaz.service'
+import { FulfillmentDanfeService } from './fulfillment-danfe.service'
 import { FulfillmentLocationsService, type LocationType, type AddressScheme } from './fulfillment-locations.service'
 import { FulfillmentCartsService } from './fulfillment-carts.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
@@ -33,6 +35,7 @@ export class FulfillmentController {
     private readonly packaging: FulfillmentPackagingService,
     private readonly fiscal: FulfillmentFiscalService,
     private readonly sefaz: FulfillmentSefazService,
+    private readonly danfe: FulfillmentDanfeService,
     private readonly locations: FulfillmentLocationsService,
     private readonly carts: FulfillmentCartsService,
   ) {}
@@ -220,6 +223,41 @@ export class FulfillmentController {
   @Post('fiscal/reenviar-marketplace')
   reenviarMarketplace(@ReqUser() u: ReqUserPayload) {
     return this.sefaz.reenviarNotasPendentes(this.org(u))
+  }
+
+  // Faturador F2b-8 — CONTROLE: histórico de notas por plataforma/conta/período.
+  @Get('fiscal/notas')
+  listarNotas(@ReqUser() u: ReqUserPayload, @Query() q: {
+    plataforma?: string; conta?: string; status?: 'issued' | 'cancelled'
+    de?: string; ate?: string; busca?: string; limite?: string; offset?: string
+  }) {
+    return this.sefaz.listarNotas(this.org(u), {
+      plataforma: q.plataforma, conta: q.conta, status: q.status,
+      de: q.de, ate: q.ate, busca: q.busca,
+      limite: q.limite ? Number(q.limite) : undefined,
+      offset: q.offset ? Number(q.offset) : undefined,
+    })
+  }
+
+  // Contas que alimentam o filtro da tela de controle
+  @Get('fiscal/notas/contas')
+  contasComNota(@ReqUser() u: ReqUserPayload) {
+    return this.sefaz.contasComNota(this.org(u))
+  }
+
+  // Link temporário do XML (procNFe — o arquivo de distribuição)
+  @Get('fiscal/notas/:id/xml')
+  xmlDaNota(@ReqUser() u: ReqUserPayload, @Param('id') id: string) {
+    return this.sefaz.arquivoDaNota(this.org(u), id, 'xml')
+  }
+
+  // DANFE em PDF — gerado a partir do XML autorizado (sempre fiel à nota)
+  @Get('fiscal/notas/:id/danfe')
+  async danfeDaNota(@ReqUser() u: ReqUserPayload, @Param('id') id: string, @Res() res: Response) {
+    const { buffer, filename } = await this.danfe.gerarDanfe(this.org(u), id)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    res.send(buffer)
   }
 
   // Faturador F2b-7 — CANCELA a NF-e (evento 110111). Prazo de 24h na SEFAZ.
