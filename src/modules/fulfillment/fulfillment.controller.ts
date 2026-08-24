@@ -195,6 +195,14 @@ export class FulfillmentController {
     return this.sefaz.emitTest(this.org(u), companyId)
   }
 
+  // Faturador F2b-3 — emite a NF-e REAL de um pedido de marketplace.
+  // dryRun=true monta e devolve o XML sem assinar/enviar (não consome número).
+  @Post('fiscal/emit')
+  emitOrder(@ReqUser() u: ReqUserPayload, @Body() body: { externalOrderId: string; dryRun?: boolean }) {
+    if (!body?.externalOrderId?.trim()) throw new BadRequestException('Informe externalOrderId (nº do pedido no marketplace).')
+    return this.sefaz.emitForOrder(this.org(u), body.externalOrderId.trim(), { dryRun: !!body.dryRun })
+  }
+
   @Get('fiscal/products')
   listProductFiscal(@ReqUser() u: ReqUserPayload) {
     return this.fiscal.listProductFiscal(this.org(u))

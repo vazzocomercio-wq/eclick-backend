@@ -1151,7 +1151,7 @@ export function parseShopeeFullAddress(full: string): { logradouro: string; nume
  *  fone (capturados pelo sync na janela aberta da plataforma) e endereço de
  *  entrega do raw (Shopee: recipient_address). Valor mascarado ("****") nunca
  *  entra. É o que a emissão da NF-e (F2b-3) vai ler de fulfillment_orders.customer. */
-function marketplaceCustomer(r: { buyer_name: string | null; buyer_doc_number: string | null; buyer_phone: string | null; raw_data: Record<string, unknown> | null }): Record<string, unknown> {
+export function marketplaceCustomer(r: { buyer_name: string | null; buyer_doc_number: string | null; buyer_phone: string | null; raw_data: Record<string, unknown> | null }): Record<string, unknown> {
   const open = (v: unknown): string | null => {
     const s = typeof v === 'string' ? v.trim() : ''
     return s && !/^\*+$/.test(s) ? s : null
