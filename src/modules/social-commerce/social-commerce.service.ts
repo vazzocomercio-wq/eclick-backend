@@ -737,12 +737,17 @@ export class SocialCommerceService {
     return out
   }
 
-  /** Manda os orfaos pra `visibility: staging` — somem da sacolinha do
-   *  Instagram e do catalogo do WhatsApp, mas continuam no catalogo.
+  /** ARQUIVA os orfaos (`status: archived`) — somem da loja do Instagram
+   *  e do catalogo do WhatsApp, mas continuam no catalogo.
    *
-   *  Escondemos em vez de DELETE de proposito: e reversivel (voltou pra
-   *  vitrine, o mapToMetaFormat manda `published` de novo) e nao quebra a
-   *  tag de produto em post que ja foi publicado. */
+   *  Arquivamos em vez de DELETE de proposito: e reversivel (voltou pra
+   *  vitrine, o mapToMetaFormat manda `status: active` de novo) e nao
+   *  quebra a tag de produto em post ja publicado.
+   *
+   *  🔴 O campo e `status`, nao `visibility`. Ver o comentario em
+   *  MetaProductData: `visibility: 'staging'` responde 200, grava a
+   *  string e NAO esconde nada. Quem for mexer aqui, confira lendo de
+   *  volta — tem que virar `visibility: 'hidden'`. */
   private async unpublishOrphans(
     orgId: string,
     ch: SocialCommerceChannelRow,
@@ -770,7 +775,7 @@ export class SocialCommerceService {
             method:      'UPDATE' as const,
             retailer_id: o.retailer_id,
             // So os campos que mudam: a Meta faz merge no item existente.
-            data:        { visibility: 'staging' } as unknown as MetaProductData,
+            data:        { status: 'archived' } as unknown as MetaProductData,
           })),
         )
         if (result.errors && result.errors.length > 0) {
@@ -1058,9 +1063,9 @@ export class SocialCommerceService {
       image_link:   imageUrl,
       brand:        p.brand ?? 'Sem marca',
       // Explicito de proposito: produto que VOLTOU pra vitrine precisa
-      // sair do 'staging' que o unpublishOrphans pos nele. Omitir aqui
+      // sair do arquivo que o unpublishOrphans pos nele. Omitir aqui
       // deixaria ele escondido pra sempre.
-      visibility:   'published',
+      status:       'active',
     }
     // item_type='PRODUCT_ITEM' vai no top-level do batch (em meta-catalog
     // batchUpdateProducts) — nao em cada item.data.

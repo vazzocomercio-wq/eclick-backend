@@ -75,10 +75,22 @@ export interface MetaProductData {
   gtin?:                 string
   custom_label_0?:       string
   custom_label_1?:       string
-  /** 'published' aparece na sacolinha; 'staging' fica no catalogo mas
-   *  SOME da loja do Instagram/WhatsApp. Sempre mandar explicito: sem
-   *  isso, produto que voltou pra vitrine continuaria escondido. */
-  visibility?:           'published' | 'staging'
+  /** Tira ou devolve o item da loja do Instagram/WhatsApp.
+   *
+   *  'active'   -> aparece (o campo `visibility` passa a ler 'published')
+   *  'archived' -> some da loja       (`visibility` passa a ler 'hidden')
+   *
+   *  🔴 O campo se chama `status`, NAO `visibility`. A Meta renomeou, e o
+   *  `visibility` antigo so aceita 'published'/'hidden' na LEITURA. Mandar
+   *  `visibility: 'staging'` na escrita e o pior caso possivel: a API
+   *  responde 200, grava a string, e nao esconde nada — a gente achou que
+   *  tinha tirado 265 produtos da loja e eles seguiram a venda por um dia
+   *  (23-24/08/2026). Se for mudar, teste lendo de volta: tem que virar
+   *  'hidden', nao o que voce escreveu.
+   *
+   *  Sempre mandar explicito no sync: sem isso, produto que voltou pra
+   *  vitrine continuaria arquivado. */
+  status?:               'active' | 'archived'
 }
 
 /** Item que saiu da vitrine mas continua publicado no catalogo da Meta. */
