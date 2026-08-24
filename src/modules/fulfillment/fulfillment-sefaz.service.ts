@@ -154,10 +154,7 @@ export class FulfillmentSefazService {
       const signed = await tools.xmlSign(xml)
       // a lib tipa indSinc como literal 0; síncrono (1) é o que queremos pro teste
       const ret = await tools.sefazEnviaLote(signed, { idLote: 1, indSinc: 1, compactar: false } as unknown as { idLote?: 1; indSinc?: 0; compactar?: false })
-      const cStat = /<cStat>(\d+)<\/cStat>/g.exec(ret)?.[1] ?? null
-      const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(ret)?.[1] ?? null
-      const chave = /<chNFe>(\d{44})<\/chNFe>/.exec(ret)?.[1] ?? null
-      const protocolo = /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null
+      const { cStat, xMotivo, chave, protocolo } = parseRetornoSefaz(ret)
       this.logger.log(`[emit-test] org=${orgId} company=${companyId} nNF=${nNF} cStat=${cStat} ${xMotivo}`)
       return { authorized: cStat === '100', cStat, xMotivo, chave, protocolo }
     } catch (e) {
@@ -351,10 +348,7 @@ export class FulfillmentSefazService {
     try {
       const signed = await tools.xmlSign(xml)
       const ret = await tools.sefazEnviaLote(signed, { idLote: 1, indSinc: 1, compactar: false } as unknown as { idLote?: 1; indSinc?: 0; compactar?: false })
-      const cStat = /<cStat>(\d+)<\/cStat>/g.exec(ret)?.[1] ?? null
-      const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(ret)?.[1] ?? null
-      const chave = /<chNFe>(\d{44})<\/chNFe>/.exec(ret)?.[1] ?? null
-      const protocolo = /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null
+      const { cStat, xMotivo, chave, protocolo } = parseRetornoSefaz(ret)
       this.logger.log(`[emit-order] ${externalOrderId} nNF=${nNF} cStat=${cStat} ${xMotivo}`)
 
       let invoiceId: string | undefined
@@ -428,6 +422,21 @@ export class FulfillmentSefazService {
     } catch {
       throw new BadRequestException(`Não consegui resolver o município do CEP ${cep} (ViaCEP) — confira o CEP do comprador.`)
     }
+  }
+}
+
+/** Lê o retorno do envio síncrono. O 1º <cStat> do XML é o do LOTE (104 =
+ *  "Lote processado" — diz nada sobre a nota); o veredito da NF-e vive DENTRO
+ *  do <protNFe> (100 = autorizada, 2xx/7xx = rejeição). Ler o de fora fez uma
+ *  nota AUTORIZADA aparecer como "⚠ 104" na tela (visto ao vivo 24/08). */
+function parseRetornoSefaz(ret: string): { cStat: string | null; xMotivo: string | null; chave: string | null; protocolo: string | null } {
+  const prot = /<protNFe[\s\S]*?<\/protNFe>/.exec(ret)?.[0]
+  const scope = prot ?? ret
+  return {
+    cStat: /<cStat>(\d+)<\/cStat>/.exec(scope)?.[1] ?? null,
+    xMotivo: /<xMotivo>([^<]+)<\/xMotivo>/.exec(scope)?.[1] ?? null,
+    chave: /<chNFe>(\d{44})<\/chNFe>/.exec(ret)?.[1] ?? null,
+    protocolo: /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null,
   }
 }
 
