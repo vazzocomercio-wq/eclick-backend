@@ -258,7 +258,11 @@ export class FulfillmentSefazService {
     if (!dAddr.logradouro || !dAddr.cidade || !dAddr.uf || dCep.length !== 8) {
       throw new BadRequestException('ENDERECO_INCOMPLETO: A Shopee mascarou o endereço (ela só abre depois de organizar o envio). Informe o endereço do comprador — ele aparece no detalhe do pedido na Shopee.')
     }
-    const dCMun = await this.resolveIbgeByCep(dCep)   // cMun do DESTINATÁRIO via ViaCEP
+    // cMun do DESTINATÁRIO via ViaCEP; o bairro também vem de lá quando falta
+    // (o Seller Center não manda bairro na linha do endereço)
+    const cepInfo = await this.resolveIbgeByCep(dCep)
+    const dCMun = cepInfo.ibge
+    const dBairro = dAddr.bairro ?? cepInfo.bairro ?? 'CENTRO'
 
     // ── 5. itens: % da conta → kits explodidos → fiscal por produto ────────
     const pct = await this.fiscal.getEffectivePct(orgId, acc.id)
@@ -325,7 +329,7 @@ export class FulfillmentSefazService {
     const enderDest = {
       xLgr: String(dAddr.logradouro).slice(0, 60), nro: String(dAddr.numero ?? 'S/N').slice(0, 60),
       ...(dAddr.complemento ? { xCpl: String(dAddr.complemento).slice(0, 60) } : {}),
-      xBairro: String(dAddr.bairro ?? 'CENTRO').slice(0, 60), cMun: dCMun,
+      xBairro: String(dBairro).slice(0, 60), cMun: dCMun,
       xMun: String(dAddr.cidade).slice(0, 60), UF: (dAddr.uf ?? '').toUpperCase(), CEP: dCep, cPais: '1058', xPais: 'BRASIL',
     }
 
@@ -432,14 +436,15 @@ export class FulfillmentSefazService {
     }
   }
 
-  /** Código IBGE do município do DESTINATÁRIO via ViaCEP (a Shopee não manda).
-   *  Emissão é operação pontual — a latência da consulta é aceitável. */
-  private async resolveIbgeByCep(cep: string): Promise<string> {
+  /** Código IBGE do município + BAIRRO do DESTINATÁRIO via ViaCEP (a Shopee não
+   *  manda nenhum dos dois). Emissão é pontual — a latência é aceitável. */
+  private async resolveIbgeByCep(cep: string): Promise<{ ibge: string; bairro: string | null }> {
     try {
-      const { data } = await axios.get<{ ibge?: string; erro?: boolean }>(`https://viacep.com.br/ws/${cep}/json/`, { timeout: 8000 })
+      const { data } = await axios.get<{ ibge?: string; bairro?: string; erro?: boolean }>(`https://viacep.com.br/ws/${cep}/json/`, { timeout: 8000 })
       const ibge = String(data?.ibge ?? '').replace(/\D/g, '')
       if (data?.erro || ibge.length !== 7) throw new Error('CEP sem código IBGE')
-      return ibge
+      const bairro = String(data?.bairro ?? '').trim() || null
+      return { ibge, bairro }
     } catch {
       throw new BadRequestException(`Não consegui resolver o município do CEP ${cep} (ViaCEP) — confira o CEP do comprador.`)
     }

@@ -203,6 +203,14 @@ export class FulfillmentController {
     return this.sefaz.emitForOrder(this.org(u), body.externalOrderId.trim(), { dryRun: !!body.dryRun, dest: body.dest })
   }
 
+  // Faturador F2b-4 — coletor de endereços: recebe os dados do comprador lidos
+  // no Seller Center (a Open API mascara até o despacho, que exige a NF).
+  @Post('fiscal/shopee-addresses')
+  importShopeeAddresses(@ReqUser() u: ReqUserPayload, @Body() body: { items: Array<{ orderSn?: string; name?: string | null; doc?: string | null; addressLine?: string | null }> }) {
+    if (!Array.isArray(body?.items) || body.items.length === 0) throw new BadRequestException('Envie items[] com os pedidos coletados.')
+    return this.fiscal.importShopeeAddresses(this.org(u), body.items)
+  }
+
   @Get('fiscal/products')
   listProductFiscal(@ReqUser() u: ReqUserPayload) {
     return this.fiscal.listProductFiscal(this.org(u))
