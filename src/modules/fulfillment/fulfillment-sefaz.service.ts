@@ -134,7 +134,9 @@ export class FulfillmentSefazService {
       // ⚠️ cDV vai AQUI (entre tpEmis e tpAmb): a lib escreve o <ide> na ordem das
       // chaves do objeto e só ATUALIZA o valor do cDV ao calcular a chave — sem o
       // placeholder na posição certa ele cai no fim do grupo e a SEFAZ rejeita (215).
-      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
+      // indIntermed 0 = sem intermediador (o teste não passa por marketplace);
+      // venda a consumidor final pela internet exige o campo (rejeição 434).
+      make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie: 1, nNF, dhEmi, tpNF: 1, idDest: 1, cMunFG: cMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb: 2, finNFe: 1, indFinal: 1, indPres: 2, indIntermed: 0, procEmi: 0, verProc: 'eClick-1.0' })
       make.tagEmit({ CNPJ: cnpj, xNome: c?.name || 'EMITENTE TESTE', xFant: c?.name || 'EMITENTE', IE: (cfg!.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
       make.tagEnderEmit(ender)
       // Em homologação a SEFAZ EXIGE este xNome literal no destinatário (senão rejeita)
@@ -313,11 +315,13 @@ export class FulfillmentSefazService {
       xMun: String(dAddr.cidade).slice(0, 60), UF: (dAddr.uf ?? '').toUpperCase(), CEP: dCep, cPais: '1058', xPais: 'BRASIL',
     }
 
+    const intermed = INTERMEDIADORES[platform]
     const { Make } = await loadSpedNfe('node-sped-nfe')
     const make = new Make()
     make.tagInfNFe({ versao: '4.00' })
-    // cDV entre tpEmis e tpAmb — ver comentário no emitTest (rejeição 215 sem isso)
-    make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie, nNF, dhEmi: brtNow(), tpNF: 1, idDest: sameUf ? 1 : 2, cMunFG: eCMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb, finNFe: 1, indFinal: 1, indPres: 2, procEmi: 0, verProc: 'eClick-1.0' })
+    // cDV entre tpEmis e tpAmb (rejeição 215); indIntermed obrigatório em venda a
+    // consumidor final pela internet (rejeição 434): 1 = com marketplace, 0 = sem.
+    make.tagIde({ cUF, cNF, natOp: 'VENDA DE MERCADORIA', mod: 55, serie, nNF, dhEmi: brtNow(), tpNF: 1, idDest: sameUf ? 1 : 2, cMunFG: eCMun, tpImp: 1, tpEmis: 1, cDV: 0, tpAmb, finNFe: 1, indFinal: 1, indPres: 2, indIntermed: intermed ? 1 : 0, procEmi: 0, verProc: 'eClick-1.0' })
     make.tagEmit({ CNPJ: emitCnpj, xNome: company?.name || 'EMITENTE', xFant: company?.name || 'EMITENTE', IE: (cfg.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
     make.tagEnderEmit(enderEmit)
     // homologação EXIGE este xNome literal; produção leva o nome real
@@ -338,8 +342,7 @@ export class FulfillmentSefazService {
     make.tagInfRespTec({ CNPJ: emitCnpj, xContato: company?.name || 'Vazzo', email: 'vazzocomercio@gmail.com', fone: '7199372247' })
 
     let xml = make.xml()
-    // venda intermediada (NT 2020.006) — grupo obrigatório
-    const intermed = INTERMEDIADORES[platform]
+    // venda intermediada (NT 2020.006) — grupo infIntermed (indIntermed=1 já no <ide>)
     if (intermed) xml = injectIntermed(xml, { cnpj: intermed.cnpj, idCadIntTran: acc.label ?? intermed.nome })
 
     if (dryRun) {
@@ -468,21 +471,17 @@ const AUTXML_POR_UF: Record<string, string> = {
   BA: '13937073000156',   // CNPJ da SEFAZ Bahia
 }
 
-/** Injeta `indIntermed=1` no <ide> e o grupo <infIntermed> no XML da NF-e.
- *  A node-sped-nfe 1.2.x NÃO implementa tagIntermed (lança "Não implementado!"),
- *  então inserimos direto na string ANTES de assinar, nas posições do leiaute
- *  4.00: indIntermed logo após indPres (ordem do XSD) e infIntermed logo após
- *  </pag>. Lança se os pontos de ancoragem não existirem — XML inválido NÃO
- *  pode seguir calado pra assinatura. */
+/** Injeta o grupo <infIntermed> no XML da NF-e (o indIntermed=1 já vai no <ide>
+ *  via tagIde). A node-sped-nfe 1.2.x NÃO implementa tagIntermed (lança "Não
+ *  implementado!"), então inserimos direto na string ANTES de assinar: infIntermed
+ *  logo após </pag> (ordem do leiaute 4.00). Lança se a âncora não existir —
+ *  XML inválido NÃO pode seguir calado pra assinatura. */
 export function injectIntermed(xml: string, intermed: { cnpj: string; idCadIntTran: string }): string {
   const cnpj = intermed.cnpj.replace(/\D/g, '')
   if (cnpj.length !== 14) throw new Error(`CNPJ do intermediador inválido: "${intermed.cnpj}"`)
   const idCad = intermed.idCadIntTran.trim().slice(0, 60)
   if (!idCad) throw new Error('idCadIntTran (identificação do vendedor no marketplace) vazio.')
-  if (!xml.includes('</indPres>')) throw new Error('XML sem <indPres> — não dá pra ancorar indIntermed.')
   if (!xml.includes('</pag>')) throw new Error('XML sem <pag> — não dá pra ancorar infIntermed.')
   const esc = idCad.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  return xml
-    .replace('</indPres>', '</indPres><indIntermed>1</indIntermed>')
-    .replace('</pag>', `</pag><infIntermed><CNPJ>${cnpj}</CNPJ><idCadIntTran>${esc}</idCadIntTran></infIntermed>`)
+  return xml.replace('</pag>', `</pag><infIntermed><CNPJ>${cnpj}</CNPJ><idCadIntTran>${esc}</idCadIntTran></infIntermed>`)
 }
