@@ -5,7 +5,7 @@ import { CredentialsService } from '../credentials/credentials.service'
 
 export type FiscalProvider = 'nfeio' | 'focusnfe' | 'plugnotas' | 'erp_externo'
 export type FiscalEnvironment = 'homologacao' | 'producao'
-export type RegimeTributario = 'simples' | 'presumido' | 'real'
+export type RegimeTributario = 'simples' | 'presumido' | 'real' | 'mei'
 
 export interface CompanyFiscalConfig {
   id: string
@@ -139,6 +139,28 @@ export class FulfillmentFiscalService {
     try { return JSON.parse(raw) as { pfxBase64: string; password: string } } catch { return null }
   }
 
+  // ── Numeração + regime ──────────────────────────────────────────────────────
+  /** CRT do emitente na NF-e a partir do regime: MEI = 4 (NT 2023.001, vigente
+   *  desde set/2024), Simples = 1, Presumido/Real = 3 (regime normal). */
+  crtFor(regime: RegimeTributario | null | undefined): 1 | 3 | 4 {
+    if (regime === 'mei') return 4
+    if (regime === 'presumido' || regime === 'real') return 3
+    return 1
+  }
+
+  /** Reserva ATÔMICA do próximo nNF da série (RPC fiscal_next_number — INSERT
+   *  ON CONFLICT UPDATE num statement só). Numeração fiscal é sequencial e
+   *  irreversível: número pulado exige inutilização na SEFAZ; por isso NUNCA
+   *  gerar nNF por timestamp/MAX+1. Homologação e produção têm contadores
+   *  separados (mesma série pode existir nos dois ambientes). */
+  async nextInvoiceNumber(orgId: string, companyId: string, serie: number, ambiente: FiscalEnvironment): Promise<number> {
+    const { data, error } = await supabaseAdmin.rpc('fiscal_next_number', {
+      p_org: orgId, p_company: companyId, p_serie: serie, p_ambiente: ambiente,
+    })
+    if (error || data == null) throw new BadRequestException(`Não consegui reservar o número da NF-e: ${error?.message ?? 'RPC sem retorno'}`)
+    return Number(data)
+  }
+
   /** O que falta pra empresa poder emitir (usado pela UI + trava futura). */
   async readiness(orgId: string, companyId: string): Promise<{ ready: boolean; missing: string[] }> {
     const cfg = await this.getCompanyFiscal(orgId, companyId)
@@ -191,6 +213,45 @@ export class FulfillmentFiscalService {
   }
 
   // ── Dados fiscais por produto ────────────────────────────────────────────────
+  /** Dados fiscais RESOLVIDOS por produto pra emissão: product_fiscal (painel do
+   *  Faturador, canônico) com fallback em products.fiscal (jsonb do cadastro —
+   *  vem do import/NF de compra). Devolve só os produtos que têm ALGUM dado. */
+  async resolveProductFiscal(orgId: string, productIds: string[]): Promise<Map<string, {
+    ncm: string | null; cest: string | null; origem: string | null
+    cfop_sale: string | null; cst_csosn: string | null; unit: string; tax_rate: number | null
+  }>> {
+    const out = new Map<string, { ncm: string | null; cest: string | null; origem: string | null; cfop_sale: string | null; cst_csosn: string | null; unit: string; tax_rate: number | null }>()
+    const ids = [...new Set(productIds.filter(Boolean))]
+    if (ids.length === 0) return out
+    const { data: rows } = await supabaseAdmin
+      .from('product_fiscal').select('product_id, ncm, cest, origem, cfop_sale, cst_csosn, unit, tax_rate')
+      .eq('organization_id', orgId).in('product_id', ids)
+    for (const r of (rows ?? []) as Array<{ product_id: string; ncm: string | null; cest: string | null; origem: string | null; cfop_sale: string | null; cst_csosn: string | null; unit: string | null; tax_rate: number | null }>) {
+      out.set(r.product_id, { ncm: r.ncm, cest: r.cest, origem: r.origem, cfop_sale: r.cfop_sale, cst_csosn: r.cst_csosn, unit: r.unit || 'UN', tax_rate: r.tax_rate })
+    }
+    const missing = ids.filter((id) => !out.get(id)?.ncm)
+    if (missing.length > 0) {
+      const { data: prods } = await supabaseAdmin
+        .from('products').select('id, fiscal').eq('organization_id', orgId).in('id', missing)
+      for (const p of (prods ?? []) as Array<{ id: string; fiscal: Record<string, string> | null }>) {
+        if (!p.fiscal) continue
+        const cur = out.get(p.id)
+        const ncm = (p.fiscal.ncm ?? '').trim() || null
+        if (!ncm && !cur) continue
+        out.set(p.id, {
+          ncm:       cur?.ncm ?? ncm,
+          cest:      cur?.cest ?? ((p.fiscal.cest ?? '').trim() || null),
+          origem:    cur?.origem ?? ((p.fiscal.origem ?? '').trim() || null),
+          cfop_sale: cur?.cfop_sale ?? null,
+          cst_csosn: cur?.cst_csosn ?? null,
+          unit:      cur?.unit ?? 'UN',
+          tax_rate:  cur?.tax_rate ?? null,
+        })
+      }
+    }
+    return out
+  }
+
   async listProductFiscal(orgId: string) {
     const { data } = await supabaseAdmin
       .from('product_fiscal').select('*').eq('organization_id', orgId).order('updated_at', { ascending: false }).limit(500)

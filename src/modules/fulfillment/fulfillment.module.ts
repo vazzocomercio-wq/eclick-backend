@@ -17,9 +17,12 @@ import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { StockModule } from '../stock/stock.module'
 import { CredentialsModule } from '../credentials/credentials.module'
+import { CompositionModule } from '../composition/composition.module'
+import { MarketplaceModule } from '../marketplace/marketplace.module'
 
 @Module({
-  imports:     [AiModule, MercadolivreModule, StockModule, CredentialsModule],
+  // Composition + Marketplace: F2b-3 (emissão de NF-e explode kits e re-ingere o pedido Shopee ao vivo)
+  imports:     [AiModule, MercadolivreModule, StockModule, CredentialsModule, CompositionModule, MarketplaceModule],
   controllers: [FulfillmentController],
   providers:   [FulfillmentService, FulfillmentAiService, FulfillmentLabelsService, FulfillmentReconcileService, FulfillmentReturnsService, FulfillmentWaveService, FulfillmentAccountsService, FulfillmentInvoicesService, FulfillmentPackagingService, FulfillmentFiscalService, FulfillmentSefazService, FulfillmentLocationsService, FulfillmentCartsService],
   exports:     [FulfillmentService],
