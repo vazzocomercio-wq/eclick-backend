@@ -140,6 +140,8 @@ export class FulfillmentSefazService {
       // Em homologação a SEFAZ EXIGE este xNome literal no destinatário (senão rejeita)
       make.tagDest({ CPF: '11144477735', xNome: 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL', indIEDest: 9 })
       make.tagEnderDest(ender)
+      // BA exige o grupo autXML (contador; sem contador = CNPJ da SEFAZ-BA) — rejeição 486
+      if (AUTXML_POR_UF[uf]) make.tagAutXML({ CNPJ: AUTXML_POR_UF[uf] })
       await make.tagProd([{ cProd: 'TESTE001', cEAN: 'SEM GTIN', xProd: 'PRODUTO TESTE', NCM: '49011000', CFOP: '5102', uCom: 'UN', qCom: 1, vUnCom: 1.00, vProd: 1.00, cEANTrib: 'SEM GTIN', uTrib: 'UN', qTrib: 1, vUnTrib: 1.00, indTot: 1 }])
       make.tagProdICMSSN(0, { orig: '0', CSOSN: '102' })
       make.tagProdPIS(0, { CST: '49', vBC: '0.00', pPIS: '0.0000', vPIS: '0.00' })
@@ -322,6 +324,8 @@ export class FulfillmentSefazService {
     const destNome = tpAmb === 2 ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : String(cust.name ?? 'CONSUMIDOR').slice(0, 60)
     make.tagDest({ ...(doc.length === 14 ? { CNPJ: doc } : { CPF: doc }), xNome: destNome, indIEDest: 9 })
     make.tagEnderDest(enderDest)
+    // BA exige o grupo autXML (contador; sem contador = CNPJ da SEFAZ-BA) — rejeição 486
+    if (AUTXML_POR_UF[uf]) make.tagAutXML({ CNPJ: AUTXML_POR_UF[uf] })
     await make.tagProd(items.map(({ _orig, _csosn, ...rest }) => rest))
     items.forEach((it, idx) => {
       make.tagProdICMSSN(idx, { orig: it._orig, CSOSN: it._csosn })
@@ -455,6 +459,13 @@ function brtNow(): string {
 export const INTERMEDIADORES: Record<string, { cnpj: string; nome: string }> = {
   // SHPS Tecnologia e Serviços Ltda (Shopee Brasil)
   shopee: { cnpj: '35635824000112', nome: 'Shopee' },
+}
+
+/** UFs que EXIGEM o grupo autXML identificando o escritório de contabilidade
+ *  (rejeição 486). Emitente sem contador cadastrado informa o CNPJ da própria
+ *  SEFAZ — texto literal da rejeição da BA (validação desde 01/01/2016). */
+const AUTXML_POR_UF: Record<string, string> = {
+  BA: '13937073000156',   // CNPJ da SEFAZ Bahia
 }
 
 /** Injeta `indIntermed=1` no <ide> e o grupo <infIntermed> no XML da NF-e.
