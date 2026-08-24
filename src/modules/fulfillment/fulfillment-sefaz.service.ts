@@ -264,13 +264,25 @@ export class FulfillmentSefazService {
     const dCMun = cepInfo.ibge
     const dBairro = dAddr.bairro ?? cepInfo.bairro ?? 'CENTRO'
 
-    // ── 5. itens: % da conta → kits explodidos → fiscal por produto ────────
+    // ── 5. itens: valor PAGO → % da conta → kits explodidos → fiscal ───────
     const pct = await this.fiscal.getEffectivePct(orgId, acc.id)
     const fator = (Number(pct.salePct) || 100) / 100
+
+    // `orders.sale_price` é o preço do ITEM; o comprador pode ter pago MENOS
+    // (cupom/voucher da plataforma). A nota tem de refletir o valor PAGO —
+    // senão sai maior que a operação real e o pagamento declarado não fecha.
+    // Rateia a diferença proporcionalmente entre as linhas do pedido.
+    const somaItens = rows.reduce((s, r) => s + (Number(r.sale_price) || 0), 0)
+    const pago = Number((rows[0].raw_data as { total_amount?: unknown } | null)?.total_amount)
+    const ajuste = Number.isFinite(pago) && pago > 0 && somaItens > 0 ? pago / somaItens : 1
+    if (ajuste !== 1) {
+      this.logger.log(`[emit-order] ${externalOrderId} valor pago R$${pago.toFixed(2)} vs itens R$${somaItens.toFixed(2)} — rateando desconto (fator ${ajuste.toFixed(4)})`)
+    }
+
     const lines = rows.map((r) => ({
       product_id: r.product_id, sku: r.sku, description: r.product_title,
       qty: Number(r.quantity) || 1,
-      unit_value: round4(((Number(r.sale_price) || 0) * fator) / (Number(r.quantity) || 1)),
+      unit_value: round4(((Number(r.sale_price) || 0) * ajuste * fator) / (Number(r.quantity) || 1)),
     }))
     const exploded = await this.composition.explodeForInvoice(orgId, lines)
     const pids = [...new Set(exploded.map((l) => l.product_id).filter((v): v is string => !!v))]
