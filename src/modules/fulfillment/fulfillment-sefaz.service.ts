@@ -444,6 +444,120 @@ export class FulfillmentSefazService {
     }
   }
 
+  // ── F2b-7: eventos da nota (cancelamento e carta de correção) ────────────
+
+  /** CANCELA uma NF-e autorizada (evento 110111).
+   *
+   *  ⚠️ Prazo legal: 24h da autorização na maioria das UFs — passou disso, a
+   *  SEFAZ recusa e o caminho vira devolução/nota de entrada (com o contador).
+   *  A justificativa é obrigatória e vai NO EVENTO público: mínimo 15 chars.
+   *  Cancelar NÃO reabre a numeração — o número fica queimado, é assim mesmo. */
+  async cancelarNota(orgId: string, input: { invoiceId?: string; accessKey?: string; justificativa: string }): Promise<{
+    cancelada: boolean; cStat: string | null; xMotivo: string | null; protocolo: string | null
+  }> {
+    const just = String(input.justificativa ?? '').trim()
+    if (just.length < 15) throw new BadRequestException('A justificativa do cancelamento precisa de pelo menos 15 caracteres (exigência da SEFAZ).')
+    if (just.length > 255) throw new BadRequestException('Justificativa muito longa (máx. 255 caracteres).')
+
+    let q = supabaseAdmin.from('fulfillment_invoices')
+      .select('id, number, series, access_key, status, company_id, fulfillment_order_id')
+      .eq('organization_id', orgId)
+    q = input.invoiceId ? q.eq('id', input.invoiceId) : q.eq('access_key', (input.accessKey ?? '').replace(/\D/g, ''))
+    const { data: row } = await q.limit(1).maybeSingle()
+    const inv = row as { id: string; number: string | null; series: string | null; access_key: string | null; status: string; company_id: string | null } | null
+    if (!inv) throw new NotFoundException('Nota não encontrada.')
+    if (inv.status === 'cancelled') throw new BadRequestException('Esta nota já está cancelada.')
+    if (inv.status !== 'issued' || !inv.access_key) throw new BadRequestException('Só dá pra cancelar nota emitida e autorizada.')
+    if (!inv.company_id) throw new BadRequestException('Nota sem empresa emissora — não consigo carregar o certificado.')
+
+    // o protocolo de autorização é obrigatório no evento; sai do XML guardado
+    const protocolo = await this.protocoloDaNota(orgId, inv.access_key)
+    if (!protocolo) throw new BadRequestException('Não achei o protocolo de autorização desta nota (necessário pro cancelamento).')
+
+    const { tools, cleanup } = await this.toolsFor(orgId, inv.company_id)
+    try {
+      const ret = await tools.sefazEvento({ chNFe: inv.access_key, tpEvento: '110111', nProt: protocolo, xJust: just, nSeqEvento: 1 })
+      // 135 = evento registrado e vinculado · 155 = registrado fora de prazo (também cancela)
+      const cStat = /<cStat>(\d+)<\/cStat>/g.exec(ret)?.[1] ?? null
+      const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(ret)?.[1] ?? null
+      const protEvento = /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null
+      const okStats = ['135', '155']
+      const cStatEvento = /<retEvento[\s\S]*?<cStat>(\d+)<\/cStat>/.exec(ret)?.[1] ?? cStat
+      const cancelada = okStats.includes(String(cStatEvento))
+
+      // guarda o XML do evento (faz parte da escrituração)
+      await supabaseAdmin.storage.from(FULFILLMENT_BUCKET)
+        .upload(`${orgId}/invoices/${inv.access_key}-cancelamento.xml`, Buffer.from(ret, 'utf8'), { contentType: 'application/xml', upsert: true })
+
+      if (cancelada) {
+        await supabaseAdmin.from('fulfillment_invoices')
+          .update({ status: 'cancelled', cancel_reason: just, cancelled_at: new Date().toISOString() })
+          .eq('id', inv.id).eq('organization_id', orgId)
+      }
+      this.logger.log(`[cancelar-nf] NF ${inv.number} chave=${inv.access_key} cStat=${cStatEvento} ${xMotivo}`)
+      return { cancelada, cStat: cStatEvento, xMotivo, protocolo: protEvento }
+    } catch (e) {
+      const msg = (e as Error).message || JSON.stringify(e)
+      this.logger.warn(`[cancelar-nf] ${inv.access_key}: ${msg}`)
+      throw new BadRequestException(`Falha ao cancelar a NF-e: ${msg}`)
+    } finally {
+      cleanup()
+    }
+  }
+
+  /** CARTA DE CORREÇÃO (evento 110110) — conserta erro que NÃO seja de valor,
+   *  imposto, quantidade, data ou troca de destinatário (esses só cancelando).
+   *  Serve pra endereço/observação. Cada CC-e é uma sequência nova. */
+  async cartaDeCorrecao(orgId: string, input: { invoiceId?: string; accessKey?: string; correcao: string }): Promise<{
+    ok: boolean; cStat: string | null; xMotivo: string | null; sequencia: number
+  }> {
+    const texto = String(input.correcao ?? '').trim()
+    if (texto.length < 15) throw new BadRequestException('A correção precisa de pelo menos 15 caracteres (exigência da SEFAZ).')
+    if (texto.length > 1000) throw new BadRequestException('Correção muito longa (máx. 1000 caracteres).')
+
+    let q = supabaseAdmin.from('fulfillment_invoices')
+      .select('id, number, access_key, status, company_id, cce_count').eq('organization_id', orgId)
+    q = input.invoiceId ? q.eq('id', input.invoiceId) : q.eq('access_key', (input.accessKey ?? '').replace(/\D/g, ''))
+    const { data: row } = await q.limit(1).maybeSingle()
+    const inv = row as { id: string; number: string | null; access_key: string | null; status: string; company_id: string | null; cce_count: number | null } | null
+    if (!inv?.access_key) throw new NotFoundException('Nota não encontrada.')
+    if (inv.status !== 'issued') throw new BadRequestException('Carta de correção só vale pra nota autorizada (não cancelada).')
+    if (!inv.company_id) throw new BadRequestException('Nota sem empresa emissora.')
+
+    const seq = (Number(inv.cce_count) || 0) + 1
+    const { tools, cleanup } = await this.toolsFor(orgId, inv.company_id)
+    try {
+      const ret = await tools.sefazEvento({ chNFe: inv.access_key, tpEvento: '110110', xJust: texto, nSeqEvento: seq })
+      const cStat = /<retEvento[\s\S]*?<cStat>(\d+)<\/cStat>/.exec(ret)?.[1] ?? /<cStat>(\d+)<\/cStat>/.exec(ret)?.[1] ?? null
+      const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(ret)?.[1] ?? null
+      const ok = ['135', '136'].includes(String(cStat))
+      await supabaseAdmin.storage.from(FULFILLMENT_BUCKET)
+        .upload(`${orgId}/invoices/${inv.access_key}-cce-${seq}.xml`, Buffer.from(ret, 'utf8'), { contentType: 'application/xml', upsert: true })
+      if (ok) {
+        await supabaseAdmin.from('fulfillment_invoices').update({ cce_count: seq }).eq('id', inv.id).eq('organization_id', orgId)
+      }
+      this.logger.log(`[cce] NF ${inv.number} seq=${seq} cStat=${cStat} ${xMotivo}`)
+      return { ok, cStat, xMotivo, sequencia: seq }
+    } catch (e) {
+      const msg = (e as Error).message || JSON.stringify(e)
+      throw new BadRequestException(`Falha na carta de correção: ${msg}`)
+    } finally {
+      cleanup()
+    }
+  }
+
+  /** Protocolo de autorização da nota — lê do XML de retorno guardado. */
+  private async protocoloDaNota(orgId: string, chave: string): Promise<string | null> {
+    for (const suf of ['-prot.xml', '-procNFe.xml']) {
+      const { data } = await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).download(`${orgId}/invoices/${chave}${suf}`)
+      if (!data) continue
+      const txt = await data.text()
+      const nProt = /<nProt>(\d+)<\/nProt>/.exec(txt)?.[1]
+      if (nProt) return nProt
+    }
+    return null
+  }
+
   /** FILA FISCAL — pedidos na janela de despacho e o que falta em cada um pra
    *  virar nota. É a tela de trabalho do dia: o operador olha o semáforo,
    *  resolve o que está vermelho e manda emitir o lote. */
@@ -451,7 +565,7 @@ export class FulfillmentSefazService {
     pedidos: Array<{
       orderSn: string; comprador: string | null; valor: number; loja: string | null
       temEndereco: boolean; temDoc: boolean; semNcm: string[]
-      nota: { number: string | null; chave: string | null; noMarketplace: boolean } | null
+      nota: { id: string; number: string | null; chave: string | null; noMarketplace: boolean; podeCancelar: boolean; horasPraCancelar: number | null } | null
       pronto: boolean; falta: string[]
     }>
     resumo: { total: number; prontos: number; jaEmitidos: number; bloqueados: number }
@@ -478,10 +592,10 @@ export class FulfillmentSefazService {
       .eq('organization_id', orgId).eq('source_type', 'marketplace').in('source_id', sns)
     const foBySn = new Map((fos ?? []).map((f) => [(f as { source_id: string }).source_id, (f as { id: string }).id]))
     const { data: invs } = await supabaseAdmin
-      .from('fulfillment_invoices').select('fulfillment_order_id, number, access_key, marketplace_sent_at, status')
+      .from('fulfillment_invoices').select('id, fulfillment_order_id, number, access_key, marketplace_sent_at, status, created_at')
       .eq('organization_id', orgId).eq('status', 'issued')
       .in('fulfillment_order_id', [...foBySn.values()].length ? [...foBySn.values()] : ['00000000-0000-0000-0000-000000000000'])
-    const invByFo = new Map((invs ?? []).map((i) => [(i as { fulfillment_order_id: string }).fulfillment_order_id, i as { number: string | null; access_key: string | null; marketplace_sent_at: string | null }]))
+    const invByFo = new Map((invs ?? []).map((i) => [(i as { fulfillment_order_id: string }).fulfillment_order_id, i as { id: string; number: string | null; access_key: string | null; marketplace_sent_at: string | null; created_at: string }]))
 
     // fiscal de todos os produtos envolvidos, de uma vez
     const pids = [...new Set((rows ?? []).map((r) => (r as { product_id: string | null }).product_id).filter((v): v is string => !!v))]
@@ -502,7 +616,15 @@ export class FulfillmentSefazService {
 
       const foId = foBySn.get(orderSn)
       const inv = foId ? invByFo.get(foId) : undefined
-      const nota = inv ? { number: inv.number, chave: inv.access_key, noMarketplace: !!inv.marketplace_sent_at } : null
+      // janela de cancelamento: 24h da autorização (regra da maioria das UFs)
+      const horasRestantes = inv
+        ? Math.max(0, Math.round((new Date(inv.created_at).getTime() + 24 * 3600_000 - Date.now()) / 360_000) / 10)
+        : null
+      const nota = inv ? {
+        id: inv.id, number: inv.number, chave: inv.access_key,
+        noMarketplace: !!inv.marketplace_sent_at,
+        podeCancelar: (horasRestantes ?? 0) > 0, horasPraCancelar: horasRestantes,
+      } : null
 
       const falta: string[] = []
       if (!temDoc) falta.push('CPF/CNPJ do comprador')

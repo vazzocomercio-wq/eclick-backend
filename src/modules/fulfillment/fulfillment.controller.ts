@@ -222,6 +222,22 @@ export class FulfillmentController {
     return this.sefaz.reenviarNotasPendentes(this.org(u))
   }
 
+  // Faturador F2b-7 — CANCELA a NF-e (evento 110111). Prazo de 24h na SEFAZ.
+  @Post('fiscal/cancelar')
+  cancelarNota(@ReqUser() u: ReqUserPayload, @Body() body: { invoiceId?: string; accessKey?: string; justificativa: string }) {
+    if (!body?.justificativa?.trim()) throw new BadRequestException('Informe a justificativa do cancelamento (mín. 15 caracteres).')
+    if (!body.invoiceId && !body.accessKey) throw new BadRequestException('Informe a nota (invoiceId ou accessKey).')
+    return this.sefaz.cancelarNota(this.org(u), body)
+  }
+
+  // Carta de correção (110110) — só erro que NÃO seja de valor/imposto/destinatário.
+  @Post('fiscal/carta-correcao')
+  cartaCorrecao(@ReqUser() u: ReqUserPayload, @Body() body: { invoiceId?: string; accessKey?: string; correcao: string }) {
+    if (!body?.correcao?.trim()) throw new BadRequestException('Informe o texto da correção (mín. 15 caracteres).')
+    if (!body.invoiceId && !body.accessKey) throw new BadRequestException('Informe a nota (invoiceId ou accessKey).')
+    return this.sefaz.cartaDeCorrecao(this.org(u), body)
+  }
+
   // Faturador F2b-4 — coletor de endereços: recebe os dados do comprador lidos
   // no Seller Center (a Open API mascara até o despacho, que exige a NF).
   @Post('fiscal/shopee-addresses')
