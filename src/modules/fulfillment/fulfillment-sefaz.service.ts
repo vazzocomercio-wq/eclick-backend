@@ -12,6 +12,10 @@ import { FulfillmentService, marketplaceCustomer } from './fulfillment.service'
 import { FULFILLMENT_BUCKET } from './fulfillment-labels.service'
 import { CompositionService } from '../composition/composition.service'
 import { ShopeeOrdersIngestionService } from '../marketplace/shopee-sync/shopee-orders-ingestion.service'
+import { ShopeeProductSyncService } from '../marketplace/shopee-sync/shopee-product-sync.service'
+import { MarketplaceService } from '../marketplace/marketplace.service'
+import { MarketplaceAdapterRegistry } from '../marketplace/adapters/registry'
+import { ShopeeAdapter } from '../marketplace/adapters/shopee.adapter'
 
 // node-sped-nfe é ESM-only ("type":"module") e o backend é CommonJS. Carregamos
 // via import() REAL — o `new Function` impede o TS de rebaixar pra require()
@@ -36,6 +40,9 @@ export class FulfillmentSefazService {
     private readonly fulfillment: FulfillmentService,
     private readonly composition: CompositionService,
     private readonly shopeeOrders: ShopeeOrdersIngestionService,
+    private readonly shopeeSync: ShopeeProductSyncService,   // ensureFreshToken
+    private readonly mp: MarketplaceService,                 // conexão por loja
+    private readonly registry: MarketplaceAdapterRegistry,   // adapter da plataforma
   ) {}
 
   /** Monta o Tools da node-sped-nfe. O .pfx é gravado num ARQUIVO temporário e
@@ -185,6 +192,8 @@ export class FulfillmentSefazService {
     authorized: boolean; dryRun?: boolean; cStat: string | null; xMotivo: string | null
     chave: string | null; protocolo: string | null; nNF: number | null; serie: number
     invoiceId?: string; xml?: string
+    /** resultado do envio automático da nota pro marketplace (F2b-6) */
+    marketplace?: { ok: boolean; erro?: string }
   }> {
     const dryRun = !!opts?.dryRun
     const serie = 1
@@ -389,11 +398,19 @@ export class FulfillmentSefazService {
       this.logger.log(`[emit-order] ${externalOrderId} nNF=${nNF} cStat=${cStat} ${xMotivo}`)
 
       let invoiceId: string | undefined
+      let marketplace: { ok: boolean; erro?: string } | undefined
       if (cStat === '100' && chave) {
-        // guarda o XML assinado + protocolo (obrigação de 5 anos) e registra a invoice
+        // guarda os 3 XMLs (obrigação de 5 anos). O que o marketplace/contador
+        // aceita é o nfeProc — nota assinada + protocolo no MESMO arquivo;
+        // mandar só o <NFe> dá "Invalid NF-e" na Shopee (visto ao vivo 24/08).
         const base = `${orgId}/invoices/${chave}`
-        await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).upload(`${base}-nfe.xml`, Buffer.from(signed, 'utf8'), { contentType: 'application/xml', upsert: true })
-        await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).upload(`${base}-prot.xml`, Buffer.from(ret, 'utf8'), { contentType: 'application/xml', upsert: true })
+        const proc = montarNfeProc(signed, ret)
+        const up = (nome: string, conteudo: string) => supabaseAdmin.storage.from(FULFILLMENT_BUCKET)
+          .upload(`${base}${nome}`, Buffer.from(conteudo, 'utf8'), { contentType: 'application/xml', upsert: true })
+        await up('-nfe.xml', signed)
+        await up('-prot.xml', ret)
+        if (proc) await up('-procNFe.xml', proc)
+
         const foId = fo ?? await this.ensureFulfillmentOrder(orgId, externalOrderId, false)
         if (foId) {
           const r = await this.invoices.upsertForOrder(orgId, foId, {
@@ -403,9 +420,21 @@ export class FulfillmentSefazService {
             items: exploded.map((l) => ({ sku: String(l.sku ?? ''), description: l.description ?? null, qty: Number(l.qty) || 0, unit_value: l.unit_value ?? null })),
           })
           invoiceId = r.id
+          if (proc) {
+            await supabaseAdmin.from('fulfillment_invoices')
+              .update({ proc_xml_url: `${base}-procNFe.xml` }).eq('id', r.id).eq('organization_id', orgId)
+          }
         }
+
+        // F2b-6 — devolve a nota pro marketplace (destrava o "Organizar Envio").
+        // Best-effort: a nota JÁ existe na SEFAZ; falha aqui vira pendência de
+        // reenvio, nunca desfaz a emissão.
+        marketplace = await this.enviarNotaProMarketplace(orgId, {
+          invoiceId, platform, shopId, orderSn: externalOrderId,
+          number: String(nNF), serie: String(serie), chave, total,
+        })
       }
-      return { authorized: cStat === '100', cStat, xMotivo, chave, protocolo, nNF, serie, invoiceId }
+      return { authorized: cStat === '100', cStat, xMotivo, chave, protocolo, nNF, serie, invoiceId, marketplace }
     } catch (e) {
       const msg = (e as Error).message || JSON.stringify(e)
       this.logger.warn(`[emit-order] ${externalOrderId}: ${msg}`)
@@ -413,6 +442,180 @@ export class FulfillmentSefazService {
     } finally {
       cleanup()
     }
+  }
+
+  /** FILA FISCAL — pedidos na janela de despacho e o que falta em cada um pra
+   *  virar nota. É a tela de trabalho do dia: o operador olha o semáforo,
+   *  resolve o que está vermelho e manda emitir o lote. */
+  async filaFiscal(orgId: string): Promise<{
+    pedidos: Array<{
+      orderSn: string; comprador: string | null; valor: number; loja: string | null
+      temEndereco: boolean; temDoc: boolean; semNcm: string[]
+      nota: { number: string | null; chave: string | null; noMarketplace: boolean } | null
+      pronto: boolean; falta: string[]
+    }>
+    resumo: { total: number; prontos: number; jaEmitidos: number; bloqueados: number }
+  }> {
+    // pedidos pagos ainda não despachados = janela em que a nota é necessária
+    const { data: rows } = await supabaseAdmin
+      .from('orders')
+      .select('external_order_id, product_id, sku, quantity, sale_price, buyer_name, buyer_doc_number, buyer_phone, raw_data, channel_account_id, platform, shipping_status, status')
+      .eq('organization_id', orgId).eq('status', 'paid')
+      .in('shipping_status', ['ready_to_ship', 'processed', 'pending'])
+      .order('sold_at', { ascending: true }).limit(500)
+    const porPedido = new Map<string, typeof rows>()
+    for (const r of (rows ?? []) as NonNullable<typeof rows>) {
+      const k = (r as { external_order_id: string }).external_order_id
+      if (!porPedido.has(k)) porPedido.set(k, [] as unknown as typeof rows)
+      ;(porPedido.get(k) as unknown as Array<unknown>).push(r)
+    }
+    if (porPedido.size === 0) return { pedidos: [], resumo: { total: 0, prontos: 0, jaEmitidos: 0, bloqueados: 0 } }
+
+    // notas já emitidas destes pedidos
+    const sns = [...porPedido.keys()]
+    const { data: fos } = await supabaseAdmin
+      .from('fulfillment_orders').select('id, source_id')
+      .eq('organization_id', orgId).eq('source_type', 'marketplace').in('source_id', sns)
+    const foBySn = new Map((fos ?? []).map((f) => [(f as { source_id: string }).source_id, (f as { id: string }).id]))
+    const { data: invs } = await supabaseAdmin
+      .from('fulfillment_invoices').select('fulfillment_order_id, number, access_key, marketplace_sent_at, status')
+      .eq('organization_id', orgId).eq('status', 'issued')
+      .in('fulfillment_order_id', [...foBySn.values()].length ? [...foBySn.values()] : ['00000000-0000-0000-0000-000000000000'])
+    const invByFo = new Map((invs ?? []).map((i) => [(i as { fulfillment_order_id: string }).fulfillment_order_id, i as { number: string | null; access_key: string | null; marketplace_sent_at: string | null }]))
+
+    // fiscal de todos os produtos envolvidos, de uma vez
+    const pids = [...new Set((rows ?? []).map((r) => (r as { product_id: string | null }).product_id).filter((v): v is string => !!v))]
+    const fiscalMap = await this.fiscal.resolveProductFiscal(orgId, pids)
+
+    const pedidos = [] as Awaited<ReturnType<typeof this.filaFiscal>>['pedidos']
+    for (const [orderSn, linhas] of porPedido) {
+      const ls = linhas as unknown as Array<{ product_id: string | null; sku: string; sale_price: number | null; buyer_name: string | null; buyer_doc_number: string | null; buyer_phone: string | null; raw_data: Record<string, unknown> | null; channel_account_id: string | null }>
+      const cust = marketplaceCustomer(ls[0])
+      const addr = (cust.address ?? null) as { logradouro?: string | null; cidade?: string | null; uf?: string | null; cep?: string | null } | null
+      const temEndereco = !!(addr?.logradouro && addr.cidade && addr.uf && String(addr.cep ?? '').replace(/\D/g, '').length === 8)
+      const doc = String(cust.doc ?? '').replace(/\D/g, '')
+      const temDoc = doc.length === 11 || doc.length === 14
+      const semNcm = ls.filter((l) => !l.product_id || !fiscalMap.get(l.product_id)?.ncm).map((l) => l.sku)
+      const pago = Number((ls[0].raw_data as { total_amount?: unknown } | null)?.total_amount)
+      const somaItens = ls.reduce((s, l) => s + (Number(l.sale_price) || 0), 0)
+      const valor = round2(Number.isFinite(pago) && pago > 0 ? pago : somaItens)
+
+      const foId = foBySn.get(orderSn)
+      const inv = foId ? invByFo.get(foId) : undefined
+      const nota = inv ? { number: inv.number, chave: inv.access_key, noMarketplace: !!inv.marketplace_sent_at } : null
+
+      const falta: string[] = []
+      if (!temDoc) falta.push('CPF/CNPJ do comprador')
+      if (!temEndereco) falta.push('endereço do comprador')
+      if (semNcm.length) falta.push(`NCM de ${semNcm.join(', ')}`)
+      pedidos.push({
+        orderSn, comprador: (cust.name as string | null) ?? null, valor,
+        loja: ls[0].channel_account_id, temEndereco, temDoc, semNcm, nota,
+        pronto: !nota && falta.length === 0, falta,
+      })
+    }
+    const resumo = {
+      total: pedidos.length,
+      prontos: pedidos.filter((p) => p.pronto).length,
+      jaEmitidos: pedidos.filter((p) => p.nota).length,
+      bloqueados: pedidos.filter((p) => !p.nota && p.falta.length > 0).length,
+    }
+    return { pedidos, resumo }
+  }
+
+  /** Emite o LOTE de pedidos prontos. Sequencial de propósito: cada nota
+   *  consome um número da série e bate na SEFAZ — paralelizar aqui só
+   *  atrapalha. Um erro não derruba os demais. */
+  async emitirLote(orgId: string, orderSns?: string[]): Promise<{
+    emitidas: number; falhas: Array<{ pedido: string; erro: string }>
+    notas: Array<{ pedido: string; numero: number | null; chave: string | null; noMarketplace: boolean }>
+  }> {
+    let alvos = orderSns?.filter(Boolean)
+    if (!alvos?.length) {
+      const fila = await this.filaFiscal(orgId)
+      alvos = fila.pedidos.filter((p) => p.pronto).map((p) => p.orderSn)
+    }
+    const notas: Array<{ pedido: string; numero: number | null; chave: string | null; noMarketplace: boolean }> = []
+    const falhas: Array<{ pedido: string; erro: string }> = []
+    for (const sn of alvos) {
+      try {
+        const r = await this.emitForOrder(orgId, sn)
+        if (r.authorized) notas.push({ pedido: sn, numero: r.nNF, chave: r.chave, noMarketplace: !!r.marketplace?.ok })
+        else falhas.push({ pedido: sn, erro: `cStat ${r.cStat}: ${r.xMotivo}` })
+      } catch (e) {
+        falhas.push({ pedido: sn, erro: (e as Error).message })
+      }
+    }
+    this.logger.log(`[emit-lote] org=${orgId} ${notas.length} emitidas, ${falhas.length} falhas`)
+    return { emitidas: notas.length, falhas, notas }
+  }
+
+  /** Manda a NF-e autorizada pro marketplace. Hoje só Shopee (é quem exige a
+   *  nota antes do despacho). Grava o resultado na invoice pra UI/reenvio. */
+  private async enviarNotaProMarketplace(orgId: string, i: {
+    invoiceId?: string; platform: string; shopId: string | null; orderSn: string
+    number: string; serie: string; chave: string; total: number
+  }): Promise<{ ok: boolean; erro?: string }> {
+    const marcar = async (patch: Record<string, unknown>) => {
+      if (i.invoiceId) await supabaseAdmin.from('fulfillment_invoices').update(patch).eq('id', i.invoiceId).eq('organization_id', orgId)
+    }
+    try {
+      if (i.platform !== 'shopee') return { ok: false, erro: `envio automático ainda não suportado em ${i.platform || 'plataforma desconhecida'}` }
+      if (!i.shopId) return { ok: false, erro: 'pedido sem loja identificada' }
+      const conn0 = await this.mp.getConnectionByShop(orgId, Number(i.shopId))
+      if (!conn0) return { ok: false, erro: `loja ${i.shopId} não está conectada` }
+      const conn = await this.shopeeSync.ensureFreshToken(conn0)
+      const adapter = this.registry.get('shopee') as ShopeeAdapter
+      const r = await adapter.uploadInvoiceData(conn, i.orderSn, {
+        number: i.number, seriesNumber: i.serie, accessKey: i.chave,
+        issueDate: Math.floor(Date.now() / 1000),
+        totalValue: i.total, productsTotalValue: i.total,
+      })
+      if (!r.ok) {
+        const erro = `${r.error ?? 'erro'}: ${r.message ?? ''}`.trim()
+        await marcar({ marketplace_error: erro })
+        this.logger.warn(`[nf->marketplace] ${i.orderSn} recusada: ${erro}`)
+        return { ok: false, erro }
+      }
+      await marcar({ marketplace_sent_at: new Date().toISOString(), marketplace_error: null })
+      this.logger.log(`[nf->marketplace] ${i.orderSn} NF ${i.number} aceita pela Shopee`)
+      return { ok: true }
+    } catch (e) {
+      const erro = (e as Error).message || 'falha desconhecida'
+      await marcar({ marketplace_error: erro })
+      this.logger.warn(`[nf->marketplace] ${i.orderSn}: ${erro}`)
+      return { ok: false, erro }
+    }
+  }
+
+  /** Reenvio manual/em lote das notas que ainda não foram aceitas pelo
+   *  marketplace (falha de rede, token vencido, recusa temporária). */
+  async reenviarNotasPendentes(orgId: string): Promise<{ tentadas: number; enviadas: number; falhas: Array<{ pedido: string; erro: string }> }> {
+    const { data } = await supabaseAdmin
+      .from('fulfillment_invoices')
+      .select('id, number, series, access_key, items, fulfillment_order_id')
+      .eq('organization_id', orgId).eq('status', 'issued').is('marketplace_sent_at', null).limit(200)
+    const pendentes = (data ?? []) as Array<{ id: string; number: string | null; series: string | null; access_key: string | null; items: Array<{ qty: number; unit_value: number | null }>; fulfillment_order_id: string }>
+    const falhas: Array<{ pedido: string; erro: string }> = []
+    let enviadas = 0
+    for (const p of pendentes) {
+      const { data: fo } = await supabaseAdmin
+        .from('fulfillment_orders').select('source_id, channel').eq('id', p.fulfillment_order_id).maybeSingle()
+      const orderSn = (fo as { source_id: string | null } | null)?.source_id
+      const platform = (fo as { channel: string | null } | null)?.channel ?? 'shopee'
+      if (!orderSn || !p.access_key) continue
+      const { data: ord } = await supabaseAdmin
+        .from('orders').select('channel_account_id').eq('organization_id', orgId).eq('external_order_id', orderSn).limit(1).maybeSingle()
+      const total = round2((p.items ?? []).reduce((s, it) => s + (Number(it.unit_value) || 0) * (Number(it.qty) || 0), 0))
+      const r = await this.enviarNotaProMarketplace(orgId, {
+        invoiceId: p.id, platform, shopId: (ord as { channel_account_id: string | null } | null)?.channel_account_id ?? null,
+        orderSn, number: String(p.number ?? ''), serie: String(p.series ?? '1'), chave: p.access_key, total,
+      })
+      if (r.ok) enviadas++
+      else falhas.push({ pedido: orderSn, erro: r.erro ?? '?' })
+    }
+    this.logger.log(`[nf->marketplace] reenvio org=${orgId}: ${enviadas}/${pendentes.length} aceitas`)
+    return { tentadas: pendentes.length, enviadas, falhas }
   }
 
   // ── helpers do emitForOrder ──────────────────────────────────────────────
@@ -476,6 +679,21 @@ function parseRetornoSefaz(ret: string): { cStat: string | null; xMotivo: string
     chave: /<chNFe>(\d{44})<\/chNFe>/.exec(ret)?.[1] ?? null,
     protocolo: /<nProt>(\d+)<\/nProt>/.exec(ret)?.[1] ?? null,
   }
+}
+
+/** Monta o XML de DISTRIBUIÇÃO (nfeProc) = nota assinada + protocolo de
+ *  autorização no MESMO arquivo. É o que marketplace, contador e o comprador
+ *  aceitam; o `<NFe>` sozinho é recusado ("Invalid NF-e" na Shopee, 24/08).
+ *  Devolve null se o retorno não trouxer protNFe autorizado. */
+export function montarNfeProc(nfeAssinada: string, retornoSefaz: string): string | null {
+  const prot = /<protNFe[\s\S]*?<\/protNFe>/.exec(retornoSefaz)?.[0]
+  if (!prot) return null
+  if (!/<cStat>100<\/cStat>/.test(prot)) return null      // só autorizada vira nfeProc
+  const nfe = nfeAssinada.replace(/^﻿/, '').replace(/^<\?xml[^>]*\?>/, '').trim()
+  if (!/^<NFe[\s>]/.test(nfe)) return null
+  return '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">'
+    + nfe + prot + '</nfeProc>'
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100 }

@@ -203,6 +203,25 @@ export class FulfillmentController {
     return this.sefaz.emitForOrder(this.org(u), body.externalOrderId.trim(), { dryRun: !!body.dryRun, dest: body.dest })
   }
 
+  // Faturador F2b-6 — FILA FISCAL: pedidos na janela de despacho + o que falta
+  // em cada um pra virar nota (semáforo da tela de trabalho).
+  @Get('fiscal/fila')
+  filaFiscal(@ReqUser() u: ReqUserPayload) {
+    return this.sefaz.filaFiscal(this.org(u))
+  }
+
+  // Emite o lote. Sem body = todos os pedidos PRONTOS da fila.
+  @Post('fiscal/emitir-lote')
+  emitirLote(@ReqUser() u: ReqUserPayload, @Body() body?: { orderSns?: string[] }) {
+    return this.sefaz.emitirLote(this.org(u), body?.orderSns)
+  }
+
+  // Reenvia pro marketplace as notas emitidas que ainda não foram aceitas.
+  @Post('fiscal/reenviar-marketplace')
+  reenviarMarketplace(@ReqUser() u: ReqUserPayload) {
+    return this.sefaz.reenviarNotasPendentes(this.org(u))
+  }
+
   // Faturador F2b-4 — coletor de endereços: recebe os dados do comprador lidos
   // no Seller Center (a Open API mascara até o despacho, que exige a NF).
   @Post('fiscal/shopee-addresses')
