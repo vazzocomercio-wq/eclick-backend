@@ -185,6 +185,78 @@ export class FulfillmentFiscalService {
     return { ready: missing.length === 0, missing }
   }
 
+  // ── Coletor de endereços da Shopee (F2b-4) ─────────────────────────────────
+  /** Recebe os dados do comprador lidos no SELLER CENTER (get_one_order) e
+   *  grava em `orders` no mesmo formato do sync — assim a emissão encontra o
+   *  endereço pronto, sem ninguém digitar nada.
+   *
+   *  Por quê: a Open API da Shopee mascara `recipient_address` até o pedido ser
+   *  DESPACHADO, mas despachar exige a NF-e. A tela do vendedor mostra tudo
+   *  aberto; o coletor (bookmarklet) lê de lá e manda pra cá.
+   *
+   *  NUNCA sobrescreve valor aberto por vazio/mascarado. Idempotente. */
+  async importShopeeAddresses(orgId: string, items: Array<{
+    orderSn?: string; name?: string | null; doc?: string | null; addressLine?: string | null
+  }>): Promise<{ ok: true; updated: number; skipped: number; errors: string[] }> {
+    const errors: string[] = []
+    let updated = 0, skipped = 0
+    const cepCache = new Map<string, { bairro: string | null; ibge: string | null }>()
+
+    for (const it of items ?? []) {
+      const sn = String(it?.orderSn ?? '').trim()
+      if (!sn) { skipped++; continue }
+      try {
+        const { data: rows } = await supabaseAdmin
+          .from('orders').select('id, raw_data, buyer_name, buyer_doc_number')
+          .eq('organization_id', orgId).eq('external_order_id', sn)
+        if (!rows?.length) { errors.push(`${sn}: pedido não está no e-Click (sincronize a loja)`); continue }
+
+        const parsed = parseSellerCenterAddress(it.addressLine ?? '')
+        if (!parsed) { errors.push(`${sn}: não consegui interpretar o endereço`); continue }
+
+        // ViaCEP completa o BAIRRO (o Seller Center não manda) e confere o município
+        let extra = cepCache.get(parsed.cep)
+        if (!extra) {
+          extra = await lookupCep(parsed.cep)
+          cepCache.set(parsed.cep, extra)
+        }
+
+        const doc = String(it.doc ?? '').replace(/\D/g, '')
+        const name = openValue(it.name)
+
+        for (const r of rows as Array<{ id: string; raw_data: Record<string, unknown> | null; buyer_name: string | null; buyer_doc_number: string | null }>) {
+          const raw = (r.raw_data ?? {}) as Record<string, unknown>
+          const prev = (raw.recipient_address ?? {}) as Record<string, unknown>
+          const patch: Record<string, unknown> = {
+            raw_data: {
+              ...raw,
+              recipient_address: {
+                ...prev,
+                name: name ?? prev.name ?? null,
+                full_address: parsed.fullAddress,
+                city: parsed.cidade,
+                state: parsed.uf,
+                district: extra.bairro ?? openValue(prev.district) ?? null,
+                zipcode: parsed.cep,
+              },
+              // carimbo de origem — dado veio da tela do vendedor, não da Open API
+              _endereco_via: 'seller_center',
+            },
+          }
+          if (name) patch.buyer_name = name
+          if (doc.length === 11 || doc.length === 14) patch.buyer_doc_number = doc
+          const { error } = await supabaseAdmin.from('orders').update(patch).eq('id', r.id).eq('organization_id', orgId)
+          if (error) throw new Error(error.message)
+        }
+        updated++
+      } catch (e) {
+        errors.push(`${sn}: ${(e as Error).message}`)
+      }
+    }
+    this.logger.log(`[shopee-addr] org=${orgId} atualizados=${updated} pulados=${skipped} erros=${errors.length}`)
+    return { ok: true, updated, skipped, errors }
+  }
+
   /** % efetivo de uma CONTA (plataforma × conta): override da conta quando
    *  preenchido, senão o padrão da empresa dona da conta. Base pros valores das
    *  notas em F2/F4. */
@@ -280,4 +352,72 @@ function clampPct(v: number): number {
   const n = Number(v)
   if (!Number.isFinite(n)) return 100
   return Math.min(Math.max(n, 0), 100)
+}
+
+// ── helpers do coletor de endereços ──────────────────────────────────────────
+
+/** Valor "aberto" — a Shopee devolve `****` no lugar do dado quando mascara. */
+function openValue(v: unknown): string | null {
+  const s = typeof v === 'string' ? v.trim() : ''
+  return s && !/^\*+$/.test(s) ? s : null
+}
+
+const UF_POR_ESTADO: Record<string, string> = {
+  acre: 'AC', alagoas: 'AL', amapa: 'AP', amazonas: 'AM', bahia: 'BA', ceara: 'CE',
+  'distrito federal': 'DF', 'espirito santo': 'ES', goias: 'GO', maranhao: 'MA',
+  'mato grosso': 'MT', 'mato grosso do sul': 'MS', 'minas gerais': 'MG', para: 'PA',
+  paraiba: 'PB', parana: 'PR', pernambuco: 'PE', piaui: 'PI', 'rio de janeiro': 'RJ',
+  'rio grande do norte': 'RN', 'rio grande do sul': 'RS', rondonia: 'RO', roraima: 'RR',
+  'santa catarina': 'SC', 'sao paulo': 'SP', sergipe: 'SE', tocantins: 'TO',
+}
+
+function ufFrom(v: string): string | null {
+  const raw = String(v ?? '').trim()
+  if (/^[A-Za-z]{2}$/.test(raw)) return raw.toUpperCase()
+  const key = raw.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  return UF_POR_ESTADO[key] ?? null
+}
+
+/** Quebra o endereço de LINHA ÚNICA do Seller Center. Formato observado:
+ *  "Rua X, 765, Complemento, Cidade, Estado por extenso, 14037434"
+ *  (o Seller Center NÃO manda o bairro — quem completa é o ViaCEP).
+ *  Lê de trás pra frente: CEP → estado → cidade; o resto é logradouro/nº/compl. */
+export function parseSellerCenterAddress(line: string): {
+  logradouro: string; numero: string | null; complemento: string | null
+  cidade: string; uf: string; cep: string; fullAddress: string
+} | null {
+  const src = String(line ?? '').trim()
+  if (!src) return null
+  const parts = src.split(',').map((s) => s.trim()).filter(Boolean)
+  if (parts.length < 4) return null
+
+  const cep = (parts[parts.length - 1] ?? '').replace(/\D/g, '')
+  if (cep.length !== 8) return null
+  const uf = ufFrom(parts[parts.length - 2] ?? '')
+  if (!uf) return null
+  const cidade = parts[parts.length - 3] ?? ''
+  if (!cidade) return null
+
+  const resto = parts.slice(0, parts.length - 3)
+  const logradouro = resto[0] ?? ''
+  if (!logradouro) return null
+  // 2º pedaço é o número quando for numérico; senão a rua fica sem número (S/N)
+  const numMatch = /^(?:n[ºo°.]?\s*)?(\d{1,6}[a-zA-Z]?)$/.exec(resto[1] ?? '')
+  const numero = numMatch ? numMatch[1] : null
+  const complemento = resto.slice(numero ? 2 : 1).join(', ') || null
+
+  return { logradouro, numero, complemento, cidade, uf, cep, fullAddress: src }
+}
+
+/** ViaCEP: bairro (o Seller Center não manda) + código IBGE do município.
+ *  Best-effort — falha vira nulls e a emissão segue com o que tiver. */
+async function lookupCep(cep: string): Promise<{ bairro: string | null; ibge: string | null }> {
+  try {
+    const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`, { signal: AbortSignal.timeout(8000) })
+    const j = (await res.json()) as { bairro?: string; ibge?: string; erro?: boolean }
+    if (j?.erro) return { bairro: null, ibge: null }
+    return { bairro: openValue(j?.bairro), ibge: String(j?.ibge ?? '').replace(/\D/g, '') || null }
+  } catch {
+    return { bairro: null, ibge: null }
+  }
 }
