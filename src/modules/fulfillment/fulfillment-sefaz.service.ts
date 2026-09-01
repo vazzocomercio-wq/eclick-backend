@@ -432,6 +432,7 @@ export class FulfillmentSefazService {
         marketplace = await this.enviarNotaProMarketplace(orgId, {
           invoiceId, platform, shopId, orderSn: externalOrderId,
           number: String(nNF), serie: String(serie), chave, total,
+          autorizadaEm: new Date().toISOString(),   // recém-autorizada: cai na espera da SERPRO
         })
       }
       return { authorized: cStat === '100', cStat, xMotivo, chave, protocolo, nNF, serie, invoiceId, marketplace }
@@ -814,11 +815,25 @@ export class FulfillmentSefazService {
     return { emitidas: notas.length, falhas, notas }
   }
 
+  /** Lê o XML AUTORIZADO (procNFe) do armazenamento — é o arquivo que sobe
+   *  pra Shopee. `<NFe>` puro ela recusa: tem de vir com o protocolo. */
+  private async xmlAutorizado(orgId: string, chave: string): Promise<string | null> {
+    for (const suf of ['-procNFe.xml', '-nfe.xml']) {
+      const { data } = await supabaseAdmin.storage
+        .from(FULFILLMENT_BUCKET).download(`${orgId}/invoices/${chave}${suf}`)
+      if (!data) continue
+      const txt = Buffer.from(await data.arrayBuffer()).toString('utf8')
+      if (/<nfeProc[\s>]/.test(txt)) return txt
+    }
+    return null
+  }
+
   /** Manda a NF-e autorizada pro marketplace. Hoje só Shopee (é quem exige a
    *  nota antes do despacho). Grava o resultado na invoice pra UI/reenvio. */
   private async enviarNotaProMarketplace(orgId: string, i: {
     invoiceId?: string; platform: string; shopId: string | null; orderSn: string
     number: string; serie: string; chave: string; total: number
+    autorizadaEm?: string | null
   }): Promise<{ ok: boolean; erro?: string }> {
     const marcar = async (patch: Record<string, unknown>) => {
       if (i.invoiceId) await supabaseAdmin.from('fulfillment_invoices').update(patch).eq('id', i.invoiceId).eq('organization_id', orgId)
@@ -826,15 +841,32 @@ export class FulfillmentSefazService {
     try {
       if (i.platform !== 'shopee') return { ok: false, erro: `envio automático ainda não suportado em ${i.platform || 'plataforma desconhecida'}` }
       if (!i.shopId) return { ok: false, erro: 'pedido sem loja identificada' }
+
+      // ⚠️ JANELA DA SERPRO: a Shopee valida a chave contra a SERPRO e pede
+      // explicitamente 5 min de espera após a emissão. Mandar na hora volta
+      // "Invalid NF-e" mesmo com a nota autorizada — foi o que aconteceu no
+      // envio manual do dia 31. Antes disso nem tenta: marca como pendente e
+      // o reenvio (botão / lote) pega depois.
+      // sem data conhecida, ASSUME velha e tenta: bloquear por falta de dado
+      // deixaria a nota presa pra sempre, que é pior que uma recusa da Shopee
+      const t0 = i.autorizadaEm ? new Date(i.autorizadaEm).getTime() : 0
+      const emitidaHa = Number.isFinite(t0) && t0 > 0 ? Date.now() - t0 : Infinity
+      if (emitidaHa < ESPERA_SERPRO_MS) {
+        const faltam = Math.ceil((ESPERA_SERPRO_MS - emitidaHa) / 60_000)
+        const erro = `aguardando validação da SERPRO (a Shopee exige 5 min após a emissão) — reenvie em ~${faltam} min`
+        await marcar({ marketplace_error: erro })
+        return { ok: false, erro }
+      }
+
+      // o upload é do ARQUIVO XML (multipart), não dos campos da nota
+      const xml = await this.xmlAutorizado(orgId, i.chave)
+      if (!xml) return { ok: false, erro: 'XML autorizado não encontrado no armazenamento' }
+
       const conn0 = await this.mp.getConnectionByShop(orgId, Number(i.shopId))
       if (!conn0) return { ok: false, erro: `loja ${i.shopId} não está conectada` }
       const conn = await this.shopeeSync.ensureFreshToken(conn0)
       const adapter = this.registry.get('shopee') as ShopeeAdapter
-      const r = await adapter.uploadInvoiceData(conn, i.orderSn, {
-        number: i.number, seriesNumber: i.serie, accessKey: i.chave,
-        issueDate: Math.floor(Date.now() / 1000),
-        totalValue: i.total, productsTotalValue: i.total,
-      })
+      const r = await adapter.uploadInvoiceDoc(conn, i.orderSn, xml, `${i.chave}.xml`)
       if (!r.ok) {
         const erro = `${r.error ?? 'erro'}: ${r.message ?? ''}`.trim()
         await marcar({ marketplace_error: erro })
@@ -857,9 +889,9 @@ export class FulfillmentSefazService {
   async reenviarNotasPendentes(orgId: string): Promise<{ tentadas: number; enviadas: number; falhas: Array<{ pedido: string; erro: string }> }> {
     const { data } = await supabaseAdmin
       .from('fulfillment_invoices')
-      .select('id, number, series, access_key, items, fulfillment_order_id')
+      .select('id, number, series, access_key, items, fulfillment_order_id, created_at')
       .eq('organization_id', orgId).eq('status', 'issued').is('marketplace_sent_at', null).limit(200)
-    const pendentes = (data ?? []) as Array<{ id: string; number: string | null; series: string | null; access_key: string | null; items: Array<{ qty: number; unit_value: number | null }>; fulfillment_order_id: string }>
+    const pendentes = (data ?? []) as Array<{ id: string; number: string | null; series: string | null; access_key: string | null; items: Array<{ qty: number; unit_value: number | null }>; fulfillment_order_id: string; created_at: string }>
     const falhas: Array<{ pedido: string; erro: string }> = []
     let enviadas = 0
     for (const p of pendentes) {
@@ -874,6 +906,7 @@ export class FulfillmentSefazService {
       const r = await this.enviarNotaProMarketplace(orgId, {
         invoiceId: p.id, platform, shopId: (ord as { channel_account_id: string | null } | null)?.channel_account_id ?? null,
         orderSn, number: String(p.number ?? ''), serie: String(p.series ?? '1'), chave: p.access_key, total,
+        autorizadaEm: p.created_at ?? null,
       })
       if (r.ok) enviadas++
       else falhas.push({ pedido: orderSn, erro: r.erro ?? '?' })
@@ -980,6 +1013,11 @@ export interface DestOverride {
   logradouro?: string | null; numero?: string | null; complemento?: string | null
   bairro?: string | null; cidade?: string | null; uf?: string | null; cep?: string | null
 }
+
+/** A Shopee valida a chave contra a SERPRO e pede 5 min de espera após a
+ *  emissão (documentado no guia BR "Como subir a NF-e através da OpenAPI").
+ *  Antes disso a resposta é "Invalid NF-e" mesmo com a nota autorizada. */
+const ESPERA_SERPRO_MS = 5 * 60_000
 
 export const INTERMEDIADORES: Record<string, { cnpj: string; nome: string }> = {
   // SHPS Tecnologia e Serviços Ltda (Shopee Brasil)
