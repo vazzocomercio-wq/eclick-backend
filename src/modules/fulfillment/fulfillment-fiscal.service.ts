@@ -371,7 +371,7 @@ export class FulfillmentFiscalService {
       productId: string; sku: string | null; nome: string | null; categoria: string | null
       pedidos: number; receita: number; ultimaVenda: string | null
       viaKit: Array<{ sku: string | null; nome: string | null }>
-      sugestao: { ncm: string; origem: string | null; irmaos: number; exemplo: string | null; base: 'categoria' | 'nome' } | null
+      sugestao: { ncm: string; origem: string | null; irmaos: number; exemplo: string | null; base: 'kit' | 'categoria' | 'nome' } | null
     }>
   }> {
     const desde = new Date(Date.now() - Math.max(1, dias) * 86400_000).toISOString()
@@ -450,6 +450,13 @@ export class FulfillmentFiscalService {
     const sugestaoPorNome = await this.sugerirNcmPorNome(
       orgId, semCategoria.map((id) => ({ id, nome: infoPendente.get(id)?.name ?? null })),
     )
+    // Caminho MAIS FORTE, e por isso o primeiro na hora de escolher: kit de N
+    // unidades do mesmo produto tem, por definição, o NCM do produto. Vence
+    // categoria e nome — a categoria "VENTILADOR DE TETO" tem 8 plafons e 1
+    // ventilador, e a maioria mandava o kit de ventilador virar luminária.
+    const sugestaoPorKit = await this.sugerirNcmPorKit(
+      orgId, pendentes.map((id) => ({ id, sku: infoPendente.get(id)?.sku ?? null })),
+    )
 
     // 5. quantos PEDIDOS estão travados hoje por causa disso
     const pendenteSet = new Set(pendentes)
@@ -473,7 +480,9 @@ export class FulfillmentFiscalService {
         receita: Math.round((venda?.receita ?? 0) * 100) / 100,
         ultimaVenda: venda?.ultima ?? null,
         viaKit: kits,
-        sugestao: (info?.category ? sugestaoPorCategoria.get(info.category) : undefined) ?? sugestaoPorNome.get(id) ?? null,
+        sugestao: sugestaoPorKit.get(id)
+          ?? (info?.category ? sugestaoPorCategoria.get(info.category) : undefined)
+          ?? sugestaoPorNome.get(id) ?? null,
       }
     }).sort((a, b) => b.pedidos - a.pedidos || b.receita - a.receita)
 
@@ -535,6 +544,44 @@ export class FulfillmentFiscalService {
       const ro = [...v.origem.entries()].sort((a, b) => b[1] - a[1])
       const origem = ro.length && !(ro.length > 1 && ro[0][1] === ro[1][1]) ? ro[0][0] : null
       out.set(cat, { ncm: rank[0][0], origem, irmaos: rank[0][1].n, exemplo: rank[0][1].exemplo, base: 'categoria' })
+    }
+    return out
+  }
+
+  /**
+   * Sugestão por KIT — a mais forte das três. `KIT-2UN-FSD80WB` é dois
+   * `FSD80WB`: mesma mercadoria, mesmo NCM, sem espaço pra palpite.
+   *
+   * Existe porque `main_sku` está vazio no catálogo inteiro e a única ligação
+   * entre o kit e a unidade é a convenção do SKU. Sem isso, o kit caía no voto
+   * da categoria — e a categoria "VENTILADOR DE TETO" tem 8 plafons contra 1
+   * ventilador, então o kit de ventilador herdava NCM de luminária.
+   */
+  private async sugerirNcmPorKit(orgId: string, alvos: Array<{ id: string; sku: string | null }>): Promise<Map<string, Sugestao>> {
+    const out = new Map<string, Sugestao>()
+    const kits = alvos
+      .map((a) => ({ ...a, baseSku: skuBaseDoKit(a.sku) }))
+      .filter((a): a is { id: string; sku: string | null; baseSku: string } => !!a.baseSku)
+    if (kits.length === 0) return out
+
+    const skus = [...new Set(kits.map((k) => k.baseSku))]
+    const porSku = new Map<string, { id: string; sku: string; name: string | null }>()
+    for (let i = 0; i < skus.length; i += 200) {
+      const { data } = await supabaseAdmin
+        .from('products').select('id, sku, name').eq('organization_id', orgId).in('sku', skus.slice(i, i + 200))
+      for (const p of (data ?? []) as Array<{ id: string; sku: string; name: string | null }>) porSku.set(p.sku, p)
+    }
+    if (porSku.size === 0) return out
+
+    const fiscal = await this.resolveProductFiscal(orgId, [...porSku.values()].map((p) => p.id))
+    for (const k of kits) {
+      const p = porSku.get(k.baseSku)
+      const f = p ? fiscal.get(p.id) : undefined
+      if (!p || !f?.ncm) continue
+      out.set(k.id, {
+        ncm: f.ncm, origem: f.origem, irmaos: 1, base: 'kit',
+        exemplo: `${p.sku} — ${(p.name ?? '').slice(0, 48)}`,
+      })
     }
     return out
   }
@@ -650,7 +697,14 @@ interface Sugestao {
   origem: string | null
   irmaos: number
   exemplo: string | null
-  base: 'categoria' | 'nome'
+  /** de onde veio, da mais forte pra mais fraca */
+  base: 'kit' | 'categoria' | 'nome'
+}
+
+/** `KIT-2UN-FSD80WB` → `FSD80WB`. Convenção de SKU da casa (main_sku está vazio). */
+function skuBaseDoKit(sku: string | null): string | null {
+  const m = /^KIT[-_ ]?\d+\s*UN[-_ ]?(.+)$/i.exec((sku ?? '').trim())
+  return m ? m[1].trim() || null : null
 }
 
 /**
