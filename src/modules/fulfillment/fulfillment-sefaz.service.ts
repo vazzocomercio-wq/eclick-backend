@@ -753,17 +753,36 @@ export class FulfillmentSefazService {
   /** Link temporário pro arquivo da nota (xml = procNFe de distribuição). */
   async arquivoDaNota(orgId: string, invoiceId: string, tipo: 'xml'): Promise<{ url: string; filename: string }> {
     const { data } = await supabaseAdmin
-      .from('fulfillment_invoices').select('access_key, proc_xml_url, xml_url')
+      .from('fulfillment_invoices').select('access_key, number, proc_xml_url, xml_url, fulfillment_order_id')
       .eq('organization_id', orgId).eq('id', invoiceId).maybeSingle()
-    const inv = data as { access_key: string | null; proc_xml_url: string | null; xml_url: string | null } | null
+    const inv = data as { access_key: string | null; number: string | null; proc_xml_url: string | null; xml_url: string | null; fulfillment_order_id: string | null } | null
     if (!inv?.access_key) throw new NotFoundException('Nota não encontrada.')
     if (tipo !== 'xml') throw new BadRequestException('Tipo de arquivo não suportado.')
+
+    // Nome do arquivo = NÚMERO DO PEDIDO. É por ele que a Shopee pede a nota, e
+    // é assim que quem sobe 20 XMLs na mão consegue casar arquivo com pedido —
+    // a chave de acesso de 44 dígitos não diz nada pra quem está na tela.
+    let pedido: string | null = null
+    if (inv.fulfillment_order_id) {
+      const { data: fo } = await supabaseAdmin
+        .from('fulfillment_orders').select('reference').eq('id', inv.fulfillment_order_id).maybeSingle()
+      pedido = (fo as { reference: string | null } | null)?.reference ?? null
+    }
+    const filename = pedido
+      ? `${pedido}-NF${inv.number ?? ''}.xml`.replace(/-NF\.xml$/, '.xml')
+      : `NFe-${inv.access_key}.xml`
 
     // procNFe primeiro: é o que marketplace e contador aceitam
     const candidatos = [inv.proc_xml_url, `${orgId}/invoices/${inv.access_key}-procNFe.xml`, inv.xml_url, `${orgId}/invoices/${inv.access_key}-nfe.xml`]
     for (const p of candidatos.filter((v): v is string => !!v)) {
-      const { data: signed } = await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).createSignedUrl(p, 600)
-      if (signed?.signedUrl) return { url: signed.signedUrl, filename: `NFe-${inv.access_key}.xml` }
+      // ⚠️ `download` NÃO é enfeite: a URL assinada é do Supabase, outro domínio.
+      // O atributo `download` do <a> é IGNORADO em link cross-origin, então sem
+      // isto o navegador só NAVEGA até o arquivo e mostra o XML na tela em vez
+      // de baixar. Esta opção manda o storage responder Content-Disposition:
+      // attachment, que é o que de fato dispara o download.
+      const { data: signed } = await supabaseAdmin.storage
+        .from(FULFILLMENT_BUCKET).createSignedUrl(p, 600, { download: filename })
+      if (signed?.signedUrl) return { url: signed.signedUrl, filename }
     }
     throw new NotFoundException('Arquivo XML desta nota não está no armazenamento.')
   }
