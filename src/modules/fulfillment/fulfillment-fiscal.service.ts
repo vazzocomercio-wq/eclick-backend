@@ -580,24 +580,46 @@ export class FulfillmentFiscalService {
     }
     if (corpus.length === 0) return out
 
-    // stopwords dinâmicas: palavra presente em >30% do catálogo não distingue nada
+    // Peso por RARIDADE (idf): casar em "palhinha", "penteadeira" ou "escorredor"
+    // diz muita coisa; casar em "pote", "tampa", "organizador" ou "infantil" não
+    // diz quase nada — e foi exatamente por palavra banal que o matcher mandou um
+    // banquinho de plástico herdar de um abajur infantil. A marca ("vazzo") e o
+    // jargão do anúncio ("bivolt") caem sozinhos: aparecem em quase tudo, idf ~0.
     const freq = new Map<string, number>()
     for (const c of corpus) for (const t of c.toks) freq.set(t, (freq.get(t) ?? 0) + 1)
-    const corte = corpus.length * 0.3
-    const ruido = new Set([...freq.entries()].filter(([, n]) => n > corte).map(([t]) => t))
+    const idf = (t: string) => Math.log(corpus.length / (1 + (freq.get(t) ?? 0)))
 
     for (const alvo of pendentes) {
-      const tA = new Set([...tokens(alvo.nome!)].filter((t) => !ruido.has(t)))
-      if (tA.size === 0) continue
+      const tA = [...tokens(alvo.nome!)].filter((t) => !SEM_SINAL.has(t))
+      const pesoAlvo = tA.reduce((s, t) => s + Math.max(0, idf(t)), 0)
+      if (pesoAlvo <= 0) continue
+
       let melhor: { score: number; c: (typeof corpus)[number] } | null = null
+      let rival: { score: number; ncm: string } | null = null   // melhor de OUTRO NCM
       for (const c of corpus) {
-        let iguais = 0
-        for (const t of tA) if (c.toks.has(t)) iguais += 1
-        if (iguais < 2) continue                        // 1 palavra em comum é coincidência
-        const score = iguais / tA.size
+        let iguais = 0, peso = 0
+        for (const t of tA) if (c.toks.has(t)) { iguais += 1; peso += Math.max(0, idf(t)) }
+        if (iguais < 2) continue                       // 1 palavra em comum é coincidência
+        const score = peso / pesoAlvo
         if (!melhor || score > melhor.score) melhor = { score, c }
       }
-      if (!melhor || melhor.score < 0.25) continue      // parecido demais de leve: não chuta
+      // Corte calibrado em 6 casos conferidos à mão contra a TIPI: os certos
+      // ficaram em 0,320 / 0,338 / 0,667 e os errados em 0,214 / 0,224 / 0,297.
+      // ⚠️ a folga entre o pior certo e o melhor errado é de 0,02 — fina demais
+      // pra confiar só nela. A segurança real NÃO é este número: é a tela exigir
+      // clique por linha nas sugestões por nome (o "preencher tudo" ignora elas).
+      if (!melhor || melhor.score < 0.31) continue
+      for (const c of corpus) {
+        if (c.ncm === melhor.c.ncm) continue
+        let iguais = 0, peso = 0
+        for (const t of tA) if (c.toks.has(t)) { iguais += 1; peso += Math.max(0, idf(t)) }
+        if (iguais < 2) continue
+        const score = peso / pesoAlvo
+        if (!rival || score > rival.score) rival = { score, ncm: c.ncm }
+      }
+      // duas classificações igualmente plausíveis = não é sugestão, é moeda
+      if (rival && melhor.score - rival.score < 0.10) continue
+
       const c = melhor.c
       out.set(alvo.id, {
         ncm: c.ncm, origem: c.origem, irmaos: 1, base: 'nome',
@@ -630,6 +652,21 @@ interface Sugestao {
   exemplo: string | null
   base: 'categoria' | 'nome'
 }
+
+/**
+ * Palavras que NUNCA classificam nada: a marca e as cores. Casar em "vazzo" ou
+ * em "bege" não diz absolutamente nada sobre o NCM, mas o idf as premia porque
+ * não estão em todo o catálogo — foi assim que um banquinho de plástico quase
+ * herdou o NCM de um abajur infantil (as duas palavras em comum eram
+ * "infantil" e "vazzo").
+ */
+const SEM_SINAL = new Set([
+  'vazzo', 'nitrolux', 'cinderella', 'cinderela', 'quality', 'deco', 'decor',
+  'bege', 'preto', 'preta', 'branco', 'branca', 'cinza', 'dourado', 'dourada',
+  'cromado', 'cromada', 'verde', 'vermelho', 'vermelha', 'rosa', 'azul',
+  'amarelo', 'amarela', 'marrom', 'lilas', 'laranja', 'colorido', 'colorida',
+  'bivolt', 'unidade', 'unitario', 'grande', 'pequeno', 'pequena',
+])
 
 /** Palavras significativas de um nome de produto: sem acento, sem número, ≥4 letras. */
 function tokens(nome: string): Set<string> {
