@@ -414,41 +414,33 @@ export class ShopeeAdapter extends MarketplaceAdapter {
    *  O shape espelha o `invoice_data` que vem no get_order_detail. issue_date
    *  em epoch SEGUNDOS. Não lança em erro de negócio: devolve ok:false pro
    *  caller decidir (a emissão NÃO pode ser desfeita por falha de upload). */
-  async uploadInvoiceData(conn: MpConnection, orderSn: string, invoice: {
-    number: string; seriesNumber: string; accessKey: string
-    issueDate: number; totalValue: number; productsTotalValue: number; taxCode?: string
-  }): Promise<{ ok: boolean; error?: string; message?: string }> {
+  async uploadInvoiceDoc(conn: MpConnection, orderSn: string, xml: string, filename: string): Promise<{ ok: boolean; error?: string; message?: string }> {
     const { accessToken, shopId } = this.requireShop(conn)
     const { partnerId } = this.partnerEnv()
-    const apiPath = '/api/v2/order/upload_invoice_data'
+    const apiPath = '/api/v2/order/upload_invoice_doc'
     const ts = Math.floor(Date.now() / 1000)
     const sign = this.signShop(apiPath, ts, accessToken, shopId)
     const qs = new URLSearchParams({
       partner_id: partnerId, timestamp: String(ts), access_token: accessToken,
       shop_id: String(shopId), sign,
     })
-    const body = {
-      order_sn: orderSn,
-      invoice_data: {
-        number:               invoice.number,
-        series_number:        invoice.seriesNumber,
-        access_key:           invoice.accessKey,
-        issue_date:           invoice.issueDate,
-        total_value:          invoice.totalValue,
-        products_total_value: invoice.productsTotalValue,
-        tax_code:             invoice.taxCode ?? '',
-      },
-    }
+
+    // multipart, NÃO json: a Shopee quer o ARQUIVO. file_type 4 = XML.
+    const form = new FormData()
+    form.append('order_sn', orderSn)
+    form.append('file_type', '4')
+    form.append('file', new Blob([xml], { type: 'application/xml' }), filename)
+
     const { data } = await this.callShopee({
-      key: `shop:${shopId}`, tag: 'shopee.uploadInvoice',
+      key: `shop:${shopId}`, tag: 'shopee.uploadInvoiceDoc',
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      exec: () => axios.post<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`, body),
+      exec: () => axios.post<any>(`${SHOPEE_BASE}${apiPath}?${qs.toString()}`, form),
     })
     if (data?.error) {
-      this.logger.warn(`[shopee.uploadInvoice] ${orderSn}: ${data.error} ${data.message}`)
+      this.logger.warn(`[shopee.uploadInvoiceDoc] ${orderSn}: ${data.error} ${data.message}`)
       return { ok: false, error: String(data.error), message: String(data.message ?? '') }
     }
-    this.logger.log(`[shopee.uploadInvoice] ${orderSn}: NF ${invoice.number} aceita`)
+    this.logger.log(`[shopee.uploadInvoiceDoc] ${orderSn}: XML aceito`)
     return { ok: true }
   }
 
