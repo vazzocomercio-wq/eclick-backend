@@ -300,7 +300,7 @@ export class FulfillmentSefazService {
       .from('products').select('id, ean').eq('organization_id', orgId).in('id', pids.length ? pids : ['00000000-0000-0000-0000-000000000000'])
     const eanById = new Map((prodRows ?? []).map((p) => [(p as { id: string }).id, (p as { ean: string | null }).ean]))
     const semNcm = exploded.filter((l) => !l.product_id || !fiscalMap.get(l.product_id)?.ncm)
-    if (semNcm.length) throw new BadRequestException(`Produto(s) sem NCM cadastrado: ${semNcm.map((l) => l.sku ?? '?').join(', ')} — preencha em Fulfillment → Fiscal.`)
+    if (semNcm.length) throw new BadRequestException(`Produto(s) sem NCM cadastrado: ${semNcm.map((l) => l.sku ?? '?').join(', ')} — classifique em Faturamento → aba Classificação.`)
 
     const sameUf = (dAddr.uf ?? '').toUpperCase() === eAddr.uf.toUpperCase()
     const items = exploded.map((l) => {

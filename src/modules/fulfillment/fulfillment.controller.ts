@@ -289,6 +289,19 @@ export class FulfillmentController {
     return this.fiscal.listProductFiscal(this.org(u))
   }
 
+  // F2b-9 — o que trava a emissão: produtos vendidos e ainda sem NCM.
+  @Get('fiscal/products/pendentes')
+  produtosPendentesNcm(@ReqUser() u: ReqUserPayload, @Query('dias') dias?: string) {
+    const d = Number(dias)
+    return this.fiscal.produtosPendentesNcm(this.org(u), Number.isFinite(d) && d > 0 ? Math.min(d, 730) : 120)
+  }
+
+  // grava só as linhas que o usuário confirmou na tela (a sugestão é rascunho)
+  @Put('fiscal/products')
+  upsertProductFiscalLote(@ReqUser() u: ReqUserPayload, @Body() body: { items: Array<{ productId: string } & Record<string, unknown>> }) {
+    return this.fiscal.upsertProductFiscalLote(this.org(u), body?.items ?? [])
+  }
+
   @Put('fiscal/products/:productId')
   upsertProductFiscal(@ReqUser() u: ReqUserPayload, @Param('productId') productId: string, @Body() body: {
     ncm?: string | null; cest?: string | null; origem?: string | null
