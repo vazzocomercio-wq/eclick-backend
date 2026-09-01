@@ -16,9 +16,12 @@ const DEVE_SUGERIR = [
   { sku: 'VZ-15010404', ncm: '39241000', nota: 'porta-talheres = cozinha' },
   { sku: 'VZ-13011003-60', ncm: '39249000', nota: 'porta-escova = toucador' },
   { sku: 'VZ-06010104', ncm: '39249000', nota: 'bandeja penteadeira = toucador' },
+  { sku: 'KIT-2UN-FSD80WB', ncm: '84145190', nota: 'kit de ventilador herda do PROPRIO ventilador, nao da categoria' },
+  { sku: 'KIT-10UN-E27GY', ncm: '85395200', nota: 'kit de lampada herda da lampada' },
 ]
 const NAO_PODE_SUGERIR = [
   { sku: 'KIT-3UN-202391/BEGE', errado: '94052900', nota: 'banquinho plastico herdou de ABAJUR infantil' },
+  { sku: 'KIT-2UN-FSD80WB', errado: '94051190', nota: 'ventilador NAO e luminaria (categoria VENTILADOR DE TETO tem 8 plafons)' },
   { sku: 'VZ-11031004-60', errado: '39241000', nota: 'pote de banheiro herdou de POTE DE VIDRO de cozinha' },
   { sku: '0343', errado: '39249000', nota: 'cesto de roupa dobravel herdou de porta-pinceis' },
 ]
