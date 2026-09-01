@@ -677,17 +677,33 @@ export class FulfillmentFiscalService {
   }
 
   /** Grava vários de uma vez — a tela manda só as linhas que o usuário confirmou. */
-  async upsertProductFiscalLote(orgId: string, itens: Array<{ productId: string } & Record<string, unknown>>): Promise<{ ok: true; gravados: number }> {
+  async upsertProductFiscalLote(orgId: string, itens: Array<{ productId: string } & Record<string, unknown>>): Promise<{ ok: true; gravados: number; pulados: number }> {
     if (!Array.isArray(itens) || itens.length === 0) throw new BadRequestException('Nenhum produto enviado.')
     if (itens.length > 200) throw new BadRequestException('Máximo de 200 produtos por vez.')
-    let gravados = 0
+
+    // 🔴 REGRA DO CLIENTE: o lote NÃO mexe em cadastro antigo. Quem já tem NCM
+    // fica como está — mesmo que a tela mande, mesmo que o novo valor pareça
+    // melhor. Classificação existente só se corrige uma a uma, de propósito,
+    // pelo PUT de produto único. Aqui o risco é gravar 200 de uma vez.
+    const ids = itens.map((i) => i?.productId).filter(Boolean)
+    const jaTem = new Set<string>()
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await supabaseAdmin
+        .from('product_fiscal').select('product_id').eq('organization_id', orgId)
+        .in('product_id', ids.slice(i, i + 200)).not('ncm', 'is', null)
+      for (const r of (data ?? []) as Array<{ product_id: string }>) jaTem.add(r.product_id)
+    }
+
+    let gravados = 0, pulados = 0
     for (const it of itens) {
       if (!it?.productId) continue
+      if (jaTem.has(it.productId)) { pulados += 1; continue }
       const { productId, ...resto } = it
       await this.upsertProductFiscal(orgId, productId, resto as Parameters<typeof this.upsertProductFiscal>[2])
       gravados += 1
     }
-    return { ok: true, gravados }
+    if (pulados > 0) this.logger.log(`[fiscal-lote] ${pulados} produto(s) pulados: ja tinham NCM (cadastro antigo nao se mexe)`)
+    return { ok: true, gravados, pulados }
   }
 }
 
