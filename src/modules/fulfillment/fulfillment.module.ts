@@ -14,6 +14,7 @@ import { FulfillmentSefazService } from './fulfillment-sefaz.service'
 import { FulfillmentDanfeService } from './fulfillment-danfe.service'
 import { FulfillmentLocationsService } from './fulfillment-locations.service'
 import { FulfillmentCartsService } from './fulfillment-carts.service'
+import { FulfillmentQzService } from './fulfillment-qz.service'
 import { AiModule } from '../ai/ai.module'
 import { MercadolivreModule } from '../mercadolivre/mercadolivre.module'
 import { StockModule } from '../stock/stock.module'
@@ -25,7 +26,7 @@ import { MarketplaceModule } from '../marketplace/marketplace.module'
   // Composition + Marketplace: F2b-3 (emissão de NF-e explode kits e re-ingere o pedido Shopee ao vivo)
   imports:     [AiModule, MercadolivreModule, StockModule, CredentialsModule, CompositionModule, MarketplaceModule],
   controllers: [FulfillmentController],
-  providers:   [FulfillmentService, FulfillmentAiService, FulfillmentLabelsService, FulfillmentReconcileService, FulfillmentReturnsService, FulfillmentWaveService, FulfillmentAccountsService, FulfillmentInvoicesService, FulfillmentPackagingService, FulfillmentFiscalService, FulfillmentSefazService, FulfillmentDanfeService, FulfillmentLocationsService, FulfillmentCartsService],
+  providers:   [FulfillmentService, FulfillmentAiService, FulfillmentLabelsService, FulfillmentReconcileService, FulfillmentReturnsService, FulfillmentWaveService, FulfillmentAccountsService, FulfillmentInvoicesService, FulfillmentPackagingService, FulfillmentFiscalService, FulfillmentSefazService, FulfillmentDanfeService, FulfillmentLocationsService, FulfillmentCartsService, FulfillmentQzService],
   exports:     [FulfillmentService],
 })
 export class FulfillmentModule {}

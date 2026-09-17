@@ -1,7 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common'
 import { supabaseAdmin } from '../../common/supabase'
 import { FulfillmentAiService } from './fulfillment-ai.service'
-import { FulfillmentLabelsService, FULFILLMENT_BUCKET } from './fulfillment-labels.service'
+import { FulfillmentLabelsService, FULFILLMENT_BUCKET, type MlShipmentStatus } from './fulfillment-labels.service'
 import { FulfillmentAccountsService, type PlatformTiming } from './fulfillment-accounts.service'
 import { FulfillmentLocationsService } from './fulfillment-locations.service'
 import { computePickProfile } from './fulfillment-carts.service'
@@ -232,7 +232,10 @@ export class FulfillmentService {
     } else if (input.source === 'b2b') {
       externalAccountId = 'b2b'
     }
-    const { accountId, companyId } = await this.accounts.resolveAccount(orgId, { platform, externalAccountId, label: accountLabel })
+    const { accountId, companyId, active } = await this.accounts.resolveAccount(orgId, { platform, externalAccountId, label: accountLabel })
+    // conta desativada na expedição: o pedido NÃO entra na fila (auto-ingest e
+    // reconciliação engolem o erro; chamada manual recebe a mensagem)
+    if (!active) throw new BadRequestException(`A conta ${accountLabel ?? externalAccountId ?? platform} está desativada na expedição.`)
 
     // Prazo REAL do ML (lead_time do shipment) — usa o de despacho como prazo efetivo
     let timing: PlatformTiming | null = null
@@ -553,7 +556,9 @@ export class FulfillmentService {
     if (s.ai_smart_queue_enabled) tasks = smartSortPickTasks(tasks)
     const foIds = [...new Set(tasks.map((t) => t.fulfillment_order_id as string))]
     const refs = await this.foRefs(orgId, foIds)
-    return tasks.map((t) => ({ ...t, order: refs.get(t.fulfillment_order_id as string) ?? null }))
+    return tasks
+      .filter((t) => isFoVisible(refs.get(t.fulfillment_order_id as string)))
+      .map((t) => ({ ...t, order: refs.get(t.fulfillment_order_id as string) ?? null }))
   }
 
   /** Bipagem do item: aceita SKU, EAN ou QR. Mismatch é bloqueado e logado. */
@@ -625,7 +630,7 @@ export class FulfillmentService {
     const foIds = [...new Set(tasks.map((t) => t.fulfillment_order_id as string))]
     const refs = await this.foRefs(orgId, foIds)
     const itemsByFo = await this.itemsByFo(orgId, foIds)
-    return tasks.map((t) => ({
+    return tasks.filter((t) => isFoVisible(refs.get(t.fulfillment_order_id as string))).map((t) => ({
       ...t,
       order: refs.get(t.fulfillment_order_id as string) ?? null,
       items: itemsByFo.get(t.fulfillment_order_id as string) ?? [],
@@ -734,19 +739,139 @@ export class FulfillmentService {
   }
 
   async printLabel(orgId: string, userId: string, fulfillmentOrderId: string) {
-    const fo = await this.getFo(orgId, fulfillmentOrderId)
-    const items = await this.itemsByFoOne(orgId, fulfillmentOrderId)
     // Modo teste (settings.test_mode): etiqueta de ML sai simulada, sem chamar a API
     // do ML — garante que nada é enviado à plataforma durante a fase de validação.
     const st = await this.getSettings(orgId)
     const testMode = !!(st.settings as { test_mode?: boolean } | null)?.test_mode
-    const result = await this.labels.generate(orgId, fo, items, { testMode })
+    const { storagePath: _sp, ...resposta } = await this.registrarEtiqueta(orgId, userId, fulfillmentOrderId, { testMode, origem: 'conferencia' })
+    return resposta
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // ETIQUETAS DO DIA — operação simples (sem bipar): lista os envios das
+  // contas ATIVAS prontos pra despachar e imprime a etiqueta REAL direto na
+  // térmica. Grava no mesmo lugar da expedição completa (fulfillment_order +
+  // shipment_labels + operator_actions): na virada o histórico já está lá.
+  // ════════════════════════════════════════════════════════════════════
+
+  async etiquetasPendentes(orgId: string, sinceDays = 10) {
+    const contas = await this.accounts.activeAccounts(orgId)
+    const since = new Date(Date.now() - Math.min(Math.max(sinceDays, 1), 30) * 86400_000).toISOString()
+    // substatus do ML em que a etiqueta do vendedor está disponível
+    const IMPRIMIVEL = ['ready_to_print', 'printed']
+    const envios: EtiquetaEnvio[] = []
+
+    for (const conta of contas.filter((c) => c.platform === 'mercadolivre')) {
+      const { data } = await supabaseAdmin
+        .from('orders')
+        .select('external_order_id, sku, product_title, quantity, buyer_name, shipping_id, sold_at, created_at, pack_id:raw_data->pack_id')
+        .eq('organization_id', orgId).eq('seller_id', conta.external_account_id)
+        .eq('status', 'paid').gte('created_at', since).not('shipping_id', 'is', null)
+        .order('created_at', { ascending: true }).limit(500)
+      const linhas = (data ?? []) as unknown as Array<{
+        external_order_id: string; sku: string; product_title: string | null; quantity: number | null
+        buyer_name: string | null; shipping_id: string; sold_at: string | null; created_at: string; pack_id: number | string | null
+      }>
+      // um envio = uma etiqueta (carrinho com vários pedidos divide o mesmo shipment)
+      const porEnvio = new Map<string, typeof linhas>()
+      for (const l of linhas) {
+        const k = String(l.shipping_id)
+        if (!porEnvio.has(k)) porEnvio.set(k, [])
+        porEnvio.get(k)!.push(l)
+      }
+      if (porEnvio.size === 0) continue
+
+      let situacao: Map<string, MlShipmentStatus>
+      try {
+        situacao = await this.labels.mlShipments(orgId, Number(conta.external_account_id), [...porEnvio.keys()])
+      } catch (e) {
+        this.logger.warn(`[etiquetas] conta ${conta.label ?? conta.external_account_id}: ${(e as Error).message}`)
+        continue
+      }
+
+      for (const [shipmentId, ls] of porEnvio) {
+        const s = situacao.get(shipmentId)
+        if (!s || s.status !== 'ready_to_ship' || s.logisticType === 'fulfillment') continue
+        const aguardandoNota = s.substatus === 'invoice_pending'
+        if (!aguardandoNota && !IMPRIMIVEL.includes(s.substatus ?? '')) continue // já no CD/transportadora
+        envios.push({
+          shipmentId, accountId: conta.id, contaLabel: conta.label, platform: conta.platform,
+          pedidos: [...new Set(ls.map((l) => l.external_order_id))],
+          packId: ls[0].pack_id != null ? String(ls[0].pack_id) : null,
+          comprador: ls[0].buyer_name,
+          itens: ls.map((l) => ({ sku: l.sku, title: l.product_title, qty: Number(l.quantity) || 1 })),
+          vendidoEm: ls[0].sold_at ?? ls[0].created_at,
+          substatus: s.substatus, logisticType: s.logisticType,
+          prazoDespacho: s.handlingDeadline, rastreio: s.trackingCode,
+          podeImprimir: !aguardandoNota,
+          motivo: aguardandoNota ? 'Aguardando nota fiscal no Mercado Livre' : null,
+          impressoNoMl: s.substatus === 'printed',
+          impressoPorNosEm: null,
+        })
+      }
+    }
+
+    // quando NÓS imprimimos (pedido → fulfillment_order → shipment_labels)
+    const todos = [...new Set(envios.flatMap((e) => e.pedidos))]
+    if (todos.length) {
+      const { data: fos } = await supabaseAdmin
+        .from('fulfillment_orders').select('id, source_id')
+        .eq('organization_id', orgId).eq('source_type', 'marketplace').in('source_id', todos)
+      const snByFo = new Map(((fos ?? []) as Array<{ id: string; source_id: string }>).map((f) => [f.id, f.source_id]))
+      if (snByFo.size) {
+        const { data: labs } = await supabaseAdmin
+          .from('shipment_labels').select('fulfillment_order_id, printed_at')
+          .eq('organization_id', orgId).in('fulfillment_order_id', [...snByFo.keys()])
+        const ultima = new Map<string, string>()
+        for (const l of (labs ?? []) as Array<{ fulfillment_order_id: string; printed_at: string | null }>) {
+          const sn = snByFo.get(l.fulfillment_order_id)
+          if (sn && l.printed_at && (!ultima.has(sn) || l.printed_at > ultima.get(sn)!)) ultima.set(sn, l.printed_at)
+        }
+        for (const e of envios) e.impressoPorNosEm = e.pedidos.map((p) => ultima.get(p)).filter((v): v is string => !!v).sort().pop() ?? null
+      }
+    }
+
+    envios.sort((a, b) => (a.prazoDespacho ?? '9999').localeCompare(b.prazoDespacho ?? '9999'))
+    return {
+      contas: contas.map((c) => ({
+        id: c.id, label: c.label, platform: c.platform, externalAccountId: c.external_account_id,
+        // Shopee tem fluxo próprio (organizar envio → gerar documento) — próxima etapa
+        suportado: c.platform === 'mercadolivre',
+      })),
+      envios,
+      geradoEm: new Date().toISOString(),
+    }
+  }
+
+  /** Imprime a etiqueta REAL de um pedido de marketplace pela tela de Etiquetas.
+   *  Ignora o modo teste da expedição de propósito: esta tela é a operação de
+   *  verdade. Cria o fulfillment_order se ainda não existir (idempotente) e
+   *  devolve o PDF em base64 pra ir direto à impressora. */
+  async imprimirEtiquetaPedido(orgId: string, userId: string, externalOrderId: string) {
+    const { fulfillmentOrderId } = await this.seed(orgId, { source: 'marketplace', externalOrderId })
+    const r = await this.registrarEtiqueta(orgId, userId, fulfillmentOrderId, { testMode: false, origem: 'etiquetas' })
+    if (r.format === 'NONE') throw new BadRequestException(r.message ?? 'Este envio não tem etiqueta do vendedor.')
+    // a separação não passou pelo sistema: tarefas abertas são encerradas pra não
+    // ficarem penduradas na fila de quem for bipar depois da virada
+    await supabaseAdmin.from('pick_tasks').update({ status: 'cancelled' })
+      .eq('fulfillment_order_id', fulfillmentOrderId).eq('organization_id', orgId).in('status', ['pending', 'in_progress'])
+    const pdfBase64 = r.storagePath ? await this.labels.fileBase64(r.storagePath) : null
+    const { storagePath: _sp, ...resposta } = r
+    return { ...resposta, fulfillmentOrderId, pdfBase64 }
+  }
+
+  /** Gera a etiqueta, grava em shipment_labels, marca o pedido como despachado e
+   *  registra quem imprimiu. Compartilhado entre a conferência e a tela de Etiquetas. */
+  private async registrarEtiqueta(orgId: string, userId: string, fulfillmentOrderId: string, opts: { testMode: boolean; origem: 'conferencia' | 'etiquetas' }) {
+    const fo = await this.getFo(orgId, fulfillmentOrderId)
+    const items = await this.itemsByFoOne(orgId, fulfillmentOrderId)
+    const result = await this.labels.generate(orgId, fo, items, { testMode: opts.testMode })
 
     // Mercado Envios Full: sem etiqueta do vendedor (ML gerencia). Não cria
     // registro de etiqueta nem marca como expedido — não há ação de despacho.
     if (result.format === 'NONE') {
-      await this.log(orgId, userId, 'label_printed', { fulfillmentOrderId, payload: { managed: true, note: result.note } })
-      return { ok: true, managed: true, format: 'NONE' as const, trackingCode: result.trackingCode, labelUrl: null, message: result.note ?? 'Envio gerenciado pelo Mercado Livre (Full).' }
+      await this.log(orgId, userId, 'label_printed', { fulfillmentOrderId, payload: { managed: true, note: result.note, origem: opts.origem } })
+      return { ok: true, managed: true, format: 'NONE' as const, trackingCode: result.trackingCode, labelUrl: null, message: result.note ?? 'Envio gerenciado pelo Mercado Livre (Full).', storagePath: null }
     }
 
     const { data, error } = await supabaseAdmin.from('shipment_labels').insert({
@@ -759,20 +884,27 @@ export class FulfillmentService {
     // marca pedido como shipped + pack shipped
     await supabaseAdmin.from('fulfillment_orders').update({ status: 'shipped' }).eq('id', fulfillmentOrderId).eq('organization_id', orgId)
     await supabaseAdmin.from('pack_tasks').update({ status: 'shipped', shipped_at: new Date().toISOString() }).eq('fulfillment_order_id', fulfillmentOrderId).eq('organization_id', orgId)
-    await this.log(orgId, userId, 'label_printed', { fulfillmentOrderId, payload: { format: result.format, tracking: result.trackingCode } })
+    await this.log(orgId, userId, 'label_printed', { fulfillmentOrderId, payload: { format: result.format, tracking: result.trackingCode, origem: opts.origem } })
 
     const signedUrl = await this.labels.signedUrl(result.storagePath, 600)
-    return { ok: true, id: (data as { id: string } | null)?.id, format: result.format, trackingCode: result.trackingCode, labelUrl: signedUrl }
+    return { ok: true, managed: false, id: (data as { id: string } | null)?.id, format: result.format, trackingCode: result.trackingCode, labelUrl: signedUrl, message: null as string | null, storagePath: result.storagePath }
   }
 
   async dashboard(orgId: string, warehouseId?: string) {
     const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
 
-    const pickCountQ = supabaseAdmin.from('pick_tasks').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).in('status', ['pending', 'in_progress'])
-    const packCountQ = supabaseAdmin.from('pack_tasks').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).in('status', ['ready_to_pack', 'in_progress'])
+    // contagem só do que aparece nas filas (sem conta desativada / pedido já despachado)
+    const pickCountQ = supabaseAdmin.from('pick_tasks').select('fulfillment_order_id').eq('organization_id', orgId).in('status', ['pending', 'in_progress']).limit(2000)
+    const packCountQ = supabaseAdmin.from('pack_tasks').select('fulfillment_order_id').eq('organization_id', orgId).in('status', ['ready_to_pack', 'in_progress']).limit(2000)
     if (warehouseId) { pickCountQ.eq('warehouse_id', warehouseId); packCountQ.eq('warehouse_id', warehouseId) }
-    const [{ count: pickQueue }, { count: packQueue }] = await Promise.all([pickCountQ, packCountQ])
+    const [{ data: pickRows }, { data: packRows }] = await Promise.all([pickCountQ, packCountQ])
+    const pickFo = ((pickRows ?? []) as Array<{ fulfillment_order_id: string }>).map((r) => r.fulfillment_order_id)
+    const packFo = ((packRows ?? []) as Array<{ fulfillment_order_id: string }>).map((r) => r.fulfillment_order_id)
+    const queueRefs = await this.foRefs(orgId, [...new Set([...pickFo, ...packFo])])
+    const pickQueue = pickFo.filter((id) => isFoVisible(queueRefs.get(id))).length
+    const packQueue = packFo.filter((id) => isFoVisible(queueRefs.get(id))).length
+    const inactive = await this.accounts.inactiveAccounts(orgId)
 
     const { data: actions } = await supabaseAdmin
       .from('operator_actions').select('id, action_type, user_id, fulfillment_order_id, payload, created_at')
@@ -797,11 +929,16 @@ export class FulfillmentService {
       .eq('organization_id', orgId).in('status', ['received', 'picking', 'packing'])
       .not('sla_deadline', 'is', null).gte('sla_deadline', nowIso).lt('sla_deadline', soonIso)
     if (warehouseId) { lateQ.eq('warehouse_id', warehouseId); dueSoonQ.eq('warehouse_id', warehouseId) }
+    if (inactive.ids.size) {
+      // NOT IN sozinho descartaria account_id nulo (b2b antigo) — por isso o OR
+      const semInativas = `account_id.is.null,account_id.not.in.(${[...inactive.ids].join(',')})`
+      lateQ.or(semInativas); dueSoonQ.or(semInativas)
+    }
     const [{ count: lateCount }, { count: dueSoonCount }] = await Promise.all([lateQ, dueSoonQ])
 
     return {
-      pickQueue: pickQueue ?? 0,
-      packQueue: packQueue ?? 0,
+      pickQueue,
+      packQueue,
       damagesToday: damagesToday ?? 0,
       mismatch24h: mismatch24h ?? 0,
       lateCount: lateCount ?? 0,
@@ -825,11 +962,12 @@ export class FulfillmentService {
       .limit(500)
     if (warehouseId) q = q.eq('warehouse_id', warehouseId)
     const { data } = await q
-    const orders = (data ?? []) as Array<{
+    const inactive = await this.accounts.inactiveAccounts(orgId)
+    const orders = ((data ?? []) as Array<{
       id: string; reference: string | null; channel: string | null; status: string; items_count: number
       sla_deadline: string | null; platform_handling_deadline: string | null; logistic_type: string | null
       account_id: string | null; company_id: string | null; customer: { name?: string } | null; created_at: string
-    }>
+    }>).filter((o) => !o.account_id || !inactive.ids.has(o.account_id))
 
     // labels de conta/empresa (1 lookup cada)
     const accIds = [...new Set(orders.map((o) => o.account_id).filter((x): x is string => !!x))]
@@ -906,6 +1044,7 @@ export class FulfillmentService {
       .limit(500)
     if (warehouseId) q = q.eq('warehouse_id', warehouseId)
     const { data } = await q
+    const inactive = await this.accounts.inactiveAccounts(orgId)
     const orders = ((data ?? []) as Array<{
       id: string; reference: string | null; channel: string | null; status: string; items_count: number
       sla_deadline: string | null; platform_handling_deadline: string | null; logistic_type: string | null
@@ -914,6 +1053,7 @@ export class FulfillmentService {
     }>)
       // shipped só conta como "aguardando coleta" se foi recente (senão é histórico)
       .filter((o) => o.status === 'packed' || o.updated_at >= since)
+      .filter((o) => !o.account_id || !inactive.ids.has(o.account_id))
 
     // labels conta/empresa + tracking
     const accIds = [...new Set(orders.map((o) => o.account_id).filter((x): x is string => !!x))]
@@ -1014,11 +1154,11 @@ export class FulfillmentService {
     // operador não distingue as contas (ex.: VAZZO_ vs V20251215…, Shopee, loja).
     const accIds = [...new Set(orders.map((o) => o.account_id as string | null).filter((x): x is string => !!x))]
     const compIds = [...new Set(orders.map((o) => o.company_id as string | null).filter((x): x is string => !!x))]
-    const accMap = new Map<string, { label: string | null; platform: string }>()
+    const accMap = new Map<string, { label: string | null; platform: string; active: boolean }>()
     const compMap = new Map<string, string>()
     if (accIds.length) {
-      const { data: a } = await supabaseAdmin.from('fulfillment_accounts').select('id, label, platform').in('id', accIds)
-      for (const r of (a ?? []) as Array<{ id: string; label: string | null; platform: string }>) accMap.set(r.id, { label: r.label, platform: r.platform })
+      const { data: a } = await supabaseAdmin.from('fulfillment_accounts').select('id, label, platform, is_active').in('id', accIds)
+      for (const r of (a ?? []) as Array<{ id: string; label: string | null; platform: string; is_active: boolean }>) accMap.set(r.id, { label: r.label, platform: r.platform, active: r.is_active !== false })
     }
     if (compIds.length) {
       const { data: c } = await supabaseAdmin.from('fulfillment_companies').select('id, name').in('id', compIds)
@@ -1031,6 +1171,7 @@ export class FulfillmentService {
         ...r,
         accountLabel: accId ? accMap.get(accId)?.label ?? null : null,
         platform: accId ? accMap.get(accId)?.platform ?? null : null,
+        accountActive: accId ? accMap.get(accId)?.active ?? true : true,
         companyName: compId ? compMap.get(compId) ?? null : null,
       })
     }
@@ -1228,4 +1369,22 @@ function decodeImage(input: string, mimeHint?: string): { buffer: Buffer; mime: 
   if (buffer.length > 8 * 1024 * 1024) throw new BadRequestException('Imagem muito grande (máx. 8MB).')
   const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg'
   return { buffer, mime, ext }
+}
+
+/** Tarefa só aparece na fila se o pedido existe, não é de conta desativada e
+ *  ainda não saiu (etiqueta impressa pela tela de Etiquetas = já despachado). */
+function isFoVisible(ref: Record<string, unknown> | undefined): boolean {
+  if (!ref) return false
+  if (ref.accountActive === false) return false
+  return !['shipped', 'cancelled'].includes(String(ref.status))
+}
+
+/** Um envio da tela de Etiquetas (1 envio = 1 etiqueta; pode juntar vários pedidos). */
+export interface EtiquetaEnvio {
+  shipmentId: string; accountId: string; contaLabel: string | null; platform: string
+  pedidos: string[]; packId: string | null; comprador: string | null
+  itens: Array<{ sku: string; title: string | null; qty: number }>
+  vendidoEm: string | null; substatus: string | null; logisticType: string | null
+  prazoDespacho: string | null; rastreio: string | null
+  podeImprimir: boolean; motivo: string | null; impressoNoMl: boolean; impressoPorNosEm: string | null
 }

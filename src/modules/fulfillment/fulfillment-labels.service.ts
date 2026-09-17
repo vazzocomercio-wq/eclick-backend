@@ -163,6 +163,74 @@ export class FulfillmentLabelsService {
       .createSignedUrl(storagePath, ttlSeconds)
     return data?.signedUrl ?? null
   }
+
+  /** Conteúdo da etiqueta em base64 — a tela de Etiquetas manda direto pra
+   *  impressora térmica (QZ Tray) sem abrir o PDF. */
+  async fileBase64(storagePath: string): Promise<string | null> {
+    const { data } = await supabaseAdmin.storage.from(FULFILLMENT_BUCKET).download(storagePath)
+    if (!data) return null
+    return Buffer.from(await data.arrayBuffer()).toString('base64')
+  }
+
+  /** Situação AO VIVO de vários envios ML de uma conta (status/substatus/prazo).
+   *  O `orders` sincronizado atrasa em relação ao ML — pra decidir se a etiqueta
+   *  está disponível a fonte tem de ser o /shipments. Envio que falhar na
+   *  consulta simplesmente não volta no mapa. */
+  async mlShipments(orgId: string, sellerId: number, shipmentIds: string[]): Promise<Map<string, MlShipmentStatus>> {
+    const out = new Map<string, MlShipmentStatus>()
+    if (shipmentIds.length === 0) return out
+    const { token } = await this.mercadolivre.getTokenForOrg(orgId, sellerId)
+    const pick = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
+    const fila = [...shipmentIds]
+    const worker = async () => {
+      for (let id = fila.shift(); id; id = fila.shift()) {
+        try {
+          const { data: d } = await axios.get(`https://api.mercadolibre.com/shipments/${id}`, {
+            headers: { Authorization: `Bearer ${token}`, 'x-format-new': 'true' },
+            timeout: 15_000,
+          })
+          const status = pick(d?.status)
+          let handlingDeadline = pick(d?.lead_time?.estimated_handling_limit?.date)
+          // envio por agência (xd_drop_off) não traz o limite no lead_time — o
+          // "despachar até" impresso na etiqueta vem do /sla
+          if (!handlingDeadline && status === 'ready_to_ship') handlingDeadline = await mlSlaDate(token, id)
+          out.set(id, {
+            status,
+            substatus: pick(d?.substatus),
+            // com x-format-new o tipo vem em logistic.type; no formato antigo, logistic_type
+            logisticType: pick(d?.logistic_type) ?? pick(d?.logistic?.type),
+            handlingDeadline,
+            trackingCode: pick(d?.tracking_number),
+          })
+        } catch (e) {
+          this.logger.warn(`[labels] shipment ${id} falhou: ${(e as Error).message}`)
+        }
+      }
+    }
+    // 6 em paralelo: rápido o bastante pra ~50 envios sem esbarrar no rate limit do ML
+    await Promise.all(Array.from({ length: Math.min(6, fila.length) }, worker))
+    return out
+  }
+}
+
+/** Prazo de despacho do envio ML (GET /shipments/:id/sla → expected_date). Best-effort. */
+export async function mlSlaDate(token: string, shipmentId: string): Promise<string | null> {
+  try {
+    const { data } = await axios.get(`https://api.mercadolibre.com/shipments/${shipmentId}/sla`, {
+      headers: { Authorization: `Bearer ${token}` }, timeout: 10_000,
+    })
+    return typeof data?.expected_date === 'string' && data.expected_date ? data.expected_date : null
+  } catch {
+    return null
+  }
+}
+
+export interface MlShipmentStatus {
+  status: string | null
+  substatus: string | null
+  logisticType: string | null
+  handlingDeadline: string | null
+  trackingCode: string | null
 }
 
 function buildZpl(input: {

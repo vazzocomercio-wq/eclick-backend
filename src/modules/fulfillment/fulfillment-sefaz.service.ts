@@ -574,12 +574,21 @@ export class FulfillmentSefazService {
     // pedidos pagos ainda não despachados = janela em que a nota é necessária
     const { data: rows } = await supabaseAdmin
       .from('orders')
-      .select('external_order_id, product_id, sku, quantity, sale_price, buyer_name, buyer_doc_number, buyer_phone, raw_data, channel_account_id, platform, shipping_status, status')
+      .select('external_order_id, product_id, sku, quantity, sale_price, buyer_name, buyer_doc_number, buyer_phone, raw_data, channel_account_id, seller_id, platform, shipping_status, status')
       .eq('organization_id', orgId).eq('status', 'paid')
       .in('shipping_status', ['ready_to_ship', 'processed', 'pending'])
       .order('sold_at', { ascending: true }).limit(500)
+    // conta desativada na expedição não aparece na fila fiscal (ML identifica a
+    // conta pelo seller_id; Shopee/TikTok pelo channel_account_id = shop_id)
+    const { data: inativas } = await supabaseAdmin
+      .from('fulfillment_accounts').select('platform, external_account_id')
+      .eq('organization_id', orgId).eq('is_active', false)
+    const contasInativas = new Set(((inativas ?? []) as Array<{ platform: string; external_account_id: string }>).map((a) => `${a.platform}:${a.external_account_id}`))
     const porPedido = new Map<string, typeof rows>()
     for (const r of (rows ?? []) as NonNullable<typeof rows>) {
+      const o = r as { platform: string | null; seller_id: number | null; channel_account_id: string | null }
+      const conta = o.platform === 'mercadolivre' ? o.seller_id : o.channel_account_id
+      if (conta != null && contasInativas.has(`${o.platform}:${conta}`)) continue
       const k = (r as { external_order_id: string }).external_order_id
       if (!porPedido.has(k)) porPedido.set(k, [] as unknown as typeof rows)
       ;(porPedido.get(k) as unknown as Array<unknown>).push(r)
