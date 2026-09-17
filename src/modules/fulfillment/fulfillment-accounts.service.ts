@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common'
 import axios from 'axios'
 import { supabaseAdmin } from '../../common/supabase'
 import { MercadolivreService } from '../mercadolivre/mercadolivre.service'
+import { mlSlaDate } from './fulfillment-labels.service'
 
 export type CompanyRole = 'matriz' | 'revendedora' | 'unica'
 
@@ -128,20 +129,20 @@ export class FulfillmentAccountsService {
   /** Acha ou cria a conta de canal e devolve {accountId, companyId}. Auto-cadastro:
    *  conta nova é ligada à empresa padrão (o user reatribui depois). Best-effort —
    *  se algo falhar, devolve nulls (não trava a ingestão do pedido). */
-  async resolveAccount(orgId: string, input: { platform: string; externalAccountId: string | null; label?: string | null }): Promise<{ accountId: string | null; companyId: string | null }> {
+  async resolveAccount(orgId: string, input: { platform: string; externalAccountId: string | null; label?: string | null }): Promise<{ accountId: string | null; companyId: string | null; active: boolean }> {
     try {
       const platform = (input.platform || 'desconhecido').toLowerCase()
       const key = (input.externalAccountId && String(input.externalAccountId).trim()) || platform // b2b/loja sem conta → usa a própria plataforma
       const { data: found } = await supabaseAdmin
-        .from('fulfillment_accounts').select('id, company_id')
+        .from('fulfillment_accounts').select('id, company_id, is_active')
         .eq('organization_id', orgId).eq('platform', platform).eq('external_account_id', key).maybeSingle()
       if (found) {
-        const f = found as { id: string; company_id: string | null }
-        if (f.company_id) return { accountId: f.id, companyId: f.company_id }
+        const f = found as { id: string; company_id: string | null; is_active: boolean }
+        if (f.company_id) return { accountId: f.id, companyId: f.company_id, active: f.is_active !== false }
         // conta órfã (empresa foi removida → company_id null) → religa à empresa padrão
         const defId = await this.ensureDefaultCompany(orgId)
         await supabaseAdmin.from('fulfillment_accounts').update({ company_id: defId }).eq('id', f.id).eq('organization_id', orgId)
-        return { accountId: f.id, companyId: defId }
+        return { accountId: f.id, companyId: defId, active: f.is_active !== false }
       }
       const companyId = await this.ensureDefaultCompany(orgId)
       const { data: created, error } = await supabaseAdmin
@@ -151,16 +152,41 @@ export class FulfillmentAccountsService {
       if (error || !created) {
         // corrida: outra ingestão criou ao mesmo tempo → re-seleciona
         const { data: again } = await supabaseAdmin
-          .from('fulfillment_accounts').select('id, company_id')
+          .from('fulfillment_accounts').select('id, company_id, is_active')
           .eq('organization_id', orgId).eq('platform', platform).eq('external_account_id', key).maybeSingle()
-        if (again) { const a = again as { id: string; company_id: string | null }; return { accountId: a.id, companyId: a.company_id } }
-        return { accountId: null, companyId: null }
+        if (again) { const a = again as { id: string; company_id: string | null; is_active: boolean }; return { accountId: a.id, companyId: a.company_id, active: a.is_active !== false } }
+        return { accountId: null, companyId: null, active: true }
       }
-      return { accountId: (created as { id: string }).id, companyId }
+      return { accountId: (created as { id: string }).id, companyId, active: true }
     } catch (e) {
       this.logger.warn(`[accounts] resolveAccount falhou (best-effort): ${(e as Error).message}`)
-      return { accountId: null, companyId: null }
+      return { accountId: null, companyId: null, active: true }
     }
+  }
+
+  /** Contas DESATIVADAS na expedição. Pedido de conta desativada não entra na
+   *  fila e some das telas (separação, conferência, painel, coleta, fila fiscal)
+   *  — nada é apagado: reativou, volta tudo. `keys` = "plataforma:conta externa"
+   *  pra filtrar linhas de `orders`, que não têm account_id. */
+  async inactiveAccounts(orgId: string): Promise<{ ids: Set<string>; keys: Set<string> }> {
+    const { data } = await supabaseAdmin
+      .from('fulfillment_accounts').select('id, platform, external_account_id')
+      .eq('organization_id', orgId).eq('is_active', false)
+    const rows = (data ?? []) as Array<{ id: string; platform: string; external_account_id: string }>
+    return {
+      ids: new Set(rows.map((r) => r.id)),
+      keys: new Set(rows.map((r) => `${r.platform}:${r.external_account_id}`)),
+    }
+  }
+
+  /** Contas ATIVAS de uma plataforma (ex.: as contas ML cujas etiquetas imprimimos). */
+  async activeAccounts(orgId: string, platform?: string): Promise<FulfillmentAccount[]> {
+    let q = supabaseAdmin
+      .from('fulfillment_accounts').select('*')
+      .eq('organization_id', orgId).eq('is_active', true)
+    if (platform) q = q.eq('platform', platform)
+    const { data } = await q.order('created_at', { ascending: true })
+    return (data ?? []) as FulfillmentAccount[]
   }
 
   /** Apelido (nickname) da conta ML pelo seller_id, pra rotular a conta. */
@@ -188,8 +214,9 @@ export class FulfillmentAccountsService {
       const pick = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
       return {
         shipmentId: String(shipmentId),
-        logisticType: pick(d.logistic_type),
-        handlingDeadline: pick(lt?.estimated_handling_limit?.date),
+        logisticType: pick(d.logistic_type) ?? pick(d.logistic?.type),
+        // agência (xd_drop_off) não traz o limite no lead_time → cai pro /sla
+        handlingDeadline: pick(lt?.estimated_handling_limit?.date) ?? await mlSlaDate(token, String(shipmentId)),
         deliveryDeadline: pick(lt?.estimated_delivery_limit?.date) ?? pick(lt?.estimated_delivery_final?.date),
         scheduledFrom: pick(lt?.pickup_promise?.from) ?? pick(lt?.estimated_schedule_limit?.date),
         scheduledTo: pick(lt?.pickup_promise?.to),

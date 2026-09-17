@@ -15,6 +15,7 @@ import { FulfillmentSefazService, type DestOverride } from './fulfillment-sefaz.
 import { FulfillmentDanfeService } from './fulfillment-danfe.service'
 import { FulfillmentLocationsService, type LocationType, type AddressScheme } from './fulfillment-locations.service'
 import { FulfillmentCartsService } from './fulfillment-carts.service'
+import { FulfillmentQzService } from './fulfillment-qz.service'
 import type { SeedItem, SourceType, FulfillmentSettings, DamageSeverity, DamageResolution, OperatorRole } from './fulfillment.types'
 
 interface ReqUserPayload { id: string; orgId: string | null }
@@ -38,6 +39,7 @@ export class FulfillmentController {
     private readonly danfe: FulfillmentDanfeService,
     private readonly locations: FulfillmentLocationsService,
     private readonly carts: FulfillmentCartsService,
+    private readonly qz: FulfillmentQzService,
   ) {}
 
   private org(u: ReqUserPayload): string {
@@ -443,6 +445,30 @@ export class FulfillmentController {
   printLabel(@ReqUser() u: ReqUserPayload, @Body() body: { fulfillmentOrderId: string }) {
     if (!body?.fulfillmentOrderId) throw new BadRequestException('fulfillmentOrderId obrigatório.')
     return this.svc.printLabel(this.org(u), u.id, body.fulfillmentOrderId)
+  }
+
+  // ── Etiquetas do dia (operação simples, sem bipar) ───────────────────
+  @Get('etiquetas')
+  etiquetasPendentes(@ReqUser() u: ReqUserPayload, @Query('dias') dias?: string) {
+    return this.svc.etiquetasPendentes(this.org(u), dias ? Number(dias) : undefined)
+  }
+
+  @Post('etiquetas/imprimir')
+  imprimirEtiqueta(@ReqUser() u: ReqUserPayload, @Body() body: { externalOrderId: string }) {
+    if (!body?.externalOrderId) throw new BadRequestException('externalOrderId obrigatório.')
+    return this.svc.imprimirEtiquetaPedido(this.org(u), u.id, String(body.externalOrderId))
+  }
+
+  // QZ Tray: certificado público da org (instalado 1x no QZ do computador) e
+  // assinatura de cada requisição — sem isso o QZ pede "Allow" a cada impressão
+  @Get('qz/certificado')
+  qzCertificado(@ReqUser() u: ReqUserPayload) {
+    return this.qz.certificado(this.org(u), u.id).then((certificate) => ({ certificate }))
+  }
+
+  @Post('qz/assinar')
+  qzAssinar(@ReqUser() u: ReqUserPayload, @Body() body: { toSign: string }) {
+    return this.qz.assinar(this.org(u), u.id, body?.toSign).then((signature) => ({ signature }))
   }
 
   // ── Empresas & Contas (Onda A — multi-CNPJ / multiconta) ─────────────
