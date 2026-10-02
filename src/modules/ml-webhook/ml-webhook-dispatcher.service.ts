@@ -62,9 +62,17 @@ export class MlWebhookDispatcherService {
           }
           break
         }
+        // Na prática as reclamações chegam com topic 'post_purchase' e resource
+        // /post-purchase/v1/claims/{id}[/actions-history] — eram IGNORADAS
+        // (ml_claims sem nada novo desde 21/08/2026; visto nos logs 02/10).
         case 'claims':
+        case 'post_purchase':
         case 'post_purchase.claims': {
           // resource: /post-purchase/v1/claims/{id} ou /claims/{id}
+          if (!/\/claims\/\d+/.test(payload.resource)) {
+            this.logger.log(`[ml-webhook] ${payload.topic} sem claim ignorado (resource=${payload.resource})`)
+            break
+          }
           await this.claims.handleClaimWebhook(orgId, payload.user_id, payload.resource)
           // Reclamação nova/alterada mexe no indicador de reclamações → recalcula (debounce).
           this.reputation.scheduleRecalc(orgId, payload.user_id, 'claims')
