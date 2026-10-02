@@ -17,6 +17,7 @@ const TRANSFORM_PROMPTS: Record<TransformAction, string> = {
 }
 
 const AUTO_SEND_FEATURE_KEY = 'ml_question_auto_send'
+const DRAFT_FEATURE_PREFIX  = 'ml_question_draft:'
 
 /**
  * Atendente IA pra perguntas pré-venda do Mercado Livre.
@@ -72,12 +73,14 @@ export class MlQuestionsAiService {
 
   // ── Parte B — Sugestão + envio aprovado ─────────────────────────────────
 
-  async suggestAnswer(orgId: string, questionId: string): Promise<{
+  async suggestAnswer(orgId: string, questionId: string, sellerId?: number, opts: { onlyUnanswered?: boolean } = {}): Promise<{
     suggestedAnswer: string
     confidence: number
     autoSendEligible: boolean
-  }> {
-    const { token } = await this.ml.getTokenForOrg(orgId)
+  } | null> {
+    // sellerId: org com várias contas ML — sem ele o token é o da conta mais
+    // recente e o ML nega a pergunta de outra conta.
+    const { token, sellerId: tokenSeller } = await this.ml.getTokenForOrg(orgId, sellerId)
 
     const { data: question } = await axios.get(`${ML_BASE}/questions/${questionId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -85,6 +88,8 @@ export class MlQuestionsAiService {
     if (!question?.text || !question?.item_id) {
       throw new BadRequestException('Pergunta não encontrada ou sem item_id')
     }
+    // Webhook também chega quando a pergunta é respondida/apagada
+    if (opts.onlyUnanswered && question.status !== 'UNANSWERED') return null
 
     const { data: item } = await axios.get(`${ML_BASE}/items/${question.item_id}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -145,6 +150,7 @@ export class MlQuestionsAiService {
       .from('ml_question_suggestions')
       .upsert({
         organization_id:    orgId,
+        seller_id:          tokenSeller ?? null,
         question_id:        questionId,
         item_id:            question.item_id,
         question_text:      question.text,
@@ -211,7 +217,7 @@ export class MlQuestionsAiService {
           const r = await this.suggestAnswer(orgId, String(q.id))
           processed++
 
-          if (autoSendOn && r.autoSendEligible) {
+          if (r && autoSendOn && r.autoSendEligible) {
             try {
               await this.ml.answerQuestion(orgId, Number(q.id), r.suggestedAnswer)
               await supabaseAdmin
@@ -249,7 +255,7 @@ export class MlQuestionsAiService {
    *
    * Sprint ML Pós-venda MVP 1 — substitui o cron @5min.
    */
-  async handleQuestionWebhook(orgId: string, questionId: string): Promise<void> {
+  async handleQuestionWebhook(orgId: string, questionId: string, sellerId?: number): Promise<void> {
     try {
       // Gating de custo: o webhook do ML chega VÁRIAS vezes pra mesma
       // pergunta (a cada update do recurso). Sem auto-send, a sugestão só
@@ -259,7 +265,25 @@ export class MlQuestionsAiService {
       // Decisão (2026-05-19): webhook só dispara Claude quando auto-send
       // está LIGADO; modo manual = só o botão da UI gera sugestão.
       const autoSendOn = await this.getAutoSendEnabled(orgId)
-      if (!autoSendOn) return
+      if (!autoSendOn) {
+        // Modo RASCUNHO (Operador 02, 02/10/2026): por CONTA, gera a
+        // sugestão UMA vez por pergunta e deixa 'pending' pra aprovação
+        // humana na tela de perguntas. Nunca envia. O "existe linha → sai"
+        // é o que evita o custo de re-rodar a cada evento do webhook.
+        if (sellerId && await this.isDraftEnabled(orgId, sellerId)) {
+          const { data: has } = await supabaseAdmin
+            .from('ml_question_suggestions')
+            .select('question_id')
+            .eq('organization_id', orgId)
+            .eq('question_id', questionId)
+            .maybeSingle()
+          if (!has) {
+            const r = await this.suggestAnswer(orgId, questionId, sellerId, { onlyUnanswered: true })
+            if (r) this.logger.log(`[draft] org=${orgId.slice(0, 8)} seller=${sellerId} q=${questionId} rascunho pronto (conf ${r.confidence})`)
+          }
+        }
+        return
+      }
 
       const { data: existing } = await supabaseAdmin
         .from('ml_question_suggestions')
@@ -273,7 +297,8 @@ export class MlQuestionsAiService {
         return
       }
       // Gera sugestão (idempotente via upsert na suggestAnswer).
-      await this.suggestAnswer(orgId, questionId)
+      const fresh = await this.suggestAnswer(orgId, questionId, sellerId, { onlyUnanswered: true })
+      if (!fresh) return
 
       const { data: row } = await supabaseAdmin
         .from('ml_question_suggestions')
@@ -284,7 +309,7 @@ export class MlQuestionsAiService {
       if (!row?.auto_send_eligible || !row.suggested_answer) return
 
       try {
-        await this.ml.answerQuestion(orgId, Number(questionId), row.suggested_answer)
+        await this.ml.answerQuestion(orgId, Number(questionId), row.suggested_answer, sellerId)
         await supabaseAdmin
           .from('ml_question_suggestions')
           .update({
@@ -303,6 +328,34 @@ export class MlQuestionsAiService {
       const msg = err instanceof Error ? err.message : String(err)
       this.logger.warn(`[webhook] org=${orgId} q=${questionId} falhou: ${msg}`)
     }
+  }
+
+  // ── Modo rascunho por conta ML (Operador 02) ────────────────────────────
+  // Liga/desliga por CONTA via ai_feature_settings.feature_key
+  // 'ml_question_draft:<seller_id>' (enabled). Sem migration: a tabela já
+  // tem UNIQUE (organization_id, feature_key).
+
+  async isDraftEnabled(orgId: string, sellerId: number): Promise<boolean> {
+    const { data } = await supabaseAdmin
+      .from('ai_feature_settings')
+      .select('enabled')
+      .eq('organization_id', orgId)
+      .eq('feature_key', `${DRAFT_FEATURE_PREFIX}${sellerId}`)
+      .maybeSingle()
+    return data?.enabled === true
+  }
+
+  /** Rascunho pendente já gerado pra pergunta — a tela de perguntas mostra
+   *  no lugar do botão "IA sugerir" (sem nova chamada de IA). */
+  async getPendingSuggestion(orgId: string, questionId: string) {
+    const { data } = await supabaseAdmin
+      .from('ml_question_suggestions')
+      .select('suggested_answer, confidence, status, created_at')
+      .eq('organization_id', orgId)
+      .eq('question_id', questionId)
+      .eq('status', 'pending')
+      .maybeSingle()
+    return data ?? null
   }
 
   // ── Auto-send toggle (ai_feature_settings flag-only) ────────────────────

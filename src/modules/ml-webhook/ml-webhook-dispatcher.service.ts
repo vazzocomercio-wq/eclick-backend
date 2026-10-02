@@ -43,7 +43,11 @@ export class MlWebhookDispatcherService {
 
     try {
       switch (payload.topic) {
-        case 'messages': {
+        // O app ML assina os nomes novos ('messages.created',
+        // 'post_purchase.claims'); hoje chegam como 'messages'/'claims', mas
+        // os aliases evitam perder evento se o ML passar a mandar o nome novo.
+        case 'messages':
+        case 'messages.created': {
           await this.postsale.handleMessageWebhook(orgId, payload.resource, payload.user_id)
           break
         }
@@ -52,13 +56,14 @@ export class MlWebhookDispatcherService {
           const m = payload.resource.match(/\/questions\/(\d+)/)
           const qid = m?.[1]
           if (qid) {
-            await this.questions.handleQuestionWebhook(orgId, qid)
+            await this.questions.handleQuestionWebhook(orgId, qid, payload.user_id)
           } else {
             this.logger.warn(`[ml-webhook] questions resource sem id: ${payload.resource}`)
           }
           break
         }
-        case 'claims': {
+        case 'claims':
+        case 'post_purchase.claims': {
           // resource: /post-purchase/v1/claims/{id} ou /claims/{id}
           await this.claims.handleClaimWebhook(orgId, payload.user_id, payload.resource)
           // Reclamação nova/alterada mexe no indicador de reclamações → recalcula (debounce).
