@@ -70,7 +70,11 @@ export class MlPostsaleService {
    * persiste tudo, processa msgs novas do comprador.
    */
   async handleMessageWebhook(orgId: string, resource: string, sellerId: number): Promise<void> {
-    const { packId } = parseMessageResource(resource)
+    // Formato atual do ML: resource = ID da mensagem (hash), não mais
+    // "/messages/packs/{pack}/sellers/{seller}". Sem resolver, TODA mensagem
+    // era descartada — ml_conversations parado desde 11/05/2026.
+    const packId = parseMessageResource(resource).packId
+      ?? await this.resolvePackIdFromMessage(orgId, resource, sellerId)
     if (!packId) {
       this.logger.warn(`[postsale.webhook] resource sem pack_id: ${resource}`)
       return
@@ -91,6 +95,28 @@ export class MlPostsaleService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       this.logger.warn(`[postsale.webhook] org=${orgId} pack=${packId}: ${msg}`)
+    }
+  }
+
+  /** GET /messages/{id}?tag=post_sale → pack em message_resources. */
+  private async resolvePackIdFromMessage(orgId: string, resource: string, sellerId: number): Promise<string | undefined> {
+    const messageId = resource.replace(/^\/?messages\//, '').trim()
+    if (!/^[A-Za-z0-9]+$/.test(messageId)) return undefined
+    try {
+      const { token } = await this.ml.getTokenForOrg(orgId, sellerId)
+      const { data } = await axios.get(`${ML_BASE}/messages/${messageId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params:  { tag: 'post_sale' },
+        timeout: 15_000,
+      })
+      type Res = { id?: string | number; name?: string }
+      const msg = (Array.isArray(data?.messages) ? data.messages[0] : data) as { message_resources?: Res[] } | undefined
+      const pack = msg?.message_resources?.find(r => r.name === 'packs' || r.name === 'orders')
+      return pack?.id != null ? String(pack.id) : undefined
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      this.logger.warn(`[postsale.webhook] resolver pack da msg ${messageId}: ${msg}`)
+      return undefined
     }
   }
 

@@ -509,6 +509,17 @@ export class MercadolivreController {
     return this.ml.deleteQuestion(user.orgId!, Number(id), sid)
   }
 
+  // GET /ml/questions/:id/suggestion — rascunho pendente já gerado pelo
+  // webhook (modo rascunho por conta). null quando não há.
+  @Get('questions/:id/suggestion')
+  @RequirePermission('crm.view')
+  getPendingSuggestion(
+    @ReqUser() user: ReqUserPayload,
+    @Param('id') id: string,
+  ) {
+    return this.questionsAi.getPendingSuggestion(user.orgId!, id)
+  }
+
   // POST /ml/questions/:id/suggest-answer
   @Post('questions/:id/suggest-answer')
   @RequirePermission('crm.message')
