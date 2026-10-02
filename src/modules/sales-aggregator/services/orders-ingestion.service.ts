@@ -14,6 +14,14 @@ interface ProductInfo {
   sku: string | null
 }
 
+/** Status de envio ML que ainda podem mudar — o enrich re-consulta esses.
+ *  Finais (delivered, not_delivered, cancelled) saem da fila. */
+const OPEN_SHIPPING_STATUSES = ['pending', 'handling', 'ready_to_ship', 'shipped'] as const
+
+/** Custos do ENVIO inteiro (shipment), guardados em raw_data._shipment_costs
+ *  pra o rateio entre pedidos do mesmo pacote ser idempotente. */
+type ShipmentCosts = { sender_cost: number; receiver_cost: number; gross_amount: number; ml_refund: number }
+
 interface IngestionStats {
   ordersFound: number
   rowsUpserted: number
@@ -165,6 +173,13 @@ export class OrdersIngestionService {
 
     this.logger.log(`[single-ingest] order=${externalOrderId} org=${orgId.slice(0,8)} upserted=${rows.length} em ${Date.now() - t0}ms`)
 
+    // Pedido de pacote: divide o frete com os irmãos já gravados ANTES de
+    // notificar (a notificação de venda mostra o frete).
+    if (shipId) {
+      await this.reallocateSharedShipping(orgId, [shipId])
+        .catch(e => this.logger.warn(`[single-ingest] rateio frete ${externalOrderId}: ${(e as Error).message}`))
+    }
+
     // Dispara notificação rica pra UI (fire-and-forget — não atrasa webhook).
     // Só pra pedidos pagos. Falha silenciosa se algum dado faltar.
     if (order.status === 'paid') {
@@ -315,6 +330,12 @@ export class OrdersIngestionService {
                 stats.rowsUpserted += batch.length
               }
             }
+            // Upsert acima regravou o frete cheio em cada pedido do pacote
+            try {
+              await this.reallocateSharedShipping(orgId, shipIds)
+            } catch (e) {
+              this.logger.warn(`[aggregator] rateio frete ${date} seller=${sellerId}: ${(e as Error).message}`)
+            }
           }
 
           // Auto-trigger de jornadas (Messaging Studio) — best-effort.
@@ -374,15 +395,151 @@ export class OrdersIngestionService {
     return stats
   }
 
+  /** Rateia o frete de um ENVIO entre todos os pedidos que ele leva.
+   *
+   *  Carrinho no ML = N pedidos (um por anúncio) num mesmo shipment. O
+   *  buildOrderRows só enxerga 1 pedido por vez e lançava o frete do envio
+   *  inteiro em CADA pedido (pacote de 6 itens com envio de R$ 90 → R$ 90
+   *  em cada um dos 6). Margem ia negativa e o hub disparava ~1000 alertas
+   *  "margem_critica" por dia. Conferido no painel do ML em 02/10/2026.
+   *
+   *  Aqui: custo do envio (raw_data._shipment_costs; linhas antigas sem o
+   *  campo → maior soma por pedido, que é o envio inteiro) dividido pelo
+   *  valor de cada linha ÷ valor de todas as linhas não-canceladas do
+   *  envio; recalcula lucro/margem. Idempotente. tax_amount fica como está
+   *  (imposto sobre frete é exceção e o efeito é pequeno). */
+  async reallocateSharedShipping(orgId: string, shippingIds: Array<number | string>): Promise<number> {
+    const ids = [...new Set(shippingIds.filter(Boolean).map(String))]
+    if (ids.length === 0) return 0
+
+    type Row = {
+      id: string; external_order_id: string; shipping_id: string; status: string | null
+      sale_price: number | null; quantity: number | null; platform_fee: number | null
+      cost_price: number | null; tax_amount: number | null
+      shipping_cost: number | null; shipping_buyer_paid: number | null
+      shipping_ml_refund: number | null; shipping_gross: number | null
+      raw_data: Record<string, unknown> | null
+    }
+    const rows: Row[] = []
+    for (let i = 0; i < ids.length; i += 100) {
+      const { data, error } = await supabaseAdmin
+        .from('orders')
+        .select('id, external_order_id, shipping_id, status, sale_price, quantity, platform_fee, cost_price, tax_amount, shipping_cost, shipping_buyer_paid, shipping_ml_refund, shipping_gross, raw_data')
+        .eq('organization_id', orgId)
+        .eq('platform', 'mercadolivre')
+        .in('shipping_id', ids.slice(i, i + 100))
+      if (error) {
+        this.logger.warn(`[ship-realloc] select falhou: ${error.message}`)
+        return 0
+      }
+      rows.push(...((data ?? []) as Row[]))
+    }
+
+    const byShip = new Map<string, Row[]>()
+    for (const r of rows) {
+      const k = String(r.shipping_id)
+      if (!byShip.has(k)) byShip.set(k, [])
+      byShip.get(k)!.push(r)
+    }
+
+    const r2 = (n: number) => Math.round(n * 100) / 100
+    let updated = 0
+    for (const [, group] of byShip) {
+      // Envio de 1 pedido só já está certo — nada a ratear
+      if (new Set(group.map(g => g.external_order_id)).size < 2) continue
+
+      let costs = group
+        .map(g => g.raw_data?._shipment_costs as ShipmentCosts | null | undefined)
+        .find(c => c && typeof c.sender_cost === 'number') ?? null
+      if (!costs) {
+        // Legado: cada pedido carrega o envio inteiro → maior soma por pedido
+        const perOrder = new Map<string, ShipmentCosts>()
+        for (const g of group) {
+          const acc = perOrder.get(g.external_order_id) ?? { sender_cost: 0, receiver_cost: 0, gross_amount: 0, ml_refund: 0 }
+          acc.sender_cost   += Number(g.shipping_cost       ?? 0)
+          acc.receiver_cost += Number(g.shipping_buyer_paid ?? 0)
+          acc.ml_refund     += Number(g.shipping_ml_refund  ?? 0)
+          acc.gross_amount  += Number(g.shipping_gross      ?? 0)
+          perOrder.set(g.external_order_id, acc)
+        }
+        costs = [...perOrder.values()].reduce((a, b) => (b.sender_cost > a.sender_cost ? b : a))
+      }
+
+      const value = (g: Row) => Number(g.sale_price ?? 0) * Number(g.quantity ?? 1)
+      const live = group.filter(g => g.status !== 'cancelled')
+      const total = live.reduce((s, g) => s + value(g), 0)
+      if (total <= 0) continue
+
+      for (const g of group) {
+        const share = g.status === 'cancelled' ? 0 : value(g) / total
+        const itemTotal = value(g)
+        const ship = r2(costs.sender_cost * share)
+        const gross = itemTotal - Number(g.platform_fee ?? 0) - ship
+        const cm = g.cost_price != null ? gross - Number(g.cost_price) - Number(g.tax_amount ?? 0) : null
+        const patch = {
+          shipping_cost:           ship,
+          shipping_buyer_paid:     r2(costs.receiver_cost * share),
+          shipping_ml_refund:      r2(costs.ml_refund * share),
+          shipping_gross:          r2(costs.gross_amount * share),
+          gross_profit:            r2(gross),
+          contribution_margin:     cm != null ? r2(cm) : null,
+          contribution_margin_pct: cm != null && itemTotal > 0 ? r2(cm / itemTotal * 100) : null,
+          raw_data:                { ...(g.raw_data ?? {}), _shipment_costs: costs },
+        }
+        if (Number(g.shipping_cost ?? 0) === patch.shipping_cost && g.raw_data?._shipment_costs) continue
+        const { error } = await supabaseAdmin.from('orders').update(patch).eq('id', g.id)
+        if (error) this.logger.warn(`[ship-realloc] update ${g.external_order_id}: ${error.message}`)
+        else updated++
+      }
+    }
+    if (updated > 0) this.logger.log(`[ship-realloc] org=${orgId.slice(0,8)} envios=${byShip.size} linhas_corrigidas=${updated}`)
+    return updated
+  }
+
+  /** Varre os envios dos últimos N dias e rateia os que levam >1 pedido.
+   *  Roda no cron de envio (:42) — também faz o backfill do histórico. */
+  async reallocateSharedShippingRecent(orgId: string, daysBack = 30): Promise<number> {
+    const fromIso = new Date(Date.now() - daysBack * 86400_000).toISOString()
+    const counts = new Map<string, Set<string>>()
+    const PAGE = 1000 // PostgREST corta em 1000 linhas — paginar
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseAdmin
+        .from('orders')
+        .select('shipping_id, external_order_id')
+        .eq('organization_id', orgId)
+        .eq('platform', 'mercadolivre')
+        .not('shipping_id', 'is', null)
+        .gte('sold_at', fromIso)
+        .order('id')
+        .range(from, from + PAGE - 1)
+      if (error || !data) break
+      for (const r of data as Array<{ shipping_id: string; external_order_id: string }>) {
+        const k = String(r.shipping_id)
+        if (!counts.has(k)) counts.set(k, new Set())
+        counts.get(k)!.add(r.external_order_id)
+      }
+      if (data.length < PAGE) break
+    }
+    const shared = [...counts].filter(([, s]) => s.size > 1).map(([k]) => k)
+    return this.reallocateSharedShipping(orgId, shared)
+  }
+
   /** Enriquece pedidos com shipping_status / logistic_type via /shipments/{id}.
    *  ML não devolve esses campos em /orders/search — só em /shipments/{id}.
    *  Sem isso: tabs "Em Preparação" / "Despachadas" / "Encerradas" /
    *  "Flex" e KPIs "pendentes envio" / "em trânsito" ficam sempre zero.
    *
-   *  Estratégia: pega N pedidos mais recentes com shipping_id mas sem
-   *  shipping_status, agrupa por seller_id (token correto pra cada
-   *  conta), chama /shipments/{id} com pacing 1.5s entre chamadas, faz
-   *  UPDATE individual. Idempotente. */
+   *  Estratégia: pega N pedidos com shipping_id cujo envio ainda NÃO
+   *  terminou (status vazio OU pending/handling/ready_to_ship/shipped),
+   *  os que estão há mais tempo sem atualizar primeiro; agrupa por
+   *  seller_id (token correto pra cada conta), chama /shipments/{id}
+   *  (1x por envio — pacote com N pedidos divide o mesmo shipment) e
+   *  faz UPDATE individual. Idempotente.
+   *
+   *  Antes só pegava `shipping_status IS NULL`: o 1º status gravado
+   *  ('ready_to_ship') nunca mais mudava. Em 02/10/2026 o e-Click
+   *  mostrava 54 pedidos "sem despacho" na Vazzo Essenziali e o painel do
+   *  ML tinha 2 — o KPI "pra despachar" e o boletim de saúde mentiam. */
   async enrichShippingStatuses(
     orgId: string,
     options: { limit?: number; daysBack?: number } = {},
@@ -396,10 +553,10 @@ export class OrdersIngestionService {
       .select('id, seller_id, shipping_id, external_order_id, raw_data')
       .eq('organization_id', orgId)
       .not('shipping_id', 'is', null)
-      .is('shipping_status', null)
+      .or(`shipping_status.is.null,shipping_status.in.(${OPEN_SHIPPING_STATUSES.join(',')})`)
       .gte('sold_at', fromIso)
       .neq('status', 'cancelled')
-      .order('sold_at', { ascending: false })
+      .order('updated_at', { ascending: true, nullsFirst: true })
       .limit(limit)
 
     if (!rows || rows.length === 0) return { checked: 0, updated: 0, skipped: 0 }
@@ -427,13 +584,19 @@ export class OrdersIngestionService {
         continue
       }
 
+      // Pacote = vários pedidos no mesmo shipment → 1 GET por envio
+      const shipCache = new Map<number, Awaited<ReturnType<typeof this.mlClient.fetchShipmentFull>>>()
       for (const r of batch) {
         checked++
         // Usa fetchShipmentFull — pega status + substatus + logistic_type +
         // receiver_address de uma vez. Antes era fetchShipment (3 campos),
         // mas isso deixava endereço de fora e quebrava o mapa "Vendas por
         // Região" do dashboard. Custa o mesmo (1 GET /shipments/{id}).
-        const shipment = await this.mlClient.fetchShipmentFull(token, r.shipping_id)
+        const cached = shipCache.has(r.shipping_id)
+        const shipment = cached
+          ? shipCache.get(r.shipping_id)!
+          : await this.mlClient.fetchShipmentFull(token, r.shipping_id)
+        shipCache.set(r.shipping_id, shipment)
         if (!shipment) { skipped++; continue }
 
         // Mescla os campos novos no raw_data.shipping preservando o resto
@@ -460,6 +623,9 @@ export class OrdersIngestionService {
             shipping_status: shipment.status,
             shipped_at:      (shipment.date_shipped as string | null) ?? null,
             raw_data:        newRawData,
+            // Marca a checagem: a fila ordena por updated_at, então quem
+            // acabou de ser consultado vai pro fim e todos giram.
+            updated_at:      new Date().toISOString(),
           })
           .eq('id', r.id)
 
@@ -471,7 +637,7 @@ export class OrdersIngestionService {
 
         updated++
         // Pacing pra evitar 429 — ML aceita ~5 req/s por token; 200ms = 5 req/s
-        await new Promise(res => setTimeout(res, 200))
+        if (!cached) await new Promise(res => setTimeout(res, 200))
       }
     }
 
@@ -904,6 +1070,11 @@ export class OrdersIngestionService {
             total_amount:  order.total_amount,
             paid_amount:   order.paid_amount ?? null,
             pack_id:       (order as unknown as Record<string, unknown>).pack_id ?? null,
+            // Custo do envio INTEIRO — base do rateio entre pedidos do pacote
+            // (reallocateSharedShipping). shipping_cost acima é provisório.
+            _shipment_costs: order.shipping?.id
+              ? (shipBreakdown ?? { sender_cost: orderShippingCost, receiver_cost: 0, gross_amount: 0, ml_refund: 0 })
+              : null,
             coupon:        (order as unknown as Record<string, unknown>).coupon ?? null,
             context:       (order as unknown as Record<string, unknown>).context ?? null,
             item: {

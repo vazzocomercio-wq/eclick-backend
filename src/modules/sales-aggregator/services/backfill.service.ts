@@ -232,6 +232,10 @@ export class BackfillService implements OnApplicationBootstrap {
         const r = await this.ordersIngestion.enrichShippingStatuses(orgId, { limit: 200, daysBack: 30 })
         totalUpdated += r.updated
         console.log(`[shipping-enrich.cron] org=${orgId.slice(0,8)} ✓ checked=${r.checked} updated=${r.updated} skipped=${r.skipped}`)
+        // Rateio do frete de pacote (só banco, sem chamar ML) — idempotente,
+        // e na 1ª execução corrige o histórico de 30 dias.
+        const fixed = await this.ordersIngestion.reallocateSharedShippingRecent(orgId, 30)
+        if (fixed > 0) console.log(`[shipping-enrich.cron] org=${orgId.slice(0,8)} frete de pacote rateado em ${fixed} linhas`)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`[shipping-enrich.cron] org=${orgId.slice(0,8)} ✗ ${msg}`)
