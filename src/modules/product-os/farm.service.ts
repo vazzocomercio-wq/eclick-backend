@@ -815,9 +815,35 @@ export class FarmService {
 
   async status(orgId: string) {
     const { data: printers } = await supabaseAdmin.from('production_printer')
-      .select('id, name, brand, model, status, serial_number, ai_detection_enabled, ai_sensitivity, auto_dispatch').eq('organization_id', orgId).order('name')
+      .select('id, name, brand, model, status, serial_number, has_ams, farm_slot, ai_detection_enabled, ai_sensitivity, auto_dispatch').eq('organization_id', orgId).order('name')
     const { data: statuses } = await supabaseAdmin.from('printer_status')
       .select('*').eq('organization_id', orgId)
+    // OP em curso por impressora (imprimindo/pausada) → produto, peça, quantidade e estimativas.
+    // É o que o Mapa da farm mostra ao clicar na máquina: a telemetria sabe só o nome do arquivo.
+    const { data: activeOrders } = await supabaseAdmin.from('production_order')
+      .select('id, order_number, printer_id, product_dev_id, part_id, version_id, sku_variant_id, quantity, status, started_at, estimated_time_minutes, estimated_filament_g, due_at')
+      .eq('organization_id', orgId).in('status', ['imprimindo', 'pausado']).not('printer_id', 'is', null)
+      .order('updated_at', { ascending: false })
+    type ActiveOrder = { id: string; order_number: number; printer_id: string; product_dev_id: string; part_id: string | null; version_id: string | null; sku_variant_id: string | null; quantity: number; status: string; started_at: string | null; estimated_time_minutes: number | null; estimated_filament_g: number | null; due_at: string | null }
+    const orderByPid = new Map<string, ActiveOrder>()
+    for (const o of (activeOrders ?? []) as ActiveOrder[]) if (!orderByPid.has(o.printer_id)) orderByPid.set(o.printer_id, o)
+    const uniq = (xs: Array<string | null>) => [...new Set(xs.filter((x): x is string => !!x))]
+    const act = [...orderByPid.values()]
+    const devIds = uniq(act.map(o => o.product_dev_id)), partIds = uniq(act.map(o => o.part_id)), verIds = uniq(act.map(o => o.version_id)), varIds = uniq(act.map(o => o.sku_variant_id))
+    const [devs, parts, vers, vars] = await Promise.all([
+      devIds.length ? supabaseAdmin.from('product_dev').select('id, name, code').in('id', devIds) : Promise.resolve({ data: [] as unknown[] }),
+      partIds.length ? supabaseAdmin.from('product_dev_part').select('id, name, code').in('id', partIds) : Promise.resolve({ data: [] as unknown[] }),
+      verIds.length ? supabaseAdmin.from('product_dev_version').select('id, version_number, material, weight_g, print_time_minutes, thumbnail_url, filaments').in('id', verIds) : Promise.resolve({ data: [] as unknown[] }),
+      varIds.length ? supabaseAdmin.from('product_dev_sku_variant').select('id, sku, cor_id').in('id', varIds) : Promise.resolve({ data: [] as unknown[] }),
+    ])
+    const devById = new Map(((devs.data ?? []) as Array<{ id: string; name: string; code: string | null }>).map(d => [d.id, d]))
+    const partById = new Map(((parts.data ?? []) as Array<{ id: string; name: string; code: string | null }>).map(d => [d.id, d]))
+    const verById = new Map(((vers.data ?? []) as Array<{ id: string; version_number: number; material: string | null; weight_g: number | null; print_time_minutes: number | null; thumbnail_url: string | null; filaments: unknown }>).map(d => [d.id, d]))
+    const varById = new Map(((vars.data ?? []) as Array<{ id: string; sku: string | null; cor_id: string | null }>).map(d => [d.id, d]))
+    // nome da cor da variação (taxonomia do SKU: kind = cor)
+    const corIds = uniq([...varById.values()].map(v => v.cor_id))
+    const { data: cores } = corIds.length ? await supabaseAdmin.from('sku_taxonomy').select('id, label').in('id', corIds) : { data: [] as unknown[] }
+    const corById = new Map(((cores ?? []) as Array<{ id: string; label: string }>).map(c => [c.id, c.label]))
     const byId = new Map((statuses ?? []).map(s => [(s as { printer_id: string }).printer_id, s as Record<string, unknown>]))
     // falhas abertas (não reconhecidas) por impressora
     const { data: openFails } = await supabaseAdmin.from('printer_failure_event')
@@ -825,12 +851,29 @@ export class FarmService {
     const failByPid = new Map((openFails ?? []).map(f => [(f as { printer_id: string }).printer_id, f as Record<string, unknown>]))
 
     return (printers ?? []).map(p => {
-      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null; ai_detection_enabled: boolean | null; ai_sensitivity: string | null; auto_dispatch: boolean | null }
+      const pr = p as { id: string; name: string; brand: string | null; model: string | null; status: string; serial_number: string | null; has_ams: boolean | null; farm_slot: string | null; ai_detection_enabled: boolean | null; ai_sensitivity: string | null; auto_dispatch: boolean | null }
       const st = byId.get(pr.id)
+      const ao = orderByPid.get(pr.id)
+      const dev = ao ? devById.get(ao.product_dev_id) : undefined
+      const part = ao?.part_id ? partById.get(ao.part_id) : undefined
+      const ver = ao?.version_id ? verById.get(ao.version_id) : undefined
+      const vr = ao?.sku_variant_id ? varById.get(ao.sku_variant_id) : undefined
+      const currentOrder = ao ? {
+        id: ao.id, order_number: ao.order_number, status: ao.status, quantity: ao.quantity,
+        product_dev_id: ao.product_dev_id, product_name: dev?.name ?? null, product_code: dev?.code ?? null,
+        part_id: ao.part_id, part_name: part?.name ?? null, part_code: part?.code ?? null,
+        version_id: ao.version_id, version_number: ver?.version_number ?? null, material: ver?.material ?? null,
+        weight_g: ver?.weight_g ?? null, print_time_minutes: ver?.print_time_minutes ?? null, thumbnail_url: ver?.thumbnail_url ?? null,
+        filaments: ver?.filaments ?? null,
+        sku: vr?.sku ?? null, color_name: vr?.cor_id ? corById.get(vr.cor_id) ?? null : null,
+        started_at: ao.started_at, estimated_time_minutes: ao.estimated_time_minutes, estimated_filament_g: ao.estimated_filament_g, due_at: ao.due_at,
+      } : null
       const fresh = st ? this.isFresh(st.updated_at as string) : false
       const fail = failByPid.get(pr.id)
       return {
         id: pr.id, name: pr.name, brand: pr.brand, model: pr.model, config_status: pr.status,
+        has_ams: pr.has_ams === true, farm_slot: pr.farm_slot ?? null,
+        current_order: currentOrder,
         bound: !!pr.serial_number,
         ai_detection_enabled: pr.ai_detection_enabled !== false,
         ai_sensitivity: pr.ai_sensitivity || 'medium',

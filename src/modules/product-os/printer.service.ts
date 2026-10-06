@@ -14,7 +14,19 @@ export interface Printer {
   acquisition_cost: number; acquisition_date: string | null; expected_lifetime_hours: number | null
   status: 'ativa' | 'manutencao' | 'aposentada'; notes: string | null
   serial_number: string | null; lan_ip: string | null; connection_mode: string | null; agent_id: string | null
+  farm_slot: string | null                 // posição física na print farm (ex.: R01-N2-A-03); null = sem posição
   created_at: string; updated_at: string
+}
+
+// Endereço da POSIÇÃO na farm: R{estante 2 díg}-N{nível 1..3}-{lado A|B}-{posição 2 díg}.
+// Mesma gramática do gerador fabrica/layout/enderecos.py (48 posições = 2×3×2×4).
+const FARM_SLOT_RE = /^R\d{2}-N\d-[AB]-\d{2}$/
+function normalizeFarmSlot(v: unknown): string | null {
+  if (v == null) return null
+  const t = String(v).trim().toUpperCase()
+  if (!t) return null
+  if (!FARM_SLOT_RE.test(t)) throw new BadRequestException(`Posição inválida "${t}" — use o formato R01-N2-A-03 (estante, nível, lado, posição)`)
+  return t
 }
 
 export interface PrinterEconomics extends Printer {
@@ -145,18 +157,21 @@ export class PrinterService {
       acquisition_date: dto.acquisition_date ?? null, expected_lifetime_hours: dto.expected_lifetime_hours ?? null,
       status: dto.status ?? 'ativa', notes: dto.notes ?? null,
       serial_number: dto.serial_number ?? null, lan_ip: dto.lan_ip ?? null, connection_mode: dto.connection_mode ?? 'lan',
+      farm_slot: normalizeFarmSlot(dto.farm_slot),
     }).select('*').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao criar impressora: ${error?.message ?? 'sem dados'}`)
     return data as Printer
   }
 
   async update(orgId: string, id: string, patch: Partial<Printer>): Promise<Printer> {
-    const allowed: (keyof Printer)[] = ['name', 'brand', 'model', 'build_volume_mm', 'nozzle_mm', 'has_ams', 'power_watts', 'acquisition_cost', 'acquisition_date', 'expected_lifetime_hours', 'status', 'notes', 'serial_number', 'lan_ip', 'connection_mode']
+    const allowed: (keyof Printer)[] = ['name', 'brand', 'model', 'build_volume_mm', 'nozzle_mm', 'has_ams', 'power_watts', 'acquisition_cost', 'acquisition_date', 'expected_lifetime_hours', 'status', 'notes', 'serial_number', 'lan_ip', 'connection_mode', 'farm_slot']
     const safe: Record<string, unknown> = {}
     for (const k of allowed) if (k in patch) safe[k] = patch[k]
+    if ('farm_slot' in safe) safe.farm_slot = normalizeFarmSlot(safe.farm_slot)
     if (Object.keys(safe).length === 0) throw new BadRequestException('Nada para atualizar')
     const { data, error } = await supabaseAdmin.from('production_printer').update(safe)
       .eq('id', id).eq('organization_id', orgId).select('*').maybeSingle()
+    if (error?.code === '23505' && 'farm_slot' in safe) throw new BadRequestException(`A posição ${safe.farm_slot} já tem outra impressora — libere a posição antes de mover`)
     if (error || !data) throw new BadRequestException(`Erro: ${error?.message ?? 'não encontrado'}`)
     return data as Printer
   }
