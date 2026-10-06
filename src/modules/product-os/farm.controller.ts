@@ -69,6 +69,14 @@ export class FarmController {
   @RequirePermission('products.view')
   status(@ReqUser() u: ReqUserPayload) { return this.farm.status(this.org(u)) }
 
+  /** Operador corrige "de que produto é este arquivo" (vale pra todas as vezes que ele rodar). */
+  @Post('job-product')
+  @RequirePermission('products.update')
+  setJobProduct(@ReqUser() u: ReqUserPayload, @Body() body: { job_name: string; product_dev_id: string | null }) {
+    if (!body?.job_name?.trim()) throw new BadRequestException('job_name obrigatório')
+    return this.farm.setJobProduct(this.org(u), body.job_name, body.product_dev_id ?? null)
+  }
+
   @Post('printers/:pid/command')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')

@@ -444,6 +444,16 @@ export const FEATURE_REGISTRY = {
     primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
     fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
   },
+  // Product OS — Mapa da farm: a telemetria da Bambu só traz o NOME DO ARQUIVO em
+  // impressão; quando a regra de tokens empata, a IA escolhe de qual produto é o job
+  // (pra mostrar a imagem do produto na posição). Resultado fica gravado por arquivo
+  // → 1 chamada por arquivo novo. Decisão curta → Haiku.
+  farm_job_product_match: {
+    label:       'Produto do job em impressão (Mapa da farm)',
+    description: 'Identifica a qual produto pertence o arquivo que a impressora está rodando, a partir do nome do arquivo e da lista de produtos/peças, para mostrar a imagem certa no Mapa da farm',
+    primary:     { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+    fallback:    { provider: 'openai',    model: 'gpt-5-nano' },
+  },
   // Product OS — Lê o DANFE (PDF) da NF de insumo e extrai fornecedor + itens
   // estruturados. PDF nativo via Anthropic (vê a tabela) → Sonnet. Sem fallback
   // OpenAI (precisa de leitura de documento).
