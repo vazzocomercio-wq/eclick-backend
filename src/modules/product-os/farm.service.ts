@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../common/supabase'
 import { ProductionService } from './production.service'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { SliceService, type SliceJobOut } from './slice.service'
+import { FarmJobImageService, type JobProduct } from './farm-job-image.service'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -43,6 +44,7 @@ export class FarmService {
     private readonly production: ProductionService,
     private readonly bridge: ActiveBridgeClient,
     private readonly slice: SliceService,
+    private readonly jobImage: FarmJobImageService,
   ) {}
 
   // ── agentes ───────────────────────────────────────────────────────
@@ -844,6 +846,13 @@ export class FarmService {
     const corIds = uniq([...varById.values()].map(v => v.cor_id))
     const { data: cores } = corIds.length ? await supabaseAdmin.from('sku_taxonomy').select('id, label').in('id', corIds) : { data: [] as unknown[] }
     const corById = new Map(((cores ?? []) as Array<{ id: string; label: string }>).map(c => [c.id, c.label]))
+    // imagem do produto por impressora: OP → produto conhecido; senão casa o nome do arquivo (regra → IA → manual)
+    const printerRows = (printers ?? []) as Array<{ id: string }>
+    const jobsSemOp = printerRows.filter(p => !orderByPid.has(p.id)).map(p => byId.get(p.id)?.job_name as string | null | undefined).filter((x): x is string => !!x)
+    const [jobProducts, opProducts] = await Promise.all([
+      this.jobImage.forJobs(orgId, jobsSemOp).catch(e => { this.logger.warn(`[farm.status] job→produto: ${e instanceof Error ? e.message : e}`); return new Map<string, JobProduct>() }),
+      Promise.all([...new Set([...orderByPid.values()].map(o => o.product_dev_id))].map(async id => [id, await this.jobImage.forDev(orgId, id).catch(() => null)] as const)).then(xs => new Map(xs)),
+    ])
     const byId = new Map((statuses ?? []).map(s => [(s as { printer_id: string }).printer_id, s as Record<string, unknown>]))
     // falhas abertas (não reconhecidas) por impressora
     const { data: openFails } = await supabaseAdmin.from('printer_failure_event')
@@ -868,12 +877,14 @@ export class FarmService {
         sku: vr?.sku ?? null, color_name: vr?.cor_id ? corById.get(vr.cor_id) ?? null : null,
         started_at: ao.started_at, estimated_time_minutes: ao.estimated_time_minutes, estimated_filament_g: ao.estimated_filament_g, due_at: ao.due_at,
       } : null
+      const jobProduct: JobProduct | null = ao ? (opProducts.get(ao.product_dev_id) ?? null) : (st?.job_name ? jobProducts.get(st.job_name as string) ?? null : null)
       const fresh = st ? this.isFresh(st.updated_at as string) : false
       const fail = failByPid.get(pr.id)
       return {
         id: pr.id, name: pr.name, brand: pr.brand, model: pr.model, config_status: pr.status,
         has_ams: pr.has_ams === true, farm_slot: pr.farm_slot ?? null,
         current_order: currentOrder,
+        job_product: jobProduct,   // produto + imagem (foto real > render > referência) do que está rodando
         bound: !!pr.serial_number,
         ai_detection_enabled: pr.ai_detection_enabled !== false,
         ai_sensitivity: pr.ai_sensitivity || 'medium',
@@ -893,6 +904,11 @@ export class FarmService {
         camera_url: st?.camera_at ? `${(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/storage/v1/object/public/product-os/cam/${pr.id}.jpg` : null,
       }
     })
+  }
+
+  async setJobProduct(orgId: string, jobName: string, productDevId: string | null) {
+    try { return await this.jobImage.setManual(orgId, jobName, productDevId) }
+    catch (e) { throw new BadRequestException(e instanceof Error ? e.message : 'Erro ao gravar o produto do job') }
   }
 
   private isFresh(ts: string | null | undefined): boolean {
