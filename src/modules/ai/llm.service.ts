@@ -270,8 +270,12 @@ export class LlmService {
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
     messages.push({ role: 'user', content: userPrompt })
 
-    const body: Record<string, unknown> = { model, max_tokens: maxTokens, messages }
-    if (typeof temperature === 'number') body.temperature = temperature
+    // gpt-5 / o-series (modelos de raciocínio): a API rejeita `max_tokens` (exige
+    // `max_completion_tokens`) e qualquer `temperature` ≠ padrão → HTTP 400. Era por isso que o
+    // fallback gpt-5-nano nunca funcionou (07/10/2026).
+    const reasoning = /^(gpt-5|o[1-9])/i.test(model)
+    const body: Record<string, unknown> = reasoning ? { model, max_completion_tokens: maxTokens, messages } : { model, max_tokens: maxTokens, messages }
+    if (typeof temperature === 'number' && !reasoning) body.temperature = temperature
     if (jsonMode) body.response_format = { type: 'json_object' }
 
     const res = await axios.post<{
