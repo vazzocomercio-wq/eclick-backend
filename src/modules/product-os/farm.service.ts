@@ -133,6 +133,16 @@ export class FarmService {
         // T1-A: vigilância de falha (só se ligada pra esta impressora)
         if (cfgByPid.get(printerId)?.enabled !== false && this.isFailureSignal(p)) failures.push({ printerId, p })
       }
+      // Falha registrada some SOZINHA quando a impressora volta a imprimir (pedido do cliente, 07/10):
+      // o alerta é histórico; máquina imprimindo e sem código de erro vivo não tem o que reconhecer.
+      // Só falhas com mais de 60 s (a que acabou de ser detectada neste ciclo fica).
+      const printingIds = printers.filter(p => p.state === 'printing' && !p.error_code).map(p => idBySerial.get(p.serial)).filter((x): x is string => !!x)
+      if (printingIds.length) {
+        const cutoff = new Date(Date.now() - 60_000).toISOString()
+        await supabaseAdmin.from('printer_failure_event').update({ acknowledged_at: now, false_positive: false })
+          .in('printer_id', printingIds).is('acknowledged_at', null).lt('detected_at', cutoff)
+          .then(({ error }) => { if (error) this.logger.warn(`[farm.auto-ack] ${error.message}`) }, () => {})
+      }
       if (matched > 0) {
         await supabaseAdmin.from('production_printer')
           .update({ agent_id: a.id }).eq('organization_id', a.organization_id).in('serial_number', serials).is('agent_id', null)
