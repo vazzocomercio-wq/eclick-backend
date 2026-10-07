@@ -202,7 +202,7 @@ export class FarmJobImageService {
     const lista = cands.map(d => `${d.id} | ${d.name}${d.code ? ` (${d.code})` : ''}${d.parts.length ? ` | peças: ${d.parts.slice(0, 8).join(', ')}` : ''}`).join('\n')
     const out = await this.llm.generateText({
       // modelos de raciocínio gastam tokens de saída "pensando": 200 estourava e a resposta vinha vazia
-      orgId, feature: 'farm_job_product_match', jsonMode: true, maxTokens: 1500,
+      orgId, feature: 'farm_job_product_match', jsonMode: true, maxTokens: 3000,
       systemPrompt: 'Você identifica a qual produto de uma fábrica de impressão 3D pertence um arquivo que está sendo impresso. O nome do arquivo vem do fatiador e costuma trazer nome da peça, cor e tamanho; uma bandeja pode juntar várias peças (separadas por " + ") — nesse caso escolha o produto principal. Responda SOMENTE JSON: {"product_dev_id": "<id ou null>", "confidence": 0.0-1.0}. Use null quando nenhum produto da lista for claramente o certo.',
       userPrompt: `Arquivo em impressão: "${jobName}"\n\nProdutos (id | nome | peças):\n${lista}`,
     })
