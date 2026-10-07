@@ -185,6 +185,10 @@ export class FarmJobImageService {
     const [best, second] = scored
     if (!best || best.s < 1) return null
     if (second && best.s < second.s + 1) return null   // empate → IA decide
+    // só aceita quando TODOS os tokens do arquivo batem exatamente no produto (bandeja com
+    // peças de produtos diferentes, ou nome parcial, vai pra IA — errar imagem é pior que esperar)
+    const full = jt.every(t => best.d.tokens.has(t))
+    if (!full) return null
     const confidence = Math.min(0.9, 0.6 + 0.1 * best.s)
     return { product_dev_id: best.d.id, name: best.d.name, ...this.image(best.d), source: 'regra', confidence }
   }

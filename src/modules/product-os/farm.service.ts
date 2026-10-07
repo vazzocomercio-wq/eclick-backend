@@ -848,7 +848,8 @@ export class FarmService {
     const corById = new Map(((cores ?? []) as Array<{ id: string; label: string }>).map(c => [c.id, c.label]))
     // imagem do produto por impressora: OP → produto conhecido; senão casa o nome do arquivo (regra → IA → manual)
     const printerRows = (printers ?? []) as Array<{ id: string }>
-    const jobsSemOp = printerRows.filter(p => !orderByPid.has(p.id)).map(p => byId.get(p.id)?.job_name as string | null | undefined).filter((x): x is string => !!x)
+    const jobNameByPid = new Map((statuses ?? []).map(s => [(s as { printer_id: string }).printer_id, (s as { job_name: string | null }).job_name]))   // byId é definido mais abaixo
+    const jobsSemOp = printerRows.filter(p => !orderByPid.has(p.id)).map(p => jobNameByPid.get(p.id)).filter((x): x is string => !!x)
     const [jobProducts, opProducts] = await Promise.all([
       this.jobImage.forJobs(orgId, jobsSemOp).catch(e => { this.logger.warn(`[farm.status] job→produto: ${e instanceof Error ? e.message : e}`); return new Map<string, JobProduct>() }),
       Promise.all([...new Set([...orderByPid.values()].map(o => o.product_dev_id))].map(async id => [id, await this.jobImage.forDev(orgId, id).catch(() => null)] as const)).then(xs => new Map(xs)),
