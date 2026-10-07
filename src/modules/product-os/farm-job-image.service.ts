@@ -201,11 +201,13 @@ export class FarmJobImageService {
     if (!cands.length) cands = devs.slice(0, 150)
     const lista = cands.map(d => `${d.id} | ${d.name}${d.code ? ` (${d.code})` : ''}${d.parts.length ? ` | peças: ${d.parts.slice(0, 8).join(', ')}` : ''}`).join('\n')
     const out = await this.llm.generateText({
-      orgId, feature: 'farm_job_product_match', jsonMode: true, maxTokens: 200, temperature: 0,
+      // modelos de raciocínio gastam tokens de saída "pensando": 200 estourava e a resposta vinha vazia
+      orgId, feature: 'farm_job_product_match', jsonMode: true, maxTokens: 1500,
       systemPrompt: 'Você identifica a qual produto de uma fábrica de impressão 3D pertence um arquivo que está sendo impresso. O nome do arquivo vem do fatiador e costuma trazer nome da peça, cor e tamanho; uma bandeja pode juntar várias peças (separadas por " + ") — nesse caso escolha o produto principal. Responda SOMENTE JSON: {"product_dev_id": "<id ou null>", "confidence": 0.0-1.0}. Use null quando nenhum produto da lista for claramente o certo.',
       userPrompt: `Arquivo em impressão: "${jobName}"\n\nProdutos (id | nome | peças):\n${lista}`,
     })
     const parsed = parseJsonLoose(out.text) as { product_dev_id?: string | null; confidence?: number } | null
+    if (!parsed || typeof parsed !== 'object') throw new Error(`resposta da IA sem JSON (${(out.text || '').slice(0, 80) || 'vazia'})`)   // falha → NÃO grava; tenta de novo na próxima rodada
     const id = parsed?.product_dev_id && cands.some(c => c.id === parsed.product_dev_id) ? parsed.product_dev_id : null
     const d = id ? cands.find(c => c.id === id) : undefined
     const confidence = typeof parsed?.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : (id ? 0.5 : 0)
