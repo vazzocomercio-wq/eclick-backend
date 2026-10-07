@@ -357,7 +357,11 @@ export class LlmService {
     const ax = e as AxiosError
     if (!ax.response) return true                       // timeout / no response → retry
     const status = ax.response.status
-    return status >= 500 && status < 600                // 5xx → retry
+    // 5xx → retry. 4xx do PROVEDOR também cai pro fallback: desde 03/10/2026 a Anthropic devolveu
+    // HTTP 400 em TODAS as chamadas (crédito/chave da conta) e nenhuma feature com fallback OpenAI
+    // chegou a usá-lo — 3 dias de IA parada em silêncio. 4xx de prompt inválido também é melhor
+    // tentar no outro provedor do que falhar; o log de uso guarda o erro do primário de todo jeito.
+    return status >= 400 && status < 600
   }
 
   private errorStatus(e: unknown): string {
