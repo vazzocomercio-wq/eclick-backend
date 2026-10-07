@@ -13,8 +13,10 @@ import { LlmService } from '../ai/llm.service'
  *   3. manual — o operador corrige no detalhe da máquina (vale pra sempre pra aquele arquivo).
  * O resultado fica em farm_job_product_match (por org + nome normalizado).
  *
- * Imagem do produto (pedido do cliente): foto REAL do anúncio quando existir; senão o RENDER
- * da versão; senão a imagem de referência.
+ * Imagem do produto (pedido do cliente, 07/10): o RENDER do produto primeiro — ele não gostou das
+ * fotos ambientadas do anúncio. Render = imagem de referência marcada como "Render"/"cover"/"capa"
+ * (é onde os renders Vazzo são guardados no cadastro); senão miniatura do fatiador da versão;
+ * senão a foto do anúncio; senão qualquer referência.
  */
 
 export type JobProductSource = 'op' | 'regra' | 'ia' | 'manual'
@@ -22,14 +24,14 @@ export interface JobProduct {
   product_dev_id: string | null
   name: string | null
   image_url: string | null
-  image_kind: 'foto' | 'render' | 'referencia' | null
+  image_kind: 'render' | 'fatiador' | 'foto' | 'referencia' | null
   source: JobProductSource | null
   confidence: number | null
 }
 
 interface DevLite {
   id: string; name: string; code: string | null; product_id: string | null
-  photo: string | null; render: string | null; reference: string | null
+  render: string | null; slicer: string | null; photo: string | null; reference: string | null
   parts: string[]; tokens: Set<string>
 }
 interface MatchRow { job_key: string; product_dev_id: string | null; source: JobProductSource; confidence: number | null; updated_at: string }
@@ -85,13 +87,17 @@ export class FarmJobImageService {
     for (const p of (parts ?? []) as Array<{ product_dev_id: string; name: string }>) partsByDev.set(p.product_dev_id, [...(partsByDev.get(p.product_dev_id) ?? []), p.name])
     const renderByDev = new Map<string, string>()
     for (const v of (vers ?? []) as Array<{ product_dev_id: string; thumbnail_url: string }>) if (!renderByDev.has(v.product_dev_id)) renderByDev.set(v.product_dev_id, v.thumbnail_url)
-    const out: DevLite[] = ((devs ?? []) as Array<{ id: string; name: string; code: string | null; product_id: string | null; reference_images: Array<{ url?: string }> | null }>).map(d => {
+    const out: DevLite[] = ((devs ?? []) as Array<{ id: string; name: string; code: string | null; product_id: string | null; reference_images: Array<{ url?: string; notes?: string }> | null }>).map(d => {
       const partNames = partsByDev.get(d.id) ?? []
+      const refs = (d.reference_images ?? []).filter(r => r && r.url)
+      // render Vazzo = referência anotada como render/cover/capa/montado, e que não seja capa de terceiro nem arte do Canva/card
+      const renderRef = refs.find(r => /render|cover|capa|montado|iso|frente/i.test(r.notes ?? '') && !/makerworld|canva|card|thingiverse|cults|printables/i.test(r.notes ?? ''))
       return {
         id: d.id, name: d.name, code: d.code, product_id: d.product_id,
+        render: renderRef?.url ?? null,
+        slicer: renderByDev.get(d.id) ?? null,
         photo: d.product_id ? photoByProduct.get(d.product_id) ?? null : null,
-        render: renderByDev.get(d.id) ?? null,
-        reference: d.reference_images?.[0]?.url ?? null,
+        reference: refs[0]?.url ?? null,
         parts: partNames,
         tokens: new Set([...tokensOf(d.name), ...(d.code ? tokensOf(d.code) : []), ...partNames.flatMap(tokensOf)]),
       }
@@ -102,8 +108,9 @@ export class FarmJobImageService {
 
   private image(d: DevLite | undefined): Pick<JobProduct, 'image_url' | 'image_kind'> {
     if (!d) return { image_url: null, image_kind: null }
-    if (d.photo) return { image_url: d.photo, image_kind: 'foto' }
     if (d.render) return { image_url: d.render, image_kind: 'render' }
+    if (d.slicer) return { image_url: d.slicer, image_kind: 'fatiador' }
+    if (d.photo) return { image_url: d.photo, image_kind: 'foto' }
     if (d.reference) return { image_url: d.reference, image_kind: 'referencia' }
     return { image_url: null, image_kind: null }
   }
