@@ -95,7 +95,8 @@ export class FarmService {
     const serials = printers.map(p => p.serial).filter(Boolean)
     const unmatched: string[] = []
     let matched = 0
-    const finished: string[] = []
+    const finished: string[] = []      // terminou (printing→finished/idle): fecha a OP
+    const freed: string[] = []         // mesa liberada (→idle): pode receber a próxima ordem
     const failures: Array<{ printerId: string; p: TelemetryPrinter }> = []
     const detection_config: Record<string, { enabled: boolean; sensitivity: string }> = {}
     if (printers.length) {
@@ -127,7 +128,10 @@ export class FarmService {
         matched++
         // sincroniza a OP com o estado da impressora (só quando muda)
         if (before !== p.state) {
-          if (before === 'printing' && p.state === 'idle') finished.push(printerId) // terminou → auto-fecha
+          // 'finished' = a Bambu terminou e a peça ainda está na mesa (até confirmar na tela dela);
+          // 'idle' = mesa liberada. Fecha a OP ao terminar; só despacha a próxima quando liberar.
+          if (before === 'printing' && (p.state === 'finished' || p.state === 'idle')) { finished.push(printerId); if (p.state === 'idle') freed.push(printerId) }
+          else if (before === 'finished' && p.state === 'idle') freed.push(printerId)
           else await this.syncOrderState(a.organization_id, printerId, p.state ?? '').catch(() => {})
         }
         // T1-A: vigilância de falha (só se ligada pra esta impressora)
@@ -151,7 +155,7 @@ export class FarmService {
     for (const pid of finished) await this.autoCloseFinished(a.organization_id, pid).catch(e => this.logger.warn(`[farm.autoclose] ${(e as Error).message}`))
     for (const f of failures) await this.handleFailure(a.organization_id, f.printerId, f.p).catch(e => this.logger.warn(`[farm.failure] ${(e as Error).message}`))
     // lights-out: impressora que terminou → inicia sozinha a próxima ordem (se auto_dispatch ligado)
-    for (const pid of finished) await this.autoDispatch(a.organization_id, { printerId: pid }).catch(e => this.logger.warn(`[farm.autodispatch] ${(e as Error).message}`))
+    for (const pid of freed) await this.autoDispatch(a.organization_id, { printerId: pid }).catch(e => this.logger.warn(`[farm.autodispatch] ${(e as Error).message}`))
 
     // entrega comandos pendentes das impressoras desse agente
     const commands = await this.pullCommands(a.id, a.organization_id)
@@ -277,6 +281,7 @@ export class FarmService {
     const st = ps as { state: string | null; online: boolean | null; updated_at: string | null; progress_pct: number | null } | null
     const liveState = !st ? 'sem_dados' : !this.isFresh(st.updated_at) ? 'offline' : (st.state ?? 'idle')
     if (liveState !== 'idle') {
+      if (liveState === 'finished') throw new BadRequestException('A impressora terminou o trabalho anterior e a peça ainda está na mesa — retire a peça e confirme na tela da impressora antes de enviar outra ordem.')
       if (liveState === 'printing') throw new BadRequestException(`A impressora já está imprimindo${st?.progress_pct != null ? ` (${Math.round(Number(st.progress_pct))}%)` : ''} — só dá pra enviar pra uma impressora OCIOSA. Espere terminar ou escolha outra máquina.`)
       if (liveState === 'paused') throw new BadRequestException('A impressora está com uma impressão PAUSADA — retome ou pare esse job antes de enviar outro.')
       if (liveState === 'error') throw new BadRequestException('A impressora está em ERRO — limpe o erro na tela dela (Cancelar/OK) antes de enviar um novo job.')
