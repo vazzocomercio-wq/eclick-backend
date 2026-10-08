@@ -25,7 +25,7 @@ const acks = []         // [{ id, ok, result }] pendentes de envio
 const detectionCfg = {}     // serial -> { enabled, sensitivity } (vem do backend)
 const detectionApplied = {} // serial -> assinatura já aplicada (evita reenviar)
 
-const STATE_MAP = { RUNNING: 'printing', PAUSE: 'paused', FAILED: 'error', FINISH: 'idle', IDLE: 'idle', PREPARE: 'printing', SLICING: 'printing' }
+const STATE_MAP = { RUNNING: 'printing', PAUSE: 'paused', FAILED: 'error', FINISH: 'finished', IDLE: 'idle', PREPARE: 'printing', SLICING: 'printing' }
 
 function connectPrinter(p) {
   const client = mqtt.connect(`mqtts://${p.ip}:8883`, {
