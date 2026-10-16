@@ -338,6 +338,9 @@ export class ShopeeCreativePublisherService {
       dimension,
       normal_stock: 0, // estoque entra depois via update_stock (Fase C, real+virtual)
       brand: { brand_id: 0, original_brand_name: brandName },
+      // add_item recusa sem condição em várias categorias ("condition is
+      // required" — ex.: 101220 Armazenamento de Alimentos, 16/10/2026).
+      condition: 'NEW',
       item_status: 'NORMAL',
       seller_stock: [{ stock: 0 }],
     }
