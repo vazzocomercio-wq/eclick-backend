@@ -75,6 +75,11 @@ export interface MetaProductData {
   gtin?:                 string
   custom_label_0?:       string
   custom_label_1?:       string
+  /** Preço promocional ("39.90 BRL") e a janela dele ("inicio/fim" ISO).
+   *  String vazia APAGA a promocao no item (verificado lendo de volta em
+   *  02/11/2026); omitir deixaria a promo antiga no ar ate o fim da janela. */
+  sale_price?:                string
+  sale_price_effective_date?: string
   /** Tira ou devolve o item da loja do Instagram/WhatsApp.
    *
    *  'active'   -> aparece (o campo `visibility` passa a ler 'published')

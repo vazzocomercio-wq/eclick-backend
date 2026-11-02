@@ -31,6 +31,9 @@ interface ProductForSync {
   brand:                 string | null
   category:              string | null
   price:                 number | null
+  sale_price:            number | null
+  sale_start_at:         string | null
+  sale_end_at:           string | null
   stock:                 number | null
   description:           string | null
   ai_short_description:  string | null
@@ -510,10 +513,12 @@ export class SocialCommerceService {
     await this.upsertProductMapping(ch, productId, orgId, { sync_status: 'syncing' })
 
     try {
+      // CREATE se o item ainda nao existe — ver comentario no syncAll.
+      const existe = await this.meta.catalogHasRetailerId(ch.access_token!, ch.external_catalog_id!, retailerId)
       const result = await this.meta.batchUpdateProducts(
         ch.access_token!,
         ch.external_catalog_id!,
-        [{ method: 'UPDATE', retailer_id: retailerId, data: metaData }],
+        [{ method: existe ? 'UPDATE' : 'CREATE', retailer_id: retailerId, data: metaData }],
       )
 
       if (result.errors && result.errors.length > 0) {
@@ -567,6 +572,7 @@ export class SocialCommerceService {
       .from('products')
       .select(`
         id, organization_id, name, brand, category, price, stock,
+        sale_price, sale_start_at, sale_end_at,
         description, ai_short_description, photo_urls,
         channel_titles, channel_descriptions, gtin, condition,
         ml_permalink, sku, storefront_visible
@@ -581,8 +587,15 @@ export class SocialCommerceService {
       return { synced: 0, failed: 0, skipped: 0, unpublished: await this.unpublishOrphans(orgId, ch) }
     }
 
-    // 2) Constrói requests + pula inválidos
-    type R = { method: 'UPDATE'; retailer_id: string; data: MetaProductData; product_id: string }
+    // 2) Constrói requests + pula inválidos. Item que ainda nao existe no
+    // catalogo vai como CREATE: `UPDATE` de retailer_id desconhecido responde
+    // sem erro e nao cria nada (5 produtos novos ficaram de fora em 02/11/2026).
+    const noCatalogo = new Set(
+      (await this.meta.listCatalogProducts(ch.access_token!, ch.external_catalog_id!, 100_000))
+        .map(i => i.retailer_id)
+        .filter((r): r is string => Boolean(r)),
+    )
+    type R = { method: 'CREATE' | 'UPDATE'; retailer_id: string; data: MetaProductData; product_id: string }
     const requests: R[] = []
     let skipped = 0
     for (const p of products as ProductForSync[]) {
@@ -592,7 +605,8 @@ export class SocialCommerceService {
       }
       const metaData = this.mapToMetaFormat(p, ch, storeSlug)
       const retailerId = p.sku || p.id
-      requests.push({ method: 'UPDATE', retailer_id: retailerId, data: metaData, product_id: p.id })
+      const method = noCatalogo.has(retailerId) ? 'UPDATE' : 'CREATE'
+      requests.push({ method, retailer_id: retailerId, data: metaData, product_id: p.id })
     }
     if (!requests.length) {
       return { synced: 0, failed: 0, skipped, unpublished: await this.unpublishOrphans(orgId, ch) }
@@ -961,6 +975,7 @@ export class SocialCommerceService {
       .from('products')
       .select(`
         id, organization_id, name, brand, category, price, stock,
+        sale_price, sale_start_at, sale_end_at,
         description, ai_short_description, photo_urls,
         channel_titles, channel_descriptions, gtin, condition,
         ml_permalink, sku, storefront_visible
@@ -1074,6 +1089,24 @@ export class SocialCommerceService {
     }
     if (p.gtin)     out.gtin = p.gtin
     if (p.category) out.custom_label_0 = p.category
+
+    // Promocao da loja (espelho da campanha do ML) vai como sale_price com a
+    // mesma janela — a Meta mostra o preco riscado e volta sozinha ao cheio
+    // no fim. Sem promo vigente manda VAZIO: omitir manteria a promo antiga.
+    const salePrice = Number(p.sale_price ?? 0)
+    const nowMs = Date.now()
+    const vigente = salePrice > 0 && salePrice < priceNum
+      && (!p.sale_start_at || Date.parse(p.sale_start_at) <= nowMs)
+      && (!p.sale_end_at   || Date.parse(p.sale_end_at)   >  nowMs)
+    if (vigente) {
+      out.sale_price = `${salePrice.toFixed(2)} BRL`
+      out.sale_price_effective_date = p.sale_end_at
+        ? `${p.sale_start_at ?? new Date(nowMs).toISOString()}/${p.sale_end_at}`
+        : ''
+    } else {
+      out.sale_price = ''
+      out.sale_price_effective_date = ''
+    }
     return out
   }
 
