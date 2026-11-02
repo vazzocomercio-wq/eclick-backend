@@ -458,6 +458,17 @@ export class MetaCatalogService {
     return out.slice(0, max)
   }
 
+  /** O catalogo ja tem um item com este retailer_id (SKU)? Uma chamada
+   *  filtrada, pra decidir CREATE x UPDATE sem listar o catalogo inteiro. */
+  async catalogHasRetailerId(accessToken: string, catalogId: string, retailerId: string): Promise<boolean> {
+    const filter = encodeURIComponent(JSON.stringify({ retailer_id: { eq: retailerId } }))
+    const url = `${GRAPH_API_BASE}/${catalogId}/products?fields=id&limit=1&filter=${filter}&access_token=${accessToken}`
+    const res = await fetch(url)
+    const body = await res.json() as { data?: Array<{ id: string }>; error?: { message?: string } }
+    if (!res.ok) throw new BadRequestException(`Meta catalogHasRetailerId: ${body.error?.message ?? 'erro'}`)
+    return (body.data ?? []).length > 0
+  }
+
   /** Lê os product tags ja aplicados num media. Precisa instagram_shopping_tag_products. */
   async getMediaProductTags(accessToken: string, mediaId: string): Promise<Array<{
     product_id: string; merchant_id?: string; x?: number; y?: number; name?: string
