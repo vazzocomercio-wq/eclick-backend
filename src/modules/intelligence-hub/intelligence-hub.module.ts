@@ -25,6 +25,7 @@ import { AlertEngineService } from './alert-engine.service'
 import { WhatsAppDeliveryService } from './delivery/whatsapp-delivery.service'
 import { DigestService } from './delivery/digest.service'
 import { AlertResponseService } from './delivery/alert-response.service'
+import { IaSaudeWatchService } from './ia-saude/ia-saude-watch.service'
 
 /**
  * Intelligence Hub — Sprint IH-1.
@@ -63,6 +64,7 @@ import { AlertResponseService } from './delivery/alert-response.service'
     ComprasAnalyzer,
     MargemAnalyzer,
     AdsAnalyzer,
+    IaSaudeWatchService,
   ],
   exports:     [
     AlertManagersService,

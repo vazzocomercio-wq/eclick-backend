@@ -27,7 +27,7 @@ export class CredentialsService {
 
   /** Org matriz (e-Click / Vazzo) — dona das chaves de IA da plataforma.
    *  Orgs em modo 'platform' sem chave própria caem nas chaves desta org. */
-  private static readonly PLATFORM_ORG_ID = '4ef1aabd-c209-40b0-b034-ef69dcb66833'
+  static readonly PLATFORM_ORG_ID = '4ef1aabd-c209-40b0-b034-ef69dcb66833'
 
   private get encryptionKey(): Buffer {
     const key = process.env.ENCRYPTION_KEY
