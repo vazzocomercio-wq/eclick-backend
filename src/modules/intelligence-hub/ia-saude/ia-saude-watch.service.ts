@@ -105,7 +105,7 @@ export class IaSaudeWatchService {
         severity:      'info',
         score:         85,
         entity_type:   null,
-        entity_id:     'ia',
+        entity_id:     null,                 // alert_signals.entity_id é uuid
         entity_name:   'IA do e-Click',
         data:          { chamadas_30min: total, erros_30min: erros.length },
         summary_pt:    `IA do e-Click voltou a funcionar: ${total - erros.length} de ${total} chamadas OK nos últimos 30 min.`,
@@ -143,7 +143,7 @@ export class IaSaudeWatchService {
       severity:      'critical',
       score:         95,
       entity_type:   null,
-      entity_id:     'ia',
+      entity_id:     null,                   // alert_signals.entity_id é uuid
       entity_name:   'IA do e-Click',
       data: {
         chamadas_30min:  rows.length,
