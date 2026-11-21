@@ -113,6 +113,7 @@ export class AnalyzersSchedulerService {
       ads:          this.ads,
       cross_intel:  undefined,
       atendente_ia: undefined,        // AI-5: bridge inline em AiResponderService
+      ia_saude:     undefined,        // IaSaudeWatchService tem cron próprio
       ml:           undefined,        // ML vertical (MVP 2 do Pós-venda) usa
                                        // services próprios (MlClaimsService,
                                        // MlReputationService, etc.) com cron

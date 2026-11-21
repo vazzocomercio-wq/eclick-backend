@@ -86,6 +86,7 @@ export class LlmService {
     let lastConfig:    { provider: Provider; model: string } = config.primary
     let fallbackUsed = false
     let errorMessage:  string | null = null
+    let primaryError:  string        = ''
     let toThrow:       unknown        = null
 
     try {
@@ -110,6 +111,7 @@ export class LlmService {
           toThrow = e
           throw e
         }
+        primaryError = `${config.primary.provider}/${config.primary.model}: ${this.errorStatus(e)}`
         this.logger.warn(`[llm] primary ${config.primary.provider}/${config.primary.model} falhou (${this.errorStatus(e)}) — tentando fallback`)
       }
 
@@ -130,7 +132,9 @@ export class LlmService {
         out = this.finalize(config.fallback!, result, t0, true)
         return out
       } catch (e) {
-        errorMessage = `${config.fallback!.provider}/${config.fallback!.model} (fallback): ${this.errorStatus(e)}`
+        // Guarda os DOIS erros: só o do fallback escondia que o primário também
+        // caiu (21/11/2026: Anthropic e OpenAI em 401, log mostrava só OpenAI).
+        errorMessage = `${primaryError} → ${config.fallback!.provider}/${config.fallback!.model} (fallback): ${this.errorStatus(e)}`
         toThrow = e
         throw e
       }
