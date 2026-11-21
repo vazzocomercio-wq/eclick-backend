@@ -19,6 +19,10 @@ import type { AlertSignal, AlertSeverity } from '../analyzers/analyzers.types'
  * O formato com asteriscos é o markdown nativo do WhatsApp.
  */
 
+/** Categorias só informativas: nada a responder, então sem o rodapé 1/2/3.
+ *  ia_fora_do_ar pede ação, mas no console do provedor, não por resposta. */
+const SEM_RESPOSTA = new Set(['aviso_operador', 'ia_fora_do_ar', 'ia_normalizada'])
+
 const SEVERITY_PREFIX: Record<AlertSeverity, string> = {
   critical: '🚨',
   warning:  '⚠️',
@@ -38,10 +42,12 @@ export function formatSignalMessage(signal: AlertSignal, managerName?: string): 
   const categoryLabel = humanizeCategory(signal.category)
 
   const lines: string[] = []
-  lines.push(`${severityIcon} *${categoryLabel}*`)
+  // Aviso de operador (Ads semanal etc.): o título do aviso É o cabeçalho.
+  const avisoOperador = signal.category === 'aviso_operador' && !!signal.entity_name
+  lines.push(`${severityIcon} *${avisoOperador ? signal.entity_name : categoryLabel}*`)
   lines.push('')
 
-  if (signal.entity_name) {
+  if (signal.entity_name && !avisoOperador) {
     const entityIcon = (signal.entity_type && ENTITY_PREFIX[signal.entity_type]) ?? '•'
     lines.push(`${entityIcon} *${signal.entity_name}*`)
   }
@@ -53,11 +59,20 @@ export function formatSignalMessage(signal: AlertSignal, managerName?: string): 
     lines.push(`💡 ${signal.suggestion_pt}`)
   }
 
-  lines.push('')
-  lines.push('_Responda:_')
-  lines.push('*1* — Aprovar')
-  lines.push('*2* — Ver detalhes')
-  lines.push('*3* — Ignorar')
+  // Rodapé de resposta só quando há ação a responder (regra do dono 21/11/2026).
+  // data.resposta: 'nenhuma' = sem rodapé · texto = rodapé próprio · ausente = padrão
+  // (exceto categorias só informativas, que saem sem rodapé).
+  const resposta = (signal.data as { resposta?: unknown } | null)?.resposta
+  if (typeof resposta === 'string' && resposta !== 'nenhuma') {
+    lines.push('')
+    lines.push(resposta)
+  } else if (resposta === undefined && !SEM_RESPOSTA.has(signal.category)) {
+    lines.push('')
+    lines.push('_Responda:_')
+    lines.push('*1* — Aprovar')
+    lines.push('*2* — Ver detalhes')
+    lines.push('*3* — Ignorar')
+  }
 
   // Header pessoal opcional na primeira interação do dia (TODO IH-4)
   void managerName
@@ -75,6 +90,8 @@ function humanizeCategory(cat: string): string {
     estoque_baixo:    'ESTOQUE BAIXO',
     estoque_alto:     'ESTOQUE PARADO',
     sem_movimento:    'SEM MOVIMENTO',
+    ia_fora_do_ar:    'IA DO E-CLICK FORA DO AR',
+    ia_normalizada:   'IA DO E-CLICK VOLTOU',
   }
   if (known[cat]) return known[cat]
   return cat.replace(/_/g, ' ').toUpperCase()
