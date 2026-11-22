@@ -141,6 +141,18 @@ export class WhatsAppDeliveryService {
     if (upErr) this.logger.error(`[dispatch] delivery=${id} update sent falhou: ${upErr.message}`)
     else       this.logger.log(`[dispatch] delivery=${id} signal=${signal_id} → manager=${manager_id} sent (${result.channel})`)
 
+    // Fotos do alerta (ex.: câmera da impressora no momento da falha + imagem do produto).
+    // signal.data.imagens = [{ url, legenda? }]. Best-effort: o texto já foi; foto que falha só loga.
+    const imagens = (signal.data as { imagens?: Array<{ url?: unknown; legenda?: unknown }> } | null)?.imagens
+    if (Array.isArray(imagens)) {
+      for (const img of imagens.slice(0, 4)) {
+        if (typeof img?.url !== 'string' || !img.url.startsWith('http')) continue
+        const r = await this.sender.sendImage(row.organization_id, 'internal_alert', manager.phone, img.url,
+          typeof img.legenda === 'string' ? img.legenda : undefined)
+        if (!r.success) this.logger.warn(`[dispatch] delivery=${id} imagem falhou: ${r.error}`)
+      }
+    }
+
     this.events.emitToOrg(row.organization_id, 'alert:sent', {
       delivery_id: id,
       signal_id,

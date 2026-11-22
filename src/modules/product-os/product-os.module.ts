@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { IntelligenceHubModule } from '../intelligence-hub/intelligence-hub.module'
 import { ProductOsController } from './product-os.controller'
 import { ProductOsService } from './product-os.service'
 import { ProductOsActiveService } from './product-os-active.service'
@@ -29,7 +30,7 @@ import { StockModule } from '../stock/stock.module'
  *  versões → produção → custo → anúncio). Reusa Ai/Products/Stock e o
  *  active-bridge p/ despacho operacional. */
 @Module({
-  imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule],
+  imports:     [AiModule, ActiveBridgeModule, ProductsModule, StockModule, IntelligenceHubModule],
   controllers: [ProductOsController, FarmController, FarmIngestController],
   providers:   [ProductOsService, ProductOsActiveService, ProductionService, ProductionInputService, ProductPartService, PrinterService, ProductOsCronService, MakeToOrderService, SkuService, PaletteService, FarmService, FarmJobImageService, SliceService, MakerworldService, ThingiverseService, CultsService, ModelSourceRegistry, MakerworldRadarService, NfeImportService],
   exports:     [ProductOsService],

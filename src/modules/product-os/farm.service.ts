@@ -5,6 +5,8 @@ import { ProductionService } from './production.service'
 import { ActiveBridgeClient } from '../active-bridge/active-bridge.client'
 import { SliceService, type SliceJobOut } from './slice.service'
 import { FarmJobImageService, type JobProduct } from './farm-job-image.service'
+import { AlertSignalsService } from '../intelligence-hub/alert-signals.service'
+import { AlertEngineService } from '../intelligence-hub/alert-engine.service'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -35,6 +37,7 @@ export interface TelemetryPrinter {
 export interface FarmCommandOut { id: string; serial: string; command_type: string; payload: Record<string, unknown> }
 
 const STALE_MS = 90_000  // sem telemetria há 90s → considera offline/stale
+const PAUSA_PROGRAMADA = '50364435'  // HMS 0300-8013: pausa pelo G-code (troca de cor) ou pelo usuário
 
 @Injectable()
 export class FarmService {
@@ -45,6 +48,8 @@ export class FarmService {
     private readonly bridge: ActiveBridgeClient,
     private readonly slice: SliceService,
     private readonly jobImage: FarmJobImageService,
+    private readonly signals: AlertSignalsService,
+    private readonly engine: AlertEngineService,
   ) {}
 
   // ── agentes ───────────────────────────────────────────────────────
@@ -170,6 +175,9 @@ export class FarmService {
   private isFailureSignal(p: TelemetryPrinter): boolean {
     if (p.detection?.failure === true) return true
     if (p.state === 'error' || p.state === 'failed') return true
+    // 0300-8013 (50364435) = pausa pelo G-code/usuário — é a troca de cor PROGRAMADA da rota PAUSA,
+    // não falha. Em 22/11/2026 eram 19 de 19 eventos com esse código, todos em job "…pausa…".
+    if (p.state === 'paused' && String(p.error_code) === PAUSA_PROGRAMADA) return false
     if (p.state === 'paused' && !!p.error_code) return true   // pausa com erro = halt automático, não pausa do usuário
     return false
   }
@@ -198,11 +206,11 @@ export class FarmService {
       await this.enqueueCommand(orgId, printerId, 'pause', {}, null).then(() => { autoPaused = true }).catch(() => {})
     }
 
-    const { error: insErr } = await supabaseAdmin.from('printer_failure_event').insert({
+    const { data: ev, error: insErr } = await supabaseAdmin.from('printer_failure_event').insert({
       organization_id: orgId, printer_id: printerId, production_order_id: o?.id ?? null,
       job_name: jobName, source: 'bambu_native', reason, error_code: p.error_code ?? null, state: p.state ?? null,
       camera_url: cameraUrl, auto_paused: autoPaused,
-    })
+    }).select('id').single()
     if (insErr) { this.logger.warn(`[farm.failure] insert: ${insErr.message}`); return }  // corrida → outro ciclo já gravou
 
     if (o) await supabaseAdmin.from('product_dev_event').insert({
@@ -218,7 +226,77 @@ export class FarmService {
       `${autoPaused ? 'A produção foi *pausada automaticamente*.' : 'A impressora *parou*.'}\n\n` +
       `Confira a câmera ao vivo e *retome* ou *cancele* no painel da Fábrica.`
     await this.bridge.notifyLojista({ organization_id: orgId, message: msg, severity: 'high', deeplink: 'producao/product-os' }).catch(() => {})
+    // WhatsApp do gestor pelo Hub, COM FOTOS: câmera (luz acesa) no momento da falha + imagem da peça.
+    // Em segundo plano: acender a luz e esperar o próximo quadro leva até ~2 min e não pode
+    // segurar o ciclo de telemetria da farm.
+    void this.alertarComFotos(orgId, printerId, pname, jobName, reason, autoPaused, p.progress_pct ?? null,
+      (ev as { id: string } | null)?.id ?? null, o?.product_dev_id ?? null, p.light_on === true)
+      .catch(e => this.logger.warn(`[farm.failure] alerta com fotos: ${(e as Error).message}`))
     this.logger.warn(`[farm] FALHA detectada na impressora ${printerId.slice(0, 8)} (${reason}) — alerta enviado`)
+  }
+
+  /** Acende a luz da câmara (se estava apagada), espera um quadro NOVO da câmera e o copia
+   *  para falhas/<evento>.jpg — o cam/<id>.jpg é sobrescrito a cada ~30 s. Depois devolve a
+   *  luz como estava. Farm escura = foto preta (22/11/2026, 7h50: inútil sem a luz). */
+  private async congelarCamera(orgId: string, printerId: string, eventId: string | null, luzAcesa: boolean): Promise<string | null> {
+    const base = (process.env.SUPABASE_URL || '').replace(/\/+$/, '')
+    if (!base) return null
+    if (!eventId) return this.camUrl(printerId)
+    if (!luzAcesa) {
+      const t0 = Date.now()
+      const acendeu = await this.enqueueCommand(orgId, printerId, 'light_on', {}, null).then(() => true, () => false)
+      if (acendeu) {
+        for (let i = 0; i < 18; i++) {                       // até ~3 min
+          await new Promise(r => setTimeout(r, 10_000))
+          const { data } = await supabaseAdmin.from('printer_status').select('camera_at').eq('printer_id', printerId).maybeSingle()
+          const at = (data as { camera_at: string | null } | null)?.camera_at
+          if (at && new Date(at).getTime() > t0 + 8_000) break  // quadro tirado já com a luz acesa
+        }
+      }
+    }
+    const url = await this.copiarQuadro(base, printerId, eventId)
+    if (!luzAcesa) await this.enqueueCommand(orgId, printerId, 'light_off', {}, null).catch(() => {})
+    return url
+  }
+
+  private async copiarQuadro(base: string, printerId: string, eventId: string): Promise<string | null> {
+    const destino = `falhas/${eventId}.jpg`
+    const { error } = await supabaseAdmin.storage.from('product-os').copy(`cam/${printerId}.jpg`, destino)
+    if (error) { this.logger.warn(`[farm.failure] congelar câmera: ${error.message}`); return null }
+    return `${base}/storage/v1/object/public/product-os/${destino}`
+  }
+
+  private async alertarComFotos(
+    orgId: string, printerId: string, pname: string, jobName: string | null, reason: string,
+    autoPaused: boolean, progress: number | null, eventId: string | null, productDevId: string | null,
+    luzAcesa: boolean,
+  ): Promise<void> {
+    const cam = await this.congelarCamera(orgId, printerId, eventId, luzAcesa)
+    let produto: JobProduct | null = null
+    try {
+      produto = productDevId ? await this.jobImage.forDev(orgId, productDevId)
+        : jobName ? (await this.jobImage.forJobs(orgId, [jobName])).get(jobName) ?? null : null
+    } catch { produto = null }
+
+    const imagens: Array<{ url: string; legenda: string }> = []
+    if (cam) imagens.push({ url: cam, legenda: `📷 ${pname} — câmera no momento da falha` })
+    if (produto?.image_url) imagens.push({ url: produto.image_url, legenda: `🧩 Peça em impressão: ${produto.name ?? jobName ?? 'produto'}` })
+
+    const job = jobName ? `*${jobName}*${progress != null ? ` (${progress}%)` : ''}` : 'a impressão'
+    const [sig] = await this.signals.insertMany(orgId, [{
+      analyzer:      'farm',
+      category:      'falha_impressao',
+      severity:      'critical',
+      score:         95,
+      entity_type:   null,
+      entity_id:     null,
+      entity_name:   pname,
+      data:          { printer_id: printerId, job_name: jobName, reason, event_id: eventId,
+                       product_dev_id: produto?.product_dev_id ?? null, imagens, resposta: 'nenhuma' },
+      summary_pt:    `Parou em ${job} — ${reason}. ${autoPaused ? 'Pausada automaticamente.' : 'A impressora parou.'}`,
+      suggestion_pt: 'Veja as fotos abaixo. Retome ou cancele no painel da Fábrica: eclick.app.br/dashboard/producao/product-os',
+    }])
+    if (sig) await this.engine.processMany(orgId, [sig])
   }
 
   private camUrl(printerId: string): string | null {
