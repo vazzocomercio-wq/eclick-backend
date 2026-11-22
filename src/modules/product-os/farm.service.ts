@@ -7,6 +7,7 @@ import { SliceService, type SliceJobOut } from './slice.service'
 import { FarmJobImageService, type JobProduct } from './farm-job-image.service'
 import { AlertSignalsService } from '../intelligence-hub/alert-signals.service'
 import { AlertEngineService } from '../intelligence-hub/alert-engine.service'
+import { FARM_LEGACY_COMMANDS, agentAtLeast } from './farm-commands'
 
 /**
  * Product OS — Fase A: monitoramento da farm.
@@ -334,11 +335,26 @@ export class FarmService {
     if (!pr) throw new BadRequestException('Impressora não encontrada')
     const p = pr as { serial_number: string | null; agent_id: string | null }
     if (!p.serial_number || !p.agent_id) throw new BadRequestException('Impressora não está conectada ao agente. Cadastre o nº de série e deixe o agente rodando.')
+    // comandos novos (velocidade, temperatura, eixos, AMS…) exigem o agente ≥ 1.5.0 —
+    // o antigo responderia "comando desconhecido"; avisar ANTES, com a instrução certa
+    if (!FARM_LEGACY_COMMANDS.includes(type)) {
+      const { data: ag } = await supabaseAdmin.from('farm_agent').select('version').eq('id', p.agent_id).maybeSingle()
+      const v = (ag as { version: string | null } | null)?.version ?? null
+      if (!agentAtLeast(v, '1.5.0')) throw new BadRequestException(`O agente da fábrica está na versão ${v ?? 'desconhecida'} e não conhece este comando. Atualize o agent.mjs (≥ 1.5.0) no PC da farm e reinicie o agente.`)
+    }
     const { data, error } = await supabaseAdmin.from('farm_command')
       .insert({ organization_id: orgId, printer_id: printerId, command_type: type, payload: payload ?? {}, created_by: userId })
       .select('id').maybeSingle()
     if (error || !data) throw new BadRequestException(`Erro ao enfileirar: ${error?.message ?? 'sem dados'}`)
     return { ok: true, command_id: (data as { id: string }).id }
+  }
+
+  /** Estado/resultado de um comando — a tela consulta pra mostrar "feito" ou o erro do agente. */
+  async commandStatus(orgId: string, commandId: string) {
+    const { data } = await supabaseAdmin.from('farm_command')
+      .select('id, command_type, status, result, created_at, sent_at, done_at').eq('id', commandId).eq('organization_id', orgId).maybeSingle()
+    if (!data) throw new BadRequestException('Comando não encontrado')
+    return data
   }
 
   /** Despacha o arquivo de uma ordem de produção pra impressora dela. */
@@ -993,6 +1009,8 @@ export class FarmService {
         remaining_minutes: st?.remaining_minutes ?? null,
         ams: st?.ams ?? null, error_code: st?.error_code ?? null, error_text: st?.error_text ?? null,
         light_on: (st?.light_on as boolean | null) ?? null,
+        // velocidade, alvos de temperatura, ventoinhas e comandos suportados (agente ≥ 1.5.0 manda em raw.controls)
+        controls: ((st?.raw as { controls?: Record<string, unknown> } | null)?.controls) ?? null,
         last_update: st?.updated_at ?? null,
         camera_at: (st?.camera_at as string) ?? null,
         camera_url: st?.camera_at ? `${(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/storage/v1/object/public/product-os/cam/${pr.id}.jpg` : null,

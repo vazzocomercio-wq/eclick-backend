@@ -3,6 +3,7 @@ import {
   UseGuards, BadRequestException, HttpCode, HttpStatus,
 } from '@nestjs/common'
 import { FarmService, type TelemetryPrinter } from './farm.service'
+import { validateFarmCommand } from './farm-commands'
 import { SliceService } from './slice.service'
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard'
 import { ReqUser } from '../../common/decorators/user.decorator'
@@ -81,9 +82,14 @@ export class FarmController {
   @HttpCode(HttpStatus.OK)
   @RequirePermission('products.update')
   command(@ReqUser() u: ReqUserPayload, @Param('pid') pid: string, @Body() body: { type: string; payload?: Record<string, unknown> }) {
-    if (!['pause', 'resume', 'stop', 'light_on', 'light_off'].includes(body?.type)) throw new BadRequestException('Comando inválido')
-    return this.farm.enqueueCommand(this.org(u), pid, body.type, body.payload ?? {}, u.id)
+    const payload = validateFarmCommand(body?.type, body?.payload ?? {})
+    return this.farm.enqueueCommand(this.org(u), pid, body.type, payload, u.id)
   }
+
+  /** Resultado de um comando (o agente executa em ~5s): pending → sent → done/failed. */
+  @Get('commands/:cid')
+  @RequirePermission('products.view')
+  commandStatus(@ReqUser() u: ReqUserPayload, @Param('cid') cid: string) { return this.farm.commandStatus(this.org(u), cid) }
 
   @Post('orders/:oid/send')
   @HttpCode(HttpStatus.OK)
