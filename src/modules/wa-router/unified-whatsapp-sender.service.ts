@@ -28,6 +28,32 @@ export class UnifiedWhatsAppSender {
     private readonly waSender: WhatsAppSender,
   ) {}
 
+  /**
+   * Envia uma IMAGEM (URL pública) com legenda. Baileys manda a foto de verdade;
+   * no Cloud API / Z-API (sem suporte aqui) cai pra texto com o link — o gestor
+   * ainda chega na imagem com 1 toque.
+   */
+  async sendImage(
+    orgId:   string,
+    purpose: WaPurpose,
+    to:      string,
+    url:     string,
+    caption?: string,
+  ): Promise<SendResult> {
+    const route = await this.router.resolveChannel(orgId, purpose)
+    if (route?.kind === 'baileys') {
+      try {
+        const r = await this.baileys.sendMessage(route.channelId, to, 'image', { url, ...(caption ? { caption } : {}) })
+        return { success: true, channel: 'baileys', message_id: r.message_id }
+      } catch (e) {
+        const msg = (e as Error).message
+        this.logger.warn(`[wa-router] org=${orgId} purpose=${purpose} imagem via baileys falhou: ${msg}`)
+        return { success: false, channel: 'baileys', error: msg }
+      }
+    }
+    return this.send(orgId, purpose, to, `${caption ? caption + '\n' : ''}${url}`)
+  }
+
   async send(
     orgId:   string,
     purpose: WaPurpose,

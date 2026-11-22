@@ -8,7 +8,7 @@
 
 export type AnalyzerName =
   | 'compras' | 'preco' | 'estoque' | 'margem' | 'ads' | 'cross_intel' | 'atendente_ia'
-  | 'ml' | 'ia_saude'
+  | 'ml' | 'ia_saude' | 'farm'
 
 /**
  * Categorias da vertical ML (MVP 2 do Pós-venda — sprint Intelligence Hub

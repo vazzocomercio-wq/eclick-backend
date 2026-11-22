@@ -92,6 +92,7 @@ function humanizeCategory(cat: string): string {
     sem_movimento:    'SEM MOVIMENTO',
     ia_fora_do_ar:    'IA DO E-CLICK FORA DO AR',
     ia_normalizada:   'IA DO E-CLICK VOLTOU',
+    falha_impressao:  'FALHA NA IMPRESSÃO',
   }
   if (known[cat]) return known[cat]
   return cat.replace(/_/g, ' ').toUpperCase()
