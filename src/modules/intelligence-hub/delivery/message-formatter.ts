@@ -93,6 +93,7 @@ function humanizeCategory(cat: string): string {
     ia_fora_do_ar:    'IA DO E-CLICK FORA DO AR',
     ia_normalizada:   'IA DO E-CLICK VOLTOU',
     falha_impressao:  'FALHA NA IMPRESSÃO',
+    falha_em_massa:   'PARADA GERAL NA FARM',
   }
   if (known[cat]) return known[cat]
   return cat.replace(/_/g, ' ').toUpperCase()

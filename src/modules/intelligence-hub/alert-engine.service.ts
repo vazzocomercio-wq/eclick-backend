@@ -143,13 +143,17 @@ export class AlertEngineService {
         continue
       }
 
-      const todayCount = await this.deliveriesSvc.countTodayByManager(m.id)
+      // Crítico (IA fora do ar, impressora parada) não entra na cota anti-spam: em 22/11/2026 os
+      // 20/dia eram gastos por margem_alta/critica e as 59 falhas da farm foram descartadas.
+      const critico = signal.severity === 'critical'
+
+      const todayCount = critico ? 0 : await this.deliveriesSvc.countTodayByManager(m.id)
       if (todayCount >= config.max_alerts_per_manager_per_day) {
         this.logger.debug(`[engine] manager=${m.id} skip — max_per_day=${todayCount}`)
         continue
       }
 
-      const last = await this.deliveriesSvc.lastByManager(m.id)
+      const last = critico ? null : await this.deliveriesSvc.lastByManager(m.id)
       if (last) {
         const minsSince = (now.getTime() - new Date(last.created_at).getTime()) / 60_000
         if (minsSince < config.min_interval_minutes) {

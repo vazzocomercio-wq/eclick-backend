@@ -272,6 +272,49 @@ export class FarmService {
     autoPaused: boolean, progress: number | null, eventId: string | null, productDevId: string | null,
     luzAcesa: boolean,
   ): Promise<void> {
+    // Espera as falhas do mesmo instante chegarem (o agente reporta todas no mesmo ciclo).
+    await new Promise(r => setTimeout(r, 20_000))
+    const agora = Date.now()
+
+    // 1) Várias máquinas paradas juntas (≥3 em 3 min) = problema geral (energia/rede/pausa geral):
+    //    UMA mensagem com a lista, sem foto. Em 22/11 às 17h57 foram 12 de uma vez.
+    const { data: juntas } = await supabaseAdmin.from('printer_failure_event')
+      .select('printer_id, job_name, reason').eq('organization_id', orgId)
+      .gte('detected_at', new Date(agora - 3 * 60_000).toISOString())
+    const outras = new Set(((juntas ?? []) as Array<{ printer_id: string }>).map(j => j.printer_id))
+    if (outras.size >= 3) {
+      const { data: ja } = await supabaseAdmin.from('alert_signals').select('id')
+        .eq('organization_id', orgId).eq('analyzer', 'farm').eq('category', 'falha_em_massa')
+        .gte('created_at', new Date(agora - 15 * 60_000).toISOString()).limit(1)
+      if ((ja ?? []).length) return
+      const { data: prs } = await supabaseAdmin.from('production_printer').select('id, name').in('id', [...outras])
+      const nomes = ((prs ?? []) as Array<{ id: string; name: string }>).map(p => p.name).sort()
+      const motivos = [...new Set(((juntas ?? []) as Array<{ reason: string | null }>).map(j => j.reason).filter(Boolean))].slice(0, 3)
+      const [sig] = await this.signals.insertMany(orgId, [{
+        analyzer: 'farm', category: 'falha_em_massa', severity: 'critical', score: 98,
+        entity_type: null, entity_id: null, entity_name: `${nomes.length} impressoras pararam juntas`,
+        data: { printers: [...outras], motivos, resposta: 'nenhuma' },
+        summary_pt: `${nomes.join(', ')}.\nMotivo${motivos.length > 1 ? 's' : ''}: ${motivos.join(' · ') || 'não informado'}.`,
+        suggestion_pt: 'Parada geral costuma ser energia, rede ou pausa em lote. Confira a farm e retome pelo painel: eclick.app.br/dashboard/producao/product-os',
+      }])
+      if (sig) await this.engine.processMany(orgId, [sig])
+      return
+    }
+
+    // 2) Falha no comecinho (< 5 %) = alguém está na farm iniciando a leva e já vê. Em 22/11 eram
+    //    a maioria (cone-G-pausa a 0–3 %). Fica no boletim e no painel, sem alerta na hora.
+    if (progress != null && progress < 5) return
+    //    Job da rota PAUSA pedindo filamento (HMS 12FF-xxxx) = troca de cor programada esperando
+    //    alguém — o boletim já mostra como "aguardando troca de cor"; não é falha.
+    if (jobName && /pausa/i.test(jobName) && /^HMS 3187/.test(reason)) return
+
+    // 3) A mesma máquina falhando de novo em seguida (reiniciaram e parou de novo): 1 alerta a cada 30 min.
+    const { data: recentes } = await supabaseAdmin.from('alert_signals').select('id')
+      .eq('organization_id', orgId).eq('analyzer', 'farm').eq('category', 'falha_impressao')
+      .eq('data->>printer_id', printerId)
+      .gte('created_at', new Date(agora - 30 * 60_000).toISOString()).limit(1)
+    if ((recentes ?? []).length) return
+
     const cam = await this.congelarCamera(orgId, printerId, eventId, luzAcesa)
     let produto: JobProduct | null = null
     try {
