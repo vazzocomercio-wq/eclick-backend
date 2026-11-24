@@ -315,7 +315,7 @@ export class FulfillmentSefazService {
       return {
         cProd: String(l.sku ?? l.product_id).slice(0, 60),
         cEAN: ean || 'SEM GTIN',
-        xProd: String(l.description ?? l.sku ?? 'PRODUTO').slice(0, 120),
+        xProd: nfeText(l.description ?? l.sku, 120, 'PRODUTO'),
         NCM: f.ncm!, CFOP: cfop, uCom: f.unit || 'UN',
         qCom: qty, vUnCom: vUn, vProd: round2(qty * vUn),
         cEANTrib: ean || 'SEM GTIN', uTrib: f.unit || 'UN', qTrib: qty, vUnTrib: vUn,
@@ -349,10 +349,10 @@ export class FulfillmentSefazService {
     const cUF = Number(eCMun.slice(0, 2))
     const enderEmit = { xLgr: eAddr.logradouro, nro: eAddr.numero, xBairro: eAddr.bairro, cMun: eCMun, xMun: eAddr.city, UF: uf, CEP: eAddr.cep.replace(/\D/g, ''), cPais: '1058', xPais: 'BRASIL' }
     const enderDest = {
-      xLgr: String(dAddr.logradouro).slice(0, 60), nro: String(dAddr.numero ?? 'S/N').slice(0, 60),
-      ...(dAddr.complemento ? { xCpl: String(dAddr.complemento).slice(0, 60) } : {}),
-      xBairro: String(dBairro).slice(0, 60), cMun: dCMun,
-      xMun: String(dAddr.cidade).slice(0, 60), UF: (dAddr.uf ?? '').toUpperCase(), CEP: dCep, cPais: '1058', xPais: 'BRASIL',
+      xLgr: nfeText(dAddr.logradouro, 60), nro: nfeText(dAddr.numero, 60, 'S/N'),
+      ...(nfeText(dAddr.complemento, 60) ? { xCpl: nfeText(dAddr.complemento, 60) } : {}),
+      xBairro: nfeText(dBairro, 60, 'CENTRO'), cMun: dCMun,
+      xMun: nfeText(dAddr.cidade, 60), UF: (dAddr.uf ?? '').toUpperCase(), CEP: dCep, cPais: '1058', xPais: 'BRASIL',
     }
 
     const intermed = INTERMEDIADORES[platform]
@@ -365,7 +365,7 @@ export class FulfillmentSefazService {
     make.tagEmit({ CNPJ: emitCnpj, xNome: company?.name || 'EMITENTE', xFant: company?.name || 'EMITENTE', IE: (cfg.inscricao_estadual ?? '').replace(/\D/g, ''), CRT: crt })
     make.tagEnderEmit(enderEmit)
     // homologação EXIGE este xNome literal; produção leva o nome real
-    const destNome = tpAmb === 2 ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : String(destName ?? 'CONSUMIDOR').slice(0, 60)
+    const destNome = tpAmb === 2 ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : nfeText(destName, 60, 'CONSUMIDOR')
     make.tagDest({ ...(doc.length === 14 ? { CNPJ: doc } : { CPF: doc }), xNome: destNome, indIEDest: 9 })
     make.tagEnderDest(enderDest)
     // BA exige o grupo autXML (contador; sem contador = CNPJ da SEFAZ-BA) — rejeição 486
@@ -1034,6 +1034,24 @@ export function montarNfeProc(nfeAssinada: string, retornoSefaz: string): string
   return '<?xml version="1.0" encoding="UTF-8"?>'
     + '<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">'
     + nfe + prot + '</nfeProc>'
+}
+
+/** Texto livre da NF-e (TString do schema): só caracteres até U+00FF, sem espaço
+ *  nas pontas nem duplo. Símbolo fora disso ("•", travessão, aspas curvas, emoji)
+ *  derruba a nota INTEIRA com cStat 215 — visto ao vivo 24/11/2026 com
+ *  "Dispenser … • Linha Nature Caminhos • Vazzo Essenziali" no xProd. */
+export function nfeText(v: unknown, max: number, fallback = ''): string {
+  const limpo = String(v ?? '')
+    .replace(/[•‣●–—−]/g, '-')   // • ‣ ● – — −
+    .replace(/[‘’‚′]/g, "'")               // aspas simples curvas
+    .replace(/[“”„″]/g, '"')               // aspas duplas curvas
+    .replace(/…/g, '...')                                  // reticências
+    .normalize('NFC')                                           // acento decomposto → composto (Latin-1)
+    .replace(/[^ -~¡-ÿ]/g, ' ')             // resto fora do schema (emoji, ™, nbsp…)
+    .replace(/[\t\n\r ]+/g, ' ')
+    .trim()
+  const out = limpo.slice(0, max).trim()
+  return out || fallback
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100 }
