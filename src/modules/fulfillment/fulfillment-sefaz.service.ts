@@ -268,8 +268,9 @@ export class FulfillmentSefazService {
       throw new BadRequestException('ENDERECO_INCOMPLETO: A Shopee mascarou o endereço (ela só abre depois de organizar o envio). Informe o endereço do comprador — ele aparece no detalhe do pedido na Shopee.')
     }
     // cMun do DESTINATÁRIO via ViaCEP; o bairro também vem de lá quando falta
-    // (o Seller Center não manda bairro na linha do endereço)
-    const cepInfo = await this.resolveIbgeByCep(dCep)
+    // (o Seller Center não manda bairro na linha do endereço). CEP fora da base
+    // dos Correios (rua nova / loteamento) → cai pra cidade+UF informadas.
+    const cepInfo = await this.resolveIbgeByCep(dCep, String(dAddr.cidade), String(dAddr.uf))
     const dCMun = cepInfo.ibge
     const dBairro = dAddr.bairro ?? cepInfo.bairro ?? 'CENTRO'
 
@@ -958,16 +959,49 @@ export class FulfillmentSefazService {
   }
 
   /** Código IBGE do município + BAIRRO do DESTINATÁRIO via ViaCEP (a Shopee não
-   *  manda nenhum dos dois). Emissão é pontual — a latência é aceitável. */
-  private async resolveIbgeByCep(cep: string): Promise<{ ibge: string; bairro: string | null }> {
+   *  manda nenhum dos dois). Emissão é pontual — a latência é aceitável.
+   *  CEP que existe nos Correios mas não no ViaCEP (ex.: 59144-145, Parnamirim/RN,
+   *  24/11/2026) travava a nota mesmo com cidade/UF digitadas à mão → fallback
+   *  pela lista oficial de municípios do IBGE por nome da cidade + UF. */
+  private async resolveIbgeByCep(cep: string, cidade?: string, uf?: string): Promise<{ ibge: string; bairro: string | null }> {
     try {
-      const { data } = await axios.get<{ ibge?: string; bairro?: string; erro?: boolean }>(`https://viacep.com.br/ws/${cep}/json/`, { timeout: 8000 })
+      const { data } = await axios.get<{ ibge?: string; bairro?: string; erro?: boolean | string }>(`https://viacep.com.br/ws/${cep}/json/`, { timeout: 8000 })
       const ibge = String(data?.ibge ?? '').replace(/\D/g, '')
-      if (data?.erro || ibge.length !== 7) throw new Error('CEP sem código IBGE')
-      const bairro = String(data?.bairro ?? '').trim() || null
-      return { ibge, bairro }
-    } catch {
-      throw new BadRequestException(`Não consegui resolver o município do CEP ${cep} (ViaCEP) — confira o CEP do comprador.`)
+      if (!data?.erro && ibge.length === 7) {
+        const bairro = String(data?.bairro ?? '').trim() || null
+        return { ibge, bairro }
+      }
+    } catch (e) {
+      this.logger.warn(`[emit-order] ViaCEP falhou pro CEP ${cep}: ${(e as Error).message}`)
+    }
+    const ibge = cidade && uf ? await this.resolveIbgeByCidade(cidade, uf) : null
+    if (ibge) {
+      this.logger.log(`[emit-order] CEP ${cep} fora do ViaCEP — município via IBGE por cidade/UF (${cidade}/${uf} → ${ibge})`)
+      return { ibge, bairro: null }
+    }
+    throw new BadRequestException(
+      `Não consegui achar o município do CEP ${cep} nem da cidade "${cidade ?? ''}"/${uf ?? ''} — confira a cidade e a UF do comprador (escreva o nome como está na Shopee, ex.: "Parnamirim").`,
+    )
+  }
+
+  /** Código IBGE pelo NOME da cidade + UF (API oficial de localidades do IBGE).
+   *  Compara sem acento/caixa/pontuação ("São José dos Pinhais" = "sao jose dos pinhais"). */
+  private async resolveIbgeByCidade(cidade: string, uf: string): Promise<string | null> {
+    const sigla = uf.trim().toUpperCase()
+    if (!/^[A-Z]{2}$/.test(sigla)) return null
+    const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    const alvo = norm(cidade)
+    if (!alvo) return null
+    try {
+      const { data } = await axios.get<Array<{ id: number; nome: string }>>(
+        `https://servicodados.ibge.gov.br/api/v1/localidades/estados/${sigla}/municipios`, { timeout: 8000 },
+      )
+      const hit = (data ?? []).find((m) => norm(m.nome) === alvo)
+      const id = hit ? String(hit.id) : ''
+      return id.length === 7 ? id : null
+    } catch (e) {
+      this.logger.warn(`[emit-order] IBGE localidades falhou (${sigla}): ${(e as Error).message}`)
+      return null
     }
   }
 }
