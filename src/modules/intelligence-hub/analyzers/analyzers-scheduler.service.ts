@@ -9,7 +9,11 @@ import { MargemAnalyzer } from './margem.analyzer'
 import { AdsAnalyzer } from './ads.analyzer'
 // PrecoAnalyzer removido em PRC-2 — PricingIntelligence é fonte única.
 import { BaseAnalyzer } from './base.analyzer'
-import type { AnalyzerName } from './analyzers.types'
+import type { AnalyzerName, SignalDraft } from './analyzers.types'
+
+/** Quanto tempo a mesma situação (analyzer + categoria + produto) fica sem novo aviso.
+ *  Margem é lenta (média de 30 dias): 1 aviso por semana basta. Demais: 1 por dia. */
+const JANELA_REPETICAO_H: Record<string, number> = { margem: 7 * 24 }
 
 /**
  * Disparador automático de analyzers por org.
@@ -83,7 +87,7 @@ export class AnalyzersSchedulerService {
         if (!isEnabled) continue
 
         try {
-          const drafts = await analyzer.scan(cfg.organization_id)
+          const drafts = await this.soNovos(cfg.organization_id, name, await analyzer.scan(cfg.organization_id))
           if (drafts.length === 0) continue
           const signals = await this.signalsSvc.insertMany(cfg.organization_id, drafts)
           const deliveries = await this.engine.processMany(cfg.organization_id, signals)
@@ -98,6 +102,41 @@ export class AnalyzersSchedulerService {
     if (totalSignals > 0) {
       this.logger.log(`[tick] orgs=${configs.length} signals=${totalSignals} deliveries=${totalDeliveries}`)
     }
+  }
+
+  /**
+   * Trava de repetição: os analyzers rodam a cada 15 min e devolvem TODA situação vigente,
+   * sem saber o que já foi avisado. Sem isto a margem gerou ~17 sinais/produto/dia
+   * (1.000+ em 3 dias pra 21 produtos — reclamação do dono 24/11/2026).
+   * Chave = (analyzer, categoria, produto/entidade). Mudou a categoria (baixa → crítica)
+   * = situação nova, avisa de novo.
+   */
+  private async soNovos(orgId: string, analyzer: string, drafts: SignalDraft[]): Promise<SignalDraft[]> {
+    if (drafts.length === 0) return drafts
+    const horas = JANELA_REPETICAO_H[analyzer] ?? 24
+    const since = new Date(Date.now() - horas * 3_600_000).toISOString()
+    const { data, error } = await supabaseAdmin
+      .from('alert_signals')
+      .select('category, entity_id, entity_name')
+      .eq('organization_id', orgId)
+      .eq('analyzer', analyzer)
+      .gte('created_at', since)
+      .limit(5000)
+    if (error) {
+      this.logger.warn(`[soNovos] ${analyzer}: ${error.message} — sem trava nesta rodada`)
+      return []   // na dúvida, não repete
+    }
+    const chave = (c: string, id?: string | null, nome?: string | null) => `${c}|${id ?? ''}|${id ? '' : nome ?? ''}`
+    const vistos = new Set((data ?? []).map((r: { category: string; entity_id: string | null; entity_name: string | null }) =>
+      chave(r.category, r.entity_id, r.entity_name)))
+    const out: SignalDraft[] = []
+    for (const d of drafts) {
+      const k = chave(d.category, d.entity_id, d.entity_name)
+      if (vistos.has(k)) continue
+      vistos.add(k)   // e não duplica dentro da mesma rodada
+      out.push(d)
+    }
+    return out
   }
 
   /**
